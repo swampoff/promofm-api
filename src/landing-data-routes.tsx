@@ -1,0 +1,927 @@
+/**
+ * LANDING DATA ROUTES v2
+ * Публичные API endpoints для данных лендинга
+ * Треки, концерты, поиск — из typed SQL tables
+ * Артисты, новости, чарты, продюсеры — из KV stores (как прежде)
+ */
+
+import { Hono } from 'hono';
+import * as typed from './db-typed.tsx';
+import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, artistAnalyticsCacheStore, beatReviewsStore, chartSourcesStore, concertAgentStore, contactFormsStore, investorInquiriesStore, newsPublicStore, paymentBalancesStore, platformStatsStore, producerServicesStore, radioAnalyticsStore, serviceOrdersByProducerStore } from './db.tsx';
+import { reseedDemoData } from './demo-seed.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+
+const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+
+/** Admin auth: either JWT admin or X-Internal-Key header */
+async function requireAdminOrKey(c: any, next: any) {
+  const internalKey = c.req.header('X-Internal-Key');
+  if (internalKey && ADMIN_INTERNAL_KEY && internalKey === ADMIN_INTERNAL_KEY) {
+    return next();
+  }
+  return requireAuth(c, () => requireAdmin(c, next));
+}
+
+const landing = new Hono();
+
+// ============================================
+// POPULAR ARTISTS (KV — unchanged)
+// ============================================
+
+landing.get('/popular-artists', async (c) => {
+  try {
+    const raw = await platformStatsStore.get('artists:popular');
+    return c.json({ success: true, data: raw || [] });
+  } catch (error) {
+    console.error('Error fetching popular artists:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+landing.get('/artists/:idOrSlug', async (c) => {
+  try {
+    const param = c.req.param('idOrSlug');
+    let artistId = param;
+
+    if (!param.startsWith('artist-')) {
+      const resolvedId = await artistAnalyticsCacheStore.get(param);
+      if (resolvedId) {
+        artistId = typeof resolvedId === 'string' ? resolvedId : resolvedId;
+      }
+    }
+
+    const raw = await getArtistProfile(artistId);
+    if (!raw) {
+      return c.json({ success: false, error: 'Artist not found' }, 404);
+    }
+
+    // Get artist's published tracks from typed table
+    const artistTracks = await typed.getTracksByUser(artistId);
+    const publishedTracks = artistTracks
+      .filter((t: any) => ['approved', 'published'].includes(t.moderation_status))
+      .sort((a: any, b: any) => (b.plays_count || 0) - (a.plays_count || 0));
+
+    return c.json({
+      success: true,
+      data: {
+        ...raw,
+        tracks: publishedTracks,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching artist:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+landing.get('/artists', async (c) => {
+  try {
+    const genre = c.req.query('genre');
+    const search = c.req.query('search')?.toLowerCase();
+    const limit = parseInt(c.req.query('limit') || '50');
+
+    const allArtistData = await getAllArtistProfiles();
+    let artists = allArtistData.filter((a: any) => a && a.id);
+
+    if (genre) {
+      artists = artists.filter((a: any) => a.genre === genre);
+    }
+
+    if (search) {
+      artists = artists.filter((a: any) =>
+        a.name?.toLowerCase().includes(search) ||
+        a.genre?.toLowerCase().includes(search) ||
+        a.city?.toLowerCase().includes(search)
+      );
+    }
+
+    artists.sort((a: any, b: any) => (b.monthlyListeners || 0) - (a.monthlyListeners || 0));
+
+    return c.json({
+      success: true,
+      data: artists.slice(0, limit),
+      total: artists.length,
+    });
+  } catch (error) {
+    console.error('Error fetching artists list:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ============================================
+// CHARTS (KV — unchanged)
+// ============================================
+
+landing.get('/charts/weekly', async (c) => {
+  try {
+    const raw = await platformStatsStore.get('chart:weekly:top20');
+    return c.json({ success: true, data: raw || { entries: [] } });
+  } catch (error) {
+    console.error('Error fetching weekly chart:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+/**
+ * GET /new-releases — Новинки недели (10 треков)
+ * Приоритет: наши артисты → Shazam/Yandex новинки
+ */
+landing.get('/new-releases', async (c) => {
+  try {
+    const cached = await platformStatsStore.get('weekly:new_releases');
+    if (cached && cached.tracks?.length) {
+      return c.json({ success: true, data: cached });
+    }
+    return c.json({ success: true, data: { tracks: [], updatedAt: null } });
+  } catch (error) {
+    console.error('Error fetching new releases:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ============================================
+// TRACKS (PUBLIC) — NOW FROM TYPED SQL TABLE!
+// ============================================
+
+/**
+ * GET /tracks/new — Published tracks, newest first
+ * Reads from `tracks` WHERE moderation_status IN ('approved','published')
+ */
+landing.get('/tracks/new', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '10');
+    const tracks = await typed.getPublishedTracks(limit, 'created_at');
+
+    // Map to frontend-expected format
+    const mapped = tracks.map((t: any) => ({
+      id: t.id,
+      title: t.title || '',
+      artist: t.artist_name || '',
+      genre: t.genre || '',
+      duration: t.duration || 0,
+      audioUrl: t.audio_url || '',
+      coverUrl: t.cover_url || '',
+      plays: t.plays_count || 0,
+      likes: t.likes_count || 0,
+      artistId: t.user_id || t.artist_id || '',
+      createdAt: t.created_at,
+      yandex_music_url: t.yandex_music_url || '',
+      youtube_url: t.youtube_url || '',
+      spotify_url: t.spotify_url || '',
+    }));
+
+    return c.json({ success: true, data: mapped });
+  } catch (error) {
+    console.error('Error fetching new tracks:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+/**
+ * GET /tracks/trending — Published tracks sorted by plays
+ */
+landing.get('/tracks/trending', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '10');
+    const tracks = await typed.getPublishedTracks(limit, 'plays_count');
+
+    const mapped = tracks.map((t: any) => ({
+      id: t.id,
+      title: t.title || '',
+      artist: t.artist_name || '',
+      genre: t.genre || '',
+      duration: t.duration || 0,
+      audioUrl: t.audio_url || '',
+      coverUrl: t.cover_url || '',
+      plays: t.plays_count || 0,
+      likes: t.likes_count || 0,
+      artistId: t.user_id || t.artist_id || '',
+      createdAt: t.created_at,
+    }));
+
+    return c.json({ success: true, data: mapped });
+  } catch (error) {
+    console.error('Error fetching trending tracks:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+/**
+ * GET /tracks/by-genre/:genre — Published tracks filtered by genre
+ */
+landing.get('/tracks/by-genre/:genre', async (c) => {
+  try {
+    const genre = c.req.param('genre');
+    const limit = parseInt(c.req.query('limit') || '20');
+    const tracks = await typed.getPublishedTracksByGenre(genre, limit);
+
+    const mapped = tracks.map((t: any) => ({
+      id: t.id,
+      title: t.title || '',
+      artist: t.artist_name || '',
+      genre: t.genre || '',
+      duration: t.duration || 0,
+      audioUrl: t.audio_url || '',
+      coverUrl: t.cover_url || '',
+      plays: t.plays_count || 0,
+      artistId: t.user_id || t.artist_id || '',
+    }));
+
+    return c.json({ success: true, data: mapped });
+  } catch (error) {
+    console.error('Error fetching tracks by genre:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+// ============================================
+// NEWS (PUBLIC — KV, unchanged)
+// ============================================
+
+landing.get('/news', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '10');
+    const tag = c.req.query('tag');
+
+    const allNews = await newsPublicStore.getAll();
+    let news = allNews.filter((n: any) => n && n.id && n.status === 'published');
+
+    if (tag) {
+      news = news.filter((n: any) => n.tag === tag);
+    }
+
+    news.sort((a: any, b: any) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+
+    return c.json({ success: true, data: news.slice(0, limit) });
+  } catch (error) {
+    console.error('Error fetching news:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+landing.get('/news/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const raw = await newsPublicStore.get(id);
+    if (!raw) {
+      return c.json({ success: false, error: 'News not found' }, 404);
+    }
+    return c.json({ success: true, data: raw });
+  } catch (error) {
+    console.error('Error fetching news item:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ============================================
+// CONCERTS (PUBLIC) — NOW FROM TYPED SQL TABLE!
+// Still merges with concert-agent data (KudaGo etc.)
+// ============================================
+
+landing.get('/concerts', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '12');
+    const city = c.req.query('city') || '';
+
+    // 1. Published concerts from typed SQL table
+    const sqlConcerts = await typed.getPublishedConcerts(100);
+    let concerts = sqlConcerts.map((c: any) => ({
+      id: c.id,
+      title: c.title || '',
+      artist: c.artist_name || '',
+      artistId: c.user_id || c.artist_id || '',
+      venue: c.venue_name || '',
+      city: c.city || '',
+      date: c.event_date instanceof Date ? c.event_date.toISOString().split('T')[0] : (c.event_date || ''),
+      time: c.event_time || '',
+      capacity: c.ticket_capacity || 0,
+      ticketsSold: c.tickets_sold || 0,
+      ticketPriceFrom: c.ticket_price_min || '',
+      ticketPriceTo: c.ticket_price_max || '',
+      status: 'published',
+      views: c.views_count || 0,
+      coverImage: c.banner_image_url || '',
+      description: c.description || '',
+      source: c.source || 'promo_artist',
+      genre: '',
+      ticketUrl: c.ticket_link || '',
+    }));
+
+    // 2. External concerts from concert-agent (KudaGo etc.)
+    try {
+      const agentConcerts = await concertAgentStore.getAll();
+      const mapped = agentConcerts
+        .filter((c: any) => c && c.status === 'published')
+        .map((c: any) => ({
+          id: c.id,
+          title: c.title || '',
+          artist: c.artist || '',
+          artistId: '',
+          artistAvatar: '',
+          venue: c.venue || '',
+          city: c.city || '',
+          date: c.date || '',
+          time: c.time || '',
+          capacity: 0,
+          ticketsSold: 0,
+          ticketPriceFrom: ((c.price || '').match(/\d+/) || [''])[0],
+          ticketPriceTo: '',
+          status: 'published',
+          views: 0,
+          coverImage: c.imageUrl || '',
+          description: c.description || '',
+          source: c.source || 'external',
+          genre: c.genre || '',
+          ticketUrl: c.ticketUrl || '',
+        }));
+      concerts = [...concerts, ...mapped];
+    } catch (e) {
+      console.log('[landing] concert-agent data error:', e);
+    }
+
+    // Filter by city
+    if (city) {
+      concerts = concerts.filter((item: any) =>
+        item.city?.toLowerCase().includes(city.toLowerCase())
+      );
+    }
+
+    // Only future events
+    const now = new Date().toISOString().split('T')[0];
+    concerts = concerts
+      .filter((item: any) => item.date >= now)
+      .sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    // Deduplicate by title + date
+    const seen = new Set<string>();
+    const deduped = concerts.filter((item: any) => {
+      const key = `${item.title?.toLowerCase().trim()}::${item.date}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    const promoCount = deduped.filter((c: any) => c.source === 'promo_artist').length;
+    const externalCount = deduped.filter((c: any) => c.source !== 'promo_artist').length;
+
+    return c.json({
+      success: true,
+      data: deduped.slice(0, limit),
+      meta: {
+        total: deduped.length,
+        sources: { promo: promoCount, external: externalCount },
+        city: city || 'all',
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching concerts:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+// ============================================
+// PLATFORM STATS (KV — unchanged)
+// ============================================
+
+landing.get('/radio-partners', async (c) => {
+  try {
+    const allStations = await radioAnalyticsStore.getAll();
+    const stations = allStations
+      .filter((s: any) => s && s.stationName)
+      .map((s: any) => ({
+        id: s.id,
+        stationName: s.stationName,
+        description: s.description || '',
+        frequency: s.frequency || '',
+        city: s.city || '',
+        country: s.country || 'Россия',
+        formats: s.formats || [],
+        audienceSize: s.audienceSize || 0,
+        logoUrl: s.logoUrl || '',
+        isOnline: s.isOnline ?? true,
+        createdAt: s.createdAt,
+      }));
+    stations.sort((a: any, b: any) => (b.audienceSize || 0) - (a.audienceSize || 0));
+
+    return c.json({
+      success: true,
+      data: stations,
+      meta: {
+        total: stations.length,
+        totalAudience: stations.reduce((sum: number, s: any) => sum + (s.audienceSize || 0), 0),
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching radio partners:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+landing.get('/stats', async (c) => {
+  try {
+    // Mix KV stats with real SQL counts
+    const raw = await platformStatsStore.get('platform');
+    const baseStats = raw || {};
+
+    // Add real track count from SQL
+    const publishedTracks = await typed.getPublishedTracks(1);
+    const trackStats = await typed.getTrackModerationStats();
+
+    return c.json({
+      success: true,
+      data: {
+        ...baseStats,
+        totalTracks: trackStats.total || baseStats.totalTracks || 0,
+        publishedTracks: trackStats.approved || 0,
+        pendingTracks: trackStats.pending || 0,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching platform stats:', error);
+    return c.json({ success: true, data: {} });
+  }
+});
+
+landing.get('/genres', async (c) => {
+  try {
+    const raw = await platformStatsStore.get('genres');
+    return c.json({ success: true, data: raw || {} });
+  } catch (error) {
+    return c.json({ success: true, data: {} });
+  }
+});
+
+// ============================================
+// SEARCH — NOW USES TYPED SQL TABLE FOR TRACKS!
+// ============================================
+
+landing.get('/search', async (c) => {
+  try {
+    const query = c.req.query('q')?.toLowerCase();
+    if (!query || query.length < 2) {
+      return c.json({ success: true, data: { artists: [], tracks: [] } });
+    }
+
+    // Search artists (KV)
+    const allArtists = await getAllArtistProfiles();
+    const matchedArtists = allArtists
+      .filter((a: any) => a && a.name &&
+        (a.name.toLowerCase().includes(query) ||
+         a.genre?.toLowerCase().includes(query) ||
+         a.city?.toLowerCase().includes(query))
+      )
+      .slice(0, 5);
+
+    // Search tracks (typed SQL!)
+    const matchedTracks = await typed.searchPublishedTracks(query, 10);
+    const mappedTracks = matchedTracks.map((t: any) => ({
+      id: t.id,
+      title: t.title || '',
+      artist: t.artist_name || '',
+      genre: t.genre || '',
+      audioUrl: t.audio_url || '',
+      coverUrl: t.cover_url || '',
+      plays: t.plays_count || 0,
+    }));
+
+    return c.json({
+      success: true,
+      data: {
+        artists: matchedArtists,
+        tracks: mappedTracks,
+      },
+    });
+  } catch (error) {
+    console.error('Error searching:', error);
+    return c.json({ success: true, data: { artists: [], tracks: [] } });
+  }
+});
+
+// ============================================
+// BEATS MARKETPLACE (KV — unchanged)
+// ============================================
+
+landing.get('/beats', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '20');
+    const genre = c.req.query('genre');
+    const sort = c.req.query('sort') || 'newest';
+
+    const allBeats = await getBeats();
+    let beats = allBeats.filter((b: any) => b && b.id && b.status === 'active');
+
+    if (genre) {
+      beats = beats.filter((b: any) => b.genre?.toLowerCase() === genre.toLowerCase());
+    }
+
+    switch (sort) {
+      case 'popular': beats.sort((a: any, b: any) => (b.plays || 0) - (a.plays || 0)); break;
+      case 'rating': beats.sort((a: any, b: any) => (b.rating || 0) - (a.rating || 0)); break;
+      case 'price_asc': beats.sort((a: any, b: any) => (a.price || 0) - (b.price || 0)); break;
+      case 'price_desc': beats.sort((a: any, b: any) => (b.price || 0) - (a.price || 0)); break;
+      default: beats.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    }
+
+    return c.json({ success: true, data: beats.slice(0, limit) });
+  } catch (error) {
+    return c.json({ success: true, data: [] });
+  }
+});
+
+// ============================================
+// PRODUCER SERVICES (KV — unchanged)
+// ============================================
+
+landing.get('/producer-services', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '20');
+    const type = c.req.query('type');
+
+    const allServices = await producerServicesStore.getAll();
+    let services = allServices.filter((s: any) => s && s.id && s.status === 'active');
+
+    if (type) {
+      services = services.filter((s: any) => s.type === type);
+    }
+
+    services.sort((a: any, b: any) => (b.orders || 0) - (a.orders || 0));
+
+    return c.json({ success: true, data: services.slice(0, limit) });
+  } catch (error) {
+    return c.json({ success: true, data: [] });
+  }
+});
+
+landing.get('/portfolio', async (c) => {
+  try {
+    const raw = await platformStatsStore.get('portfolio:public:all');
+    return c.json({ success: true, data: raw || [] });
+  } catch (error) {
+    return c.json({ success: true, data: [] });
+  }
+});
+
+landing.get('/producer-profiles', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '20');
+    const specialization = c.req.query('specialization');
+
+    const allProfiles = await getAllProducerProfiles();
+    let profiles = allProfiles.filter((p: any) => p && p.id);
+
+    if (specialization) {
+      profiles = profiles.filter((p: any) => p.specializations?.includes(specialization));
+    }
+
+    profiles.sort((a: any, b: any) => (b.averageRating || 0) - (a.averageRating || 0));
+
+    return c.json({ success: true, data: profiles.slice(0, limit) });
+  } catch (error) {
+    return c.json({ success: true, data: [] });
+  }
+});
+
+landing.get('/producer-profile/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const raw = await getProducerProfile(id);
+    if (!raw) {
+      return c.json({ success: false, error: 'Producer profile not found' }, 404);
+    }
+    return c.json({ success: true, data: raw });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+landing.get('/producer-reviews/:producerId', async (c) => {
+  try {
+    const allReviews = await beatReviewsStore.getAll();
+    const reviews = allReviews.filter((r: any) => r && r.id)
+      .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return c.json({ success: true, data: reviews });
+  } catch (error) {
+    return c.json({ success: true, data: [] });
+  }
+});
+
+landing.get('/producer-orders/:producerId', async (c) => {
+  try {
+    const producerId = c.req.param('producerId');
+    const status = c.req.query('status');
+    const allOrders = await serviceOrdersByProducerStore.get(producerId);
+
+    let orders = allOrders.filter((o: any) => o && o.id);
+
+    if (status) {
+      if (status === 'active') {
+        orders = orders.filter((o: any) => o.status !== 'completed' && o.status !== 'cancelled');
+      } else {
+        orders = orders.filter((o: any) => o.status === status);
+      }
+    }
+
+    orders.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    return c.json({ success: true, data: orders });
+  } catch (error) {
+    return c.json({ success: true, data: [] });
+  }
+});
+
+landing.get('/producer-wallet/:producerId', async (c) => {
+  try {
+    const producerId = c.req.param('producerId');
+    const raw = await paymentBalancesStore.get(producerId);
+    if (!raw) {
+      return c.json({ success: false, error: 'Wallet not found' }, 404);
+    }
+    return c.json({ success: true, data: raw });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ============================================
+// ADMIN: RESEED
+// ============================================
+
+landing.post('/reseed', async (c) => {
+  try {
+    const result = await reseedDemoData();
+    return c.json({ success: true, ...result });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ============================================
+// CONTACT FORM (KV — unchanged)
+// ============================================
+
+landing.post('/contact', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { name, email, subject, message } = body;
+
+    if (!name || !email || !subject || !message) {
+      return c.json({ success: false, error: 'Все поля обязательны для заполнения' }, 400);
+    }
+
+    const id = `contact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await contactFormsStore.set(id, {
+      id, name, email, subject, message,
+      createdAt: new Date().toISOString(),
+      status: 'new',
+    });
+
+    return c.json({ success: true, message: 'Сообщение успешно отправлено' });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+landing.post('/investor-inquiry', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { name, email, company, message } = body;
+
+    if (!name || !email) {
+      return c.json({ success: false, error: 'Имя и email обязательны' }, 400);
+    }
+
+    const id = `investor-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await investorInquiriesStore.set(id, {
+      id, name, email,
+      company: company || '',
+      message: message || 'Прошу направить инвестиционную презентацию.',
+      createdAt: new Date().toISOString(),
+      status: 'new',
+    });
+
+    return c.json({ success: true, message: 'Запрос успешно отправлен' });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ============================================
+// ADMIN: SEED LIVE DATA
+// ============================================
+
+landing.post('/seed-live', requireAdminOrKey, async (c) => {
+  try {
+    const results: Record<string, any> = {};
+
+    // 1. Popular Artists
+    const allArtists = await getAllArtistProfiles();
+    const validArtists = allArtists
+      .filter((a: any) => a && a.id && a.name)
+      .sort((a: any, b: any) => (b.monthlyListeners || b.plays || 0) - (a.monthlyListeners || a.plays || 0))
+      .slice(0, 20)
+      .map((a: any) => ({
+        id: a.id, name: a.name, genre: a.genre || '', city: a.city || '',
+        avatar: a.avatar || a.avatarUrl || '',
+        monthlyListeners: a.monthlyListeners || 0, plays: a.plays || 0,
+        verified: a.verified || false,
+      }));
+    await platformStatsStore.set('artists:popular', validArtists);
+    results.popularArtists = validArtists.length;
+
+    // 2. Platform Stats — use real SQL counts
+    const trackStats = await typed.getTrackModerationStats();
+    const radioStations = await radioAnalyticsStore.getAll();
+    const publishedTracks = await typed.getPublishedTracks(999);
+    const stats = {
+      totalArtists: allArtists.length,
+      totalTracks: trackStats.total,
+      publishedTracks: trackStats.approved,
+      totalPlays: publishedTracks.reduce((sum: number, t: any) => sum + (t?.plays_count || 0), 0),
+      totalRadioStations: radioStations.length,
+      updatedAt: new Date().toISOString(),
+    };
+    await platformStatsStore.set('platform', stats);
+    results.platformStats = stats;
+
+    // 3. Genres
+    const genreMap: Record<string, number> = {};
+    for (const a of allArtists) {
+      if ((a as any)?.genre) { const g = (a as any).genre; genreMap[g] = (genreMap[g] || 0) + 1; }
+    }
+    for (const t of publishedTracks) {
+      if ((t as any)?.genre) { const g = (t as any).genre; genreMap[g] = (genreMap[g] || 0) + 1; }
+    }
+    await platformStatsStore.set('genres', genreMap);
+    results.genres = Object.keys(genreMap).length;
+
+    // 4. Weekly Chart TOP-20
+    const chartSources = await chartSourcesStore.getAll();
+    const trackScores: Record<string, { artist: string; title: string; score: number; sources: string[] }> = {};
+    for (const src of chartSources) {
+      const tracks = (src as any)?.tracks || [];
+      const sourceMax = tracks.length;
+      for (const t of tracks) {
+        if (!t.artist || !t.title) continue;
+        const key = `${t.artist.toLowerCase()}|||${t.title.toLowerCase()}`;
+        if (!trackScores[key]) {
+          trackScores[key] = { artist: t.artist, title: t.title, score: 0, sources: [] };
+        }
+        trackScores[key].score += (sourceMax - (t.position || 0) + 1);
+        trackScores[key].sources.push((src as any).sourceId || 'unknown');
+      }
+    }
+    const top20 = Object.values(trackScores)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 20)
+      .map((t, idx) => ({
+        position: idx + 1, artist: t.artist, title: t.title,
+        score: t.score, sources: [...new Set(t.sources)],
+      }));
+    await platformStatsStore.set('chart:weekly:top20', { entries: top20, updatedAt: new Date().toISOString() });
+    results.weeklyChart = top20.length;
+
+    return c.json({ success: true, results });
+  } catch (error) {
+    console.error('[seed-live] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ============================================
+// ADMIN: NEWS CRUD (KV — unchanged)
+// ============================================
+
+landing.post('/admin/news', requireAdminOrKey, async (c) => {
+  try {
+    const body = await c.req.json();
+    const id = body.id || `news-manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const newsItem = {
+      id, title: body.title || '', excerpt: body.excerpt || '',
+      content: body.content || '', category: body.category || 'industry',
+      tags: body.tags || [], source: body.source || 'admin', sourceId: body.sourceId || 'manual',
+      sourceUrl: body.sourceUrl || '', imageUrl: body.imageUrl || '',
+      authorName: body.authorName || '', authorAvatar: body.authorAvatar || '',
+      publishedAt: body.publishedAt || new Date().toISOString(),
+      status: body.status || 'published', createdAt: new Date().toISOString(),
+    };
+    await newsPublicStore.set(id, newsItem);
+    return c.json({ success: true, data: newsItem });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+landing.put('/admin/news/:id', requireAdminOrKey, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const existing = await newsPublicStore.get(id);
+    if (!existing) return c.json({ success: false, error: 'Not found' }, 404);
+    const body = await c.req.json();
+    const updated = { ...existing, ...body, id, updatedAt: new Date().toISOString() };
+    await newsPublicStore.set(id, updated);
+    return c.json({ success: true, data: updated });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+landing.delete('/admin/news/:id', requireAdminOrKey, async (c) => {
+  try {
+    const id = c.req.param('id');
+    await newsPublicStore.del(id);
+    return c.json({ success: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+landing.get('/admin/news', requireAdminOrKey, async (c) => {
+  try {
+    const all = await newsPublicStore.getAll();
+    return c.json({ success: true, data: all });
+  } catch (error) {
+    return c.json({ success: true, data: [] });
+  }
+});
+
+// ============================================
+// ADMIN: TRACKS — now uses typed SQL table
+// No more manual "publish to public namespace" needed!
+// Tracks become public when moderation_status='published'
+// ============================================
+
+/** GET /admin/tracks — all published tracks from SQL */
+landing.get('/admin/tracks', requireAdminOrKey, async (c) => {
+  try {
+    const tracks = await typed.getPublishedTracks(500);
+    return c.json({ success: true, data: tracks });
+  } catch (error) {
+    return c.json({ success: true, data: [] });
+  }
+});
+
+/** POST /admin/tracks — insert directly into typed tracks table */
+landing.post('/admin/tracks', requireAdminOrKey, async (c) => {
+  try {
+    const body = await c.req.json();
+    const track = await typed.insertTrack({
+      title: body.title || 'Untitled',
+      artist_name: body.artist || '',
+      genre: body.genre || '',
+      duration: body.duration || 0,
+      audio_url: body.audioUrl || body.audio_url || '',
+      cover_url: body.coverUrl || body.cover_url || '',
+      moderation_status: 'published', // admin publishes directly
+    });
+    return c.json({ success: true, data: track });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+/** PUT /admin/tracks/:id — update track */
+landing.put('/admin/tracks/:id', requireAdminOrKey, async (c) => {
+  try {
+    const trackId = c.req.param('id');
+    const body = await c.req.json();
+    const track = await typed.updateTrack(trackId, body);
+    if (!track) return c.json({ success: false, error: 'Not found' }, 404);
+    return c.json({ success: true, data: track });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+/** DELETE /admin/tracks/:id — delete track */
+landing.delete('/admin/tracks/:id', requireAdminOrKey, async (c) => {
+  try {
+    const trackId = c.req.param('id');
+    await typed.deleteTrack(trackId);
+    return c.json({ success: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+/**
+ * POST /admin/tracks/publish — NO LONGER NEEDED (kept for backward compat)
+ * Moderation now sets status='published' directly. This is a no-op redirect.
+ */
+landing.post('/admin/tracks/publish', requireAdminOrKey, async (c) => {
+  try {
+    const { trackId } = await c.req.json();
+    if (!trackId) {
+      return c.json({ success: false, error: 'trackId required' }, 400);
+    }
+    const track = await typed.getTrackById(trackId);
+    if (!track) return c.json({ success: false, error: 'Track not found' }, 404);
+
+    // Just ensure it's published
+    const updated = await typed.updateTrack(trackId, { moderation_status: 'published', is_hidden: false });
+    return c.json({ success: true, data: updated });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+export default landing;

@@ -1,0 +1,23 @@
+name: Deploy API to VPS
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /opt/promofm-api
+            git pull origin main
+            npm ci --omit=dev
+            sudo systemctl restart promofm-api
+            sleep 2
+            curl -sf http://localhost:3000/server/api/health || echo "HEALTH CHECK FAILED"

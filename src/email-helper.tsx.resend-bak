@@ -1,0 +1,310 @@
+/**
+ * EMAIL HELPER — Отправка email через Resend HTTP API
+ * Используется для уведомлений, сброса пароля, верификации email
+ *
+ * IMPORTANT: VPS outbound SMTP ports (25, 465, 587, 2525) are blocked.
+ * Only HTTPS (port 443) works, so we use Resend HTTP API.
+ */
+
+const ADMIN_EMAIL = 'info@promofm.ru';
+const FROM_EMAIL = '"ПРОМО.МУЗЫКА" <noreply@promo-music.ru>';
+const REPLY_TO = 'noreply@promo-music.ru';
+const SITE_URL = 'https://promo-music.ru';
+const API_BASE = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/server` : 'https://promo-music.ru/server';
+
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+
+interface EmailOptions {
+  to: string;
+  subject: string;
+  html: string;
+  from?: string;
+}
+
+/**
+ * Отправить email через Resend HTTP API (port 443)
+ */
+export async function sendEmail(opts: EmailOptions): Promise<boolean> {
+  if (!RESEND_API_KEY) {
+    console.error('[Email] RESEND_API_KEY not set! Cannot send email.');
+    return false;
+  }
+
+  try {
+    const resp = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: opts.from || FROM_EMAIL,
+        reply_to: REPLY_TO,
+        to: [opts.to],
+        subject: opts.subject,
+        html: opts.html,
+      }),
+    });
+
+    const result = await resp.json();
+
+    if (!resp.ok) {
+      console.error('[Email] Resend API error:', resp.status, JSON.stringify(result));
+      return false;
+    }
+
+    console.log('[Email] Sent via Resend:', result.id, 'to:', opts.to);
+    return true;
+  } catch (err) {
+    console.error('[Email] Send failed:', err);
+    return false;
+  }
+}
+
+// ── Email Templates ──
+
+const emailWrapper = (content: string) => `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin: 0; padding: 0; background: #0a0a1a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background: #0a0a1a; padding: 40px 20px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background: #1a1a2e; border-radius: 16px; overflow: hidden;">
+        <tr><td style="padding: 32px 40px; background: linear-gradient(135deg, #FF577F 0%, #7C3AED 100%);">
+          <h1 style="margin: 0; color: #fff; font-size: 24px; font-weight: 700;">ПРОМО.МУЗЫКА</h1>
+        </td></tr>
+        <tr><td style="padding: 32px 40px; color: #e0e0e0; font-size: 16px; line-height: 1.6;">
+          ${content}
+        </td></tr>
+        <tr><td style="padding: 20px 40px 32px; color: #666; font-size: 12px; border-top: 1px solid #2a2a3e;">
+          <p style="margin: 0;">&copy; ${new Date().getFullYear()} ПРОМО.МУЗЫКА — платформа продвижения музыки</p>
+          <p style="margin: 4px 0 0;"><a href="${SITE_URL}" style="color: #FF577F; text-decoration: none;">promo-music.ru</a></p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+const buttonStyle = 'display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #FF577F 0%, #7C3AED 100%); color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px;';
+
+/**
+ * Отправить email для сброса пароля
+ */
+export async function sendPasswordResetEmail(email: string, name: string, token: string): Promise<boolean> {
+  const resetUrl = `${SITE_URL}/reset-password?token=${token}`;
+
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Сброс пароля</h2>
+    <p>Здравствуйте, <strong>${name}</strong>!</p>
+    <p>Вы запросили сброс пароля для вашего аккаунта на ПРОМО.МУЗЫКА.</p>
+    <p>Нажмите кнопку ниже, чтобы установить новый пароль:</p>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${resetUrl}" style="${buttonStyle}">Сбросить пароль</a>
+    </p>
+    <p style="color: #999; font-size: 14px;">Ссылка действительна в течение 1 часа.</p>
+    <p style="color: #999; font-size: 14px;">Если вы не запрашивали сброс пароля, просто проигнорируйте это письмо.</p>
+    <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">Если кнопка не работает, скопируйте ссылку: ${resetUrl}</p>
+  `);
+
+  return sendEmail({
+    to: email,
+    subject: 'Сброс пароля — ПРОМО.МУЗЫКА',
+    html,
+  });
+}
+
+/**
+ * Отправить email для подтверждения аккаунта
+ */
+export async function sendVerificationEmail(email: string, name: string, token: string): Promise<boolean> {
+  const verifyUrl = `${API_BASE}/auth/verify-email-page?token=${token}`;
+
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Подтвердите ваш email</h2>
+    <p>Здравствуйте, <strong>${name}</strong>!</p>
+    <p>Спасибо за регистрацию на ПРОМО.МУЗЫКА! Пожалуйста, подтвердите ваш email-адрес.</p>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${verifyUrl}" style="${buttonStyle}">Подтвердить email</a>
+    </p>
+    <p style="color: #999; font-size: 14px;">Ссылка действительна в течение 24 часов.</p>
+    <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">Если кнопка не работает, скопируйте ссылку: ${verifyUrl}</p>
+  `);
+
+  return sendEmail({
+    to: email,
+    subject: 'Подтвердите email — ПРОМО.МУЗЫКА',
+    html,
+  });
+}
+
+/**
+ * Уведомить админа о новой заявке артиста на радио
+ */
+export async function notifyArtistRequest(data: {
+  artistName: string;
+  trackTitle: string;
+  genre?: string;
+  stationName?: string;
+  stationId: string;
+}) {
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px;">
+      <h2 style="color: #FF577F;">Новая заявка артиста на радио</h2>
+      <table style="width: 100%; border-collapse: collapse;">
+        <tr><td style="padding: 8px; font-weight: bold;">Артист:</td><td style="padding: 8px;">${data.artistName}</td></tr>
+        <tr><td style="padding: 8px; font-weight: bold;">Трек:</td><td style="padding: 8px;">${data.trackTitle}</td></tr>
+        ${data.genre ? `<tr><td style="padding: 8px; font-weight: bold;">Жанр:</td><td style="padding: 8px;">${data.genre}</td></tr>` : ''}
+        <tr><td style="padding: 8px; font-weight: bold;">Радиостанция:</td><td style="padding: 8px;">${data.stationName || data.stationId}</td></tr>
+      </table>
+      <p style="color: #888; font-size: 12px; margin-top: 20px;">ПРОМО.МУЗЫКА — автоматическое уведомление</p>
+    </div>
+  `;
+
+  await sendEmail({
+    to: ADMIN_EMAIL,
+    subject: `[ПРОМО] Заявка артиста: ${data.artistName} — ${data.trackTitle}`,
+    html,
+  });
+}
+
+/**
+ * Уведомить админа о новой заявке заведения на радио
+ */
+export async function notifyVenueRequest(data: {
+  venueName: string;
+  venueCity?: string;
+  packageType?: string;
+  totalPrice?: number;
+  stationName?: string;
+  stationId: string;
+}) {
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px;">
+      <h2 style="color: #7C3AED;">Новая заявка заведения на радиорекламу</h2>
+      <table style="width: 100%; border-collapse: collapse;">
+        <tr><td style="padding: 8px; font-weight: bold;">Заведение:</td><td style="padding: 8px;">${data.venueName}</td></tr>
+        ${data.venueCity ? `<tr><td style="padding: 8px; font-weight: bold;">Город:</td><td style="padding: 8px;">${data.venueCity}</td></tr>` : ''}
+        ${data.packageType ? `<tr><td style="padding: 8px; font-weight: bold;">Пакет:</td><td style="padding: 8px;">${data.packageType}</td></tr>` : ''}
+        ${data.totalPrice ? `<tr><td style="padding: 8px; font-weight: bold;">Сумма:</td><td style="padding: 8px;">${data.totalPrice}</td></tr>` : ''}
+        <tr><td style="padding: 8px; font-weight: bold;">Радиостанция:</td><td style="padding: 8px;">${data.stationName || data.stationId}</td></tr>
+      </table>
+      <p style="color: #888; font-size: 12px; margin-top: 20px;">ПРОМО.МУЗЫКА — автоматическое уведомление</p>
+    </div>
+  `;
+
+  await sendEmail({
+    to: ADMIN_EMAIL,
+    subject: `[ПРОМО] Заявка заведения: ${data.venueName}${data.totalPrice ? ` — ${data.totalPrice}` : ''}`,
+    html,
+  });
+}
+
+/**
+ * Уведомить админа о новом бронировании
+ */
+export async function notifyBookingRequest(data: {
+  venueName: string;
+  performerName?: string;
+  eventTitle: string;
+  eventDate: string;
+  offeredPrice?: number;
+}) {
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px;">
+      <h2 style="color: #10B981;">Новое бронирование</h2>
+      <table style="width: 100%; border-collapse: collapse;">
+        <tr><td style="padding: 8px; font-weight: bold;">Заведение:</td><td style="padding: 8px;">${data.venueName}</td></tr>
+        ${data.performerName ? `<tr><td style="padding: 8px; font-weight: bold;">Артист:</td><td style="padding: 8px;">${data.performerName}</td></tr>` : ''}
+        <tr><td style="padding: 8px; font-weight: bold;">Событие:</td><td style="padding: 8px;">${data.eventTitle}</td></tr>
+        <tr><td style="padding: 8px; font-weight: bold;">Дата:</td><td style="padding: 8px;">${data.eventDate}</td></tr>
+        ${data.offeredPrice ? `<tr><td style="padding: 8px; font-weight: bold;">Цена:</td><td style="padding: 8px;">${data.offeredPrice}</td></tr>` : ''}
+      </table>
+      <p style="color: #888; font-size: 12px; margin-top: 20px;">ПРОМО.МУЗЫКА — автоматическое уведомление</p>
+    </div>
+  `;
+
+  await sendEmail({
+    to: ADMIN_EMAIL,
+    subject: `[ПРОМО] Бронирование: ${data.eventTitle} — ${data.eventDate}`,
+    html,
+  });
+}
+
+/**
+ * Уведомить админа о регистрации нового пользователя
+ */
+export async function notifyNewUser(data: {
+  email: string;
+  name: string;
+  role: string;
+  via?: string;
+  needsApproval?: boolean;
+}) {
+  const approvalBadge = data.needsApproval
+    ? `<tr><td colspan="2" style="padding: 12px 8px; background: #FEF3C7; color: #92400E; font-weight: bold; border-radius: 4px;">ТРЕБУЕТ ОДОБРЕНИЯ</td></tr>`
+    : '';
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px;">
+      <h2 style="color: ${data.needsApproval ? '#F59E0B' : '#3B82F6'};">${data.needsApproval ? 'Новая заявка — требует одобрения' : 'Новый пользователь'}</h2>
+      <table style="width: 100%; border-collapse: collapse;">
+        ${approvalBadge}
+        <tr><td style="padding: 8px; font-weight: bold;">Имя:</td><td style="padding: 8px;">${data.name}</td></tr>
+        <tr><td style="padding: 8px; font-weight: bold;">Email:</td><td style="padding: 8px;">${data.email}</td></tr>
+        <tr><td style="padding: 8px; font-weight: bold;">Роль:</td><td style="padding: 8px;">${data.role}</td></tr>
+        ${data.via ? `<tr><td style="padding: 8px; font-weight: bold;">Через:</td><td style="padding: 8px;">${data.via}</td></tr>` : ''}
+      </table>
+      ${data.needsApproval ? '<p style="margin-top: 16px;"><strong>Действие:</strong> Зайдите в админ-панель для одобрения или отклонения заявки.</p>' : ''}
+      <p style="color: #888; font-size: 12px; margin-top: 20px;">ПРОМО.МУЗЫКА — автоматическое уведомление</p>
+    </div>
+  `;
+
+  await sendEmail({
+    to: ADMIN_EMAIL,
+    subject: data.needsApproval
+      ? `[ПРОМО] ЗАЯВКА: ${data.role} ${data.name} (${data.email})`
+      : `[ПРОМО] Новый ${data.role}: ${data.name} (${data.email})`,
+    html,
+  });
+}
+
+/**
+ * Уведомить пользователя об одобрении аккаунта
+ */
+export async function sendAccountApprovedEmail(email: string, name: string): Promise<boolean> {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #10B981; font-size: 20px;">Аккаунт одобрен!</h2>
+    <p>Здравствуйте, <strong>${name}</strong>!</p>
+    <p>Ваша заявка на ПРОМО.МУЗЫКА одобрена. Теперь вы можете войти и пользоваться всеми функциями платформы.</p>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${SITE_URL}/login" style="${buttonStyle}">Войти</a>
+    </p>
+  `);
+
+  return sendEmail({
+    to: email,
+    subject: 'Аккаунт одобрен — ПРОМО.МУЗЫКА',
+    html,
+  });
+}
+
+/**
+ * Уведомить пользователя об отклонении заявки
+ */
+export async function sendAccountRejectedEmail(email: string, name: string, reason: string): Promise<boolean> {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #EF4444; font-size: 20px;">Заявка отклонена</h2>
+    <p>Здравствуйте, <strong>${name}</strong>!</p>
+    <p>К сожалению, ваша заявка на ПРОМО.МУЗЫКА была отклонена.</p>
+    ${reason ? `<p style="padding: 12px; background: #1a1a2e; border-left: 3px solid #EF4444; border-radius: 4px;"><strong>Причина:</strong> ${reason}</p>` : ''}
+    <p>Если вы считаете, что произошла ошибка, свяжитесь с нами по адресу <a href="mailto:info@promofm.ru" style="color: #FF577F;">info@promofm.ru</a>.</p>
+  `);
+
+  return sendEmail({
+    to: email,
+    subject: 'Заявка отклонена — ПРОМО.МУЗЫКА',
+    html,
+  });
+}

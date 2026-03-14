@@ -1,0 +1,11 @@
+ALTER TABLE cross_cabinet_notifications ALTER COLUMN title DROP NOT NULL;
+ALTER TABLE promo_guide_data ALTER COLUMN category DROP NOT NULL;
+ALTER TABLE promo_guide_data ALTER COLUMN title DROP NOT NULL;
+ALTER TABLE coin_packages ALTER COLUMN price_rub DROP NOT NULL;
+ALTER TABLE coin_packages ALTER COLUMN coins DROP NOT NULL;
+ALTER TABLE coin_packages ALTER COLUMN name DROP NOT NULL;
+ALTER TABLE venue_profiles ALTER COLUMN venue_name DROP NOT NULL;
+ALTER TABLE track_analytics ALTER COLUMN date DROP NOT NULL;
+ALTER TABLE track_analytics ALTER COLUMN plays DROP NOT NULL;
+ALTER TABLE media_contacts ALTER COLUMN tags DROP DEFAULT;
+ALTER TABLE media_contacts ALTER COLUMN tags TYPE JSONB USING COALESCE(tags::text::jsonb, '[]'::jsonb);
