@@ -8,6 +8,8 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { chartAggregationStore, chartSourcesStore, platformStatsStore, getTracksByUser } from './db.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { isUrlSafe } from './security.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 async function requireAdminOrKey(c: any, next: any) {
@@ -95,25 +97,77 @@ const YANDEX_CHART_CONFIG = {
 
 // ─── Deezer Preview URL ─────────────────────────────────
 // 30-sec MP3 preview via Deezer Search API (free, no key needed)
-async function fetchDeezerPreview(artist: string, title: string): Promise<string> {
+interface DeezerResult {
+  preview: string;
+  coverUrl: string;
+  coverSmall: string;
+}
+
+async function fetchDeezerData(artist: string, title: string): Promise<DeezerResult> {
   try {
     const q = encodeURIComponent(`${artist} ${title}`);
     const resp = await fetch(`https://api.deezer.com/search?q=${q}&limit=1`);
-    if (!resp.ok) return '';
+    if (!resp.ok) return { preview: '', coverUrl: '', coverSmall: '' };
     const data = await resp.json() as any;
-    return data?.data?.[0]?.preview || '';
-  } catch { return ''; }
+    const hit = data?.data?.[0];
+    if (!hit) return { preview: '', coverUrl: '', coverSmall: '' };
+    return {
+      preview: hit.preview || '',
+      coverUrl: hit.album?.cover_big || hit.album?.cover_medium || hit.album?.cover || '',
+      coverSmall: hit.album?.cover_small || hit.album?.cover || '',
+    };
+  } catch { return { preview: '', coverUrl: '', coverSmall: '' }; }
+}
+
+// Backward compat wrapper
+async function fetchDeezerPreview(artist: string, title: string): Promise<string> {
+  const d = await fetchDeezerData(artist, title);
+  return d.preview;
 }
 
 // Batch fetch previews for an array of tracks (max concurrency = 5)
-async function enrichWithPreviews(tracks: Array<{ artist: string; title: string; previewUrl?: string }>): Promise<void> {
+
+// iTunes Search API — stable preview URLs (no expiration)
+async function fetchITunesPreview(artist: string, title: string): Promise<{preview: string; cover: string}> {
+  try {
+    const q = encodeURIComponent(`${artist} ${title}`);
+    const res = await fetch(`https://itunes.apple.com/search?term=${q}&media=music&limit=3&country=us`);
+    if (!res.ok) return { preview: '', cover: '' };
+    const data = await res.json() as any;
+    const results = data.results || [];
+    // Try to match by title
+    const titleLower = title.toLowerCase().slice(0, 10);
+    let best = results.find((r: any) => (r.trackName || '').toLowerCase().includes(titleLower));
+    if (!best && results.length > 0) best = results[0];
+    if (best) {
+      return {
+        preview: best.previewUrl || '',
+        cover: (best.artworkUrl100 || '').replace('100x100', '500x500'),
+      };
+    }
+    return { preview: '', cover: '' };
+  } catch {
+    return { preview: '', cover: '' };
+  }
+}
+
+async function enrichWithPreviews(tracks: Array<{ artist: string; title: string; previewUrl?: string; coverUrl?: string; coverSmall?: string }>): Promise<void> {
   const batch = 5;
   for (let i = 0; i < tracks.length; i += batch) {
     const chunk = tracks.slice(i, i + batch);
-    const previews = await Promise.all(
-      chunk.map(t => fetchDeezerPreview(t.artist, t.title))
-    );
-    chunk.forEach((t, idx) => { t.previewUrl = previews[idx]; });
+    // Try iTunes first (stable URLs), then Deezer as fallback
+    const [itunesResults, deezerResults] = await Promise.all([
+      Promise.all(chunk.map(t => fetchITunesPreview(t.artist, t.title))),
+      Promise.all(chunk.map(t => fetchDeezerData(t.artist, t.title))),
+    ]);
+    chunk.forEach((t, idx) => {
+      const itunes = itunesResults[idx];
+      const deezer = deezerResults[idx];
+      // Prefer iTunes (stable) over Deezer (expiring tokens)
+      t.previewUrl = itunes.preview || deezer.preview || t.previewUrl || '';
+      if (!t.coverUrl) t.coverUrl = itunes.cover || deezer.coverUrl || '';
+      if (!t.coverSmall) t.coverSmall = deezer.coverSmall || '';
+    });
   }
 }
 
@@ -132,6 +186,8 @@ const SHAZAM_CHART_CONFIG = {
 interface ChartTrackEntry {
   position: number;
   previewUrl?: string;
+  coverUrl?: string;
+  coverSmall?: string;
   previousPosition: number;
   title: string;
   artist: string;
@@ -156,6 +212,12 @@ interface ExternalChartData {
 // ─── HTML Fetching & Text Extraction ───────────────────────
 
 async function fetchPageText(url: string): Promise<string | null> {
+  // SSRF protection: validate URL before fetching
+  const urlCheck = await isUrlSafe(url);
+  if (!urlCheck.safe) {
+    console.warn(`[SSRF blocked] ${url}: ${urlCheck.reason}`);
+    return null;
+  }
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -533,7 +595,7 @@ async function aggregateYandexChart(): Promise<ExternalChartData> {
   } catch (error) {
     console.log(`[charts] Yandex chart error: ${error}`);
     const cached: any = await chartSourcesStore.get(cfg.id);
-    if (cached?.tracks?.length) return { ...cached, error: String(error) };
+    if (cached?.tracks?.length) return { ...cached, error: safeErrorMessage(error) };
     return emptyChart(cfg, String(error));
   }
 }
@@ -666,7 +728,7 @@ async function aggregateShazamChart(): Promise<ExternalChartData> {
   } catch (error) {
     console.log(`[charts] Shazam chart error: ${error}`);
     const cached: any = await chartSourcesStore.get(cfg.id);
-    if (cached?.tracks?.length) return { ...cached, error: String(error) };
+    if (cached?.tracks?.length) return { ...cached, error: safeErrorMessage(error) };
     return emptyChart(cfg, String(error));
   }
 }
@@ -730,7 +792,7 @@ charts.get('/sources', async (c) => {
     return c.json({ success: true, data: sourcesWithData });
   } catch (error) {
     console.log(`Error fetching chart sources: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -772,10 +834,74 @@ charts.get('/all', async (c) => {
       allCharts.push(emptyChart(SHAZAM_CHART_CONFIG, 'No data'));
     }
 
+    // ── Enrich tracks with iTunes preview URLs (with KV cache) ──
+    try {
+      // 1. Load cached iTunes preview map from KV
+      const cachedMap: any = await platformStatsStore.get('itunes:preview_cache') || {};
+      const itunesMap = new Map<string, string>(Object.entries(cachedMap.urls || {}));
+
+      // 2. Add entries from chart:promofm
+      const chartData: any = await platformStatsStore.get('chart:promofm');
+      if (chartData?.entries?.length) {
+        for (const e of chartData.entries) {
+          if (e.previewUrl && e.previewUrl.includes('itunes.apple.com')) {
+            itunesMap.set((e.title + '|' + e.artist).toLowerCase().trim(), e.previewUrl);
+          }
+        }
+      }
+
+      // 3. Match tracks from cache, collect unmatched
+      const unmatchedTracks: { track: any; key: string }[] = [];
+      for (const chart of allCharts) {
+        for (const track of (chart.tracks || [])) {
+          const key = (track.title + '|' + track.artist).toLowerCase().trim();
+          const cached = itunesMap.get(key);
+          if (cached) {
+            (track as any).previewUrl = cached;
+          } else {
+            unmatchedTracks.push({ track, key });
+          }
+        }
+      }
+
+      // 4. iTunes Search API for unmatched (max 50 per request, background)
+      let newFound = 0;
+      if (unmatchedTracks.length > 0) {
+        const batch = unmatchedTracks.slice(0, 50);
+        const lookups = batch.map(({ track, key }) =>
+          fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(track.title + ' ' + track.artist)}&media=music&limit=1`)
+            .then(r => r.json())
+            .then(data => {
+              if (data.results?.[0]?.previewUrl) {
+                (track as any).previewUrl = data.results[0].previewUrl;
+                itunesMap.set(key, data.results[0].previewUrl);
+                newFound++;
+              }
+            })
+            .catch(() => {})
+        );
+        await Promise.allSettled(lookups);
+        // Apply to remaining unmatched
+        for (const { track, key } of unmatchedTracks.slice(50)) {
+          const found = itunesMap.get(key);
+          if (found) (track as any).previewUrl = found;
+        }
+      }
+
+      // 5. Save updated cache back to KV (if new URLs found)
+      if (newFound > 0) {
+        const urlsObj: Record<string, string> = {};
+        for (const [k, v] of itunesMap) urlsObj[k] = v;
+        await platformStatsStore.set('itunes:preview_cache', { urls: urlsObj, updatedAt: new Date().toISOString(), count: itunesMap.size });
+      }
+    } catch (enrichErr) {
+      // Non-critical, continue without enrichment
+    }
+
     return c.json({ success: true, data: allCharts });
   } catch (error) {
     console.log(`Error fetching all charts: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -818,7 +944,7 @@ charts.get('/source/:id', async (c) => {
     });
   } catch (error) {
     console.log(`Error fetching chart source: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -888,7 +1014,7 @@ charts.post('/aggregate', async (c) => {
     return c.json({ success: true, data: { results } });
   } catch (error) {
     console.log(`Chart aggregation error: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -902,7 +1028,7 @@ charts.get('/aggregation-status', async (c) => {
     return c.json({ success: true, data: status || null });
   } catch (error) {
     console.log(`Error fetching aggregation status: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -929,6 +1055,9 @@ interface PromoFMChartEntry {
   trend: 'up' | 'down' | 'same' | 'new';
   trendValue: number;
   onPlatform: boolean;
+  previewUrl?: string;
+  coverUrl?: string;
+  coverSmall?: string;
 }
 
 async function buildPromoFMChart(): Promise<PromoFMChartEntry[]> {
@@ -1082,6 +1211,34 @@ charts.post('/aggregate-promofm', requireAdminOrKey, async (c) => {
 
     const entries = await buildPromoFMChart();
 
+    // Preserve existing covers from previous chart
+    const prevChart: any = await platformStatsStore.get('chart:promofm');
+    const prevCoverMap = new Map<string, { coverUrl: string; coverSmall: string; previewUrl: string }>();
+    if (prevChart?.entries) {
+      for (const pe of prevChart.entries) {
+        const key = (pe.artist + '|||' + pe.title).toLowerCase();
+        if (pe.coverUrl || pe.previewUrl) {
+          prevCoverMap.set(key, { coverUrl: pe.coverUrl || '', coverSmall: pe.coverSmall || '', previewUrl: pe.previewUrl || '' });
+        }
+      }
+    }
+    // Apply previous covers first
+    for (const e of entries) {
+      const key = (e.artist + '|||' + e.title).toLowerCase();
+      const prev = prevCoverMap.get(key);
+      if (prev) {
+        if (prev.coverUrl) (e as any).coverUrl = prev.coverUrl;
+        if (prev.coverSmall) (e as any).coverSmall = prev.coverSmall;
+        if (prev.previewUrl) (e as any).previewUrl = prev.previewUrl;
+      }
+    }
+    // Enrich missing covers from Deezer
+    const missingCovers = entries.filter(e => !(e as any).coverUrl);
+    if (missingCovers.length > 0) {
+      console.log('[charts] Enriching ' + missingCovers.length + ' entries missing covers...');
+      await enrichWithPreviews(missingCovers as any);
+    }
+
     // Считаем статистику источников
     const sourceStats: Record<string, number> = {};
     for (const e of entries) {
@@ -1112,7 +1269,7 @@ charts.post('/aggregate-promofm', requireAdminOrKey, async (c) => {
     return c.json({ success: true, data: chartData });
   } catch (error) {
     console.error('[charts] PromoFM chart error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -1137,7 +1294,7 @@ charts.get('/promofm', async (c) => {
       },
     });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -1268,7 +1425,7 @@ charts.post('/build-new-releases', requireAdminOrKey, async (c) => {
     return c.json({ success: true, data });
   } catch (error) {
     console.error('[charts] Build new releases error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -1336,6 +1493,13 @@ charts.post('/full-update', requireAdminOrKey, async (c) => {
 
     // Step 2: Сводный чарт PromoFM
     const entries = await buildPromoFMChart();
+
+    // Step 2b: Enrich chart entries with Deezer previews + cover art
+    console.log('[charts] Enriching chart entries with Deezer data...');
+    await enrichWithPreviews(entries as any);
+    const enriched = entries.filter(e => (e as any).previewUrl || (e as any).coverUrl).length;
+    console.log('[charts] Enriched ' + enriched + '/' + entries.length + ' chart entries with audio/covers');
+
     const sourceStats: Record<string, number> = {};
     for (const e of entries) {
       for (const s of e.sources) {
@@ -1373,6 +1537,83 @@ charts.post('/full-update', requireAdminOrKey, async (c) => {
     });
   } catch (error) {
     console.error('[charts] Full update error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+
+// ─── Public: Weekly Chart for landing page ─────────────
+charts.get('/weekly', async (c) => {
+  try {
+    const cached: any = await platformStatsStore.get('chart:weekly:top20');
+    if (cached?.entries?.length) {
+      return c.json({ success: true, data: cached });
+    }
+    return c.json({ success: true, data: { entries: [], updatedAt: null } });
+  } catch (error) {
+    console.error('Error fetching weekly chart:', error);
+    return c.json({ success: true, data: { entries: [], updatedAt: null } });
+  }
+});
+
+
+// ─── Cron: Refresh preview URLs (iTunes → Deezer fallback) ─────────
+charts.post('/refresh-previews', async (c) => {
+  try {
+    const cached: any = await platformStatsStore.get('chart:weekly:top20');
+    if (!cached?.entries?.length) {
+      return c.json({ success: false, error: 'No chart data' }, 404);
+    }
+
+    const entries = cached.entries;
+    let updated = 0;
+    let failed = 0;
+
+    for (const entry of entries) {
+      // Check if current previewUrl still works
+      let needsRefresh = !entry.previewUrl;
+      if (entry.previewUrl) {
+        try {
+          const res = await fetch(entry.previewUrl, { method: 'HEAD' });
+          if (res.status === 403 || res.status === 404 || res.status >= 500) {
+            needsRefresh = true;
+          }
+        } catch {
+          needsRefresh = true;
+        }
+      }
+
+      if (needsRefresh) {
+        const result = await fetchITunesPreview(entry.artist, entry.title);
+        if (result.preview) {
+          entry.previewUrl = result.preview;
+          if (result.cover && !entry.coverUrl) entry.coverUrl = result.cover;
+          updated++;
+        } else {
+          failed++;
+        }
+      }
+    }
+
+    // Save updated data back
+    cached.updatedAt = new Date().toISOString();
+    await platformStatsStore.set('chart:weekly:top20', cached);
+
+    // Also update full chart
+    const full: any = await platformStatsStore.get('chart:promofm');
+    if (full?.entries?.length) {
+      for (const fe of full.entries) {
+        const match = entries.find((e: any) => e.artist === fe.artist && e.title === fe.title);
+        if (match?.previewUrl) fe.previewUrl = match.previewUrl;
+      }
+      full.updatedAt = new Date().toISOString();
+      await platformStatsStore.set('chart:promofm', full);
+    }
+
+    console.log();
+    return c.json({ success: true, updated, failed, total: entries.length });
+  } catch (error) {
+    console.error('[charts] Preview refresh error:', error);
     return c.json({ success: false, error: String(error) }, 500);
   }
 });
