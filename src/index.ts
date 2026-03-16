@@ -55,11 +55,14 @@ import marketplaceRoutes from './marketplace-routes.tsx';
 import chartsRoutes from './charts-routes.tsx';
 import newsAgentRoutes from './news-agent-routes.tsx';
 import contentHealthRoutes from './content-health-routes.tsx';
+import healthRoutes from './health-routes.tsx';
 import agentsRoutes from './agents-routes.tsx';
 import tracksRoutes from './tracks-routes.tsx';
 import videosRoutes from './videos-routes.tsx';
 import newsRoutes from './news-routes.tsx';
 import donationsRoutes from './donations-routes.tsx';
+import sitemapRoutes from './sitemap-routes.tsx';
+import seoRoutes from './seo-routes.tsx';
 import coinsRoutes from './coins-routes.tsx';
 import profileRoutes from './profile-routes.tsx';
 import statsRoutes from './stats-routes.tsx';
@@ -67,6 +70,10 @@ import analyticsRoutes from './analytics-routes.tsx';
 import checkoutRoutes from './checkout-routes.tsx';
 import concertModerationRoutes from './concert-moderation-routes.tsx';
 import curatorRoutes from './curator-routes.tsx';
+import securityMonitorRoutes from './security-monitor-routes.tsx';
+import musicGenRoutes from './music-gen-routes.tsx';
+import { authLimiter, uploadLimiter, apiLimiter } from './rate-limiter.tsx';
+import { safeErrorMessage, scanForSqlInjection } from './security.tsx';
 
 // Global unhandled rejection handler (replaces Deno version)
 process.on('unhandledRejection', (reason) => {
@@ -121,13 +128,64 @@ app.use('*', logger());
 
 // CORS
 app.use('/*', cors({
-  origin: ['https://promo-music.ru', 'https://www.promo-music.ru', 'http://localhost:3000', 'http://localhost:5173'],
+  origin: ['https://promo-music.ru', 'https://www.promo-music.ru', 'https://admin.promo-music.ru', 'http://localhost:3000', 'http://localhost:5173'],
   allowHeaders: ['Content-Type', 'Authorization', 'X-User-Id', 'X-Internal-Key', 'Cache-Control', 'Accept'],
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   exposeHeaders: ['Content-Length'],
   maxAge: 600,
   credentials: true,
 }));
+
+// Body size limit (10MB default)
+app.use('*', async (c, next) => {
+  const contentLength = c.req.header('content-length');
+  if (contentLength && parseInt(contentLength) > 10 * 1024 * 1024) {
+    return c.json({ success: false, error: 'Request body too large (max 10MB)' }, 413);
+  }
+  await next();
+});
+
+// Security headers (Hono-level fallback, nginx also sets these)
+app.use('*', async (c, next) => {
+  await next();
+  c.header('X-Content-Type-Options', 'nosniff');
+  c.header('X-Frame-Options', 'DENY');
+  c.header('X-XSS-Protection', '1; mode=block');
+  c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+});
+
+// Rate limiting: auth endpoints (10 req/min per IP)
+app.use('/server/auth/*', authLimiter);
+
+// Rate limiting: upload endpoints (15 req/min per IP)
+app.use('/server/storage/*', uploadLimiter);
+
+// Rate limiting: general API (200 req/min per IP)
+app.use('/server/api/*', apiLimiter);
+
+// SQL injection detection middleware (defense-in-depth)
+app.use('/server/*', async (c, next) => {
+  // Skip GET requests and SSE
+  if (c.req.method === 'GET' || c.req.path.includes('/sse/')) {
+    return next();
+  }
+  try {
+    const contentType = c.req.header('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const body = await c.req.json();
+      const suspicious = scanForSqlInjection(body);
+      if (suspicious) {
+        const ip = c.req.header('x-real-ip') || c.req.header('x-forwarded-for') || 'unknown';
+        console.warn('[SQLi BLOCKED]', { ip, path: c.req.path, payload: suspicious.slice(0, 100) });
+        return c.json({ success: false, error: 'Invalid input detected' }, 400);
+      }
+    }
+  } catch {
+    // If body parsing fails, let the route handler deal with it
+  }
+  await next();
+});
+
 
 // Health check
 app.get('/server/health', async (c) => {
@@ -190,6 +248,7 @@ app.route('/server/api/marketplace', marketplaceRoutes);
 app.route('/server/api/charts', chartsRoutes);
 app.route('/server/api/news-agent', newsAgentRoutes);
 app.route('/server/api/content-health', contentHealthRoutes);
+app.route('/server/api/health', healthRoutes);
 app.route('/server/api/agents', agentsRoutes);
 app.route('/server/api/tracks', tracksRoutes);
 app.route('/server/api/videos', videosRoutes);
@@ -197,10 +256,14 @@ app.route('/server/api/news', newsRoutes);
 app.route('/server/api/donations', donationsRoutes);
 app.route('/server/api/coins', coinsRoutes);
 app.route('/server/api/profile', profileRoutes);
+app.route('/server', sitemapRoutes);
+app.route('/server', seoRoutes);
 app.route('/server/api/stats', statsRoutes);
 app.route('/server/api/analytics', analyticsRoutes);
 app.route('/server/api/checkout', checkoutRoutes);
 app.route('/server/api/curator', curatorRoutes);
+app.route('/server/api/security', securityMonitorRoutes);
+app.route('/server/api/music-gen', musicGenRoutes);
 
 // 404
 app.notFound((c) => {
@@ -214,13 +277,13 @@ app.onError((err, c) => {
     return new Response(null, { status: 499 });
   }
   console.error('Server error:', err);
-  return c.json({ success: false, error: err.message || 'Internal server error' }, 500);
+  return c.json({ success: false, error: safeErrorMessage(err) }, 500);
 });
 
 // Start server
 const port = parseInt(process.env.PORT || '3000');
 
-serve({ fetch: app.fetch, port }, (info) => {
+serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, (info) => {
   console.log(`PromoFM API running on http://localhost:${info.port}`);
 });
 
