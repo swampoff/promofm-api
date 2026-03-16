@@ -10,6 +10,8 @@ import * as typed from './db-typed.tsx';
 import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, artistAnalyticsCacheStore, beatReviewsStore, chartSourcesStore, concertAgentStore, contactFormsStore, investorInquiriesStore, newsPublicStore, paymentBalancesStore, platformStatsStore, producerServicesStore, radioAnalyticsStore, serviceOrdersByProducerStore } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { sanitizeString, sanitizeUrl } from './security.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 
@@ -34,7 +36,7 @@ landing.get('/popular-artists', async (c) => {
     return c.json({ success: true, data: raw || [] });
   } catch (error) {
     console.error('Error fetching popular artists:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -70,7 +72,7 @@ landing.get('/artists/:idOrSlug', async (c) => {
     });
   } catch (error) {
     console.error('Error fetching artist:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -104,7 +106,7 @@ landing.get('/artists', async (c) => {
     });
   } catch (error) {
     console.error('Error fetching artists list:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -114,11 +116,17 @@ landing.get('/artists', async (c) => {
 
 landing.get('/charts/weekly', async (c) => {
   try {
-    const raw = await platformStatsStore.get('chart:weekly:top20');
-    return c.json({ success: true, data: raw || { entries: [] } });
+    // Read from canonical chart:promofm (has covers from Deezer enrichment)
+    const raw: any = await platformStatsStore.get('chart:promofm');
+    if (raw?.entries) {
+      return c.json({ success: true, data: { entries: raw.entries.slice(0, 20), updatedAt: raw.updatedAt } });
+    }
+    // Fallback to chart:weekly:top20
+    const fallback = await platformStatsStore.get('chart:weekly:top20');
+    return c.json({ success: true, data: fallback || { entries: [] } });
   } catch (error) {
     console.error('Error fetching weekly chart:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -130,12 +138,49 @@ landing.get('/new-releases', async (c) => {
   try {
     const cached = await platformStatsStore.get('weekly:new_releases');
     if (cached && cached.tracks?.length) {
+      // Enrich with iTunes preview URLs (Deezer previews expire after ~24h)
+      try {
+        const chartData: any = await platformStatsStore.get('chart:promofm');
+        if (chartData?.entries?.length) {
+          const itunesMap = new Map<string, string>();
+          for (const e of chartData.entries) {
+            if (e.previewUrl && e.previewUrl.includes('itunes.apple.com')) {
+              const key = (e.title + '|' + e.artist).toLowerCase().trim();
+              itunesMap.set(key, e.previewUrl);
+            }
+          }
+          const fetchPromises: Promise<void>[] = [];
+          for (const track of cached.tracks) {
+            const key = (track.title + '|' + track.artist).toLowerCase().trim();
+            const itunesUrl = itunesMap.get(key);
+            if (itunesUrl) {
+              track.previewUrl = itunesUrl;
+            } else if (!track.previewUrl || track.previewUrl.includes('dzcdn.net')) {
+              // Fallback: search iTunes for preview URL
+              fetchPromises.push(
+                fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(track.title + ' ' + track.artist)}&media=music&limit=1`)
+                  .then(r => r.json())
+                  .then(data => {
+                    const url = data.results?.[0]?.previewUrl;
+                    if (url) {
+                      track.previewUrl = url;
+                    }
+                  })
+                  .catch(() => {})
+              );
+            }
+          }
+          if (fetchPromises.length > 0) {
+            await Promise.allSettled(fetchPromises);
+          }
+        }
+      } catch {}
       return c.json({ success: true, data: cached });
     }
     return c.json({ success: true, data: { tracks: [], updatedAt: null } });
   } catch (error) {
     console.error('Error fetching new releases:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -157,18 +202,50 @@ landing.get('/tracks/new', async (c) => {
       id: t.id,
       title: t.title || '',
       artist: t.artist_name || '',
+      artist_name: t.artist_name || '',
       genre: t.genre || '',
       duration: t.duration || 0,
       audioUrl: t.audio_url || '',
+      audio_url: t.audio_url || '',
       coverUrl: t.cover_url || '',
+      cover_url: t.cover_url || '',
       plays: t.plays_count || 0,
       likes: t.likes_count || 0,
       artistId: t.user_id || t.artist_id || '',
       createdAt: t.created_at,
+      created_at: t.created_at,
       yandex_music_url: t.yandex_music_url || '',
       youtube_url: t.youtube_url || '',
       spotify_url: t.spotify_url || '',
     }));
+
+    // If no real tracks, fallback to chart data with covers
+    if (mapped.length === 0) {
+      const chartData: any = await platformStatsStore.get('chart:promofm');
+      if (chartData?.entries?.length) {
+        const chartTracks = chartData.entries.slice(0, limit).map((e: any, i: number) => ({
+          id: 'chart-' + (i + 1),
+          title: e.title || '',
+          artist: e.artist || '',
+          artist_name: e.artist || '',
+          genre: '',
+          duration: 30,
+          audioUrl: e.previewUrl || '',
+          audio_url: e.previewUrl || '',
+          coverUrl: e.coverUrl || '',
+          cover_url: e.coverUrl || '',
+          coverSmall: e.coverSmall || '',
+          plays: 0,
+          likes: 0,
+          artistId: '',
+          createdAt: chartData.updatedAt || new Date().toISOString(),
+          created_at: chartData.updatedAt || new Date().toISOString(),
+          chartPosition: e.position,
+          source: 'chart',
+        }));
+        return c.json({ success: true, data: chartTracks, source: 'chart' });
+      }
+    }
 
     return c.json({ success: true, data: mapped });
   } catch (error) {
@@ -238,6 +315,60 @@ landing.get('/tracks/by-genre/:genre', async (c) => {
 // NEWS (PUBLIC — KV, unchanged)
 // ============================================
 
+
+/** Normalize news item fields for frontend compatibility */
+
+// Auto-ping search engines after news publish (IndexNow + Yandex)
+async function pingSitemapAsync(newsId?: string) {
+  const INDEXNOW_KEY = 'be3b1945c60d606211ccb819caebe3fb';
+  const urls = ['https://promo-music.ru/sitemap.xml'];
+  if (newsId) urls.push(`https://promo-music.ru/news/${newsId}`);
+  
+  try {
+    await Promise.allSettled([
+      // Yandex sitemap ping
+      fetch(`https://webmaster.yandex.ru/ping?sitemap=${encodeURIComponent('https://promo-music.ru/sitemap.xml')}`),
+      // IndexNow (Bing + Yandex)
+      fetch('https://api.indexnow.org/indexnow', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: 'promo-music.ru',
+          key: INDEXNOW_KEY,
+          keyLocation: `https://promo-music.ru/${INDEXNOW_KEY}.txt`,
+          urlList: urls,
+        }),
+      }),
+      fetch('https://yandex.com/indexnow', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: 'promo-music.ru',
+          key: INDEXNOW_KEY,
+          keyLocation: `https://promo-music.ru/${INDEXNOW_KEY}.txt`,
+          urlList: urls,
+        }),
+      }),
+    ]);
+    console.log('[sitemap] Pinged Yandex + IndexNow for', urls);
+  } catch (e) {
+    console.error('[sitemap] Ping error:', e);
+  }
+}
+
+function normalizeNews(n: any): any {
+  let c = n.content || n.excerpt || '';
+  // Strip markdown code fences (```html ... ```)
+  c = c.replace(/^\s*```html\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+  return {
+    ...n,
+    artistName: n.artistName || n.authorName || 'ПРОМО.МУЗЫКА',
+    artistAvatar: n.artistAvatar || n.authorAvatar || '/logo-promo.svg',
+    coverImage: n.coverImage || n.imageUrl || n.banner || '',
+    content: c,
+  };
+}
+
 landing.get('/news', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '10');
@@ -252,7 +383,7 @@ landing.get('/news', async (c) => {
 
     news.sort((a: any, b: any) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
 
-    return c.json({ success: true, data: news.slice(0, limit) });
+    return c.json({ success: true, data: news.slice(0, limit).map(normalizeNews) });
   } catch (error) {
     console.error('Error fetching news:', error);
     return c.json({ success: true, data: [] });
@@ -266,10 +397,10 @@ landing.get('/news/:id', async (c) => {
     if (!raw) {
       return c.json({ success: false, error: 'News not found' }, 404);
     }
-    return c.json({ success: true, data: raw });
+    return c.json({ success: true, data: normalizeNews(raw) });
   } catch (error) {
     console.error('Error fetching news item:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -300,11 +431,15 @@ landing.get('/concerts', async (c) => {
       ticketPriceTo: c.ticket_price_max || '',
       status: 'published',
       views: c.views_count || 0,
+      clicks: c.clicks_count || 0,
       coverImage: c.banner_image_url || '',
+      banner: c.banner_image_url || '',
       description: c.description || '',
       source: c.source || 'promo_artist',
       genre: '',
       ticketUrl: c.ticket_link || '',
+      ticketLink: c.ticket_link || '',
+      type: c.concert_type || c.type || 'Концерт',
     }));
 
     // 2. External concerts from concert-agent (KudaGo etc.)
@@ -331,6 +466,10 @@ landing.get('/concerts', async (c) => {
           coverImage: c.imageUrl || '',
           description: c.description || '',
           source: c.source || 'external',
+          type: c.type || 'Концерт',
+          clicks: 0,
+          banner: c.imageUrl || '',
+          ticketLink: c.ticketUrl || '',
           genre: c.genre || '',
           ticketUrl: c.ticketUrl || '',
         }));
@@ -590,7 +729,7 @@ landing.get('/producer-profile/:id', async (c) => {
     }
     return c.json({ success: true, data: raw });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -638,7 +777,7 @@ landing.get('/producer-wallet/:producerId', async (c) => {
     }
     return c.json({ success: true, data: raw });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -651,7 +790,7 @@ landing.post('/reseed', async (c) => {
     const result = await reseedDemoData();
     return c.json({ success: true, ...result });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -677,7 +816,7 @@ landing.post('/contact', async (c) => {
 
     return c.json({ success: true, message: 'Сообщение успешно отправлено' });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -701,7 +840,7 @@ landing.post('/investor-inquiry', async (c) => {
 
     return c.json({ success: true, message: 'Запрос успешно отправлен' });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -783,7 +922,7 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
     return c.json({ success: true, results });
   } catch (error) {
     console.error('[seed-live] Error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -799,15 +938,17 @@ landing.post('/admin/news', requireAdminOrKey, async (c) => {
       id, title: body.title || '', excerpt: body.excerpt || '',
       content: body.content || '', category: body.category || 'industry',
       tags: body.tags || [], source: body.source || 'admin', sourceId: body.sourceId || 'manual',
-      sourceUrl: body.sourceUrl || '', imageUrl: body.imageUrl || '',
+      sourceUrl: sanitizeString(body.sourceUrl, 2000), imageUrl: sanitizeString(body.imageUrl, 2000),
       authorName: body.authorName || '', authorAvatar: body.authorAvatar || '',
       publishedAt: body.publishedAt || new Date().toISOString(),
       status: body.status || 'published', createdAt: new Date().toISOString(),
     };
     await newsPublicStore.set(id, newsItem);
+    // Auto-ping search engines
+    pingSitemapAsync(id).catch(() => {});
     return c.json({ success: true, data: newsItem });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -819,9 +960,11 @@ landing.put('/admin/news/:id', requireAdminOrKey, async (c) => {
     const body = await c.req.json();
     const updated = { ...existing, ...body, id, updatedAt: new Date().toISOString() };
     await newsPublicStore.set(id, updated);
+    // Auto-ping search engines
+    pingSitemapAsync(id).catch(() => {});
     return c.json({ success: true, data: updated });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -831,7 +974,7 @@ landing.delete('/admin/news/:id', requireAdminOrKey, async (c) => {
     await newsPublicStore.del(id);
     return c.json({ success: true });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -875,7 +1018,7 @@ landing.post('/admin/tracks', requireAdminOrKey, async (c) => {
     });
     return c.json({ success: true, data: track });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -888,7 +1031,7 @@ landing.put('/admin/tracks/:id', requireAdminOrKey, async (c) => {
     if (!track) return c.json({ success: false, error: 'Not found' }, 404);
     return c.json({ success: true, data: track });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -899,7 +1042,7 @@ landing.delete('/admin/tracks/:id', requireAdminOrKey, async (c) => {
     await typed.deleteTrack(trackId);
     return c.json({ success: true });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -920,7 +1063,7 @@ landing.post('/admin/tracks/publish', requireAdminOrKey, async (c) => {
     const updated = await typed.updateTrack(trackId, { moderation_status: 'published', is_hidden: false });
     return c.json({ success: true, data: updated });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
