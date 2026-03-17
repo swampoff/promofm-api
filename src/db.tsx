@@ -1,6 +1,6 @@
 /**
  * DB.TSX — Data Access Layer
- * Прямые SQL-запросы через Supabase вместо KV store.
+ * Прямые SQL-запросы через PostgreSQL.
  * Каждая функция возвращает типизированные данные.
  */
 
@@ -24,17 +24,17 @@ export async function getProfile(userId: string) {
   const { data, error } = await db()
     .from('profiles')
     .select('*')
-    .eq('id', userId)
+    .eq('user_id', userId)
     .maybeSingle();
   if (error) console.error('[db] getProfile:', error);
   return data;
 }
 
 export async function upsertProfile(userId: string, profile: Record<string, any>) {
-  const row = { id: userId, ...profile, updated_at: new Date().toISOString() };
+  const row = { user_id: userId, ...profile, updated_at: new Date().toISOString() };
   const { data, error } = await db()
     .from('profiles')
-    .upsert(row, { onConflict: 'id' })
+    .upsert(row, { onConflict: 'user_id' })
     .select()
     .single();
   if (error) console.error('[db] upsertProfile:', error);
@@ -72,7 +72,7 @@ export async function upsertTrack(userId: string, trackId: string, track: Record
   };
   const { data, error } = await db()
     .from('tracks')
-    .upsert(row, { onConflict: 'id' })
+    .upsert(row, { onConflict: 'user_id' })
     .select()
     .single();
   if (error) console.error('[db] upsertTrack:', error);
@@ -100,15 +100,22 @@ export async function getVideosByUser(userId: string) {
 }
 
 export async function upsertVideo(userId: string, videoId: string, video: Record<string, any>) {
-  const row = {
-    id: `${userId}:${videoId}`,
-    user_id: userId,
-    data: video,
-    updated_at: new Date().toISOString(),
-  };
-  const { error } = await db()
-    .from('videos')
-    .upsert(row, { onConflict: 'id' });
+  // videoId may not be a valid UUID — use insert instead of upsert for non-UUID IDs
+  try {
+    const { error } = await db()
+      .from('videos')
+      .insert({
+        artist_id: userId,
+        user_id: userId,
+        title: video.title || 'Untitled',
+        description: video.description || '',
+        video_url: video.video_url || video.url || '',
+        thumbnail_url: video.thumbnail_url || '',
+      });
+    if (error) console.error('[db] upsertVideo:', error);
+  } catch (e: any) {
+    console.error('[db] upsertVideo exception:', e.message);
+  }
   if (error) console.error('[db] upsertVideo:', error);
 }
 
@@ -118,7 +125,7 @@ export async function getNewsByUser(userId: string) {
   const { data, error } = await db()
     .from('news')
     .select('*')
-    .eq('user_id', userId)
+    .eq('author_id', userId)
     .order('created_at', { ascending: false });
   if (error) console.error('[db] getNewsByUser:', error);
   return (data || []).map((r: any) => r.data || r);
@@ -126,9 +133,14 @@ export async function getNewsByUser(userId: string) {
 
 export async function upsertNews(userId: string, newsId: string, news: Record<string, any>) {
   const row = {
-    id: `${userId}:${newsId}`,
-    user_id: userId,
-    data: news,
+    id: newsId,
+    author_id: userId,
+    title: news.title || 'Untitled',
+    content: news.content || '',
+    summary: news.summary || '',
+    category: news.category || 'general',
+    status: news.status || 'draft',
+    author_name: news.author_name || '',
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()
@@ -178,7 +190,7 @@ export async function upsertConcert(userId: string, concertId: string, concert: 
   };
   const { error } = await db()
     .from('concerts')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertConcert:', error);
 }
 
@@ -196,7 +208,7 @@ export async function getDonationsByArtist(artistId: string) {
   const { data, error } = await db()
     .from('donations')
     .select('*')
-    .eq('artist_id', artistId)
+    .eq('recipient_id', artistId)
     .order('created_at', { ascending: false });
   if (error) console.error('[db] getDonationsByArtist:', error);
   return (data || []).map((r: any) => r.data || r);
@@ -204,9 +216,14 @@ export async function getDonationsByArtist(artistId: string) {
 
 export async function createDonation(artistId: string, donationId: string, donation: Record<string, any>) {
   const row = {
-    id: `${artistId}:${donationId}`,
-    artist_id: artistId,
-    data: donation,
+    id: donationId,
+    recipient_id: artistId,
+    donor_id: donation.donor_id || null,
+    amount: donation.amount || 0,
+    currency: donation.currency || 'RUB',
+    message: donation.message || '',
+    is_anonymous: donation.is_anonymous || false,
+    status: donation.status || 'completed',
   };
   const { error } = await db()
     .from('donations')
@@ -237,7 +254,7 @@ export async function getCoinTransactions(userId: string) {
   const { data, error } = await db()
     .from('coin_transactions')
     .select('*')
-    .eq('user_id', userId)
+    .eq('artist_id', userId)
     .order('created_at', { ascending: false });
   if (error) console.error('[db] getCoinTransactions:', error);
   return (data || []).map((r: any) => r.data || r);
@@ -246,8 +263,15 @@ export async function getCoinTransactions(userId: string) {
 export async function createCoinTransaction(userId: string, txId: string, tx: Record<string, any>) {
   const row = {
     id: txId,
-    user_id: userId,
-    data: tx,
+    artist_id: userId,
+    transaction_type: tx.type || tx.transaction_type || 'credit',
+    amount: tx.amount || 0,
+    balance_before: tx.balance_before || 0,
+    balance_after: tx.balance_after || 0,
+    description: tx.description || '',
+    reference_type: tx.reference_type || null,
+    reference_id: tx.reference_id || null,
+    metadata: tx.metadata ? JSON.stringify(tx.metadata) : '{}',
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()
@@ -340,10 +364,13 @@ export async function getNotification(userId: string, notifId: string) {
 
 export async function upsertNotification(userId: string, notifId: string, notif: Record<string, any>) {
   const row = {
-    id: `${userId}:${notifId}`,
+    id: notifId,
     user_id: userId,
-    data: notif,
-    updated_at: new Date().toISOString(),
+    notification_type: notif.type || 'info',
+    title: notif.title || '',
+    message: notif.message || '',
+    status: notif.read ? 'read' : 'unread',
+    is_read: notif.read || false,
   };
   const { error } = await db()
     .from('notifications')
@@ -355,7 +382,7 @@ export async function deleteNotification(userId: string, notifId: string) {
   const { error } = await db()
     .from('notifications')
     .delete()
-    .eq('id', `${userId}:${notifId}`);
+    .eq('id', notifId);
   if (error) console.error('[db] deleteNotification:', error);
 }
 
@@ -365,7 +392,7 @@ export async function getNotificationSettings(userId: string) {
   const { data, error } = await db()
     .from('notification_settings')
     .select('*')
-    .eq('id', userId)
+    .eq('user_id', userId)
     .maybeSingle();
   if (error) console.error('[db] getNotificationSettings:', error);
   return data ? (data.data || data) : null;
@@ -379,7 +406,7 @@ export async function upsertNotificationSettings(userId: string, settings: Recor
   };
   const { error } = await db()
     .from('notification_settings')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertNotificationSettings:', error);
 }
 
@@ -427,7 +454,7 @@ export async function upsertTrackAnalytics(trackId: string, analytics: Record<st
   };
   const { error } = await db()
     .from('track_analytics')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertTrackAnalytics:', error);
 }
 
@@ -451,7 +478,7 @@ export async function upsertArtistProfile(artistId: string, profile: Record<stri
   };
   const { error } = await db()
     .from('artist_profiles')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertArtistProfile:', error);
 }
 
@@ -493,7 +520,7 @@ export async function upsertBeat(beatId: string, beat: Record<string, any>) {
   };
   const { error } = await db()
     .from('beats')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertBeat:', error);
 }
 
@@ -535,7 +562,7 @@ export async function upsertBooking(bookingId: string, booking: Record<string, a
   };
   const { error } = await db()
     .from('bookings')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertBooking:', error);
 }
 
@@ -581,7 +608,7 @@ export async function upsertTicket(ticketId: string, ticket: Record<string, any>
   };
   const { error } = await db()
     .from('support_tickets')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertTicket:', error);
 }
 
@@ -605,7 +632,7 @@ export async function upsertCampaign(campaignId: string, campaign: Record<string
   };
   const { error } = await db()
     .from('marketing_campaigns')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertCampaign:', error);
 }
 
@@ -630,7 +657,7 @@ export async function upsertBanner(bannerId: string, userId: string, banner: Rec
   };
   const { error } = await db()
     .from('banner_ads')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertBanner:', error);
 }
 
@@ -654,7 +681,7 @@ export async function upsertPlatformStats(stats: Record<string, any>) {
   };
   const { error } = await db()
     .from('platform_stats')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertPlatformStats:', error);
 }
 
@@ -687,7 +714,7 @@ export async function upsertAgentSession(sessionId: string, session: Record<stri
   };
   const { error } = await db()
     .from('agent_sessions')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertAgentSession:', error);
 }
 
@@ -731,7 +758,7 @@ export async function upsertDjProfile(djId: string, profile: Record<string, any>
   };
   const { error } = await db()
     .from('dj_profiles')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertDjProfile:', error);
 }
 
@@ -756,7 +783,7 @@ export async function upsertVenueProfile(userId: string, profile: Record<string,
   };
   const { error } = await db()
     .from('venue_profiles')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertVenueProfile:', error);
 }
 
@@ -781,7 +808,7 @@ export async function upsertRadioProfile(userId: string, profile: Record<string,
   };
   const { error } = await db()
     .from('radio_profiles')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertRadioProfile:', error);
 }
 
@@ -806,7 +833,7 @@ export async function upsertProducerProfile(userId: string, profile: Record<stri
   };
   const { error } = await db()
     .from('producer_profiles')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertProducerProfile:', error);
 }
 
@@ -840,7 +867,7 @@ export async function upsertCollabOffer(offerId: string, offer: Record<string, a
   };
   const { error } = await db()
     .from('collab_offers')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertCollabOffer:', error);
 }
 
@@ -863,7 +890,7 @@ export async function upsertContentOrder(orderId: string, order: Record<string, 
   };
   const { error } = await db()
     .from('content_orders')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertContentOrder:', error);
 }
 
@@ -887,7 +914,7 @@ export async function upsertEmailCampaign(campaignId: string, campaign: Record<s
   };
   const { error } = await db()
     .from('email_campaigns')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertEmailCampaign:', error);
 }
 
@@ -911,7 +938,7 @@ export async function setAuthToken(key: string, token: Record<string, any>) {
   };
   const { error } = await db()
     .from('auth_tokens')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] setAuthToken:', error);
 }
 
@@ -956,7 +983,7 @@ export async function upsertPaymentMethod(methodId: string, userId: string, meth
   };
   const { error } = await db()
     .from('payment_methods')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertPaymentMethod:', error);
 }
 
@@ -1111,7 +1138,7 @@ export async function getCoinTransactionsKv(userId: string) {
   const { data, error } = await db()
     .from('coin_transactions')
     .select('*')
-    .eq('user_id', userId)
+    .eq('artist_id', userId)
     .order('created_at', { ascending: false });
   if (error) console.error('[db] getCoinTransactionsKv:', error);
   return (data || []).map((r: any) => r.data || r);
@@ -1120,7 +1147,13 @@ export async function getCoinTransactionsKv(userId: string) {
 export async function createCoinTransactionKv(userId: string, txId: string, tx: Record<string, any>) {
   const { error } = await db()
     .from('coin_transactions')
-    .upsert({ id: txId, user_id: userId, data: tx, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    .upsert({
+      id: txId, artist_id: userId,
+      transaction_type: tx.type || tx.transaction_type || 'credit',
+      amount: tx.amount || 0, balance_before: tx.balance_before || 0, balance_after: tx.balance_after || 0,
+      description: tx.description || '', metadata: tx.metadata ? JSON.stringify(tx.metadata) : '{}',
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'id' });
   if (error) console.error('[db] createCoinTransactionKv:', error);
 }
 

@@ -1,6 +1,6 @@
 /**
  * MIGRATION RUNNER (Stub)
- * Миграции не нужны - приложение использует KV Store.
+ * Миграции не нужны - приложение использует JSON stores.
  * Экспорты сохранены для обратной совместимости с migration-routes.tsx
  */
 
@@ -8,13 +8,13 @@
  * Выполнить все миграции (stub - SQL-миграции не используются)
  */
 export async function runAllMigrations() {
-  console.log('Migrations skipped: application uses KV Store, not SQL tables.');
+  console.log('Migrations skipped: application uses JSON stores.');
   return {
     success: true,
     results: {
       migration_001: {
         success: true,
-        migration: 'Skipped (KV Store mode)',
+        migration: 'Skipped',
         successCount: 0,
         totalStatements: 0,
         successRate: 100,
@@ -31,7 +31,7 @@ export async function checkTablesStatus() {
   return {
     success: true,
     mode: 'kv_store',
-    message: 'Application uses KV Store. SQL tables are not required.',
+    message: 'Application uses JSON stores. SQL tables are not required.',
     existingTables: ['kv_store_84730125'],
   };
 }

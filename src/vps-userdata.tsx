@@ -158,7 +158,7 @@ export async function vpsListProfiles(role?: string): Promise<Record<string, unk
   }
 }
 
-// ── Verification / Reset Tokens (KV store — уже на этом сервере) ──
+// ── Verification / Reset Tokens ──
 
 export async function vpsStoreToken(
   userId: string,

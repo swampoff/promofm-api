@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { agentQueueStore, agentSessionsIndexStore, agentSessionsStore } from './db.tsx';
 import { callLLM, getLLMStatus } from './llm-router.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const agentsRoutes = new Hono();
 
@@ -51,7 +52,7 @@ interface QueueItem {
 
 const AGENTS = [
   { id: 'ARCH', role: 'System Architect',  specialty: 'architecture, system design, scalability, API contracts, component structure', personality: 'analytical, precise, thinks in systems and abstractions' },
-  { id: 'DEV',  role: 'Senior Developer',  specialty: 'React, TypeScript, Tailwind v4, Supabase Edge Functions, Deno, KV store, code implementation', personality: 'pragmatic, loves clean code, hates unnecessary complexity, writes examples' },
+  { id: 'DEV',  role: 'Senior Developer',  specialty: 'React, TypeScript, Tailwind v4, Node.js API, PostgreSQL, code implementation', personality: 'pragmatic, loves clean code, hates unnecessary complexity, writes examples' },
   { id: 'SEC',  role: 'Security Engineer', specialty: 'auth flows, data exposure, API security, input validation, rate limiting', personality: 'paranoid in a good way, always finds edge cases and attack vectors' },
   { id: 'OPS',  role: 'DevOps Engineer',   specialty: 'CI/CD, performance, caching, monitoring, infrastructure, build optimization', personality: 'automation obsessed, uptime fanatic, thinks about scale' },
   { id: 'QA',   role: 'QA Lead',           specialty: 'testing strategies, UX edge cases, accessibility, error states, user flows', personality: 'skeptical, methodical, breaks things professionally, asks "what if"' },
@@ -59,7 +60,7 @@ const AGENTS = [
 
 const SYSTEM_PROMPT = `You simulate an expert IT department team for ПРОМО.МУЗЫКА — a music marketing ecosystem.
 
-Tech stack: React + TypeScript, Tailwind CSS v4, React Router v7 (package: react-router), Motion (motion/react), Supabase (Auth, Edge Functions on Deno, Storage), KV key-value store (no SQL), Hono web server.
+Tech stack: React + TypeScript, Tailwind CSS v4, React Router v7 (package: react-router), Motion (motion/react), PostgreSQL, JWT Auth, Node.js API, KV key-value store (no SQL), Hono web server.
 
 Team agents:
 ${AGENTS.map(a => `- ${a.id} (${a.role}): ${a.specialty}. Personality: ${a.personality}`).join('\n')}
@@ -159,7 +160,7 @@ agentsRoutes.post('/discuss', async (c) => {
     return c.json({ success: true, session });
   } catch (error) {
     console.log('POST /discuss error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -199,7 +200,7 @@ agentsRoutes.post('/sessions/:id/continue', async (c) => {
     return c.json({ success: true, messages: result.messages, decisions: result.decisions });
   } catch (error) {
     console.log('POST /sessions/:id/continue error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -209,7 +210,7 @@ agentsRoutes.get('/sessions', async (c) => {
     const idx = (await agentSessionsIndexStore.get('singleton') as any) || [];
     return c.json({ success: true, sessions: idx });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -221,7 +222,7 @@ agentsRoutes.get('/sessions/:id', async (c) => {
     if (!session) return c.json({ success: false, error: 'Not found' }, 404);
     return c.json({ success: true, session });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -234,7 +235,7 @@ agentsRoutes.delete('/sessions/:id', async (c) => {
     await agentSessionsIndexStore.set('singleton', idx.filter((s: any) => s.id !== id));
     return c.json({ success: true });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -244,7 +245,7 @@ agentsRoutes.get('/queue', async (c) => {
     const queue = (await agentQueueStore.get('singleton') as any) || [];
     return c.json({ success: true, queue });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -265,7 +266,7 @@ agentsRoutes.post('/queue', async (c) => {
     await agentQueueStore.set('singleton', queue.slice(0, 50));
     return c.json({ success: true, item });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -319,7 +320,7 @@ agentsRoutes.post('/queue/process', async (c) => {
     return c.json({ success: true, processed: processedSessions.length, sessions: processedSessions });
   } catch (error) {
     console.log('POST /queue/process error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -331,7 +332,7 @@ agentsRoutes.delete('/queue/:id', async (c) => {
     await agentQueueStore.set('singleton', queue.filter((q: any) => q.id !== id));
     return c.json({ success: true });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

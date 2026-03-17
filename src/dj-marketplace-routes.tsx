@@ -1,7 +1,7 @@
 /**
  * DJ MARKETPLACE ROUTES
  * Public endpoints for DJ Marketplace catalog
- * Uses KV store with prefix dj:profile:, dj:mixes:, dj:reviews:, dj:calendar:
+ * Uses JSON store with prefix dj:profile:, dj:mixes:, dj:reviews:, dj:calendar:
  */
 
 import { Hono } from 'hono';

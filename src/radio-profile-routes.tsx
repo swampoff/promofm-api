@@ -1,7 +1,7 @@
 /**
  * RADIO STATION PROFILE ROUTES
  * Получение и обновление профиля радиостанции
- * Источник данных: KV store
+ * Источник данных: PostgreSQL
  */
 
 import { Hono } from 'hono';

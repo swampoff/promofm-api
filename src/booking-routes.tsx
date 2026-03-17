@@ -1,6 +1,6 @@
 /**
  * BOOKING ROUTES - API для системы букинга артистов
- * Миграция на KV Store (вместо SQL таблиц)
+ * Маршруты бронирования (JSON stores)
  * 
  * KV ключи:
  * - booking:{id} - данные букинга
@@ -28,7 +28,7 @@ import { notifyBookingRequest } from './email-helper.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
 const app = new Hono();
-const supabase = getDbClient();
+const dbClient = getDbClient();
 
 // =====================================================
 // HELPER: Получить пользователя из токена
@@ -38,7 +38,7 @@ async function getUserFromToken(authHeader: string | null) {
     return null;
   }
   const token = authHeader.split(' ')[1];
-  const { data, error } = await supabase.auth.getUser(token);
+  const { data, error } = await dbClient.auth.getUser(token);
   if (error || !data.user) {
     return null;
   }
