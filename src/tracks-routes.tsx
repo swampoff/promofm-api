@@ -56,6 +56,12 @@ tracksRoutes.post('/', async (c) => {
       return c.json({ success: false, error: 'Failed to create track' }, 500);
     }
 
+    // Fire-and-forget: trigger Promo.check fingerprinting in background
+    if (track.audio_url) {
+      fetch(`http://127.0.0.1:3000/server/api/promo-check/process/${track.id}`, { method: 'POST' })
+        .catch(() => {}); // non-blocking
+    }
+
     return c.json({ success: true, data: track }, 201);
   } catch (error) {
     console.error('Error in POST /tracks:', error);
