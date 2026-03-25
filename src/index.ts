@@ -77,6 +77,7 @@ import helpRoutes from "./help-routes.tsx";
 import ecosystemRoutes from "./ecosystem-routes.tsx";
 import { memoryRoutes } from "./memory-routes.tsx";
 import { feedbackRoutes } from "./feedback-routes.tsx";
+import { promoPipelineRoutes } from "./promo-pipeline-routes.tsx";
 import { classifyAndLog } from "./error-classifier.ts";
 import { authLimiter, uploadLimiter, apiLimiter } from './rate-limiter.tsx';
 import { safeErrorMessage, scanForSqlInjection } from './security.tsx';
