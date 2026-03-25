@@ -31,6 +31,20 @@ const PAGE_META: Record<string, { title: string; desc: string; type: string; ima
   '/promo-lab': { title: `ПРОМО.ЛАБ — оценка треков — ${SITE_NAME}`, desc: 'Профессиональная оценка треков от экспертов индустрии', type: 'website' },
   '/promo-guide': { title: `ПРОМО.ГИД — руководства — ${SITE_NAME}`, desc: 'Гайды по продвижению музыки и развитию карьеры артиста', type: 'website' },
   '/marketplace': { title: `Маркетплейс — ${SITE_NAME}`, desc: 'Маркетплейс музыкальных услуг: биты, мастеринг, дизайн, продвижение', type: 'website' },
+  '/tracks': { title: `Треки — ${SITE_NAME}`, desc: 'Слушайте и открывайте новую музыку: треки артистов платформы ПРОМО.МУЗЫКА', type: 'website' },
+  '/radio': { title: `Радиостанции — ${SITE_NAME}`, desc: 'Каталог радиостанций-партнёров: ротации, эфиры, сотрудничество', type: 'website' },
+  '/videos': { title: `Видео — ${SITE_NAME}`, desc: 'Музыкальные видео, клипы и live-выступления артистов', type: 'website' },
+  '/booking': { title: `Букинг — ${SITE_NAME}`, desc: 'Забронируйте артиста, DJ или площадку для мероприятия', type: 'website' },
+  '/curator': { title: `Кураторы — ${SITE_NAME}`, desc: 'Кураторы музыки: слушайте, оценивайте, продвигайте артистов', type: 'website' },
+  '/donations': { title: `Донаты — ${SITE_NAME}`, desc: 'Поддержите любимых артистов донатами', type: 'website' },
+  '/coins': { title: `Коины — ${SITE_NAME}`, desc: 'Внутренняя валюта платформы: покупайте услуги, продвигайте треки', type: 'website' },
+  '/collaboration': { title: `Коллаборации — ${SITE_NAME}`, desc: 'Найдите партнёров для совместных музыкальных проектов', type: 'website' },
+  '/dj-studio': { title: `DJ Студия — ${SITE_NAME}`, desc: 'Инструменты для диджеев: миксы, плейлисты, аналитика', type: 'website' },
+  '/dj-marketplace': { title: `DJ Маркетплейс — ${SITE_NAME}`, desc: 'Биржа диджеев: найдите DJ для мероприятия', type: 'website' },
+  '/producer-studio': { title: `Продюсерская студия — ${SITE_NAME}`, desc: 'Продакшн-инструменты: биты, аранжировки, мастеринг', type: 'website' },
+  '/about': { title: `О платформе — ${SITE_NAME}`, desc: 'ПРОМО.МУЗЫКА — платформа для артистов, DJ, продюсеров и музыкальной индустрии', type: 'website' },
+  '/help': { title: `Помощь — ${SITE_NAME}`, desc: 'Ответы на частые вопросы и руководства по работе с платформой', type: 'website' },
+  '/contacts': { title: `Контакты — ${SITE_NAME}`, desc: 'Свяжитесь с командой ПРОМО.МУЗЫКА', type: 'website' },
 };
 
 // ─── GET /prerender/* — SSR for bots ───
