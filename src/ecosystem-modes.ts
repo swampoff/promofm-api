@@ -1,6 +1,7 @@
 /**
  * ECOSYSTEM MODES — Agent execution engine
  * Runs agents via LLM with structured prompts and chaining support.
+ * Evolve mode generates daily reports with agent personalities.
  */
 
 import { callLLM } from "./llm-router.tsx";
@@ -16,6 +17,8 @@ export interface AgentResult {
   data: Record<string, unknown>;
   meta: {
     agent: string;
+    displayName?: string;
+    title?: string;
     mode: string;
     latencyMs: number;
     next_actions: Array<{ tool: string; hint: string }>;
@@ -30,6 +33,7 @@ export interface ModeReport {
   totalLatencyMs: number;
   results: AgentResult[];
   errors: Array<{ agent: string; error: string }>;
+  dailyBrief?: string;
 }
 
 export interface ChainResult {
@@ -66,6 +70,23 @@ export const MODES = {
 } as const;
 
 export type ModeName = keyof typeof MODES;
+
+// ─── Agent Personalities for Reports ──────────────────────────────────────────
+
+const AGENT_VOICE: Record<string, string> = {
+  feedback_collector: "Говори как внимательный слушатель, который реально заботится о каждом отзыве. Начни с обращения: 'Привет, шеф! Джемма на связи.' Используй живой разговорный язык.",
+  improvement_agent: "Говори как опытный инженер, уверенный в своих решениях. Начни с: 'Гермес докладывает.' Будь конкретным, предлагай чёткие шаги.",
+  product_optimizer: "Говори как аналитик-перфекционист, одержимый метриками. Начни с: 'Оптимус на линии.' Цифры — твоя стихия.",
+  role_expansion_scout: "Говори как разведчик, вернувшийся с полевой операции. Начни с: 'Скаут вернулся с разведки.' Делись наблюдениями живо.",
+  bug_hunter: "Говори как охотник, который выслеживает добычу. Начни с: 'Дельфин нырнул и вот что нашёл.' Описывай баги как пойманных зверей.",
+  chaos_agent: "Говори как безумный учёный, которому нравится ломать вещи. Начни с: 'Хаос в деле!' Радуйся найденным уязвимостям.",
+  load_tester: "Говори как военный инженер, проверяющий укрепления. Начни с: 'Квен — отчёт по нагрузке.' Будь чётким и структурированным.",
+  pipeline_tester: "Говори как контролёр качества на конвейере. Начни с: 'Кодер проверил конвейер.' Докладывай чётко — прошло/не прошло.",
+  artist_assistant: "Говори как друг-музыкант, который всегда поддержит. Начни с: 'Макс на связи!' Будь тёплым и вдохновляющим.",
+  promo_agent: "Говори как энергичный промоутер. Начни с: 'Промо зажигает!' Будь энтузиастом, предлагай дерзкие идеи.",
+  onboarding_agent: "Говори как заботливый гид в музее. Начни с: 'Гид приветствует!' Будь терпеливым и понятным.",
+  community_agent: "Говори как тамада на вечеринке. Начни с: 'Комьюнити на пульсе!' Знай всех и про каждого расскажи.",
+};
 
 // ─── Prompt Builder ───────────────────────────────────────────────────────────
 
@@ -112,14 +133,12 @@ function buildPrompt(
 function parseJsonResponse(text: string): Record<string, unknown> {
   const cleaned = text.trim();
 
-  // Try direct parse
   try {
     return JSON.parse(cleaned);
   } catch {
     // noop
   }
 
-  // Try extracting JSON from markdown code block
   const codeBlockMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   if (codeBlockMatch) {
     try {
@@ -129,7 +148,6 @@ function parseJsonResponse(text: string): Record<string, unknown> {
     }
   }
 
-  // Try finding first { ... } block
   const braceStart = cleaned.indexOf("{");
   const braceEnd = cleaned.lastIndexOf("}");
   if (braceStart !== -1 && braceEnd > braceStart) {
@@ -141,6 +159,58 @@ function parseJsonResponse(text: string): Record<string, unknown> {
   }
 
   return { raw_response: cleaned, parse_error: true };
+}
+
+// ─── Generate Daily Brief ─────────────────────────────────────────────────────
+
+async function generateDailyBrief(
+  results: AgentResult[],
+  errors: Array<{ agent: string; error: string }>
+): Promise<string> {
+  const agentReports: string[] = [];
+
+  for (const r of results) {
+    const voice = AGENT_VOICE[r.meta.agent] || "";
+    const agentInfo = getAgent(r.meta.agent);
+    const name = agentInfo?.displayName || r.meta.agent;
+    const title = agentInfo?.title || "";
+
+    const briefReq = {
+      system: `Ты — ${name}, ${title} в команде AI-экосистемы ПРОМО.МУЗЫКА. ${voice} Пиши на русском. Максимум 3-4 предложения. Будь живым, не роботом.`,
+      messages: [{
+        role: "user" as const,
+        content: `Вот результаты твоей работы сегодня. Расскажи о них живым языком от первого лица:\n${JSON.stringify(r.data, null, 2)}`,
+      }],
+      maxTokens: 300,
+      temperature: 0.8,
+      tag: `brief-${r.meta.agent}`,
+      model: agentInfo?.model,
+    };
+
+    try {
+      let resp;
+      try {
+        resp = await callLLM(briefReq);
+      } catch (err) {
+        if (agentInfo?.model && String(err).includes("429")) {
+          resp = await callLLM({ ...briefReq, model: undefined });
+        } else {
+          throw err;
+        }
+      }
+      agentReports.push(`**${name}** (${title}):\n${resp.text.trim()}`);
+    } catch {
+      agentReports.push(`**${name}** (${title}):\n[Не смог сформировать отчёт]`);
+    }
+  }
+
+  for (const e of errors) {
+    const agentInfo = getAgent(e.agent);
+    const name = agentInfo?.displayName || e.agent;
+    agentReports.push(`**${name}**: Не смог выполнить задачу — ${e.error}`);
+  }
+
+  return agentReports.join("\n\n---\n\n");
 }
 
 // ─── Run Single Agent ─────────────────────────────────────────────────────────
@@ -158,13 +228,27 @@ export async function runAgent(
   const userPrompt = buildPrompt(agent, input, context);
   const start = Date.now();
 
-  const llmResponse = await callLLM({
+  const llmRequest = {
     system: agent.systemPrompt,
-    messages: [{ role: "user", content: userPrompt }],
+    messages: [{ role: "user" as const, content: userPrompt }],
     maxTokens: 2048,
     temperature: agent.mode === "evolve" ? 0.3 : 0.7,
     tag: `ecosystem-${agent.name}`,
-  });
+    model: agent.model,
+  };
+
+  let llmResponse;
+  try {
+    llmResponse = await callLLM(llmRequest);
+  } catch (err) {
+    // Fallback to default model on 429 rate limit
+    if (agent.model && String(err).includes("429")) {
+      console.warn(`[ecosystem] ${agent.displayName} (${agent.model}) rate-limited, falling back to default`);
+      llmResponse = await callLLM({ ...llmRequest, model: undefined });
+    } else {
+      throw err;
+    }
+  }
 
   const latencyMs = Date.now() - start;
   const data = parseJsonResponse(llmResponse.text);
@@ -178,6 +262,8 @@ export async function runAgent(
     data,
     meta: {
       agent: agent.name,
+      displayName: agent.displayName,
+      title: agent.title,
       mode: agent.mode,
       latencyMs,
       next_actions: nextActions,
@@ -232,6 +318,15 @@ export async function runMode(
     }
   }
 
+  let dailyBrief: string | undefined;
+  if (modeName === "evolve" && results.length > 0) {
+    try {
+      dailyBrief = await generateDailyBrief(results, errors);
+    } catch (err) {
+      console.error("[ecosystem] Failed to generate daily brief:", err);
+    }
+  }
+
   return {
     mode: modeName,
     startedAt,
@@ -239,6 +334,7 @@ export async function runMode(
     totalLatencyMs: Date.now() - modeStart,
     results,
     errors,
+    dailyBrief,
   };
 }
 

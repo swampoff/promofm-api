@@ -5,6 +5,7 @@
 
 import { Hono } from "hono";
 import { pool } from "./db-client.tsx";
+import { sendEmail } from "./email-helper.tsx";
 import {
   getManifest,
   getAgent,
@@ -131,6 +132,21 @@ app.post("/mode/:mode/run", async (c) => {
     };
 
     await saveSession(sessionId, sessionData);
+
+    // Email daily brief for evolve mode
+    if (modeName === "evolve" && report.dailyBrief) {
+      const today = new Date().toISOString().slice(0, 10);
+      await sendEmail({
+        to: "info@promofm.ru",
+        subject: `[ECOSYSTEM] Ежедневный отчёт команды — ${today}`,
+        html: `<h2>Ежедневный отчёт AI-команды ПРОМО.МУЗЫКА</h2>
+<p><b>Дата:</b> ${today} | <b>Агентов:</b> ${report.results.length} | <b>Время:</b> ${report.totalLatencyMs}ms</p>
+<hr/>
+${report.dailyBrief.replace(/\n/g, "<br/>")}
+<hr/>
+<p><small>Сгенерировано AI-экосистемой ПРОМО.МУЗЫКА v1.1</small></p>`,
+      }).catch((e: unknown) => console.error("[ecosystem] Brief email failed:", e));
+    }
 
     return c.json(
       jsonOk(report, {
