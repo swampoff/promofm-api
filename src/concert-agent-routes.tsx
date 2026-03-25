@@ -5,6 +5,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { concertAgentStore } from './db.tsx';
+import { safeErrorMessage } from './security.tsx';
 import {
   fetchAllConcerts,
   fetchConcertsFromSource,
@@ -40,7 +41,7 @@ concertAgent.post('/fetch', requireAdminOrKey, async (c) => {
     });
   } catch (error) {
     console.error('[concert-agent] Fetch error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -60,7 +61,7 @@ concertAgent.post('/fetch/:sourceId', requireAdminOrKey, async (c) => {
     return c.json({ success: true, sourceId, ...result });
   } catch (error) {
     console.error('[concert-agent] Fetch error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -78,7 +79,7 @@ concertAgent.get('/concerts', async (c) => {
       total: concerts.length,
     });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -134,7 +135,7 @@ concertAgent.get('/status', async (c) => {
       },
     });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -146,7 +147,7 @@ concertAgent.post('/cleanup', requireAdminOrKey, async (c) => {
     const deleted = await clearOldConcerts();
     return c.json({ success: true, deleted });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -165,7 +166,7 @@ concertAgent.delete('/clear', requireAdminOrKey, async (c) => {
     }
     return c.json({ success: true, deleted });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

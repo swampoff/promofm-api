@@ -51,6 +51,24 @@ export class YooKassaGateway implements PaymentGateway {
       },
     };
 
+    // 54-ФЗ: чек обязателен при включённой фискализации
+    body.receipt = {
+      customer: {
+        email: req.metadata?.email || 'noreply@promo-music.ru',
+      },
+      items: [{
+        description: req.description?.slice(0, 128) || 'Оплата на ПРОМО.МУЗЫКА',
+        quantity: '1.00',
+        amount: {
+          value: req.amount.toFixed(2),
+          currency: req.currency || 'RUB',
+        },
+        vat_code: 1,  // Без НДС
+        payment_subject: 'service',
+        payment_mode: 'full_payment',
+      }],
+    };
+
     if (req.savePaymentMethod) {
       body.save_payment_method = true;
     }

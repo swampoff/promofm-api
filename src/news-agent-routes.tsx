@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { newsPublicStore } from './db.tsx';
 import { fetchAllNews, fetchNewsFromSource, NEWS_SOURCES } from './news-agent.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const newsAgent = new Hono();
 
@@ -34,7 +35,7 @@ newsAgent.post('/fetch', requireAdminOrKey, async (c) => {
     });
   } catch (error) {
     console.error('[news-agent] Fetch error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -54,7 +55,7 @@ newsAgent.post('/fetch/:sourceId', requireAdminOrKey, async (c) => {
     return c.json({ success: true, sourceId, ...result });
   } catch (error) {
     console.error('[news-agent] Fetch error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -106,7 +107,7 @@ newsAgent.get('/status', async (c) => {
       },
     });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -125,7 +126,7 @@ newsAgent.delete('/clear', requireAdminOrKey, async (c) => {
     }
     return c.json({ success: true, deleted });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

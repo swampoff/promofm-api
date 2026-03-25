@@ -11,6 +11,7 @@ import { Hono } from 'hono';
 import { getDbClient } from './db-client.tsx';
 import * as db from './db.tsx';
 import { contentOrdersStore } from './db.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 
@@ -125,23 +126,23 @@ app.post('/generate', async (c) => {
     console.log('Audio generated, size:', audioData.byteLength, 'bytes');
 
     // Сохраняем в Supabase Storage
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
 
     // Создаем bucket если не существует
     const bucketName = 'make-84730125-content';
     try {
-      const { data: buckets } = await supabase.storage.listBuckets();
+      const { data: buckets } = await dbClient.storage.listBuckets();
       const bucketExists = buckets?.some(bucket => bucket.name === bucketName);
       
       if (!bucketExists) {
         console.log('Creating storage bucket:', bucketName);
-        await supabase.storage.createBucket(bucketName, { public: false });
+        await dbClient.storage.createBucket(bucketName, { public: false });
       }
     } catch (bucketErr: any) {
       // Storage API may return non-JSON "Internal server error" - try to create bucket anyway
       console.warn('listBuckets failed, attempting createBucket directly:', bucketErr?.message);
       try {
-        await supabase.storage.createBucket(bucketName, { public: false });
+        await dbClient.storage.createBucket(bucketName, { public: false });
       } catch {
         // Bucket may already exist - ignore
       }
@@ -154,7 +155,7 @@ app.post('/generate', async (c) => {
     console.log('Uploading to storage:', fileName);
 
     // Загружаем файл
-    const { data: uploadData, error: uploadError } = await supabase.storage
+    const { data: uploadData, error: uploadError } = await dbClient.storage
       .from(bucketName)
       .upload(fileName, audioData, {
         contentType: 'audio/mpeg',
@@ -169,7 +170,7 @@ app.post('/generate', async (c) => {
     console.log('File uploaded:', uploadData.path);
 
     // Создаем signed URL (действителен 1 год)
-    const { data: signedUrlData, error: signedUrlError } = await supabase.storage
+    const { data: signedUrlData, error: signedUrlError } = await dbClient.storage
       .from(bucketName)
       .createSignedUrl(fileName, 31536000); // 365 days
 

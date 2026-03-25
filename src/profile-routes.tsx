@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const profileRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
@@ -21,7 +22,7 @@ profileRoutes.get('/', async (c) => {
       },
     });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -40,7 +41,7 @@ profileRoutes.put('/', async (c) => {
     await db.upsertProfile(userId, updated);
     return c.json({ success: true, data: updated });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

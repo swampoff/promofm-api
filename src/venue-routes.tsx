@@ -30,6 +30,7 @@ import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser,
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { notifyVenueRequest } from './email-helper.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 
@@ -285,7 +286,7 @@ app.get('/analytics/overview', requireAuth, async (c) => {
     });
   } catch (error: any) {
     console.error('Error fetching venue analytics:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -304,7 +305,7 @@ app.get('/analytics/campaigns', requireAuth, async (c) => {
     return c.json({ success: true, campaigns });
   } catch (error: any) {
     console.error('Error fetching campaigns:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -325,7 +326,7 @@ app.get('/analytics/spending', requireAuth, async (c) => {
     return c.json({ success: true, period, data: spending });
   } catch (error: any) {
     console.error('Error fetching spending data:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -344,7 +345,7 @@ app.get('/analytics/roi', requireAuth, async (c) => {
     return c.json({ success: true, data: roi });
   } catch (error: any) {
     console.error('Error fetching ROI data:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -363,7 +364,7 @@ app.get('/analytics/radio-compare', requireAuth, async (c) => {
     return c.json({ success: true, data: comparison });
   } catch (error: any) {
     console.error('Error fetching radio comparison:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -381,7 +382,7 @@ app.post('/analytics/export', requireAuth, async (c) => {
     });
   } catch (error: any) {
     console.error('Error exporting analytics:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -409,7 +410,7 @@ app.get('/notifications', requireAuth, async (c) => {
     return c.json({ success: true, notifications });
   } catch (error: any) {
     console.error('Error fetching notifications:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -431,7 +432,7 @@ app.put('/notifications/:id/read', requireAuth, async (c) => {
     return c.json({ success: true });
   } catch (error: any) {
     console.error('Error marking notification as read:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -454,7 +455,7 @@ app.get('/playlists', requireAuth, async (c) => {
     return c.json({ success: true, playlists });
   } catch (error: any) {
     console.error('Error fetching venue playlists:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -493,7 +494,7 @@ app.post('/playlists', requireAuth, async (c) => {
     return c.json({ success: true, playlist });
   } catch (error: any) {
     console.error('Error creating playlist:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -522,7 +523,7 @@ app.put('/playlists/:id', requireAuth, async (c) => {
     return c.json({ success: true, playlist: playlists[idx] });
   } catch (error: any) {
     console.error('Error updating playlist:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -544,7 +545,7 @@ app.delete('/playlists/:id', requireAuth, async (c) => {
     return c.json({ success: true });
   } catch (error: any) {
     console.error('Error deleting playlist:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -560,7 +561,7 @@ app.get('/radio-catalog', requireAuth, async (c) => {
     return c.json({ success: true, stations });
   } catch (error: any) {
     console.error('Error fetching radio catalog:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -578,7 +579,7 @@ app.get('/radio-campaigns', requireAuth, async (c) => {
     return c.json({ success: true, campaigns });
   } catch (error: any) {
     console.error('Error fetching radio campaigns:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -628,7 +629,7 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
     return c.json({ success: true, campaign });
   } catch (error: any) {
     console.error('Error creating radio campaign:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -657,7 +658,7 @@ app.put('/radio-campaigns/:id', requireAuth, async (c) => {
     return c.json({ success: true, campaign: campaigns[idx] });
   } catch (error: any) {
     console.error('Error updating radio campaign:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -679,7 +680,7 @@ app.get('/radio-brand', requireAuth, async (c) => {
     return c.json({ success: true, data });
   } catch (error: any) {
     console.error('Error fetching radio brand:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -701,7 +702,7 @@ app.put('/radio-brand', requireAuth, async (c) => {
     return c.json({ success: true, data: updated });
   } catch (error: any) {
     console.error('Error updating radio brand:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -736,7 +737,7 @@ app.get('/bookings', requireAuth, async (c) => {
     return c.json({ success: true, bookings });
   } catch (error: any) {
     console.error('Error fetching venue bookings:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

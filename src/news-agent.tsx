@@ -4,6 +4,24 @@
  */
 
 import { newsPublicStore } from './db.tsx';
+import { isUrlSafe } from './security.tsx';
+
+
+// ─── Poster Personas (round-robin for auto-news) ────────
+const POSTERS = [
+  { name: 'DJ Den', avatar: '/avatars/djden.png' },
+  { name: 'Сандра', avatar: '/avatars/sandra.png' },
+  { name: 'Лиана', avatar: '/avatars/liana.png' },
+  { name: 'Макс', avatar: '/avatars/max.png' },
+  { name: 'Стелла', avatar: '/avatars/stella.png' },
+  { name: 'Марк', avatar: '/avatars/mark.png' },
+];
+let posterIndex = 0;
+function nextPoster() {
+  const p = POSTERS[posterIndex % POSTERS.length];
+  posterIndex++;
+  return p;
+}
 
 // ─── Source Configuration ───────────────────────────────
 
@@ -56,6 +74,12 @@ export const NEWS_SOURCES: NewsSource[] = [
 // ─── HTML Fetching ──────────────────────────────────────
 
 async function fetchPageText(url: string): Promise<string | null> {
+  // SSRF protection: validate URL before fetching
+  const urlCheck = await isUrlSafe(url);
+  if (!urlCheck.safe) {
+    console.warn(`[SSRF blocked] ${url}: ${urlCheck.reason}`);
+    return null;
+  }
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -132,6 +156,7 @@ ${source.parsingHint}
 - Верни ТОЛЬКО валидный JSON с полем "news" — массив объектов
 - Каждый объект: {"title": "Заголовок", "excerpt": "Краткое описание 1-2 предложения", "content": "Переписанный текст новости 3-5 предложений", "category": "одна из: releases, artists, industry, events, charts, interviews", "tags": ["тег1", "тег2"], "publishedAt": "дата ISO или пустая строка"}
 - Перепиши каждую новость своими словами (не копируй дословно)
+- ОБЯЗАТЕЛЬНО пиши заголовок (title) и весь текст ТОЛЬКО НА РУССКОМ ЯЗЫКЕ. Названия групп и альбомов можно оставить на английском, но заголовок должен быть на русском
 - Максимум 5 новостей
 - НЕ добавляй markdown-обёртку
 - Если не удалось извлечь новости, верни {"news": []}`;
@@ -234,11 +259,14 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
     if (isDuplicate) continue;
 
     const id = `news-${source.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const poster = nextPoster();
     const newsRecord = {
       id,
       ...item,
       source: source.name,
       sourceId: source.id,
+      authorName: poster.name,
+      authorAvatar: poster.avatar,
       status: 'published' as const,
       createdAt: new Date().toISOString(),
     };

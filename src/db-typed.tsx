@@ -69,6 +69,7 @@ export async function getPublishedTracks(limit = 50, orderBy: 'created_at' | 'pl
     .select('*')
     .in('moderation_status', ['approved', 'published'])
     .eq('is_hidden', false)
+    .neq('artist_name', '')
     .order(orderBy, { ascending: false })
     .limit(limit);
   if (error) console.error('[db-typed] getPublishedTracks:', error);
@@ -390,10 +391,10 @@ export async function deleteBanner(bannerId: string) {
 export async function awardCoins(userId: string, amount: number, description: string) {
   if (!userId || amount <= 0) return;
 
-  const supabase = db();
+  const dbClient = db();
 
   // 1. Update balance
-  const { data: existing } = await supabase
+  const { data: existing } = await dbClient
     .from('coin_balances')
     .select('balance')
     .eq('user_id', userId)
@@ -402,13 +403,13 @@ export async function awardCoins(userId: string, amount: number, description: st
   const currentBalance = existing?.balance || 0;
   const newBalance = currentBalance + amount;
 
-  await supabase
+  await dbClient
     .from('coin_balances')
     .upsert({ user_id: userId, balance: newBalance, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
 
   // 2. Record transaction
   const txId = `cointx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await supabase
+  await dbClient
     .from('coin_transactions')
     .upsert({
       id: txId,
@@ -431,9 +432,9 @@ export async function awardCoins(userId: string, amount: number, description: st
 export async function deductCoins(userId: string, amount: number, description: string) {
   if (!userId || amount <= 0) return null;
 
-  const supabase = db();
+  const dbClient = db();
 
-  const { data: existing } = await supabase
+  const { data: existing } = await dbClient
     .from('coin_balances')
     .select('balance')
     .eq('user_id', userId)
@@ -446,12 +447,12 @@ export async function deductCoins(userId: string, amount: number, description: s
 
   const newBalance = currentBalance - amount;
 
-  await supabase
+  await dbClient
     .from('coin_balances')
     .upsert({ user_id: userId, balance: newBalance, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
 
   const txId = `cointx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await supabase
+  await dbClient
     .from('coin_transactions')
     .upsert({
       id: txId,

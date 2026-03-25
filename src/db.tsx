@@ -145,7 +145,7 @@ export async function upsertNews(userId: string, newsId: string, news: Record<st
   };
   const { error } = await db()
     .from('news')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertNews:', error);
 }
 
@@ -227,7 +227,7 @@ export async function createDonation(artistId: string, donationId: string, donat
   };
   const { error } = await db()
     .from('donations')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] createDonation:', error);
 }
 
@@ -276,7 +276,7 @@ export async function createCoinTransaction(userId: string, txId: string, tx: Re
   };
   const { error } = await db()
     .from('coin_transactions')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] createCoinTransaction:', error);
 }
 
@@ -374,7 +374,7 @@ export async function upsertNotification(userId: string, notifId: string, notif:
   };
   const { error } = await db()
     .from('notifications')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertNotification:', error);
 }
 
@@ -461,13 +461,26 @@ export async function upsertTrackAnalytics(trackId: string, analytics: Record<st
 // ─── Artist Profiles ───
 
 export async function getArtistProfile(artistId: string) {
-  const { data, error } = await db()
+  // Try by id first, then by user_id
+  let { data, error } = await db()
     .from('artist_profiles')
     .select('*')
     .eq('id', artistId)
     .maybeSingle();
+  
+  if (!data) {
+    const res = await db()
+      .from('artist_profiles')
+      .select('*')
+      .eq('user_id', artistId)
+      .maybeSingle();
+    data = res.data;
+    if (res.error) error = res.error;
+  }
+  
   if (error) console.error('[db] getArtistProfile:', error);
-  return data ? (data.data || data) : null;
+  // Return the full row (not just data column) for proper field access
+  return data || null;
 }
 
 export async function upsertArtistProfile(artistId: string, profile: Record<string, any>) {
@@ -486,9 +499,29 @@ export async function getAllArtistProfiles() {
   const { data, error } = await db()
     .from('artist_profiles')
     .select('*')
-    .order('created_at', { ascending: false });
+    .order('total_plays', { ascending: false });
   if (error) console.error('[db] getAllArtistProfiles:', error);
-  return (data || []).map((r: any) => r.data || r);
+  // Return full rows with proper field names
+  return (data || []).map((r: any) => ({
+    id: r.user_id || r.id,
+    slug: r.slug || '',
+    name: r.artist_name || '',
+    genre: r.genre || '',
+    genres: r.sub_genres || [],
+    city: r.city || '',
+    country: r.country || 'Россия',
+    bio: r.bio || '',
+    avatarUrl: r.avatar_url || '',
+    coverUrl: r.cover_url || '',
+    website: r.website || '',
+    socialLinks: r.social_links || {},
+    streamingLinks: r.streaming_links || {},
+    monthlyListeners: r.monthly_listeners || 0,
+    totalPlays: r.total_plays || 0,
+    totalFollowers: r.total_followers || 0,
+    isVerified: r.is_verified || false,
+    trackCount: r.data?.track_count || 0,
+  }));
 }
 
 // ─── Marketplace / Beats ───
@@ -983,7 +1016,7 @@ export async function upsertPaymentMethod(methodId: string, userId: string, meth
   };
   const { error } = await db()
     .from('payment_methods')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertPaymentMethod:', error);
 }
 
@@ -1153,7 +1186,7 @@ export async function createCoinTransactionKv(userId: string, txId: string, tx: 
       amount: tx.amount || 0, balance_before: tx.balance_before || 0, balance_after: tx.balance_after || 0,
       description: tx.description || '', metadata: tx.metadata ? JSON.stringify(tx.metadata) : '{}',
       updated_at: new Date().toISOString()
-    }, { onConflict: 'id' });
+    }, { onConflict: 'user_id' });
   if (error) console.error('[db] createCoinTransactionKv:', error);
 }
 
@@ -1173,7 +1206,7 @@ export async function getRadioAdSlot(radioId: string, slotId: string) {
 export async function upsertRadioAdSlot(radioId: string, slotId: string, slot: Record<string, any>) {
   const { error } = await db()
     .from('radio_ad_slots')
-    .upsert({ id: slotId, radio_id: radioId, data: slot, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    .upsert({ id: slotId, radio_id: radioId, data: slot, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertRadioAdSlot:', error);
 }
 
@@ -1191,7 +1224,7 @@ export async function getTicketProvidersByConcert(concertId: string) {
 export async function upsertTicketProvider(concertId: string, providerId: string, provider: Record<string, any>) {
   const { error } = await db()
     .from('ticket_providers')
-    .upsert({ id: providerId, concert_id: concertId, data: provider, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    .upsert({ id: providerId, concert_id: concertId, data: provider, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertTicketProvider:', error);
 }
 
@@ -1207,7 +1240,7 @@ export async function getTicketSalesByConcert(concertId: string) {
 export async function upsertTicketSale(concertId: string, saleId: string, sale: Record<string, any>) {
   const { error } = await db()
     .from('ticket_sales')
-    .upsert({ id: saleId, concert_id: concertId, data: sale, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    .upsert({ id: saleId, concert_id: concertId, data: sale, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertTicketSale:', error);
 }
 
@@ -1226,7 +1259,7 @@ export async function getBeatReview(beatId: string, userId: string) {
 export async function upsertBeatReview(beatId: string, userId: string, review: Record<string, any>) {
   const { error } = await db()
     .from('beat_reviews')
-    .upsert({ id: `${beatId}:${userId}`, beat_id: beatId, user_id: userId, data: review, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    .upsert({ id: `${beatId}:${userId}`, beat_id: beatId, user_id: userId, data: review, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertBeatReview:', error);
 }
 
@@ -1245,7 +1278,7 @@ export async function getCcnByUser(userId: string) {
 export async function upsertCcn(userId: string, notifId: string, notif: Record<string, any>) {
   const { error } = await db()
     .from('cross_cabinet_notifications')
-    .upsert({ id: notifId, target_user_id: userId, data: notif, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    .upsert({ id: notifId, target_user_id: userId, data: notif, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertCcn:', error);
 }
 
@@ -1281,7 +1314,7 @@ export async function getNotificationCampaignsByUser(userId: string) {
 export async function upsertNotificationCampaign(userId: string, campaignId: string, campaign: Record<string, any>) {
   const { error } = await db()
     .from('notification_campaigns')
-    .upsert({ id: campaignId, user_id: userId, data: campaign, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    .upsert({ id: campaignId, user_id: userId, data: campaign, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertNotificationCampaign:', error);
 }
 

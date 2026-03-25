@@ -19,7 +19,7 @@ pool.on('error', (err) => {
 
 export { pool };
 
-// ─── Query Builder (Supabase-compatible API) ───
+// ─── Query Builder (PostgreSQL API) ───
 
 type Filter = { col: string; op: string; val: any };
 
@@ -109,8 +109,12 @@ class QueryBuilder {
       this._filters.push({ col, op: 'IS NOT NULL', val: null });
     } else if (op === 'in') {
       this._filters.push({ col, op: 'NOT IN', val });
-    } else {
+    } else if (op === 'eq') {
+      this._filters.push({ col, op: '!=', val });
+    } else if (op === 'like' || op === 'ilike') {
       this._filters.push({ col, op: `NOT ${op.toUpperCase()}`, val });
+    } else {
+      this._filters.push({ col, op: '!=', val });
     }
     return this;
   }
@@ -120,7 +124,7 @@ class QueryBuilder {
     return this;
   }
 
-  // Supabase-style .or('title.ilike.%search%,artist_name.ilike.%search%')
+  // Query builder .or('title.ilike.%search%,artist_name.ilike.%search%')
   or(condition: string) {
     this._orFilters.push(condition);
     return this;
@@ -183,7 +187,7 @@ class QueryBuilder {
       }
     }
 
-    // Parse Supabase-style .or() conditions
+    // Parse Query builder .or() conditions
     for (const orStr of this._orFilters) {
       const orParts = orStr.split(',').map(part => {
         const match = part.match(/^(\w+)\.(\w+)\.(.+)$/);
@@ -338,14 +342,14 @@ class QueryBuilder {
   }
 }
 
-// ─── Supabase-compatible client interface ───
+// ─── PostgreSQL client interface ───
 
-class SupabaseCompatClient {
+class DbClient {
   from(table: string) {
     return new QueryBuilder(table);
   }
 
-  // Auth compatibility (bcrypt + JWT replacing Supabase Auth)
+  // Auth compatibility (bcrypt + JWT replacing Auth)
   auth = {
     getUser: async (token: string) => {
       try {
@@ -383,7 +387,7 @@ class SupabaseCompatClient {
           'SELECT id, email, username, full_name, role::text, status::text, is_verified, avatar_url, settings, created_at FROM users ORDER BY created_at DESC LIMIT $1',
           [limit]
         );
-        // Map to Supabase-compatible format
+        // Map to PostgreSQL format
         const users = res.rows.map((u: any) => ({
           id: u.id,
           email: u.email,
@@ -572,7 +576,7 @@ class SupabaseCompatClient {
     },
   };
 
-  // Storage compatibility
+  // Storage (local filesystem)
   storage = {
     from: (bucket: string) => ({
       upload: async (path: string, data: any, opts?: any) => {
@@ -606,19 +610,19 @@ class SupabaseCompatClient {
 }
 
 // Singleton
-let instance: SupabaseCompatClient | null = null;
+let instance: DbClient | null = null;
 
-export function getDbClient(): SupabaseCompatClient {
+export function getDbClient(): DbClient {
   if (!instance) {
-    instance = new SupabaseCompatClient();
+    instance = new DbClient();
   }
   return instance;
 }
 
-export function createUserClient(accessToken: string): SupabaseCompatClient {
+export function createUserClient(accessToken: string): DbClient {
   return getDbClient();
 }
 
-export function createAnonDbClient(): SupabaseCompatClient {
+export function createAnonDbClient(): DbClient {
   return getDbClient();
 }

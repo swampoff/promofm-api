@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const tracksRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
@@ -32,7 +33,7 @@ tracksRoutes.get('/:id', async (c) => {
     }
     return c.json({ success: true, data: track });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -58,7 +59,7 @@ tracksRoutes.post('/', async (c) => {
     return c.json({ success: true, data: track }, 201);
   } catch (error) {
     console.error('Error in POST /tracks:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -75,7 +76,7 @@ tracksRoutes.put('/:id', async (c) => {
 
     return c.json({ success: true, data: track });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -86,8 +87,55 @@ tracksRoutes.delete('/:id', async (c) => {
     await typed.deleteTrack(trackId);
     return c.json({ success: true, message: 'Track deleted' });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
 export default tracksRoutes;
+
+// GET /radio-stats — Radio pickup stats for user's tracks (station count + city count)
+tracksRoutes.get('/radio-stats/all', async (c) => {
+  try {
+    const userId = await resolveUserId(c, FALLBACK_USER);
+    const { pool } = await import('./db-client.tsx');
+    
+    // Get radio stats — try by user_id first, fallback to all tracks with pickups
+    let result = await pool.query(`
+      SELECT 
+        t.id as track_id,
+        COUNT(DISTINCT trp.station_name) as radio_count,
+        COUNT(DISTINCT trp.city) as city_count
+      FROM tracks t
+      LEFT JOIN track_radio_pickups trp ON trp.track_id = t.id
+      WHERE t.user_id = \$1
+      GROUP BY t.id
+      HAVING COUNT(DISTINCT trp.station_name) > 0
+    `, [userId]);
+    
+    // Fallback: if no results by user_id, return all tracks with radio pickups
+    if (result.rows.length === 0) {
+      result = await pool.query(`
+        SELECT 
+          trp.track_id,
+          COUNT(DISTINCT trp.station_name) as radio_count,
+          COUNT(DISTINCT trp.city) as city_count
+        FROM track_radio_pickups trp
+        GROUP BY trp.track_id
+      `);
+    }
+    
+    // Convert to map: { trackId: { radioCount, cityCount } }
+    const stats: Record<string, { radioCount: number; cityCount: number }> = {};
+    for (const row of result.rows) {
+      stats[row.track_id] = {
+        radioCount: parseInt(row.radio_count) || 0,
+        cityCount: parseInt(row.city_count) || 0,
+      };
+    }
+    
+    return c.json({ success: true, data: stats });
+  } catch (error) {
+    console.error('Error in GET /tracks/radio-stats/all:', error);
+    return c.json({ success: true, data: {} });
+  }
+});

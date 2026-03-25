@@ -170,6 +170,50 @@ app.get('/profile/:artistId', async (c) => {
       }
     } catch { /* continue to 404 */ }
 
+    // 3. Fallback to artist_profiles SQL table (populated from artists + tracks)
+    try {
+      const { getDbClient } = await import('./db-client.tsx');
+      const dbClient = getDbClient();
+      
+      // Try by user_id first, then by id
+      let { data: apRow } = await dbClient
+        .from('artist_profiles')
+        .select('*')
+        .eq('user_id', artistId)
+        .maybeSingle();
+      
+      if (!apRow) {
+        const { data: apRow2 } = await dbClient
+          .from('artist_profiles')
+          .select('*')
+          .eq('id', artistId)
+          .maybeSingle();
+        apRow = apRow2;
+      }
+      
+      if (apRow) {
+        const sqlProfile = makeProfile({
+          id: apRow.user_id || apRow.id,
+          email: apRow.data?.email || '',
+          fullName: apRow.artist_name || '',
+          bio: apRow.bio || '',
+          avatarUrl: apRow.avatar_url || '',
+          city: apRow.city || '',
+          country: apRow.country || 'Россия',
+          genres: apRow.sub_genres || (apRow.genre ? [apRow.genre] : []),
+          totalPlays: apRow.total_plays || 0,
+          totalFollowers: apRow.total_followers || 0,
+          totalTracks: apRow.data?.track_count || 0,
+          isVerified: apRow.is_verified || false,
+          website: apRow.website || '',
+          socials: apRow.social_links || { ...EMPTY_SOCIALS },
+        });
+        return c.json({ success: true, source: 'sql', data: sqlProfile });
+      }
+    } catch (sqlErr) {
+      console.log('[ArtistProfile] SQL fallback failed:', sqlErr);
+    }
+
     return c.json({ success: false, error: `Artist not found: ${artistId}` }, 404);
 
   } catch (error) {
@@ -222,8 +266,8 @@ app.put('/profile/:artistId', requireAuth, async (c) => {
 
     // Best-effort SQL update
     try {
-      const supabase = getDbClient();
-      await supabase
+      const dbClient = getDbClient();
+      await dbClient
         .from('artists')
         .update({
           full_name: updatedProfile.fullName,
@@ -292,31 +336,30 @@ app.get('/popular', async (c) => {
   console.log('[ArtistProfile] GET /popular');
 
   try {
-    const kvValues = await vpsListProfiles();
-    const profiles: ArtistProfile[] = [];
+    // Load from artist_profiles SQL table (has real data)
+    const { getDbClient } = await import('./db-client.tsx');
+    const dbClient = getDbClient();
+    const { data: sqlProfiles } = await dbClient
+      .from('artist_profiles')
+      .select('user_id, artist_name, genre, sub_genres, city, avatar_url, total_plays, total_followers, is_verified, data')
+      .limit(2323);
 
-    for (const rawValue of kvValues) {
-      const parsed = parseKvProfile(rawValue);
-      if (parsed && parsed.id && parsed.fullName) {
-        profiles.push(parsed);
-      }
-    }
-
-    const allProfiles = profiles
-      .sort((a, b) => (b.totalPlays || 0) - (a.totalPlays || 0))
+    const allProfiles = (sqlProfiles || [])
+      .filter((p: any) => p.artist_name)
+      .sort((a: any, b: any) => (b.data?.track_count || 0) - (a.data?.track_count || 0))
       .slice(0, 12)
-      .map(p => ({
-        id: p.id,
-        name: p.fullName,
-        genre: (p.genres && p.genres[0]) || 'Music',
-        genres: p.genres || [],
+      .map((p: any) => ({
+        id: p.user_id,
+        name: p.artist_name,
+        genre: p.genre || 'Music',
+        genres: p.sub_genres || [],
         city: p.city || '',
-        listeners: p.totalFollowers || 0,
-        plays: p.totalPlays || 0,
-        tracks: p.totalTracks || 0,
-        rating: p.rating || 0,
-        avatarUrl: p.avatarUrl || '',
-        isVerified: p.isVerified || false,
+        listeners: p.total_followers || 0,
+        plays: p.total_plays || 0,
+        tracks: p.data?.track_count || 0,
+        rating: 0,
+        avatarUrl: p.avatar_url || '',
+        isVerified: p.is_verified || false,
       }));
 
     console.log(`[ArtistProfile] Popular: ${allProfiles.length} artists`);
@@ -337,9 +380,35 @@ app.get('/profile/:artistId/tracks', async (c) => {
   console.log(`[ArtistProfile] GET /profile/${artistId}/tracks`);
 
   try {
-    // Get real tracks from tracks store
-    const tracks = await db.getTracksByUser(artistId);
-    return c.json({ success: true, data: tracks || [] });
+    // Get real tracks from tracks table (linked by artist_id FK)
+    try {
+      const { getDbClient } = await import('./db-client.tsx');
+      const dbClient = getDbClient();
+      const { data: tracks } = await dbClient
+        .from('tracks')
+        .select('*')
+        .eq('artist_id', artistId)
+        .order('created_at', { ascending: false });
+      
+      const formatted = (tracks || []).map((t: any) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist_name || '',
+        artistId: t.artist_id,
+        genre: t.genre || '',
+        audioUrl: t.audio_url || '',
+        coverUrl: t.cover_url || '',
+        duration: t.duration || '',
+        plays: t.plays_count || 0,
+        likes: t.likes_count || 0,
+        createdAt: t.created_at,
+      }));
+      return c.json({ success: true, data: formatted });
+    } catch (trackErr) {
+      // Fallback to old method
+      const tracks = await db.getTracksByUser(artistId);
+      return c.json({ success: true, data: tracks || [] });
+    }
   } catch (error) {
     console.error(`[ArtistProfile] Tracks error: ${error}`);
     return c.json({ success: false, error: 'Internal server error' }, 500);

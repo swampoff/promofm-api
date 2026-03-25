@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 const FALLBACK_USER = 'anonymous';
@@ -65,7 +66,7 @@ app.get('/:id', async (c) => {
     }
     return c.json({ success: true, data: concert });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -89,7 +90,7 @@ app.post('/', async (c) => {
     return c.json({ success: true, data: concert }, 201);
   } catch (error) {
     console.error('Error in POST /concerts:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -106,7 +107,7 @@ app.put('/:id', async (c) => {
 
     return c.json({ success: true, data: concert });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -117,7 +118,7 @@ app.delete('/:id', async (c) => {
     await typed.deleteConcert(concertId);
     return c.json({ success: true, message: 'Concert deleted' });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -133,7 +134,7 @@ app.post('/:id/submit', async (c) => {
     }
     return c.json({ success: true, data: concert, message: 'Submitted for moderation' });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -169,7 +170,7 @@ app.post('/:id/promote', async (c) => {
 
     return c.json({ success: true, message: 'Concert promoted', coinsSpent: cost });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

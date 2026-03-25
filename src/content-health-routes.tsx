@@ -11,6 +11,7 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { chartAggregationStore, chartSourcesStore, newsPipelineStore, newsPublicStore } from './db.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const contentHealth = new Hono();
 
@@ -311,7 +312,7 @@ contentHealth.get('/health', async (c) => {
     return c.json({ success: true, data });
   } catch (error) {
     console.log(`[Content Health] Error: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -362,7 +363,7 @@ contentHealth.post('/telegram', async (c) => {
     return c.json({ success: true, messageId: result.result?.message_id });
   } catch (error) {
     console.log(`[Telegram Alert] Error: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -443,7 +444,7 @@ contentHealth.post('/telegram-report', async (c) => {
     return c.json({ success: true, messageId: result.result?.message_id });
   } catch (error) {
     console.log(`[Telegram Report] Error: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

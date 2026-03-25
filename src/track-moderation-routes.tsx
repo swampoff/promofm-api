@@ -237,4 +237,21 @@ app.get('/stats', async (c) => {
   }
 });
 
+
+// ─── Public: New Releases with YouTube playback ─────────────
+app.get('/newReleases', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '25');
+    const { platformStatsStore } = await import('./db.tsx');
+    const cached: any = await platformStatsStore.get('tracks:new_releases');
+    if (cached?.tracks?.length) {
+      return c.json({ success: true, releases: cached.tracks.slice(0, limit) });
+    }
+    return c.json({ success: true, releases: [] });
+  } catch (error) {
+    console.error('Error fetching new releases:', error);
+    return c.json({ success: true, releases: [] });
+  }
+});
+
 export default app;

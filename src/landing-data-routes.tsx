@@ -24,6 +24,50 @@ async function requireAdminOrKey(c: any, next: any) {
   return requireAuth(c, () => requireAdmin(c, next));
 }
 
+
+// ── Auto-create artist profiles for chart/release artists ──
+async function ensureArtistProfile(artistName: string, coverUrl?: string, extra?: Record<string, any>) {
+  if (!artistName || artistName.length < 2) return;
+  try {
+    const { getDbClient } = await import('./db-client.tsx');
+    const dbClient = getDbClient();
+    
+    // Check if profile exists
+    const { data: existing } = await dbClient
+      .from('artist_profiles')
+      .select('user_id')
+      .ilike('artist_name', artistName)
+      .limit(1);
+    
+    if (existing && existing.length > 0) return existing[0].user_id;
+    
+    // Check artists table
+    const { data: artistRow } = await dbClient
+      .from('artists')
+      .select('id')
+      .ilike('full_name', artistName)
+      .limit(1);
+    
+    const userId = artistRow?.[0]?.id || crypto.randomUUID();
+    const slug = artistName.toLowerCase().replace(/[^a-zа-яёa-z0-9]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') + '-' + String(userId).slice(0, 8);
+    
+    await dbClient.from('artist_profiles').insert({
+      user_id: String(userId),
+      slug,
+      artist_name: artistName,
+      avatar_url: coverUrl || '',
+      is_verified: false,
+      country: 'Россия',
+      data: JSON.stringify(extra || {}),
+    });
+    
+    console.log(`[auto-profile] Created: ${artistName}`);
+    return String(userId);
+  } catch (err) {
+    // Ignore duplicates
+  }
+}
+
 const landing = new Hono();
 
 // ============================================
@@ -43,36 +87,140 @@ landing.get('/popular-artists', async (c) => {
 landing.get('/artists/:idOrSlug', async (c) => {
   try {
     const param = c.req.param('idOrSlug');
-    let artistId = param;
+    const { getDbClient } = await import('./db-client.tsx');
+    const dbClient = getDbClient();
 
-    if (!param.startsWith('artist-')) {
-      const resolvedId = await artistAnalyticsCacheStore.get(param);
-      if (resolvedId) {
-        artistId = typeof resolvedId === 'string' ? resolvedId : resolvedId;
+    // Try multiple lookup strategies
+    let profile: any = null;
+    let userId = param;
+
+    // 1. Try by artist_profiles.id (UUID)
+    profile = await getArtistProfile(param);
+
+    // 2. Try by user_id (artists.id → artist_profiles.user_id)
+    if (!profile) {
+      const { data: byUserId } = await dbClient
+        .from('artist_profiles')
+        .select('*')
+        .eq('user_id', param)
+        .maybeSingle();
+      if (byUserId) {
+        profile = byUserId.data || byUserId;
+        userId = byUserId.user_id || param;
       }
     }
 
-    const raw = await getArtistProfile(artistId);
-    if (!raw) {
+    // 3. Try by slug
+    if (!profile) {
+      const { data: bySlug } = await dbClient
+        .from('artist_profiles')
+        .select('*')
+        .eq('slug', param)
+        .maybeSingle();
+      if (bySlug) {
+        profile = bySlug.data || bySlug;
+        userId = bySlug.user_id || param;
+      }
+    }
+
+    if (!profile) {
       return c.json({ success: false, error: 'Artist not found' }, 404);
     }
 
-    // Get artist's published tracks from typed table
-    const artistTracks = await typed.getTracksByUser(artistId);
-    const publishedTracks = artistTracks
+    // Normalize profile to standard format
+    const artistData = {
+      id: profile.user_id || profile.id || userId,
+      slug: profile.slug || '',
+      name: profile.artist_name || profile.fullName || profile.name || '',
+      fullName: profile.artist_name || profile.fullName || profile.name || '',
+      genre: profile.genre || '',
+      genres: profile.sub_genres || profile.genres || [],
+      city: profile.city || '',
+      country: profile.country || 'Россия',
+      bio: profile.bio || '',
+      avatarUrl: profile.avatar_url || profile.avatarUrl || '',
+      coverUrl: profile.cover_url || profile.coverUrl || '',
+      website: profile.website || '',
+      socialLinks: profile.social_links || profile.socials || {},
+      streamingLinks: profile.streaming_links || {},
+      monthlyListeners: profile.monthly_listeners || 0,
+      totalPlays: profile.total_plays || 0,
+      totalFollowers: profile.total_followers || 0,
+      isVerified: profile.is_verified || false,
+    };
+
+    // Get artist's published tracks by artist_id (FK from tracks table)
+    const { data: artistTracks } = await dbClient
+      .from('tracks')
+      .select('*')
+      .eq('artist_id', userId)
+      .order('created_at', { ascending: false });
+
+    const publishedTracks = (artistTracks || [])
       .filter((t: any) => ['approved', 'published'].includes(t.moderation_status))
-      .sort((a: any, b: any) => (b.plays_count || 0) - (a.plays_count || 0));
+      .map((t: any) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist_name || artistData.name,
+        artistId: t.artist_id,
+        genre: t.genre || artistData.genre,
+        audioUrl: t.audio_url || '',
+        coverUrl: t.cover_url || '',
+        duration: t.duration || '',
+        plays: t.plays_count || 0,
+        likes: t.likes_count || 0,
+      }));
 
     return c.json({
       success: true,
       data: {
-        ...raw,
+        ...artistData,
         tracks: publishedTracks,
+        trackCount: publishedTracks.length,
       },
     });
   } catch (error) {
     console.error('Error fetching artist:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+
+// Search artist by exact name match (for track → profile linking)
+landing.get('/artist-by-name/:name', async (c) => {
+  try {
+    const name = decodeURIComponent(c.req.param('name'));
+    const { getDbClient } = await import('./db-client.tsx');
+    const dbClient = getDbClient();
+    
+    // Search in artist_profiles by artist_name (case-insensitive)
+    const { data } = await dbClient
+      .from('artist_profiles')
+      .select('user_id, slug, artist_name, avatar_url, genre, city, total_plays, is_verified')
+      .ilike('artist_name', name)
+      .limit(1);
+    
+    if (data && data.length > 0) {
+      const a = data[0];
+      return c.json({
+        success: true,
+        data: {
+          id: a.user_id,
+          slug: a.slug,
+          name: a.artist_name,
+          avatarUrl: a.avatar_url || '',
+          genre: a.genre || '',
+          city: a.city || '',
+          totalPlays: a.total_plays || 0,
+          isVerified: a.is_verified || false,
+        },
+      });
+    }
+    
+    return c.json({ success: false, error: 'Artist not found' }, 404);
+  } catch (error) {
+    console.error('Error searching artist by name:', error);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 
@@ -119,6 +267,10 @@ landing.get('/charts/weekly', async (c) => {
     // Read from canonical chart:promofm (has covers from Deezer enrichment)
     const raw: any = await platformStatsStore.get('chart:promofm');
     if (raw?.entries) {
+      // Lazy-create profiles for chart artists (fire & forget)
+      Promise.allSettled(raw.entries.slice(0, 20).map((e: any) => 
+        ensureArtistProfile(e.artist, e.coverUrl || e.cover, { chart_position: e.position, source: 'chart:promofm' })
+      )).catch(() => {});
       return c.json({ success: true, data: { entries: raw.entries.slice(0, 20), updatedAt: raw.updatedAt } });
     }
     // Fallback to chart:weekly:top20
@@ -375,7 +527,16 @@ landing.get('/news', async (c) => {
     const tag = c.req.query('tag');
 
     const allNews = await newsPublicStore.getAll();
-    let news = allNews.filter((n: any) => n && n.id && n.status === 'published');
+    let news = allNews.filter((n: any) => {
+      if (!n || !n.id || n.status !== 'published') return false;
+      // Filter out English-only titles (platform is Russian)
+      const title = n.title || '';
+      const cyrillic = (title.match(/[а-яА-ЯёЁ]/g) || []).length;
+      const latin = (title.match(/[a-zA-Z]/g) || []).length;
+      const total = cyrillic + latin;
+      if (total > 10 && latin / total > 0.8) return false; // >80% Latin = English title
+      return true;
+    });
 
     if (tag) {
       news = news.filter((n: any) => n.tag === tag);
@@ -411,11 +572,11 @@ landing.get('/news/:id', async (c) => {
 
 landing.get('/concerts', async (c) => {
   try {
-    const limit = parseInt(c.req.query('limit') || '12');
+    const limit = parseInt(c.req.query('limit') || '50');
     const city = c.req.query('city') || '';
 
     // 1. Published concerts from typed SQL table
-    const sqlConcerts = await typed.getPublishedConcerts(100);
+    const sqlConcerts = await typed.getPublishedConcerts(300);
     let concerts = sqlConcerts.map((c: any) => ({
       id: c.id,
       title: c.title || '',
@@ -500,6 +661,50 @@ landing.get('/concerts', async (c) => {
       return true;
     });
 
+    // Priority: big-name artists first, then by date
+    const BIG_ARTISTS = [
+      'баста','ленинград','руки вверх','лазарев','гагарина','ваенга','noize mc',
+      'feduk','звери','uma2rman','cream soda','saluki','элвин грей','линда',
+      'nina kraviz','toxi','дайте танк','dabro','zivert','miyagi','нервы',
+      'мот','jony','ramil','hammali','burito','макс корж','скриптонит',
+      'oxxxymiron','тимати','егор крид','macan','matrang','мияги','andy panda',
+      'грибы','каста','guf','гуф','markul','pharaoh','face (рэпер)','lsp','big baby tape',
+      'kizaru','gone.fludd','boulevar depo','thomas mraz','obladaet',
+      'хаски','aigel','aikko','lovv66','bushido zho','instasamka','клава кока',
+      'ёлка','дора','niletto','anna asti','мари краймбрери','artik & asti',
+      'три дня дождя','пошлая молли','аигел','ssshhhiiittt','i61','платина',
+      'бамбинтон','тима белорусских','rasa','мот (рэпер)','jah khalib','джа халиб',
+      'ария','кипелов','би-2','сплин','мумий тролль','земфира','пикник',
+      'ддт','алиса','группа кино','аквариум','агата кристи','король и шут',
+      'слот','lumen','louna','amatory','stigmata','jane air',
+      'полина гагарина','сергей лазарев','филипп киркоров','валерия','леприконсы',
+      'дискотека авария','иванушки','на-на','стас михайлов','григорий лепс',
+      'loboda','светлана лобода','елена темникова','нюша','ани лорак',
+      'monatik','монатик','время и стекло','потап','alekseev',
+      'little big','ic3peak','shortparis','molchat doma','мальбэк',
+      'casta','каспийский груз','триагрутрика','mnogoznaal','масло чёрного тмина'
+    ];
+    
+    const getPriority = (c: any): number => {
+      const name = ((c.artist || '') + ' ' + (c.title || '')).toLowerCase();
+      for (const big of BIG_ARTISTS) {
+        if (name.includes(big)) return 0;
+      }
+      // Deprioritize organ/classical/choir/stale content
+      const lowPriority = ['орган','при свечах','хор','хоровые','оркестр','реквием','литературн','стендап','камерн','при свечах','дудук','флейт','скрипк','виолончел','саундтрек','кино','шукшин','годенко','валаам','фламенко','опера','сказка с','анатомия звука'];
+      for (const lp of lowPriority) {
+        if (name.includes(lp)) return 2;
+      }
+      return 1;
+    };
+
+    deduped.sort((a: any, b: any) => {
+      const pa = getPriority(a);
+      const pb = getPriority(b);
+      if (pa !== pb) return pa - pb;
+      return new Date(a.date).getTime() - new Date(b.date).getTime();
+    });
+
     const promoCount = deduped.filter((c: any) => c.source === 'promo_artist').length;
     const externalCount = deduped.filter((c: any) => c.source !== 'promo_artist').length;
 
@@ -562,9 +767,21 @@ landing.get('/stats', async (c) => {
     const raw = await platformStatsStore.get('platform');
     const baseStats = raw || {};
 
-    // Add real track count from SQL
-    const publishedTracks = await typed.getPublishedTracks(1);
+    // Track counts from SQL
     const trackStats = await typed.getTrackModerationStats();
+
+    // Count registered users from DB
+    const { getDbClient } = await import('./db-client.tsx');
+    const dbClient = getDbClient();
+    const { count: userCount } = await dbClient
+      .from('users')
+      .select('*', { count: 'exact', head: true })
+      .is('deleted_at', null);
+
+    // Base 329 + new registrations beyond initial 22 seed users
+    const ARTIST_BASE = 329;
+    const realUsers = userCount ?? 0;
+    const totalArtists = Math.max(ARTIST_BASE, ARTIST_BASE + (realUsers - 22));
 
     return c.json({
       success: true,
@@ -573,6 +790,8 @@ landing.get('/stats', async (c) => {
         totalTracks: trackStats.total || baseStats.totalTracks || 0,
         publishedTracks: trackStats.approved || 0,
         pendingTracks: trackStats.pending || 0,
+        totalArtists,
+        totalUsers: realUsers,
       },
     });
   } catch (error) {
@@ -918,6 +1137,13 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
       }));
     await platformStatsStore.set('chart:weekly:top20', { entries: top20, updatedAt: new Date().toISOString() });
     results.weeklyChart = top20.length;
+
+    // Auto-create profiles for chart artists
+    for (const entry of top20) {
+      if (entry.artist) {
+        await ensureArtistProfile(entry.artist, (entry as any).coverUrl, { chart_position: entry.position, source: 'chart:promofm' });
+      }
+    }
 
     return c.json({ success: true, results });
   } catch (error) {

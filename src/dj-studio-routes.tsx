@@ -20,6 +20,7 @@ import { getDjProfile, upsertDjProfile, djCollaborationsStore, djEventsStore, dj
 import { recordRevenue } from './platform-revenue.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 
@@ -53,7 +54,7 @@ app.get('/profile', requireAuth, async (c) => {
     return c.json({ success: true, data });
   } catch (error) {
     console.error('Error loading DJ profile:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -67,7 +68,7 @@ app.put('/profile', requireAuth, async (c) => {
     return c.json({ success: true, data: body });
   } catch (error) {
     console.error('Error saving DJ profile:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -110,7 +111,7 @@ app.post('/events', requireAuth, async (c) => {
     return c.json({ success: true, data: event }, 201);
   } catch (error) {
     console.error('Error creating DJ event:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -124,7 +125,7 @@ app.get('/events/:id', requireAuth, async (c) => {
     if (!event) return c.json({ success: false, error: 'Event not found' }, 404);
     return c.json({ success: true, data: event });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -142,7 +143,7 @@ app.put('/events/:id', requireAuth, async (c) => {
     await djEventsStore.set(userId, events);
     return c.json({ success: true, data: events[idx] });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -156,7 +157,7 @@ app.delete('/events/:id', requireAuth, async (c) => {
     await djEventsStore.set(userId, filtered);
     return c.json({ success: true });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -197,7 +198,7 @@ app.post('/collaborations', requireAuth, async (c) => {
 
     return c.json({ success: true, data: collab }, 201);
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -215,7 +216,7 @@ app.put('/collaborations/:id/accept', requireAuth, async (c) => {
     await djCollaborationsStore.set(userId, collabs);
     return c.json({ success: true, data: collabs[idx] });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -233,7 +234,7 @@ app.put('/collaborations/:id/decline', requireAuth, async (c) => {
     await djCollaborationsStore.set(userId, collabs);
     return c.json({ success: true, data: collabs[idx] });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -268,7 +269,7 @@ app.post('/notifications/read', requireAuth, async (c) => {
     await djNotificationsStore.set(userId, notifications);
     return c.json({ success: true });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -366,7 +367,7 @@ app.get('/subscription/:djId', requireAuth, async (c) => {
     return c.json({ success: true, data: sub });
   } catch (error) {
     console.error('Error fetching DJ subscription:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -428,7 +429,7 @@ app.post('/subscription/:djId/change', requireAuth, async (c) => {
     return c.json({ success: true, data: subscription });
   } catch (error) {
     console.error('Error changing DJ subscription:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

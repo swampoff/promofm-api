@@ -17,6 +17,7 @@
 import { Hono } from 'hono';
 import { newsPipelineStore } from './db.tsx';
 import { quickLLM } from './llm-router.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 // ── Helpers ──
 
@@ -166,7 +167,7 @@ app.get('/sources', async (c) => {
     return c.json({ success: true, sources });
   } catch (error) {
     console.log('[News Pipeline] /sources error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -177,7 +178,7 @@ app.get('/stats', async (c) => {
     return c.json({ success: true, stats });
   } catch (error) {
     console.log('[News Pipeline] /stats error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -187,7 +188,7 @@ app.get('/pending', async (c) => {
     const articles = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
     return c.json({ success: true, articles });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -198,7 +199,7 @@ app.get('/published', async (c) => {
     const articles = (await newsPipelineStore.get('news:articles:published') || []) as any[];
     return c.json({ success: true, articles: articles.slice(0, limit) });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -208,7 +209,7 @@ app.get('/rejected', async (c) => {
     const articles = (await newsPipelineStore.get('news:articles:rejected') || []) as any[];
     return c.json({ success: true, articles });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -220,7 +221,7 @@ app.post('/collect', async (c) => {
     return c.json({ success: true, ...result });
   } catch (error) {
     console.log('[News Pipeline] /collect error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -243,7 +244,7 @@ app.post('/:id/approve', async (c) => {
 
     return c.json({ success: true, article });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -266,7 +267,7 @@ app.post('/:id/reject', async (c) => {
 
     return c.json({ success: true });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -287,7 +288,7 @@ app.delete('/:id', async (c) => {
 
     return c.json({ success: false, error: 'Статья не найдена' }, 404);
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -312,7 +313,7 @@ app.post('/approve-all', async (c) => {
 
     return c.json({ success: true, approved: approved.length });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

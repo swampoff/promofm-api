@@ -13,6 +13,7 @@ import {
 } from './curator-agents.tsx';
 import type { RoleId } from './curator-agents.tsx';
 import { sendEmail } from './email-helper.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const curatorRoutes = new Hono();
 
@@ -52,7 +53,7 @@ curatorRoutes.post('/run', requireAdminOrKey, async (c) => {
     });
   } catch (error) {
     console.error('[curator] Run all error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -72,7 +73,7 @@ curatorRoutes.post('/run/:roleId', requireAdminOrKey, async (c) => {
     return c.json({ success: true, report });
   } catch (error) {
     console.error('[curator] Run error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -101,7 +102,7 @@ curatorRoutes.get('/status', async (c) => {
 
     return c.json({ success: true, data: summary });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -117,7 +118,7 @@ curatorRoutes.get('/report/:roleId', async (c) => {
     }
     return c.json({ success: true, report });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -158,7 +159,7 @@ curatorRoutes.get('/history', async (c) => {
 
     return c.json({ success: true, data: reports });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -217,7 +218,7 @@ curatorRoutes.post('/email-report/:roleId', requireAdminOrKey, async (c) => {
 
     return c.json({ success: true, sent, to: toEmail });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

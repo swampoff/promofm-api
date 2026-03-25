@@ -6,6 +6,7 @@
 import { mkdirSync, existsSync, writeFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { safeErrorMessage } from './security.tsx';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/var/www/promofm/uploads';
 const PUBLIC_URL = process.env.PUBLIC_URL || 'https://promo-music.ru';
@@ -158,7 +159,7 @@ export async function uploadFile(
     const url = `${PUBLIC_URL}/uploads/${config.subdir}/${filename}`;
     return { success: true, url };
   } catch (err: any) {
-    return { success: false, error: err.message };
+    return { success: false, error: safeErrorMessage(err) };
   }
 }
 
@@ -188,7 +189,7 @@ export async function deleteFile(
     }
     return { success: true };
   } catch (err: any) {
-    return { success: false, error: err.message };
+    return { success: false, error: safeErrorMessage(err) };
   }
 }
 
@@ -224,7 +225,7 @@ export async function listFiles(
     const limit = opts.limit || 100;
     return { success: true, files: files.slice(offset, offset + limit) };
   } catch (err: any) {
-    return { success: false, error: err.message };
+    return { success: false, error: safeErrorMessage(err) };
   }
 }
 
@@ -268,7 +269,7 @@ export async function getStorageStats(): Promise<{ success: boolean; stats?: any
       },
     };
   } catch (err: any) {
-    return { success: false, error: err.message };
+    return { success: false, error: safeErrorMessage(err) };
   }
 }
 

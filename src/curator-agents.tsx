@@ -11,6 +11,7 @@ import {
   upsertArtistProfile,
 } from './db.tsx';
 import { getDbClient } from './db-client.tsx';
+import { isUrlSafe } from './security.tsx';
 
 // ─── Types ──────────────────────────────────────────────
 
@@ -58,7 +59,7 @@ interface CuratorReport {
 // ─── Configuration ──────────────────────────────────────
 
 const BASE_URL = process.env.PUBLIC_URL || 'https://promo-music.ru';
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const SERVICE_KEY = process.env.VPS_INTERNAL_KEY || '';
 const INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 const PLACEHOLDER_USER = '00000000-0000-0000-0000-000000000000';
 
@@ -79,9 +80,9 @@ export const CURATOR_ROLES: { id: RoleId; name: string; description: string }[] 
 
 async function getCuratorJWT(): Promise<{ jwt: string; userId: string } | null> {
   try {
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
 
-    const { data: signInData } = await supabase.auth.signInWithPassword({
+    const { data: signInData } = await dbClient.auth.signInWithPassword({
       email: CURATOR_EMAIL,
       password: CURATOR_PASSWORD,
     });
@@ -92,14 +93,14 @@ async function getCuratorJWT(): Promise<{ jwt: string; userId: string } | null> 
 
     // Create user if doesn't exist
     console.log('[curator] Creating curator user...');
-    await supabase.auth.admin.createUser({
+    await dbClient.auth.admin.createUser({
       email: CURATOR_EMAIL,
       password: CURATOR_PASSWORD,
       email_confirm: true,
       user_metadata: { role: 'admin', displayName: 'Curator Bot' },
     });
 
-    const { data: newSignIn } = await supabase.auth.signInWithPassword({
+    const { data: newSignIn } = await dbClient.auth.signInWithPassword({
       email: CURATOR_EMAIL,
       password: CURATOR_PASSWORD,
     });
@@ -199,8 +200,8 @@ async function setupArtistProfile(userId: string, _jwt: string): Promise<boolean
 async function setupDjProfile(userId: string, _jwt: string): Promise<boolean> {
   try {
     // DJ profiles are stored in dj_editor_profiles by user_id
-    const supabase = getDbClient();
-    const { error } = await supabase.from('dj_editor_profiles').upsert({
+    const dbClient = getDbClient();
+    const { error } = await dbClient.from('dj_editor_profiles').upsert({
       user_id: userId,
       data: {
         userId,
@@ -225,8 +226,8 @@ async function setupDjProfile(userId: string, _jwt: string): Promise<boolean> {
 
 async function setupProducerProfile(userId: string, _jwt: string): Promise<boolean> {
   try {
-    const supabase = getDbClient();
-    const { error } = await supabase.from('producer_profiles').upsert({
+    const dbClient = getDbClient();
+    const { error } = await dbClient.from('producer_profiles').upsert({
       id: userId,
       user_id: userId,
       data: {

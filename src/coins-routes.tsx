@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const coinsRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
@@ -55,7 +56,7 @@ coinsRoutes.post('/transactions', async (c) => {
 
     return c.json({ success: true, data: { transaction, balance: newBalance } }, 201);
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -124,7 +125,7 @@ coinsRoutes.post('/topup', async (c) => {
     });
   } catch (error: any) {
     console.error('Error POST /coins/topup:', error);
-    return c.json({ success: false, error: error.message || String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) || String(error) }, 500);
   }
 });
 

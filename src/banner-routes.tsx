@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 const FALLBACK_USER = 'anonymous';
@@ -77,7 +78,7 @@ app.get('/:id', async (c) => {
     }
     return c.json({ success: true, data: banner });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -100,7 +101,7 @@ app.post('/', async (c) => {
     return c.json({ success: true, data: banner }, 201);
   } catch (error) {
     console.error('Error in POST /banners:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -117,7 +118,7 @@ app.put('/:id', async (c) => {
 
     return c.json({ success: true, data: banner });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -128,7 +129,7 @@ app.delete('/:id', async (c) => {
     await typed.deleteBanner(bannerId);
     return c.json({ success: true, message: 'Banner deleted' });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -169,7 +170,7 @@ app.post('/:id/activate', async (c) => {
 
     return c.json({ success: true, message: 'Banner activated', coinsSpent: cost });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -227,7 +228,7 @@ app.post('/moderation/manage', async (c) => {
     }
   } catch (error) {
     console.error('Error in banner moderation:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

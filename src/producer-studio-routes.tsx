@@ -28,6 +28,7 @@ import {
 } from './db.tsx';
 import { getDbClient } from "./db-client.tsx";
 import { requireAuth } from './auth-middleware.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 
@@ -103,7 +104,7 @@ app.get('/conversations/:producerId', requireAuth, async (c) => {
     return c.json({ success: true, data: convs });
   } catch (error) {
     console.log(`Error fetching conversations: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -141,7 +142,7 @@ app.post('/conversations/create', requireAuth, async (c) => {
     return c.json({ success: true, data: conv });
   } catch (error) {
     console.log(`Error creating conversation: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -157,7 +158,7 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
     return c.json({ success: true, data: msgs });
   } catch (error) {
     console.log(`Error fetching messages: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -175,7 +176,7 @@ app.get('/messages/:conversationId/poll', requireAuth, async (c) => {
     return c.json({ success: true, data: newMsgs, total: msgs.length });
   } catch (error) {
     console.log(`Error polling messages: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -261,7 +262,7 @@ app.post('/messages/send', requireAuth, async (c) => {
     return c.json({ success: true, data: msg });
   } catch (error) {
     console.log(`Error sending message: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -297,17 +298,17 @@ app.post('/messages/read', requireAuth, async (c) => {
     return c.json({ success: true });
   } catch (error) {
     console.log(`Error marking read: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
 // ════════════════════════════════════════
-// FILE UPLOAD (Supabase Storage)
+// FILE UPLOAD (Local Storage)
 // ════════════════════════════════════════
 
 const AUDIO_BUCKET = 'make-84730125-audio-files';
 
-// POST /upload/audio - accepts base64 audio data, stores in Supabase Storage, returns signed URL
+// POST /upload/audio - accepts base64 audio data, stores locally, returns signed URL
 app.post('/upload/audio', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
@@ -317,7 +318,7 @@ app.post('/upload/audio', requireAuth, async (c) => {
       return c.json({ success: false, error: 'fileName and base64Data are required' }, 400);
     }
 
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     const mimeType = contentType || 'audio/webm';
 
     // Decode base64 to Uint8Array
@@ -329,15 +330,15 @@ app.post('/upload/audio', requireAuth, async (c) => {
 
     // Ensure bucket exists
     try {
-      const { data: buckets } = await supabase.storage.listBuckets();
+      const { data: buckets } = await dbClient.storage.listBuckets();
       const bucketExists = buckets?.some((b: any) => b.name === AUDIO_BUCKET);
       if (!bucketExists) {
-        await supabase.storage.createBucket(AUDIO_BUCKET, { public: false });
+        await dbClient.storage.createBucket(AUDIO_BUCKET, { public: false });
       }
     } catch (bucketErr: any) {
       console.warn('⚠️ listBuckets failed, attempting createBucket directly:', bucketErr?.message);
       try {
-        await supabase.storage.createBucket(AUDIO_BUCKET, { public: false });
+        await dbClient.storage.createBucket(AUDIO_BUCKET, { public: false });
       } catch {
         // Bucket may already exist - ignore
       }
@@ -351,7 +352,7 @@ app.post('/upload/audio', requireAuth, async (c) => {
     const storagePath = `producer-chat/${timestamp}_${random}_${sanitized}`;
 
     // Upload
-    const { data, error: uploadError } = await supabase.storage
+    const { data, error: uploadError } = await dbClient.storage
       .from(AUDIO_BUCKET)
       .upload(storagePath, bytes, { contentType: mimeType, upsert: true });
 
@@ -361,7 +362,7 @@ app.post('/upload/audio', requireAuth, async (c) => {
     }
 
     // Create signed URL (1 hour expiry)
-    const { data: signedData, error: signedError } = await supabase.storage
+    const { data: signedData, error: signedError } = await dbClient.storage
       .from(AUDIO_BUCKET)
       .createSignedUrl(storagePath, 3600);
 
@@ -382,7 +383,7 @@ app.post('/upload/audio', requireAuth, async (c) => {
     });
   } catch (error) {
     console.log(`Error uploading audio: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -393,18 +394,18 @@ app.get('/upload/signed-url', requireAuth, async (c) => {
     if (!storagePath) {
       return c.json({ success: false, error: 'path query param required' }, 400);
     }
-    const supabase = getDbClient();
-    const { data, error } = await supabase.storage
+    const dbClient = getDbClient();
+    const { data, error } = await dbClient.storage
       .from(AUDIO_BUCKET)
       .createSignedUrl(storagePath, 3600);
 
     if (error) {
-      return c.json({ success: false, error: error.message }, 500);
+      return c.json({ success: false, error: safeErrorMessage(error) }, 500);
     }
     return c.json({ success: true, data: { url: data.signedUrl } });
   } catch (error) {
     console.log(`Error getting signed URL: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -449,7 +450,7 @@ app.get('/settings/:producerId', requireAuth, async (c) => {
     return c.json({ success: true, data: settings || null });
   } catch (error) {
     console.log(`Error fetching settings: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -466,7 +467,7 @@ app.post('/settings/:producerId', requireAuth, async (c) => {
     return c.json({ success: true, data: settings });
   } catch (error) {
     console.log(`Error saving settings: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -491,7 +492,7 @@ app.post('/services/create', requireAuth, async (c) => {
     list.push(svc);
     await producerCustomServicesStore.set(producerId, list);
     return c.json({ success: true, data: svc });
-  } catch (error) { console.log(`Error creating service: ${error}`); return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { console.log(`Error creating service: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 app.put('/services/update/:serviceId', requireAuth, async (c) => {
@@ -506,7 +507,7 @@ app.put('/services/update/:serviceId', requireAuth, async (c) => {
     for (const f of ['title','type','basePrice','description','deliveryDays','revisions','includes','status']) { if (body[f] !== undefined) (list[idx] as any)[f] = body[f]; }
     await producerCustomServicesStore.set(producerId, list);
     return c.json({ success: true, data: list[idx] });
-  } catch (error) { console.log(`Error updating service: ${error}`); return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { console.log(`Error updating service: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 app.delete('/services/delete/:serviceId', requireAuth, async (c) => {
@@ -519,7 +520,7 @@ app.delete('/services/delete/:serviceId', requireAuth, async (c) => {
     if (filtered.length === list.length) return c.json({ success: false, error: 'Not found' }, 404);
     await producerCustomServicesStore.set(producerId, filtered);
     return c.json({ success: true });
-  } catch (error) { console.log(`Error deleting service: ${error}`); return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { console.log(`Error deleting service: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 app.get('/services/custom/:producerId', requireAuth, async (c) => {
@@ -527,7 +528,7 @@ app.get('/services/custom/:producerId', requireAuth, async (c) => {
     const producerId = c.req.param('producerId');
     const list: CustomService[] = await producerCustomServicesStore.get(producerId) || [];
     return c.json({ success: true, data: list });
-  } catch (error) { return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 // ════════════════════════════════════════
@@ -544,7 +545,7 @@ app.post('/portfolio/create', requireAuth, async (c) => {
     (list as any[]).unshift(entry);
     await producerCustomPortfolioStore.set(producerId, list);
     return c.json({ success: true, data: entry });
-  } catch (error) { console.log(`Error creating portfolio: ${error}`); return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { console.log(`Error creating portfolio: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 app.delete('/portfolio/delete/:id', requireAuth, async (c) => {
@@ -557,7 +558,7 @@ app.delete('/portfolio/delete/:id', requireAuth, async (c) => {
     if (filtered.length === (list as any[]).length) return c.json({ success: false, error: 'Not found' }, 404);
     await producerCustomPortfolioStore.set(producerId, filtered);
     return c.json({ success: true });
-  } catch (error) { return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 // ════════════════════════════════════════
@@ -572,7 +573,7 @@ app.put('/profile/update/:producerId', requireAuth, async (c) => {
     const updated = { ...(existing as any), ...body, updatedAt: nowIso() };
     await producerProfileEditStore.set(producerId, updated);
     return c.json({ success: true, data: updated });
-  } catch (error) { console.log(`Error updating profile: ${error}`); return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { console.log(`Error updating profile: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 app.get('/profile/edits/:producerId', requireAuth, async (c) => {
@@ -580,7 +581,7 @@ app.get('/profile/edits/:producerId', requireAuth, async (c) => {
     const producerId = c.req.param('producerId');
     const edits = await producerProfileEditStore.get(producerId);
     return c.json({ success: true, data: edits || null });
-  } catch (error) { return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 // ════════════════════════════════════════
@@ -597,7 +598,7 @@ app.post('/wallet/withdraw', requireAuth, async (c) => {
     (list as any[]).unshift(wd);
     await paymentWithdrawalsStore.set(producerId, list);
     return c.json({ success: true, data: wd });
-  } catch (error) { console.log(`Error creating withdrawal: ${error}`); return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { console.log(`Error creating withdrawal: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 app.get('/wallet/withdrawals/:producerId', requireAuth, async (c) => {
@@ -605,7 +606,7 @@ app.get('/wallet/withdrawals/:producerId', requireAuth, async (c) => {
     const producerId = c.req.param('producerId');
     const list = await paymentWithdrawalsStore.get(producerId) || [];
     return c.json({ success: true, data: list });
-  } catch (error) { return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 // ════════════════════════════════════════
@@ -658,7 +659,7 @@ app.post('/ai/analyze', requireAuth, async (c) => {
     const aiResp = data.choices[0].message.content;
     await producerAiLastStore.set(producerId, { question, response: aiResp, timestamp: nowIso() });
     return c.json({ success: true, data: { response: aiResp, model: 'mistral-large' } });
-  } catch (error) { console.log(`AI error: ${error}`); return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { console.log(`AI error: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 app.get('/ai/history/:producerId', requireAuth, async (c) => {
@@ -666,7 +667,7 @@ app.get('/ai/history/:producerId', requireAuth, async (c) => {
     const producerId = c.req.param('producerId');
     const last = await producerAiLastStore.get(producerId);
     return c.json({ success: true, data: last || null });
-  } catch (error) { return c.json({ success: false, error: String(error) }, 500); }
+  } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
 function fallbackRecs(d: any): string {
@@ -691,7 +692,7 @@ app.get('/calendar/:producerId', requireAuth, async (c) => {
     return c.json({ success: true, data: sessions });
   } catch (error) {
     console.log(`Error fetching calendar: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -713,7 +714,7 @@ app.get('/calendar/:producerId/month', requireAuth, async (c) => {
     return c.json({ success: true, data: filtered });
   } catch (error) {
     console.log(`Error fetching month calendar: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -758,7 +759,7 @@ app.post('/calendar/create', requireAuth, async (c) => {
     return c.json({ success: true, data: session });
   } catch (error) {
     console.log(`Error creating session: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -792,7 +793,7 @@ app.put('/calendar/update/:sessionId', requireAuth, async (c) => {
     return c.json({ success: true, data: sessions[idx] });
   } catch (error) {
     console.log(`Error updating session: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -817,7 +818,7 @@ app.delete('/calendar/delete/:sessionId', requireAuth, async (c) => {
     return c.json({ success: true });
   } catch (error) {
     console.log(`Error deleting session: ${error}`);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

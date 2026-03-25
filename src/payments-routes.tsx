@@ -11,6 +11,7 @@ import {
 } from './db.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const paymentsRoutes = new Hono();
 
@@ -163,7 +164,7 @@ paymentsRoutes.get('/transactions', requireAuth, async (c) => {
     return c.json({ success: true, data: transactions });
   } catch (error: any) {
     console.error('Error in GET /payments/transactions:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -178,7 +179,7 @@ paymentsRoutes.post('/transactions', requireAuth, async (c) => {
     return c.json({ success: true, data: { transaction_id: transactionId } });
   } catch (error: any) {
     console.error('Error in POST /payments/transactions:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -194,7 +195,7 @@ paymentsRoutes.get('/balance', requireAuth, async (c) => {
     return c.json({ success: true, data: balance });
   } catch (error: any) {
     console.error('Error in GET /payments/balance:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -206,7 +207,7 @@ paymentsRoutes.get('/stats', requireAuth, async (c) => {
     return c.json({ success: true, data: stats });
   } catch (error: any) {
     console.error('Error in GET /payments/stats:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -220,7 +221,7 @@ paymentsRoutes.get('/category-stats', requireAuth, async (c) => {
     return c.json({ success: true, data: stats });
   } catch (error: any) {
     console.error('Error in GET /payments/category-stats:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -236,7 +237,7 @@ paymentsRoutes.get('/payment-methods', requireAuth, async (c) => {
     return c.json({ success: true, data: methods });
   } catch (error: any) {
     console.error('Error in GET /payments/payment-methods:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -249,7 +250,7 @@ paymentsRoutes.post('/payment-methods', requireAuth, async (c) => {
     return c.json({ success: true, data: method });
   } catch (error: any) {
     console.error('Error in POST /payments/payment-methods:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -266,7 +267,7 @@ paymentsRoutes.get('/withdrawals', requireAuth, async (c) => {
     return c.json({ success: true, data: requests });
   } catch (error: any) {
     console.error('Error in GET /payments/withdrawals:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -281,7 +282,7 @@ paymentsRoutes.post('/withdrawals', requireAuth, async (c) => {
     return c.json({ success: true, data: { request_id: requestId } });
   } catch (error: any) {
     console.error('Error in POST /payments/withdrawals:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -298,7 +299,7 @@ paymentsRoutes.post('/sync/donation', requireAuth, async (c) => {
     return c.json({ success: true, data: { transaction_id: transactionId } });
   } catch (error: any) {
     console.error('Error in POST /payments/sync/donation:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -311,7 +312,7 @@ paymentsRoutes.post('/sync/subscription', requireAuth, async (c) => {
     return c.json({ success: true, data: { transaction_id: transactionId } });
   } catch (error: any) {
     console.error('Error in POST /payments/sync/subscription:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -326,7 +327,7 @@ paymentsRoutes.post('/webhook', requireAuth, async (c) => {
     return c.json({ success: true, message: 'Webhook received' });
   } catch (error: any) {
     console.error('Error in POST /payments/webhook:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -371,7 +372,7 @@ paymentsRoutes.get('/admin/transactions', requireAuth, requireAdmin, async (c) =
     return c.json({ success: true, data, total });
   } catch (error: any) {
     console.error('Error in GET /payments/admin/transactions:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -407,7 +408,7 @@ paymentsRoutes.get('/admin/users', requireAuth, requireAdmin, async (c) => {
     return c.json({ success: true, data: users });
   } catch (error: any) {
     console.error('Error in GET /payments/admin/users:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -462,7 +463,7 @@ paymentsRoutes.get('/admin/stats', requireAuth, requireAdmin, async (c) => {
     });
   } catch (error: any) {
     console.error('Error in GET /payments/admin/stats:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -488,7 +489,7 @@ paymentsRoutes.get('/admin/accounting/reports', requireAuth, requireAdmin, async
     return c.json({ success: true, data: filtered });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/reports:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -512,7 +513,7 @@ paymentsRoutes.post('/admin/accounting/reports', requireAuth, requireAdmin, asyn
     return c.json({ success: true, data: report });
   } catch (error: any) {
     console.error('Error in POST /admin/accounting/reports:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -534,7 +535,7 @@ paymentsRoutes.put('/admin/accounting/reports/:id', requireAuth, requireAdmin, a
     return c.json({ success: true, data: reports[idx] });
   } catch (error: any) {
     console.error('Error in PUT /admin/accounting/reports/:id:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -551,7 +552,7 @@ paymentsRoutes.delete('/admin/accounting/reports/:id', requireAuth, requireAdmin
     return c.json({ success: true });
   } catch (error: any) {
     console.error('Error in DELETE /admin/accounting/reports/:id:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -575,7 +576,7 @@ paymentsRoutes.get('/admin/accounting/documents', requireAuth, requireAdmin, asy
     return c.json({ success: true, data: filtered });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/documents:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -594,7 +595,7 @@ paymentsRoutes.post('/admin/accounting/documents', requireAuth, requireAdmin, as
     return c.json({ success: true, data: doc });
   } catch (error: any) {
     console.error('Error in POST /admin/accounting/documents:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -615,7 +616,7 @@ paymentsRoutes.put('/admin/accounting/documents/:id', requireAuth, requireAdmin,
     return c.json({ success: true, data: docs[idx] });
   } catch (error: any) {
     console.error('Error in PUT /admin/accounting/documents/:id:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -630,7 +631,7 @@ paymentsRoutes.get('/admin/accounting/ledger', requireAuth, requireAdmin, async 
     return c.json({ success: true, data: entries });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/ledger:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -649,7 +650,7 @@ paymentsRoutes.post('/admin/accounting/ledger', requireAuth, requireAdmin, async
     return c.json({ success: true, data: entry });
   } catch (error: any) {
     console.error('Error in POST /admin/accounting/ledger:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -672,7 +673,7 @@ paymentsRoutes.get('/admin/accounting/counterparties', requireAuth, requireAdmin
     return c.json({ success: true, data: filtered });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/counterparties:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -691,7 +692,7 @@ paymentsRoutes.post('/admin/accounting/counterparties', requireAuth, requireAdmi
     return c.json({ success: true, data: cp });
   } catch (error: any) {
     console.error('Error in POST /admin/accounting/counterparties:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -711,7 +712,7 @@ paymentsRoutes.put('/admin/accounting/counterparties/:id', requireAuth, requireA
     return c.json({ success: true, data: cps[idx] });
   } catch (error: any) {
     console.error('Error in PUT /admin/accounting/counterparties/:id:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -726,7 +727,7 @@ paymentsRoutes.get('/admin/accounting/calendar', requireAuth, requireAdmin, asyn
     return c.json({ success: true, data: events });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/calendar:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -745,7 +746,7 @@ paymentsRoutes.post('/admin/accounting/calendar', requireAuth, requireAdmin, asy
     return c.json({ success: true, data: event });
   } catch (error: any) {
     console.error('Error in POST /admin/accounting/calendar:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -765,7 +766,7 @@ paymentsRoutes.put('/admin/accounting/calendar/:id', requireAuth, requireAdmin, 
     return c.json({ success: true, data: events[idx] });
   } catch (error: any) {
     console.error('Error in PUT /admin/accounting/calendar/:id:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -819,7 +820,7 @@ paymentsRoutes.get('/admin/accounting/summary', requireAuth, requireAdmin, async
     });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/summary:', error);
-    return c.json({ error: error.message }, 500);
+    return c.json({ error: safeErrorMessage(error) }, 500);
   }
 });
 

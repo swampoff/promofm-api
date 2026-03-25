@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import { getAllConcerts, getTicketProvidersByConcert, getTicketSalesByConcert, ticketSalesStore, upsertTicketProvider, upsertTicketSale } from './db.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const ticketing = new Hono();
 

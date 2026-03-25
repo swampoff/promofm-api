@@ -1,9 +1,26 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const videosRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
+
+// ─── Public: New Clips for landing page ─────────────────
+videosRoutes.get('/newClips', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '20');
+    const { platformStatsStore } = await import('./db.tsx');
+    const cached: any = await platformStatsStore.get('videos:new_clips');
+    if (cached?.clips?.length) {
+      return c.json({ success: true, clips: cached.clips.slice(0, limit) });
+    }
+    return c.json({ success: true, clips: [] });
+  } catch (error) {
+    console.error('Error fetching new clips:', error);
+    return c.json({ success: true, clips: [] });
+  }
+});
 
 videosRoutes.get('/', async (c) => {
   try {
@@ -29,7 +46,7 @@ videosRoutes.post('/', async (c) => {
     await db.upsertVideo(userId, videoId, video);
     return c.json({ success: true, data: video }, 201);
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

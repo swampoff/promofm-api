@@ -169,6 +169,12 @@ async function fetchKudaGoConcerts(): Promise<ParsedConcert[]> {
 // ─── HTML Parser (Mistral) ──────────────────────────────
 
 async function fetchPageText(url: string): Promise<string | null> {
+  // SSRF protection: validate URL before fetching
+  const urlCheck = await isUrlSafe(url);
+  if (!urlCheck.safe) {
+    console.warn(`[SSRF blocked] ${url}: ${urlCheck.reason}`);
+    return null;
+  }
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -416,6 +422,7 @@ function deduplicateConcerts(concerts: ParsedConcert[]): ParsedConcert[] {
 // ─── Public API ─────────────────────────────────────────
 
 import { concertAgentStore } from './db.tsx';
+import { isUrlSafe } from './security.tsx';
 
 function getConcertStore() {
   return concertAgentStore;

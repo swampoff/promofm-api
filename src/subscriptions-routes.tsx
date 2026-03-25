@@ -8,6 +8,7 @@ import { getSubscription, upsertSubscription, getAllSubscriptions, getPaymentBal
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const subscriptions = new Hono();
 
@@ -921,7 +922,7 @@ subscriptions.post('/charge-recurring', async (c) => {
     });
   } catch (error) {
     console.error('[cron] charge-recurring error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

@@ -18,6 +18,7 @@
 import { Hono } from 'hono';
 import { notificationCampaignsStore, getNotificationCampaignsByUser, upsertNotificationCampaign } from './db.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const marketing = new Hono();
 
@@ -33,7 +34,7 @@ marketing.get('/campaigns/:userId', async (c) => {
     return c.json({ success: true, data: valid });
   } catch (error) {
     console.log('Marketing GET /campaigns/:userId error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -47,7 +48,7 @@ marketing.get('/campaigns/all', async (c) => {
     return c.json({ success: true, data: valid });
   } catch (error) {
     console.log('Marketing GET /campaigns/all error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -61,7 +62,7 @@ marketing.get('/campaigns/pending', async (c) => {
     return c.json({ success: true, data: pending, count: pending.length });
   } catch (error) {
     console.log('Marketing GET /campaigns/pending error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -74,7 +75,7 @@ marketing.get('/campaigns/detail/:campaignId', async (c) => {
     if (!campaign) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
     return c.json({ success: true, data: campaign });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -138,7 +139,7 @@ marketing.post('/campaigns', async (c) => {
     return c.json({ success: true, data: campaign }, 201);
   } catch (error) {
     console.log('Marketing POST /campaigns error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -155,7 +156,7 @@ marketing.patch('/campaigns/:campaignId', async (c) => {
     await upsertNotificationCampaign(updated.user_id, campaignId, updated);
     return c.json({ success: true, data: updated });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -171,7 +172,7 @@ marketing.delete('/campaigns/:campaignId', async (c) => {
 
     return c.json({ success: true });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -208,7 +209,7 @@ marketing.post('/campaigns/:campaignId/approve', async (c) => {
 
     return c.json({ success: true, data: campaign });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -245,7 +246,7 @@ marketing.post('/campaigns/:campaignId/reject', async (c) => {
 
     return c.json({ success: true, data: campaign });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -284,7 +285,7 @@ marketing.post('/campaigns/:campaignId/launch', async (c) => {
 
     return c.json({ success: true, data: campaign });
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

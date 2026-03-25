@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const donationsRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
@@ -30,7 +31,7 @@ donationsRoutes.post('/', async (c) => {
     await db.createDonation(donation.artistId, donationId, donation);
     return c.json({ success: true, data: donation }, 201);
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

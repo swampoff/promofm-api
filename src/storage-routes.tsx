@@ -17,6 +17,7 @@ import {
   BUCKET_NAMES,
 } from './storage-setup.tsx';
 import { requireAuth } from './auth-middleware.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const storage = new Hono();
 

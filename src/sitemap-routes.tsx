@@ -1,0 +1,243 @@
+import { Hono } from 'hono';
+import { pool } from './db-client.tsx';
+import { newsPublicStore } from './db.tsx';
+
+const sitemapRoutes = new Hono();
+const DOMAIN = 'https://promo-music.ru';
+
+// ─── All 39 static public routes ───
+const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
+  // Homepage
+  { loc: '/', changefreq: 'daily', priority: '1.0' },
+  // Main sections (0.9)
+  { loc: '/news', changefreq: 'hourly', priority: '0.9' },
+  { loc: '/charts', changefreq: 'daily', priority: '0.9' },
+  { loc: '/concerts', changefreq: 'daily', priority: '0.9' },
+  // Core features (0.8)
+  { loc: '/promo-air', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/promo-lab', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/promo-guide', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/marketplace', changefreq: 'daily', priority: '0.8' },
+  { loc: '/radio', changefreq: 'daily', priority: '0.8' },
+  { loc: '/tracks', changefreq: 'daily', priority: '0.8' },
+  { loc: '/videos', changefreq: 'daily', priority: '0.8' },
+  // Artist features (0.7)
+  { loc: '/dashboard', changefreq: 'daily', priority: '0.7' },
+  { loc: '/dashboard/tracks', changefreq: 'daily', priority: '0.7' },
+  { loc: '/dashboard/videos', changefreq: 'daily', priority: '0.7' },
+  { loc: '/dashboard/concerts', changefreq: 'daily', priority: '0.7' },
+  { loc: '/dashboard/analytics', changefreq: 'daily', priority: '0.7' },
+  { loc: '/dashboard/promotion', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/dashboard/settings', changefreq: 'monthly', priority: '0.5' },
+  // DJ features (0.7)
+  { loc: '/dj-studio', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/dj-marketplace', changefreq: 'daily', priority: '0.7' },
+  // Producer features (0.7)
+  { loc: '/producer-studio', changefreq: 'weekly', priority: '0.7' },
+  // Public pages (0.6)
+  { loc: '/help', changefreq: 'monthly', priority: '0.6' },
+  { loc: '/about', changefreq: 'monthly', priority: '0.6' },
+  { loc: '/contacts', changefreq: 'monthly', priority: '0.6' },
+  { loc: '/terms', changefreq: 'yearly', priority: '0.4' },
+  { loc: '/privacy', changefreq: 'yearly', priority: '0.4' },
+  // Auth pages (0.3)
+  { loc: '/login', changefreq: 'monthly', priority: '0.3' },
+  { loc: '/register', changefreq: 'monthly', priority: '0.3' },
+  { loc: '/forgot-password', changefreq: 'monthly', priority: '0.3' },
+  // Content sections (0.6)
+  { loc: '/donations', changefreq: 'weekly', priority: '0.6' },
+  { loc: '/coins', changefreq: 'weekly', priority: '0.6' },
+  { loc: '/booking', changefreq: 'daily', priority: '0.6' },
+  { loc: '/curator', changefreq: 'weekly', priority: '0.6' },
+  { loc: '/music-gen', changefreq: 'weekly', priority: '0.6' },
+  // Collaboration & messaging (0.5)
+  { loc: '/collaboration', changefreq: 'weekly', priority: '0.5' },
+  { loc: '/messages', changefreq: 'daily', priority: '0.5' },
+  // Playgramm (0.6)
+  { loc: '/pg/', changefreq: 'weekly', priority: '0.6' },
+  // Feed / discover (0.7)
+  { loc: '/publish', changefreq: 'daily', priority: '0.7' },
+  { loc: '/checkout', changefreq: 'monthly', priority: '0.4' },
+];
+
+function escapeXml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+function toW3CDate(d: string | Date | undefined): string {
+  if (!d) return new Date().toISOString().split('T')[0];
+  try {
+    return new Date(d).toISOString().split('T')[0];
+  } catch {
+    return new Date().toISOString().split('T')[0];
+  }
+}
+
+// GET /sitemap.xml — comprehensive dynamic sitemap
+sitemapRoutes.get('/sitemap.xml', async (c) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+
+    // Fetch dynamic content in parallel
+    const [newsResult, concertsResult, videosResult] = await Promise.all([
+      newsPublicStore.getAll().catch(() => []),
+      pool.query(`SELECT id, title, updated_at, created_at FROM concerts WHERE is_hidden = false AND is_cancelled = false ORDER BY event_date DESC`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT id, title, updated_at, created_at FROM videos WHERE is_hidden = false ORDER BY created_at DESC`).catch(() => ({ rows: [] })),
+    ]);
+
+    const publishedNews = (newsResult || []).filter((n: any) => {
+      const status = n?.status || n?.data?.status;
+      return status === 'published' && n?.id;
+    });
+    const concerts = concertsResult.rows || [];
+    const videos = videosResult.rows || [];
+
+    let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+    xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n`;
+    xml += `        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9"\n`;
+    xml += `        xmlns:video="http://www.google.com/schemas/sitemap-video/1.1">\n`;
+
+    // ── Static pages ──
+    for (const p of STATIC_PAGES) {
+      xml += `  <url>\n`;
+      xml += `    <loc>${DOMAIN}${p.loc}</loc>\n`;
+      xml += `    <lastmod>${today}</lastmod>\n`;
+      xml += `    <changefreq>${p.changefreq}</changefreq>\n`;
+      xml += `    <priority>${p.priority}</priority>\n`;
+      xml += `  </url>\n`;
+    }
+
+    // ── News articles ──
+    for (const n of publishedNews) {
+      const title = n.title || n.data?.title || '';
+      const pubDate = n.publishedAt || n.data?.publishedAt || n.createdAt || n.created_at;
+      const modDate = n.updatedAt || n.data?.updatedAt || n.updated_at || pubDate;
+      const lastmod = toW3CDate(modDate);
+      xml += `  <url>\n`;
+      xml += `    <loc>${DOMAIN}/news/${escapeXml(String(n.id))}</loc>\n`;
+      xml += `    <lastmod>${lastmod}</lastmod>\n`;
+      xml += `    <changefreq>weekly</changefreq>\n`;
+      xml += `    <priority>0.8</priority>\n`;
+      if (title && pubDate) {
+        xml += `    <news:news>\n`;
+        xml += `      <news:publication>\n`;
+        xml += `        <news:name>ПРОМО.МУЗЫКА</news:name>\n`;
+        xml += `        <news:language>ru</news:language>\n`;
+        xml += `      </news:publication>\n`;
+        xml += `      <news:publication_date>${new Date(pubDate).toISOString()}</news:publication_date>\n`;
+        xml += `      <news:title>${escapeXml(title)}</news:title>\n`;
+        xml += `    </news:news>\n`;
+      }
+      xml += `  </url>\n`;
+    }
+
+    // ── Concerts ──
+    for (const concert of concerts) {
+      const lastmod = toW3CDate(concert.updated_at || concert.created_at);
+      xml += `  <url>\n`;
+      xml += `    <loc>${DOMAIN}/concerts/${escapeXml(String(concert.id))}</loc>\n`;
+      xml += `    <lastmod>${lastmod}</lastmod>\n`;
+      xml += `    <changefreq>weekly</changefreq>\n`;
+      xml += `    <priority>0.6</priority>\n`;
+      xml += `  </url>\n`;
+    }
+
+    // ── Videos ──
+    for (const video of videos) {
+      const lastmod = toW3CDate(video.updated_at || video.created_at);
+      xml += `  <url>\n`;
+      xml += `    <loc>${DOMAIN}/videos/${escapeXml(String(video.id))}</loc>\n`;
+      xml += `    <lastmod>${lastmod}</lastmod>\n`;
+      xml += `    <changefreq>monthly</changefreq>\n`;
+      xml += `    <priority>0.6</priority>\n`;
+      xml += `  </url>\n`;
+    }
+
+    xml += `</urlset>`;
+
+    const urlCount = STATIC_PAGES.length + publishedNews.length + concerts.length + videos.length;
+    console.log(`[sitemap] Generated: ${STATIC_PAGES.length} static + ${publishedNews.length} news + ${concerts.length} concerts + ${videos.length} videos = ${urlCount} URLs`);
+
+    c.header('Content-Type', 'application/xml; charset=utf-8');
+    c.header('Cache-Control', 'public, max-age=600'); // 10min cache
+    c.header('X-Sitemap-URLs', String(urlCount));
+    return c.body(xml);
+  } catch (error) {
+    console.error('[sitemap] Error:', error);
+    return c.text('Error generating sitemap', 500);
+  }
+});
+
+const INDEXNOW_KEY = 'be3b1945c60d606211ccb819caebe3fb';
+
+// POST /sitemap/ping — ping search engines (Yandex ping + IndexNow for Bing/Yandex)
+sitemapRoutes.post('/sitemap/ping', async (c) => {
+  const sitemapUrl = `${DOMAIN}/sitemap.xml`;
+  const results: Record<string, string> = {};
+
+  // Yandex sitemap ping (still works)
+  try {
+    const yRes = await fetch(`https://webmaster.yandex.ru/ping?sitemap=${encodeURIComponent(sitemapUrl)}`);
+    results.yandex_ping = yRes.ok ? 'ok' : `${yRes.status}`;
+  } catch (e: any) {
+    results.yandex_ping = `error: ${e.message}`;
+  }
+
+  // IndexNow — submit to Bing & Yandex
+  const body = c.req.query('url');
+  const urlList = body ? [body] : [`${DOMAIN}/sitemap.xml`];
+  
+  for (const engine of ['api.indexnow.org', 'yandex.com']) {
+    try {
+      const res = await fetch(`https://${engine}/indexnow`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: 'promo-music.ru',
+          key: INDEXNOW_KEY,
+          keyLocation: `${DOMAIN}/${INDEXNOW_KEY}.txt`,
+          urlList: urlList,
+        }),
+      });
+      results[`indexnow_${engine.split('.')[0]}`] = res.ok ? 'ok' : `${res.status}`;
+    } catch (e: any) {
+      results[`indexnow_${engine.split('.')[0]}`] = `error: ${e.message}`;
+    }
+  }
+
+  // Google: best practice is sitemap in robots.txt + regular crawl
+  results.google = 'sitemap in robots.txt (auto-crawl)';
+
+  console.log(`[sitemap] Ping results:`, results);
+  return c.json({ success: true, results, sitemapUrl });
+});
+
+// POST /sitemap/indexnow — submit specific URL to IndexNow
+sitemapRoutes.post('/sitemap/indexnow', async (c) => {
+  const body = await c.req.json();
+  const urls = body.urls || [body.url].filter(Boolean);
+  if (!urls.length) return c.json({ success: false, error: 'No URLs provided' }, 400);
+
+  const results: Record<string, string> = {};
+  for (const engine of ['api.indexnow.org', 'yandex.com']) {
+    try {
+      const res = await fetch(`https://${engine}/indexnow`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: 'promo-music.ru',
+          key: INDEXNOW_KEY,
+          keyLocation: `${DOMAIN}/${INDEXNOW_KEY}.txt`,
+          urlList: urls,
+        }),
+      });
+      results[engine] = res.ok ? 'ok' : `${res.status}`;
+    } catch (e: any) {
+      results[engine] = `error: ${e.message}`;
+    }
+  }
+  return c.json({ success: true, results, urls });
+});
+
+export default sitemapRoutes;

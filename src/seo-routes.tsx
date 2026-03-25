@@ -1,0 +1,235 @@
+import { Hono } from 'hono';
+import { newsPublicStore } from './db.tsx';
+
+const seoRoutes = new Hono();
+const DOMAIN = 'https://promo-music.ru';
+const SITE_NAME = 'ПРОМО.МУЗЫКА';
+const SITE_DESC = 'Музыкальная платформа для артистов: чарты, аналитика, продвижение треков, новости индустрии, радиоротации';
+const LOGO = `${DOMAIN}/logo.png`;
+
+function esc(s: string): string {
+  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function escJson(s: string): string {
+  return (s || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+}
+
+function stripHtml(s: string): string {
+  return (s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// ─── Page meta configs ───
+const PAGE_META: Record<string, { title: string; desc: string; type: string }> = {
+  '/': { title: `${SITE_NAME} — музыкальная платформа для артистов`, desc: SITE_DESC, type: 'website' },
+  '/news': { title: `Новости музыки — ${SITE_NAME}`, desc: 'Свежие новости музыкальной индустрии: релизы, фестивали, интервью, аналитика', type: 'website' },
+  '/charts': { title: `Музыкальные чарты TOP 50 — ${SITE_NAME}`, desc: 'Еженедельный чарт из Spotify, Apple Music, Яндекс Музыки, радиостанций и ВКонтакте', type: 'website' },
+  '/concerts': { title: `Концерты и фестивали — ${SITE_NAME}`, desc: 'Афиша концертов и музыкальных событий', type: 'website' },
+  '/promo-air': { title: `ПРОМО.ЭИР — радиоротации — ${SITE_NAME}`, desc: 'Попади в ротацию радиостанций с ПРОМО.ЭИР', type: 'website' },
+  '/promo-lab': { title: `ПРОМО.ЛАБ — оценка треков — ${SITE_NAME}`, desc: 'Профессиональная оценка треков от экспертов индустрии', type: 'website' },
+  '/promo-guide': { title: `ПРОМО.ГИД — руководства — ${SITE_NAME}`, desc: 'Гайды по продвижению музыки и развитию карьеры артиста', type: 'website' },
+  '/marketplace': { title: `Маркетплейс — ${SITE_NAME}`, desc: 'Маркетплейс музыкальных услуг: биты, мастеринг, дизайн, продвижение', type: 'website' },
+};
+
+// ─── GET /prerender/* — SSR for bots ───
+seoRoutes.get('/prerender/*', async (c) => {
+  const rawParam = c.req.param('*') || c.req.path.replace('/server/prerender', '') || '';
+  const path = rawParam.startsWith('/') ? rawParam : '/' + rawParam;
+  let meta = PAGE_META[path];
+  let jsonLd = '';
+  let articleHtml = '';
+
+  // News article page
+  if (path.startsWith('/news/') && path.length > 6) {
+    const newsId = path.slice(6);
+    const article = await newsPublicStore.get(newsId);
+    if (article) {
+      const title = article.title || 'Новость';
+      const desc = stripHtml(article.excerpt || article.content || '').slice(0, 300);
+      const img = article.imageUrl || article.coverImage || LOGO;
+      const author = article.authorName || SITE_NAME;
+      const pubDate = article.publishedAt || article.createdAt || new Date().toISOString();
+      
+      meta = { title: `${title} — ${SITE_NAME}`, desc, type: 'article' };
+      
+      jsonLd = `
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "NewsArticle",
+      "headline": "${escJson(title)}",
+      "description": "${escJson(desc)}",
+      "image": "${escJson(img)}",
+      "datePublished": "${pubDate}",
+      "dateModified": "${article.updatedAt || pubDate}",
+      "author": {"@type": "Person", "name": "${escJson(author)}"},
+      "publisher": {
+        "@type": "Organization",
+        "name": "${SITE_NAME}",
+        "logo": {"@type": "ImageObject", "url": "${LOGO}"}
+      },
+      "mainEntityOfPage": {"@type": "WebPage", "@id": "${DOMAIN}${path}"}
+    }
+    </script>`;
+
+      // Render article content for bots
+      const content = (article.content || article.excerpt || '')
+        .replace(/^\s*```html\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+      articleHtml = `
+    <article>
+      <h1>${esc(title)}</h1>
+      <p><time datetime="${pubDate}">${new Date(pubDate).toLocaleDateString('ru-RU')}</time> · ${esc(author)}</p>
+      ${content}
+    </article>`;
+    }
+  }
+
+  if (!meta) meta = PAGE_META['/']!;
+
+  // Organization JSON-LD (always)
+  const orgLd = `
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Organization",
+      "name": "${SITE_NAME}",
+      "url": "${DOMAIN}",
+      "logo": "${LOGO}",
+      "sameAs": ["https://vk.com/promomusic"]
+    }
+    </script>`;
+
+  // BreadcrumbList
+  const crumbs = path === '/' ? '' : `
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        {"@type": "ListItem", "position": 1, "name": "Главная", "item": "${DOMAIN}/"},
+        {"@type": "ListItem", "position": 2, "name": "${escJson(meta.title.split(' — ')[0])}", "item": "${DOMAIN}${path}"}
+      ]
+    }
+    </script>`;
+
+  const html = `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${esc(meta.title)}</title>
+  <meta name="description" content="${esc(meta.desc)}">
+  <link rel="canonical" href="${DOMAIN}${path}">
+  
+  <!-- Open Graph -->
+  <meta property="og:type" content="${meta.type}">
+  <meta property="og:url" content="${DOMAIN}${path}">
+  <meta property="og:site_name" content="${SITE_NAME}">
+  <meta property="og:title" content="${esc(meta.title)}">
+  <meta property="og:description" content="${esc(meta.desc)}">
+  <meta property="og:image" content="${LOGO}">
+  <meta property="og:locale" content="ru_RU">
+  
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="${esc(meta.title)}">
+  <meta name="twitter:description" content="${esc(meta.desc)}">
+  <meta name="twitter:image" content="${LOGO}">
+  
+  ${orgLd}
+  ${crumbs}
+  ${jsonLd}
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="${DOMAIN}/">${SITE_NAME}</a>
+      <a href="${DOMAIN}/news">Новости</a>
+      <a href="${DOMAIN}/charts">Чарты</a>
+      <a href="${DOMAIN}/concerts">Концерты</a>
+    </nav>
+  </header>
+  <main>
+    ${articleHtml || `<h1>${esc(meta.title)}</h1><p>${esc(meta.desc)}</p>`}
+  </main>
+  <footer><p>&copy; 2026 ${SITE_NAME}</p></footer>
+</body>
+</html>`;
+
+  c.header('Content-Type', 'text/html; charset=utf-8');
+  return c.body(html);
+});
+
+// ─── GET /rss.xml — RSS feed ───
+seoRoutes.get('/rss.xml', async (c) => {
+  const allNews = await newsPublicStore.getAll();
+  const published = (allNews || [])
+    .filter((n: any) => n?.status === 'published' && n?.id)
+    .sort((a: any, b: any) => new Date(b.publishedAt || 0).getTime() - new Date(a.publishedAt || 0).getTime())
+    .slice(0, 50);
+
+  let xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel>
+  <title>${SITE_NAME} — Новости музыки</title>
+  <link>${DOMAIN}/news</link>
+  <description>Свежие новости музыкальной индустрии от ${SITE_NAME}</description>
+  <language>ru</language>
+  <lastBuildDate>${new Date().toUTCString()}</lastBuildDate>
+  <atom:link href="${DOMAIN}/rss.xml" rel="self" type="application/rss+xml"/>
+  <image>
+    <url>${LOGO}</url>
+    <title>${SITE_NAME}</title>
+    <link>${DOMAIN}</link>
+  </image>
+`;
+
+  for (const n of published) {
+    const title = esc(n.title || '');
+    const desc = esc(stripHtml(n.excerpt || n.content || '').slice(0, 500));
+    const link = `${DOMAIN}/news/${n.id}`;
+    const pubDate = n.publishedAt ? new Date(n.publishedAt).toUTCString() : new Date().toUTCString();
+    const author = esc(n.authorName || SITE_NAME);
+    
+    xml += `  <item>
+    <title>${title}</title>
+    <link>${link}</link>
+    <guid isPermaLink="true">${link}</guid>
+    <pubDate>${pubDate}</pubDate>
+    <dc:creator>${author}</dc:creator>
+    <description>${desc}</description>
+  </item>
+`;
+  }
+
+  xml += `</channel>\n</rss>`;
+
+  c.header('Content-Type', 'application/rss+xml; charset=utf-8');
+  c.header('Cache-Control', 'public, max-age=600');
+  return c.body(xml);
+});
+
+// ─── GET /meta/:path — JSON meta for SPA client-side injection ───
+seoRoutes.get('/meta/*', async (c) => {
+  const rawParam = c.req.param('*') || c.req.path.replace('/server/prerender', '') || '';
+  const path = rawParam.startsWith('/') ? rawParam : '/' + rawParam;
+  let meta = PAGE_META[path];
+
+  if (path.startsWith('/news/') && path.length > 6) {
+    const newsId = path.slice(6);
+    const article = await newsPublicStore.get(newsId);
+    if (article) {
+      meta = {
+        title: `${article.title} — ${SITE_NAME}`,
+        desc: stripHtml(article.excerpt || article.content || '').slice(0, 300),
+        type: 'article',
+      };
+    }
+  }
+
+  if (!meta) meta = PAGE_META['/']!;
+  return c.json({ title: meta.title, description: meta.desc, type: meta.type, url: `${DOMAIN}${path}` });
+});
+
+export default seoRoutes;

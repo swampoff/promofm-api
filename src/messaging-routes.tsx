@@ -378,4 +378,10 @@ app.get('/rules', (c) => {
   });
 });
 
+
+// ── POST /presence - Online presence heartbeat ──
+app.post('/presence', async (c) => {
+  return c.json({ success: true });
+});
+
 export default app;

@@ -26,6 +26,7 @@
 import { Hono } from 'hono';
 import { getArtistProfile, getNotificationsByUser, publishEmailPrefsStore, publishOrdersStore, upsertNotification } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 
@@ -255,7 +256,7 @@ app.get('/orders', async (c) => {
     return c.json({ success: true, orders });
   } catch (error: any) {
     console.error('Error fetching publish orders:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -270,7 +271,7 @@ app.get('/orders/:id', async (c) => {
     }
     return c.json({ success: true, order: JSON.parse(data) });
   } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -304,7 +305,7 @@ app.put('/orders/:id', async (c) => {
 
     return c.json({ success: true, order: updatedOrder });
   } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -333,7 +334,7 @@ app.put('/orders/:id/submit', async (c) => {
 
     return c.json({ success: true, order });
   } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -371,7 +372,7 @@ app.put('/orders/:id/pay', async (c) => {
 
     return c.json({ success: true, order });
   } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -458,7 +459,7 @@ app.put('/orders/:id/status', async (c) => {
 
     return c.json({ success: true, order });
   } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -478,7 +479,7 @@ app.delete('/orders/:id', async (c) => {
 
     return c.json({ success: true });
   } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -494,7 +495,7 @@ app.get('/admin/all', async (c) => {
     return c.json({ success: true, orders });
   } catch (error: any) {
     console.error('Error fetching all publish orders:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -523,7 +524,7 @@ app.get('/admin/stats', async (c) => {
     return c.json({ success: true, stats });
   } catch (error: any) {
     console.error('Error fetching publish order stats:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -622,7 +623,7 @@ app.put('/admin/batch-status', async (c) => {
 
         results.push({ id: orderId, success: true, order });
       } catch (err: any) {
-        results.push({ id: orderId, success: false, error: err.message });
+        results.push({ id: orderId, success: false, error: safeErrorMessage(err) });
       }
     }
 
@@ -638,7 +639,7 @@ app.put('/admin/batch-status', async (c) => {
     });
   } catch (error: any) {
     console.error('Error in batch status update:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -653,7 +654,7 @@ app.get('/notifications/:userId', async (c) => {
     return c.json({ success: true, notifications, unreadCount });
   } catch (error: any) {
     console.error('Error fetching artist notifications:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -692,7 +693,7 @@ app.put('/notifications/:userId/read', async (c) => {
     return c.json({ success: true });
   } catch (error: any) {
     console.error('Error marking notifications as read:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -803,7 +804,7 @@ app.get('/email-prefs/:userId', async (c) => {
     return c.json({ success: true, prefs });
   } catch (error: any) {
     console.error('Error fetching email prefs:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -825,7 +826,7 @@ app.put('/email-prefs/:userId', async (c) => {
     return c.json({ success: true, prefs: updated });
   } catch (error: any) {
     console.error('Error updating email prefs:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -867,7 +868,7 @@ app.post('/webhook/status-change', async (c) => {
     return c.json({ success: true, message: 'Webhook processed' });
   } catch (error: any) {
     console.error('Webhook error:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -882,7 +883,7 @@ app.get('/email-log/:userId', async (c) => {
     return c.json({ success: true, emails });
   } catch (error: any) {
     console.error('Error fetching email log:', error);
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

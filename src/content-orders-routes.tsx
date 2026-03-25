@@ -11,6 +11,7 @@
 
 import { Hono } from 'hono';
 import { contentOrdersStore, contentOrdersByStatusStore, venueOrdersIndexStore } from './db.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 
@@ -117,7 +118,7 @@ app.post("/orders", async (c) => {
     console.error("Error creating content order:", error);
     return c.json({ 
       success: false, 
-      error: error instanceof Error ? error.message : "Failed to create order" 
+      error: safeErrorMessage(error) 
     }, 500);
   }
 });
@@ -198,7 +199,7 @@ app.get("/orders", async (c) => {
     console.error("Error fetching content orders:", error);
     return c.json({ 
       success: false, 
-      error: error instanceof Error ? error.message : "Failed to fetch orders" 
+      error: safeErrorMessage(error) 
     }, 500);
   }
 });
@@ -228,7 +229,7 @@ app.get("/orders/:id", async (c) => {
     console.error("Error fetching content order:", error);
     return c.json({ 
       success: false, 
-      error: error instanceof Error ? error.message : "Failed to fetch order" 
+      error: safeErrorMessage(error) 
     }, 500);
   }
 });
@@ -293,7 +294,7 @@ app.put("/orders/:id", async (c) => {
     console.error("Error updating content order:", error);
     return c.json({ 
       success: false, 
-      error: error instanceof Error ? error.message : "Failed to update order" 
+      error: safeErrorMessage(error) 
     }, 500);
   }
 });
@@ -336,7 +337,7 @@ app.delete("/orders/:id", async (c) => {
     console.error("Error deleting content order:", error);
     return c.json({ 
       success: false, 
-      error: error instanceof Error ? error.message : "Failed to delete order" 
+      error: safeErrorMessage(error) 
     }, 500);
   }
 });
@@ -368,7 +369,7 @@ app.get("/stats", async (c) => {
     console.error("Error fetching stats:", error);
     return c.json({ 
       success: false, 
-      error: error instanceof Error ? error.message : "Failed to fetch stats" 
+      error: safeErrorMessage(error) 
     }, 500);
   }
 });

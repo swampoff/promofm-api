@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import { getDbClient } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const promotion = new Hono();
 
@@ -97,9 +98,9 @@ function getEmptyResponseWithMeta(tableName: string, error?: any) {
  */
 promotion.get('/pitching', async (c) => {
   try {
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('pitching_requests')
       .select('*')
       .order('created_at', { ascending: false });
@@ -155,7 +156,7 @@ promotion.post('/pitching', async (c) => {
       }, 400);
     }
 
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     const requestId = `pitch-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const userId = await resolveUserId(c, 'anonymous');
 
@@ -175,7 +176,7 @@ promotion.post('/pitching', async (c) => {
     };
 
     // Сохраняем в SQL таблицу
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('pitching_requests')
       .insert(requestData)
       .select()
@@ -185,7 +186,7 @@ promotion.post('/pitching', async (c) => {
       console.error('Pitching creation error:', error);
       return c.json({ 
         success: false, 
-        error: error.message || 'Failed to create pitching request' 
+        error: safeErrorMessage(error) || 'Failed to create pitching request' 
       }, 500);
     }
 
@@ -237,10 +238,10 @@ promotion.post('/pitching/submit', async (c) => {
     }
 
     // 5. Rate limiting - проверяем количество заявок за последние 24 часа
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     
-    const { data: recentRequests, error: countError } = await supabase
+    const { data: recentRequests, error: countError } = await dbClient
       .from('pitching_requests')
       .select('id')
       .eq('artist_id', artist_id)
@@ -262,7 +263,7 @@ promotion.post('/pitching/submit', async (c) => {
     // 7. Создаём заявку в БД
     const requestId = `pitch-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('pitching_requests')
       .insert({
         id: requestId,
@@ -307,11 +308,11 @@ promotion.get('/pitching/:artistId', async (c) => {
   const status = c.req.query('status');
   
   try {
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     const offset = (page - 1) * limit;
 
     // Строим запрос
-    let query = supabase
+    let query = dbClient
       .from('pitching_requests')
       .select('*', { count: 'exact' })
       .eq('artist_id', artistId)
@@ -394,12 +395,12 @@ promotion.post('/pitching/:requestId/response', async (c) => {
       return c.json({ success: false, error: 'Invalid response_type' }, 400);
     }
 
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
 
     // 1. Создаём ответ редактора
     const responseId = `resp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     
-    const { error: insertError } = await supabase
+    const { error: insertError } = await dbClient
       .from('editor_responses')
       .insert({
         id: responseId,
@@ -417,7 +418,7 @@ promotion.post('/pitching/:requestId/response', async (c) => {
     }
 
     // 2. Обновляем счётчики в запросе
-    const { data: request } = await supabase
+    const { data: request } = await dbClient
       .from('pitching_requests')
       .select('responses_count, interested_count, added_to_rotation_count')
       .eq('id', requestId)
@@ -437,7 +438,7 @@ promotion.post('/pitching/:requestId/response', async (c) => {
         updates.status = 'completed'; // Если добавлено в ротацию - успех!
       }
 
-      await supabase
+      await dbClient
         .from('pitching_requests')
         .update(updates)
         .eq('id', requestId);
@@ -458,9 +459,9 @@ promotion.get('/pitching/:requestId/responses', async (c) => {
   const requestId = c.req.param('requestId');
   
   try {
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('editor_responses')
       .select('*')
       .eq('pitching_request_id', requestId)
@@ -493,9 +494,9 @@ promotion.patch('/pitching/:requestId/status', async (c) => {
       return c.json({ success: false, error: 'Invalid status' }, 400);
     }
 
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('pitching_requests')
       .update({ status, updated_at: new Date().toISOString() })
       .eq('id', requestId)
@@ -533,10 +534,10 @@ promotion.post('/production360/submit', async (c) => {
       return c.json({ success: false, error: 'Invalid service_type' }, 400);
     }
 
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     const requestId = `prod-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('production_360_requests')
       .insert({
         id: requestId,
@@ -567,10 +568,10 @@ promotion.get('/production360/:artistId', async (c) => {
   const limit = parseInt(c.req.query('limit') || '20');
   
   try {
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     const offset = (page - 1) * limit;
 
-    const { data, error, count } = await supabase
+    const { data, error, count } = await dbClient
       .from('production_360_requests')
       .select('*', { count: 'exact' })
       .eq('artist_id', artistId)
@@ -633,10 +634,10 @@ promotion.post('/marketing/submit', async (c) => {
       return c.json({ success: false, error: 'Invalid campaign_type' }, 400);
     }
 
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     const campaignId = `mkt-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('marketing_campaigns')
       .insert({
         id: campaignId,
@@ -667,9 +668,9 @@ promotion.get('/marketing/:artistId', async (c) => {
   const artistId = c.req.param('artistId');
   
   try {
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('marketing_campaigns')
       .select('*')
       .eq('artist_id', artistId)
@@ -712,10 +713,10 @@ promotion.post('/media/submit', async (c) => {
       return c.json({ success: false, error: 'Invalid outreach_type' }, 400);
     }
 
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     const requestId = `media-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('media_outreach_requests')
       .insert({
         id: requestId,
@@ -745,9 +746,9 @@ promotion.get('/media/:artistId', async (c) => {
   const artistId = c.req.param('artistId');
   
   try {
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('media_outreach_requests')
       .select('*')
       .eq('artist_id', artistId)
@@ -789,10 +790,10 @@ promotion.post('/event/submit', async (c) => {
       return c.json({ success: false, error: 'Invalid event_type' }, 400);
     }
 
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     const eventId = `event-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('event_requests')
       .insert({
         id: eventId,
@@ -824,9 +825,9 @@ promotion.get('/event/:artistId', async (c) => {
   const artistId = c.req.param('artistId');
   
   try {
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('event_requests')
       .select('*')
       .eq('artist_id', artistId)
@@ -868,10 +869,10 @@ promotion.post('/promolab/submit', async (c) => {
       return c.json({ success: false, error: 'Invalid experiment_type' }, 400);
     }
 
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
     const experimentId = `lab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('promo_lab_experiments')
       .insert({
         id: experimentId,
@@ -903,9 +904,9 @@ promotion.get('/promolab/:artistId', async (c) => {
   const artistId = c.req.param('artistId');
   
   try {
-    const supabase = getDbClient();
+    const dbClient = getDbClient();
 
-    const { data, error } = await supabase
+    const { data, error } = await dbClient
       .from('promo_lab_experiments')
       .select('*')
       .eq('artist_id', artistId)

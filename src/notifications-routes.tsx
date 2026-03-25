@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import * as db from './db.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const notifications = new Hono();
 

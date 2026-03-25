@@ -1,35 +1,87 @@
 import { Hono } from 'hono';
+import { getDbClient } from './db-client.tsx';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const newsRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
 
+function mapArticle(r: any) {
+  return {
+    id: r.id,
+    title: r.title || '',
+    excerpt: r.summary || '',
+    content: r.content || '',
+    category: r.category || 'music',
+    author: r.author_name || 'Редакция',
+    cover_image: r.image_url || '',
+    published_at: r.published_at || r.created_at,
+    read_time: Math.max(1, Math.ceil((r.content || '').split(/\s+/).length / 200)),
+    tags: r.tags || [],
+    featured: (r.tags || []).includes('featured'),
+    views: r.views_count || 0,
+  };
+}
+
+// Public: return ALL published news
 newsRoutes.get('/', async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
-    const news = await db.getNewsByUser(userId);
-    return c.json({ success: true, data: news || [] });
+    const category = c.req.query('category');
+    let qb = getDbClient()
+      .from('news')
+      .select('*')
+      .eq('status', 'published')
+      .order('published_at', { ascending: false });
+    if (category && category !== 'all') {
+      qb = qb.eq('category', category);
+    }
+    const { data, error } = await qb;
+    if (error) console.error('[news] list error:', error);
+    return c.json((data || []).map(mapArticle));
   } catch (error) {
-    return c.json({ success: true, data: [] });
+    console.error('[news] GET error:', error);
+    return c.json([]);
   }
 });
 
+// Get single article by ID
+newsRoutes.get('/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const { data, error } = await getDbClient()
+      .from('news')
+      .select('*')
+      .eq('id', id)
+      .single();
+    if (error || !data) {
+      return c.json({ error: 'Article not found' }, 404);
+    }
+    // Increment views
+    getDbClient()
+      .from('news')
+      .update({ views_count: (data.views_count || 0) + 1 })
+      .eq('id', id)
+      .then(() => {});
+    return c.json(mapArticle(data));
+  } catch (error) {
+    return c.json({ error: 'Not found' }, 404);
+  }
+});
+
+// Create/update article (authenticated)
 newsRoutes.post('/', async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const body = await c.req.json();
     const newsId = body.id || `news-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const now = new Date().toISOString();
-    const item = {
-      id: newsId, likes: 0, comments: 0,
-      ...body, userId,
-      createdAt: body.createdAt || now, updatedAt: now,
-    };
-    await db.upsertNews(userId, newsId, item);
-    return c.json({ success: true, data: item }, 201);
+    await db.upsertNews(userId, newsId, {
+      ...body,
+      status: body.status || 'draft',
+    });
+    return c.json({ success: true, id: newsId }, 201);
   } catch (error) {
-    return c.json({ success: false, error: String(error) }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

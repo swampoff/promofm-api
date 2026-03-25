@@ -13,7 +13,7 @@ import { vpsGetProfile, vpsSaveProfile, vpsStoreToken, vpsGetToken, vpsUseToken 
 import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail } from "./email-helper.tsx";
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
-const PARTNER_ROLES = ['dj', 'radio_station', 'radio', 'venue', 'producer'];
+const PARTNER_ROLES = ['radio_station', 'radio', 'venue'];
 const JWT_SECRET = process.env.JWT_SECRET!;
 const JWT_EXPIRES_IN = '7d';
 
@@ -64,14 +64,33 @@ async function createVpsProfile(userId: string, email: string, name: string, rol
   });
 }
 
+// ── Audit logging ──
+async function logAuthEvent(action: string, details: Record<string, any>, status: string = 'success') {
+  try {
+    const ip = details.ip || '';
+    const ua = details.userAgent || '';
+    const userId = details.userId || null;
+    const errorMsg = details.error || null;
+    await sql(
+      `INSERT INTO audit_logs (user_id, action, action_description, resource_type, ip_address, user_agent, status, error_message, created_at)
+       VALUES ($1, $2, $3, 'auth', $4::inet, $5, $6, $7, now())`,
+      [userId, action, details.description || '', ip || '0.0.0.0', ua, status, errorMsg]
+    );
+  } catch (e) {
+    console.error('Audit log error:', e);
+  }
+}
+
+
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/signup  —  Email-регистрация
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/signup", async (c) => {
   try {
-    const { email, password, name, role } = await c.req.json();
+    const { email, password, name, role, consentPersonalData, consentNewsletter } = await c.req.json();
     if (!email || !password) return c.json({ success: false, error: "Email и пароль обязательны" }, 400);
     if (password.length < 6) return c.json({ success: false, error: "Пароль минимум 6 символов" }, 400);
+    if (!consentPersonalData) return c.json({ success: false, error: "Необходимо согласие на обработку персональных данных" }, 400);
 
     const userRole = role || "artist";
     const isPartner = PARTNER_ROLES.includes(userRole);
@@ -83,20 +102,25 @@ auth.post("/signup", async (c) => {
     let userId: string;
     try {
       const result = await sql(
-        `INSERT INTO users (email, password_hash, username, full_name, role, status, is_email_verified)
-         VALUES ($1, $2, $3, $4, $5::user_role, $6::user_status, false) RETURNING id`,
-        [email, passwordHash, username, userName, userRole, accountStatus]
+        `INSERT INTO users (email, password_hash, username, full_name, role, status, is_email_verified, consent_personal_data, consent_newsletter, consent_at)
+         VALUES ($1, $2, $3, $4, $5::user_role, $6::user_status, false, $7, $8, now()) RETURNING id`,
+        [email, passwordHash, username, userName, userRole, accountStatus, !!consentPersonalData, !!consentNewsletter]
       );
       userId = result.rows[0].id;
     } catch (err: any) {
       if (err.code === '23505') {
-        if (err.constraint?.includes('email')) return c.json({ success: false, error: "Пользователь с таким email уже зарегистрирован" }, 409);
+        if (err.constraint?.includes('email')) logAuthEvent('signup_fail', {
+          description: `Дубликат email: ${email}`, error: 'email_exists',
+          ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
+          userAgent: c.req.header('user-agent') || '',
+        });
+        return c.json({ success: false, error: "Пользователь с таким email уже зарегистрирован" }, 409);
         if (err.constraint?.includes('username')) {
           // Retry with different username
           const result = await sql(
-            `INSERT INTO users (email, password_hash, username, full_name, role, status, is_email_verified)
-             VALUES ($1, $2, $3, $4, $5::user_role, $6::user_status, false) RETURNING id`,
-            [email, passwordHash, username + '_' + Math.random().toString(36).substring(2, 6), userName, userRole, accountStatus]
+            `INSERT INTO users (email, password_hash, username, full_name, role, status, is_email_verified, consent_personal_data, consent_newsletter, consent_at)
+             VALUES ($1, $2, $3, $4, $5::user_role, $6::user_status, false, $7, $8, now()) RETURNING id`,
+            [email, passwordHash, username + '_' + Math.random().toString(36).substring(2, 6), userName, userRole, accountStatus, !!consentPersonalData, !!consentNewsletter]
           );
           userId = result.rows[0].id;
         } else {
@@ -110,6 +134,11 @@ auth.post("/signup", async (c) => {
 
     await createVpsProfile(userId, email, userName, userRole);
     console.log(`User registered: ${email} (${userId}), role: ${userRole}, status: ${accountStatus}`);
+    logAuthEvent('signup_success', {
+      userId, description: `Регистрация: ${email}, роль: ${userRole}`,
+      ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
+      userAgent: c.req.header('user-agent') || '',
+    });
 
     notifyNewUser({ email, name: userName, role: userRole, via: "email", needsApproval: isPartner }).catch(() => {});
 
@@ -125,6 +154,11 @@ auth.post("/signup", async (c) => {
     }, 201);
   } catch (error) {
     console.error("Signup error:", error);
+    logAuthEvent('signup_error', {
+      description: `Ошибка регистрации`, error: String(error),
+      ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
+      userAgent: c.req.header('user-agent') || '',
+    });
     return c.json({ success: false, error: `Ошибка сервера: ${error}` }, 500);
   }
 });
@@ -141,7 +175,14 @@ auth.post("/signin", async (c) => {
       `SELECT id, email, password_hash, full_name, username, role::text, status::text, is_email_verified, avatar_url
        FROM users WHERE email = $1 AND deleted_at IS NULL`, [email]
     );
-    if (result.rows.length === 0) return c.json({ success: false, error: "Ошибка входа: Invalid login credentials" }, 401);
+    if (result.rows.length === 0) {
+      logAuthEvent('signin_fail', {
+        description: `Пользователь не найден: ${email}`, error: 'user_not_found',
+        ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
+        userAgent: c.req.header('user-agent') || '',
+      });
+      return c.json({ success: false, error: "Ошибка входа: Invalid login credentials" }, 401);
+    }
 
     const user = result.rows[0];
 
@@ -150,13 +191,25 @@ auth.post("/signin", async (c) => {
     }
 
     const valid = await bcrypt.compare(password, user.password_hash || '');
-    if (!valid) return c.json({ success: false, error: "Ошибка входа: Invalid login credentials" }, 401);
+    if (!valid) {
+      logAuthEvent('signin_fail', {
+        description: `Неверный пароль: ${email}`, error: 'wrong_password',
+        ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
+        userAgent: c.req.header('user-agent') || '',
+      });
+      return c.json({ success: false, error: "Ошибка входа: Invalid login credentials" }, 401);
+    }
 
     if (user.status === 'pending') return c.json({ success: false, error: 'Ваш аккаунт на модерации.', accountStatus: 'pending' }, 403);
     if (user.status === 'rejected') return c.json({ success: false, error: 'Ваша заявка отклонена.', accountStatus: 'rejected' }, 403);
 
     const accessToken = signToken({ id: user.id, email: user.email, role: user.role });
     await sql(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id]);
+    logAuthEvent('signin_success', {
+      userId: user.id, description: `Вход: ${email}, роль: ${user.role}`,
+      ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
+      userAgent: c.req.header('user-agent') || '',
+    });
 
     // Sync VPS profile
     let profile = await vpsGetProfile(user.id);
@@ -314,7 +367,12 @@ auth.post("/set-role", async (c) => {
     if (!validRoles.includes(role)) return c.json({ success: false, error: `Недопустимая роль: ${role}` }, 400);
 
     const result = await sql(`UPDATE users SET role = $1::user_role WHERE id = $2 RETURNING *`, [role, userId]);
-    if (result.rows.length === 0) return c.json({ success: false, error: "Пользователь не найден" }, 404);
+    if (result.rows.length === 0) logAuthEvent('signin_fail', {
+      description: `Пользователь не найден: ${email}`, error: 'user_not_found',
+      ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
+      userAgent: c.req.header('user-agent') || '',
+    });
+    return c.json({ success: false, error: "Пользователь не найден" }, 404);
 
     let profile = await vpsGetProfile(userId);
     if (profile) {
@@ -499,6 +557,18 @@ auth.get("/verify-email-page", async (c) => {
   const profile = await vpsGetProfile(verifyData.userId);
   if (profile) { profile.isEmailVerified = true; profile.emailVerifiedAt = new Date().toISOString(); await vpsSaveProfile(verifyData.userId, profile); }
   await vpsUseToken(token);
+
+  // Auto-login: get user data, generate JWT, redirect to cabinet
+  const userResult = await sql(`SELECT id, email, role::text, full_name FROM users WHERE id = $1`, [verifyData.userId]);
+  if (userResult.rows.length > 0) {
+    const user = userResult.rows[0];
+    const accessToken = signToken({ id: user.id, email: user.email, role: user.role });
+    const role = user.role || 'artist';
+    const routes: Record<string, string> = { artist: '/artist', dj: '/dj', producer: '/producer', engineer: '/engineer', radio_station: '/radio', venue: '/venue' };
+    const cabinet = routes[role] || '/artist';
+    const params = new URLSearchParams({ token: accessToken, role, name: user.full_name || '', email: user.email, id: user.id });
+    return c.redirect(`https://promo-music.ru/login?verified=true&auto_login=true&${params.toString()}`);
+  }
 
   return c.redirect("https://promo-music.ru/login?verified=true");
 });

@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import { runAllMigrations, checkTablesStatus } from './migration-runner.tsx';
 import { initializeStorage, getStorageStats } from './storage-setup.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const migrations = new Hono();
 

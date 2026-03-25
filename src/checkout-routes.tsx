@@ -11,8 +11,9 @@
  */
 
 import { Hono } from 'hono';
-import { createCoinTransactionKv, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, paymentTransactionsStore, paymentWebhookLogsStore } from './db.tsx';
+import { createCoinTransactionKv, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, paymentTransactionsStore, paymentWebhookLogsStore } from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
+import { safeErrorMessage } from './security.tsx';
 import {
   getGateway,
   type GatewayName,
@@ -89,6 +90,136 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         createdAt: now,
       };
       await createCoinTransactionKv(session.userId, coinTx.id, coinTx);
+    }
+  }
+
+
+  // ─── Activate subscription ───
+  if (session.type === 'subscription' && session.metadata?.planKey) {
+    try {
+      const PLANS: Record<string, any> = {
+        spark:  { name: 'Тест-драйв', price_month: 0,      credits_per_month: 0,  extra_mailing_price: 7000, discounts: { pitching: 0, marketing: 0, track_test: 0, banners: 0 }, donation_fee: 0.10, coins_bonus: 0 },
+        start:  { name: 'Старт',       price_month: 8990,   credits_per_month: 1,  extra_mailing_price: 5000, discounts: { pitching: 0.05, marketing: 0.05, track_test: 0, banners: 0.05 }, donation_fee: 0.07, coins_bonus: 0.05 },
+        pro:    { name: 'Про',         price_month: 39990,  credits_per_month: 3,  extra_mailing_price: 4000, discounts: { pitching: 0.10, marketing: 0.15, track_test: 0.10, banners: 0.10 }, donation_fee: 0.05, coins_bonus: 0.15 },
+        elite:  { name: 'Бизнес',     price_month: 149990, credits_per_month: 10, extra_mailing_price: 3000, discounts: { pitching: 0.15, marketing: 0.25, track_test: 0.20, banners: 0.15 }, donation_fee: 0.03, coins_bonus: 0.25 },
+      };
+      const planKey = session.metadata.planKey;
+      const plan = PLANS[planKey];
+      if (plan) {
+        const interval = session.metadata.interval || 'month';
+        const daysToAdd = interval === 'year' ? 365 : 30;
+        const expiresAt = new Date(Date.now() + daysToAdd * 24 * 60 * 60 * 1000).toISOString();
+        const subData = {
+          user_id: session.userId,
+          tier: planKey,
+          tierName: plan.name,
+          price: session.amount,
+          interval,
+          expires_at: expiresAt,
+          status: 'active',
+          credits_remaining: plan.credits_per_month,
+          credits_per_month: plan.credits_per_month,
+          extra_mailing_price: plan.extra_mailing_price,
+          discounts: plan.discounts,
+          donation_fee: plan.donation_fee,
+          coins_bonus: plan.coins_bonus,
+          gateway: session.gateway,
+          gateway_payment_id: session.gatewayPaymentId,
+          created_at: now,
+          updated_at: now,
+        };
+        await upsertSubscription(session.userId, subData);
+        console.log('Subscription activated:', session.userId, '->', planKey, interval);
+      }
+    } catch (err) {
+      console.error('Subscription activation error:', err);
+    }
+  }
+
+
+  // ─── Fulfill marketplace purchase ───
+  if (session.type === 'purchase' && session.metadata?.itemType) {
+    try {
+      const itemType = session.metadata.itemType;
+      
+      if (itemType === 'beat' && session.metadata.beatId) {
+        // Fulfill beat purchase
+        const { beatPurchasesStore, getBeat } = await import('./db.tsx');
+        const beat = await getBeat(session.metadata.beatId);
+        if (beat) {
+          const purchase = {
+            id: `bp_${Date.now()}`,
+            beatId: session.metadata.beatId,
+            beatTitle: beat.title || session.metadata.beatTitle || 'Beat',
+            buyerId: session.userId,
+            buyerName: session.metadata.buyerName || session.userId,
+            sellerId: beat.producerId || session.metadata.sellerId || '',
+            sellerName: beat.producerName || session.metadata.sellerName || '',
+            price: session.amount,
+            licenseType: session.metadata.licenseType || 'basic',
+            status: 'completed',
+            createdAt: now,
+          };
+          await beatPurchasesStore.set(purchase.id, purchase);
+          console.log('Beat purchase fulfilled:', purchase.id, beat.title);
+          
+          // Notify seller via SSE
+          if (beat.producerId) {
+            try {
+              const { emitSSE } = await import('./sse-routes.tsx');
+              emitSSE(beat.producerId, 'beat_sold', { beatTitle: beat.title, price: session.amount, buyerName: purchase.buyerName });
+            } catch {}
+          }
+        }
+      }
+      
+      if (itemType === 'digital_good' && session.metadata.goodId) {
+        // Fulfill digital good purchase
+        const { digitalPurchasesStore } = await import('./db.tsx');
+        const purchase = {
+          id: `bp_${Date.now()}`,
+          goodId: session.metadata.goodId,
+          goodTitle: session.metadata.goodTitle || 'Digital Good',
+          buyerId: session.userId,
+          buyerName: session.metadata.buyerName || session.userId,
+          sellerId: session.metadata.sellerId || '',
+          price: session.amount,
+          status: 'completed',
+          createdAt: now,
+        };
+        await digitalPurchasesStore.set(purchase.id, purchase);
+        console.log('Digital good purchase fulfilled:', purchase.id);
+      }
+      
+      if (itemType === 'radio_campaign' && session.metadata.stationId) {
+        // Create radio campaign after payment
+        const { venueAdCampaignsStore } = await import('./db.tsx');
+        const campaign = {
+          id: `bp_${Date.now()}`,
+          stationId: session.metadata.stationId,
+          stationName: session.metadata.stationName || '',
+          advertiserId: session.userId,
+          packageType: session.metadata.packageType || 'standard',
+          budget: session.amount,
+          status: 'paid',
+          startDate: session.metadata.startDate || new Date().toISOString().split('T')[0],
+          endDate: session.metadata.endDate || '',
+          targetPlays: parseInt(session.metadata.targetPlays || '0'),
+          createdAt: now,
+        };
+        await venueAdCampaignsStore.set(campaign.id, campaign);
+        console.log('Radio campaign created after payment:', campaign.id);
+        
+        // Notify station owner
+        if (session.metadata.stationOwnerId) {
+          try {
+            const { emitSSE } = await import('./sse-routes.tsx');
+            emitSSE(session.metadata.stationOwnerId, 'new_radio_campaign', { budget: session.amount, packageType: campaign.packageType });
+          } catch {}
+        }
+      }
+    } catch (err) {
+      console.error('Marketplace purchase fulfillment error:', err);
     }
   }
 
@@ -235,7 +366,7 @@ checkoutRoutes.get('/session/:orderId', async (c) => {
       },
     });
   } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -260,7 +391,7 @@ checkoutRoutes.delete('/methods/:id', async (c) => {
     await deletePaymentMethod(methodId);
     return c.json({ success: true, message: 'Способ оплаты удалён' });
   } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
