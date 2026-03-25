@@ -57,7 +57,7 @@ const OPENROUTER_TO_ANTHROPIC: Record<string, string> = {
 };
 
 /** Дефолтная модель (OpenRouter формат) */
-const DEFAULT_MODEL = 'anthropic/claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'openai/gpt-4o-mini';
 
 /** Конвертация OpenRouter model → Anthropic model */
 function toAnthropicModel(orModel: string): string {
@@ -111,7 +111,7 @@ async function callOpenRouter(req: LLMRequest, apiKey: string): Promise<LLMRespo
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
       'HTTP-Referer': 'https://promo.music',
-      'X-Title': 'ПРОМО.МУЗЫКА',
+      'X-Title': 'PromoMusic',
     },
     body: JSON.stringify({
       model,
