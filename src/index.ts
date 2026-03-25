@@ -276,6 +276,7 @@ app.route('/server/api/music-gen', musicGenRoutes);
 app.route("/server/api/ecosystem", ecosystemRoutes);
 app.route("/server/api/memory", memoryRoutes);
 app.route("/server/api/feedback", feedbackRoutes);
+app.route("/server/api/promo-pipeline", promoPipelineRoutes);
 
 // 404
 app.notFound((c) => {
