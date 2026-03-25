@@ -3,3 +3,7 @@ dist/
 .env
 *.bak
 *.log
+.npm/
+__pycache__/
+*.pyc
+fix-pw.js
