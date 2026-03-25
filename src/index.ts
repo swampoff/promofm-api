@@ -67,11 +67,17 @@ import coinsRoutes from './coins-routes.tsx';
 import profileRoutes from './profile-routes.tsx';
 import statsRoutes from './stats-routes.tsx';
 import analyticsRoutes from './analytics-routes.tsx';
+import pageviewRoutes from "./pageview-routes.tsx";
 import checkoutRoutes from './checkout-routes.tsx';
 import concertModerationRoutes from './concert-moderation-routes.tsx';
 import curatorRoutes from './curator-routes.tsx';
 import securityMonitorRoutes from './security-monitor-routes.tsx';
 import musicGenRoutes from './music-gen-routes.tsx';
+import helpRoutes from "./help-routes.tsx";
+import ecosystemRoutes from "./ecosystem-routes.tsx";
+import { memoryRoutes } from "./memory-routes.tsx";
+import { feedbackRoutes } from "./feedback-routes.tsx";
+import { classifyAndLog } from "./error-classifier.ts";
 import { authLimiter, uploadLimiter, apiLimiter } from './rate-limiter.tsx';
 import { safeErrorMessage, scanForSqlInjection } from './security.tsx';
 
@@ -249,6 +255,7 @@ app.route('/server/api/charts', chartsRoutes);
 app.route('/server/api/news-agent', newsAgentRoutes);
 app.route('/server/api/content-health', contentHealthRoutes);
 app.route('/server/api/health', healthRoutes);
+app.route("/server/api/help", helpRoutes);
 app.route('/server/api/agents', agentsRoutes);
 app.route('/server/api/tracks', tracksRoutes);
 app.route('/server/api/videos', videosRoutes);
@@ -260,23 +267,30 @@ app.route('/server', sitemapRoutes);
 app.route('/server', seoRoutes);
 app.route('/server/api/stats', statsRoutes);
 app.route('/server/api/analytics', analyticsRoutes);
+app.route('/server/api/analytics', pageviewRoutes);
 app.route('/server/api/checkout', checkoutRoutes);
 app.route('/server/api/curator', curatorRoutes);
 app.route('/server/api/security', securityMonitorRoutes);
 app.route('/server/api/music-gen', musicGenRoutes);
+app.route("/server/api/ecosystem", ecosystemRoutes);
+app.route("/server/api/memory", memoryRoutes);
+app.route("/server/api/feedback", feedbackRoutes);
 
 // 404
 app.notFound((c) => {
   return c.json({ success: false, error: 'Route not found', path: c.req.path }, 404);
 });
 
-// Error handler
-app.onError((err, c) => {
+// Error handler with classification
+app.onError(async (err, c) => {
   const msg = String(err);
   if (msg.includes('connection closed') || msg.includes('ECONNRESET') || msg.includes('broken pipe')) {
     return new Response(null, { status: 499 });
   }
   console.error('Server error:', err);
+  // Classify and log error asynchronously (don't block response)
+  const userId = c.req.header('X-User-Id') || undefined;
+  classifyAndLog(err instanceof Error ? err : String(err), c.req.path, userId).catch(() => {});
   return c.json({ success: false, error: safeErrorMessage(err) }, 500);
 });
 
