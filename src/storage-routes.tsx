@@ -18,6 +18,8 @@ import {
 } from './storage-setup.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { spawnSync } from 'child_process';
+import { join } from 'path';
 
 const storage = new Hono();
 
@@ -180,12 +182,36 @@ storage.post('/upload', requireAuth, async (c) => {
       }, 500);
     }
     
+    // Auto-extract cover art from audio files uploaded to track-audio bucket
+    let coverUrl: string | undefined;
+    if (bucketName === 'track-audio' && result.url) {
+      const localPath = join('/var/www/promofm/uploads/track-audio', filename);
+      try {
+        const py = spawnSync('python3', [
+          '/opt/promofm-promo-check/extract_cover.py',
+          '--input', localPath,
+          '--output-dir', '/var/www/promofm/uploads/track-covers',
+          '--base-url', 'https://promo-music.ru/uploads/track-covers',
+        ], { timeout: 15000, encoding: 'utf8' });
+        if (py.status === 0 && py.stdout) {
+          const parsed = JSON.parse(py.stdout.trim());
+          if (parsed.cover_url) {
+            coverUrl = parsed.cover_url;
+            console.log('[storage] Cover extracted:', coverUrl);
+          }
+        }
+      } catch (e) {
+        console.warn('[storage] Cover extraction skipped:', (e as Error).message);
+      }
+    }
+
     return c.json({
       success: true,
       url: result.url,
       filename,
       size: file.size,
       type: file.type,
+      ...(coverUrl ? { cover_url: coverUrl } : {}),
     });
   } catch (error) {
     console.error('Upload error:', error);

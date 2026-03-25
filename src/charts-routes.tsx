@@ -7,6 +7,7 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { chartAggregationStore, chartSourcesStore, platformStatsStore, getTracksByUser } from './db.tsx';
+import { getPublishedTracks } from './db-typed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { isUrlSafe } from './security.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -1309,12 +1310,12 @@ charts.post('/build-new-releases', requireAdminOrKey, async (c) => {
     const tracks: any[] = [];
     const seen = new Set<string>();
 
-    // Priority 1: Our platform tracks (published, last 7 days)
-    const platformTracks = await getTracksByUser('*');
+    // Priority 1: Our platform tracks (published, last 30 days)
+    const platformTracks = await getPublishedTracks(100, 'created_at');
     if (platformTracks && platformTracks.length > 0) {
-      const weekAgo = Date.now() - 7 * 24 * 3600_000;
+      const monthAgo = Date.now() - 30 * 24 * 3600_000;
       const recent = platformTracks
-        .filter((t: any) => t.moderation_status === 'published' && new Date(t.created_at).getTime() > weekAgo)
+        .filter((t: any) => new Date(t.created_at).getTime() > monthAgo)
         .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
       for (const t of recent.slice(0, 10)) {
@@ -1330,6 +1331,10 @@ charts.post('/build-new-releases', requireAdminOrKey, async (c) => {
             isOurArtist: true,
             genre: t.genre || '',
             coverUrl: t.cover_url || '',
+            audioUrl: t.audio_url || '',
+            trackId: t.id,
+            stationsCount: 0,
+            broadcastCitiesCount: 0,
           });
         }
       }
@@ -1403,6 +1408,30 @@ charts.post('/build-new-releases', requireAdminOrKey, async (c) => {
           });
         }
       }
+    }
+
+    // Enrich platform tracks with radio detection stats
+    const platformIds = tracks.filter((t: any) => t.isOurArtist).map((t: any) => t.trackId).filter(Boolean);
+    if (platformIds.length > 0) {
+      try {
+        const { rows } = await pool.query(
+          `SELECT d.track_id,
+                  COUNT(DISTINCT d.station_id) AS stations_count,
+                  COALESCE(SUM(array_length(rs.broadcast_cities, 1)), 0) AS broadcast_cities_count
+           FROM promo_check_detections d
+           LEFT JOIN radio_stations rs ON rs.id = d.station_id
+           WHERE d.track_id = ANY($1::uuid[])
+           GROUP BY d.track_id`,
+          [platformIds]
+        );
+        for (const row of rows) {
+          const track = tracks.find((t: any) => t.trackId === row.track_id);
+          if (track) {
+            track.stationsCount = parseInt(row.stations_count) || 0;
+            track.broadcastCitiesCount = parseInt(row.broadcast_cities_count) || 0;
+          }
+        }
+      } catch (e) { /* promo_check_detections may not exist */ }
     }
 
     // Enrich tracks with Deezer 30-sec preview URLs

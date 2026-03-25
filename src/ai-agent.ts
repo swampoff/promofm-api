@@ -164,7 +164,7 @@ const app = new Hono();
 app.get('/sources', async (c) => {
   try {
     const sources = await ensureSources();
-    return c.json({ success: true, sources });
+    return c.json({ success: true, data: sources });
   } catch (error) {
     console.log('[News Pipeline] /sources error:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -175,7 +175,7 @@ app.get('/sources', async (c) => {
 app.get('/stats', async (c) => {
   try {
     const stats = await getStats();
-    return c.json({ success: true, stats });
+    return c.json({ success: true, data: stats });
   } catch (error) {
     console.log('[News Pipeline] /stats error:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -186,7 +186,7 @@ app.get('/stats', async (c) => {
 app.get('/pending', async (c) => {
   try {
     const articles = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
-    return c.json({ success: true, articles });
+    return c.json({ success: true, data: articles });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -197,7 +197,7 @@ app.get('/published', async (c) => {
   try {
     const limit = Number(c.req.query('limit') || 50);
     const articles = (await newsPipelineStore.get('news:articles:published') || []) as any[];
-    return c.json({ success: true, articles: articles.slice(0, limit) });
+    return c.json({ success: true, data: articles.slice(0, limit) });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -207,7 +207,7 @@ app.get('/published', async (c) => {
 app.get('/rejected', async (c) => {
   try {
     const articles = (await newsPipelineStore.get('news:articles:rejected') || []) as any[];
-    return c.json({ success: true, articles });
+    return c.json({ success: true, data: articles });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -218,7 +218,7 @@ app.post('/collect', async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
     const result = await collectNews(body.sourceId);
-    return c.json({ success: true, ...result });
+    return c.json({ success: true, data: { ...result, message: `Собрано ${result.collected} новостей` } });
   } catch (error) {
     console.log('[News Pipeline] /collect error:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -242,7 +242,7 @@ app.post('/:id/approve', async (c) => {
     await newsPipelineStore.set('news:articles:published', [article, ...published]);
     await newsPipelineStore.set('news:articles:pending', pending.filter((a: any) => a.id !== id));
 
-    return c.json({ success: true, article });
+    return c.json({ success: true, data: article });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -297,7 +297,7 @@ app.post('/approve-all', async (c) => {
   try {
     const pending = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
     if (pending.length === 0) {
-      return c.json({ success: true, approved: 0 });
+      return c.json({ success: true, data: { approved: 0 } });
     }
 
     const now = new Date().toISOString();
@@ -311,7 +311,7 @@ app.post('/approve-all', async (c) => {
     await newsPipelineStore.set('news:articles:published', [...approved, ...published]);
     await newsPipelineStore.set('news:articles:pending', []);
 
-    return c.json({ success: true, approved: approved.length });
+    return c.json({ success: true, data: { approved: approved.length } });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }

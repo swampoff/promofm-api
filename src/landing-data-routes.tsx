@@ -7,6 +7,7 @@
 
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
+import { pool } from './db-client.tsx';
 import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, artistAnalyticsCacheStore, beatReviewsStore, chartSourcesStore, concertAgentStore, contactFormsStore, investorInquiriesStore, newsPublicStore, paymentBalancesStore, platformStatsStore, producerServicesStore, radioAnalyticsStore, serviceOrdersByProducerStore } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
@@ -349,6 +350,32 @@ landing.get('/tracks/new', async (c) => {
     const limit = parseInt(c.req.query('limit') || '10');
     const tracks = await typed.getPublishedTracks(limit, 'created_at');
 
+    // Fetch radio detections for these tracks
+    const trackIds = tracks.map((t: any) => t.id).filter(Boolean);
+    let radioMap: Record<string, { stations: string[]; stationsCount: number; broadcastCitiesCount: number }> = {};
+    if (trackIds.length > 0) {
+      try {
+        const { rows } = await pool.query(
+          `SELECT d.track_id,
+                  array_agg(DISTINCT d.station_name ORDER BY d.station_name) AS stations,
+                  COUNT(DISTINCT d.station_id) AS stations_count,
+                  COALESCE(SUM(array_length(rs.broadcast_cities, 1)), 0) AS broadcast_cities_count
+           FROM promo_check_detections d
+           LEFT JOIN radio_stations rs ON rs.id = d.station_id
+           WHERE d.track_id = ANY($1::uuid[])
+           GROUP BY d.track_id`,
+          [trackIds]
+        );
+        for (const row of rows) {
+          radioMap[row.track_id] = {
+            stations: row.stations || [],
+            stationsCount: parseInt(row.stations_count) || 0,
+            broadcastCitiesCount: parseInt(row.broadcast_cities_count) || 0,
+          };
+        }
+      } catch (e) { /* promo_check_detections may not exist yet */ }
+    }
+
     // Map to frontend-expected format
     const mapped = tracks.map((t: any) => ({
       id: t.id,
@@ -369,6 +396,10 @@ landing.get('/tracks/new', async (c) => {
       yandex_music_url: t.yandex_music_url || '',
       youtube_url: t.youtube_url || '',
       spotify_url: t.spotify_url || '',
+      city: t.city || '',
+      radio_stations: radioMap[t.id]?.stations || [],
+      stationsCount: radioMap[t.id]?.stationsCount || 0,
+      broadcastCitiesCount: radioMap[t.id]?.broadcastCitiesCount || 0,
     }));
 
     // If no real tracks, fallback to chart data with covers

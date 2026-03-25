@@ -80,10 +80,11 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
     const today = new Date().toISOString().split('T')[0];
 
     // Fetch dynamic content in parallel
-    const [newsResult, concertsResult, videosResult] = await Promise.all([
+    const [newsResult, concertsResult, videosResult, tracksResult] = await Promise.all([
       newsPublicStore.getAll().catch(() => []),
       pool.query(`SELECT id, title, updated_at, created_at FROM concerts WHERE is_hidden = false AND is_cancelled = false ORDER BY event_date DESC`).catch(() => ({ rows: [] })),
       pool.query(`SELECT id, title, updated_at, created_at FROM videos WHERE is_hidden = false ORDER BY created_at DESC`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT id, title, artist_name, genre, updated_at, created_at FROM tracks WHERE moderation_status = 'approved' AND is_hidden = false ORDER BY created_at DESC LIMIT 500`).catch(() => ({ rows: [] })),
     ]);
 
     const publishedNews = (newsResult || []).filter((n: any) => {
@@ -92,6 +93,7 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
     });
     const concerts = concertsResult.rows || [];
     const videos = videosResult.rows || [];
+    const tracks = tracksResult.rows || [];
 
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n`;
@@ -154,10 +156,22 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
       xml += `  </url>\n`;
     }
 
+
+    // ── Tracks ──
+    for (const track of tracks) {
+      const lastmod = toW3CDate(track.updated_at || track.created_at);
+      xml += `  <url>\n`;
+      xml += `    <loc>${DOMAIN}/tracks/${escapeXml(String(track.id))}</loc>\n`;
+      xml += `    <lastmod>${lastmod}</lastmod>\n`;
+      xml += `    <changefreq>monthly</changefreq>\n`;
+      xml += `    <priority>0.6</priority>\n`;
+      xml += `  </url>\n`;
+    }
+
     xml += `</urlset>`;
 
-    const urlCount = STATIC_PAGES.length + publishedNews.length + concerts.length + videos.length;
-    console.log(`[sitemap] Generated: ${STATIC_PAGES.length} static + ${publishedNews.length} news + ${concerts.length} concerts + ${videos.length} videos = ${urlCount} URLs`);
+    const urlCount = STATIC_PAGES.length + publishedNews.length + concerts.length + videos.length + tracks.length;
+    console.log(`[sitemap] Generated: ${STATIC_PAGES.length} static + ${publishedNews.length} news + ${concerts.length} concerts + ${videos.length} videos + ${tracks.length} tracks = ${urlCount} URLs`);
 
     c.header('Content-Type', 'application/xml; charset=utf-8');
     c.header('Cache-Control', 'public, max-age=600'); // 10min cache

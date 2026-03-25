@@ -272,6 +272,7 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
     };
 
     await newsPublicStore.set(id, newsRecord);
+    pingIndexNow(id).catch(() => {});
     existingTitles.push(item.title);
     added++;
 

@@ -144,11 +144,11 @@ app.use('/*', cors({
   credentials: true,
 }));
 
-// Body size limit (10MB default)
+// Body size limit (200MB for audio uploads)
 app.use('*', async (c, next) => {
   const contentLength = c.req.header('content-length');
-  if (contentLength && parseInt(contentLength) > 10 * 1024 * 1024) {
-    return c.json({ success: false, error: 'Request body too large (max 10MB)' }, 413);
+  if (contentLength && parseInt(contentLength) > 200 * 1024 * 1024) {
+    return c.json({ success: false, error: 'Request body too large (max 200MB)' }, 413);
   }
   await next();
 });

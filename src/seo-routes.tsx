@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { newsPublicStore } from './db.tsx';
+import { pool } from './db-client.tsx';
 
 const seoRoutes = new Hono();
 const DOMAIN = 'https://promo-music.ru';
@@ -21,7 +22,7 @@ function stripHtml(s: string): string {
 }
 
 // ─── Page meta configs ───
-const PAGE_META: Record<string, { title: string; desc: string; type: string }> = {
+const PAGE_META: Record<string, { title: string; desc: string; type: string; image?: string }> = {
   '/': { title: `${SITE_NAME} — музыкальная платформа для артистов`, desc: SITE_DESC, type: 'website' },
   '/news': { title: `Новости музыки — ${SITE_NAME}`, desc: 'Свежие новости музыкальной индустрии: релизы, фестивали, интервью, аналитика', type: 'website' },
   '/charts': { title: `Музыкальные чарты TOP 50 — ${SITE_NAME}`, desc: 'Еженедельный чарт из Spotify, Apple Music, Яндекс Музыки, радиостанций и ВКонтакте', type: 'website' },
@@ -51,7 +52,7 @@ seoRoutes.get('/prerender/*', async (c) => {
       const author = article.authorName || SITE_NAME;
       const pubDate = article.publishedAt || article.createdAt || new Date().toISOString();
       
-      meta = { title: `${title} — ${SITE_NAME}`, desc, type: 'article' };
+      meta = { title: `${title} — ${SITE_NAME}`, desc, type: 'article', image: img.startsWith('/') ? `${DOMAIN}${img}` : img };
       
       jsonLd = `
     <script type="application/ld+json">
@@ -82,6 +83,59 @@ seoRoutes.get('/prerender/*', async (c) => {
       <p><time datetime="${pubDate}">${new Date(pubDate).toLocaleDateString('ru-RU')}</time> · ${esc(author)}</p>
       ${content}
     </article>`;
+    }
+  }
+
+
+  // Track page
+  if (path.startsWith('/tracks/') && path.length > 8) {
+    const trackId = path.slice(8);
+    try {
+      const { rows } = await pool.query(
+        'SELECT t.*, p.artist_name as artist_display FROM tracks t LEFT JOIN profiles p ON t.user_id::text = p.user_id WHERE t.id = $1',
+        [trackId]
+      );
+      if (rows[0]) {
+        const track = rows[0];
+        const title = track.title || 'Трек';
+        const artist = track.artist_name || track.artist_display || 'Артист';
+        const desc = (track.description || `${title} — ${artist}`).slice(0, 300);
+        const img = track.cover_url ? (track.cover_url.startsWith('/') ? `${DOMAIN}${track.cover_url}` : track.cover_url) : LOGO;
+        const genre = track.genre || '';
+        const duration = track.duration ? `PT${Math.floor(track.duration / 60)}M${Math.floor(track.duration % 60)}S` : '';
+
+        meta = { title: `${title} — ${artist} — ${SITE_NAME}`, desc, type: 'music.song', image: img };
+
+        jsonLd = `
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "MusicRecording",
+      "name": "${escJson(title)}",
+      "description": "${escJson(desc)}",
+      "image": "${escJson(img)}",
+      "byArtist": {"@type": "MusicGroup", "name": "${escJson(artist)}"},
+      ${genre ? `"genre": "${escJson(genre)}",` : ''}
+      ${duration ? `"duration": "${duration}",` : ''}
+      "url": "${DOMAIN}${path}",
+      "datePublished": "${track.created_at || new Date().toISOString()}",
+      "publisher": {
+        "@type": "Organization",
+        "name": "${SITE_NAME}",
+        "logo": {"@type": "ImageObject", "url": "${LOGO}"}
+      }
+    }
+    </script>`;
+
+        articleHtml = `
+    <article>
+      <h1>${esc(title)}</h1>
+      <p>${esc(artist)}${genre ? ' · ' + esc(genre) : ''}</p>
+      <p>${esc(desc)}</p>
+    </article>`;
+      }
+    } catch (e) {
+      console.error('[seo] Track lookup error:', e);
     }
   }
 
@@ -128,14 +182,14 @@ seoRoutes.get('/prerender/*', async (c) => {
   <meta property="og:site_name" content="${SITE_NAME}">
   <meta property="og:title" content="${esc(meta.title)}">
   <meta property="og:description" content="${esc(meta.desc)}">
-  <meta property="og:image" content="${LOGO}">
+  <meta property="og:image" content="${meta.image || LOGO}">
   <meta property="og:locale" content="ru_RU">
   
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="${esc(meta.title)}">
   <meta name="twitter:description" content="${esc(meta.desc)}">
-  <meta name="twitter:image" content="${LOGO}">
+  <meta name="twitter:image" content="${meta.image || LOGO}">
   
   ${orgLd}
   ${crumbs}
@@ -228,8 +282,112 @@ seoRoutes.get('/meta/*', async (c) => {
     }
   }
 
+
+  // Track page
+  if (path.startsWith('/tracks/') && path.length > 8) {
+    const trackId = path.slice(8);
+    try {
+      const { rows } = await pool.query(
+        'SELECT t.*, p.artist_name as artist_display FROM tracks t LEFT JOIN profiles p ON t.user_id::text = p.user_id WHERE t.id = $1',
+        [trackId]
+      );
+      if (rows[0]) {
+        const track = rows[0];
+        const title = track.title || 'Трек';
+        const artist = track.artist_name || track.artist_display || 'Артист';
+        const desc = (track.description || `${title} — ${artist}`).slice(0, 300);
+        const img = track.cover_url ? (track.cover_url.startsWith('/') ? `${DOMAIN}${track.cover_url}` : track.cover_url) : LOGO;
+        const genre = track.genre || '';
+        const duration = track.duration ? `PT${Math.floor(track.duration / 60)}M${Math.floor(track.duration % 60)}S` : '';
+
+        meta = { title: `${title} — ${artist} — ${SITE_NAME}`, desc, type: 'music.song', image: img };
+
+        jsonLd = `
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "MusicRecording",
+      "name": "${escJson(title)}",
+      "description": "${escJson(desc)}",
+      "image": "${escJson(img)}",
+      "byArtist": {"@type": "MusicGroup", "name": "${escJson(artist)}"},
+      ${genre ? `"genre": "${escJson(genre)}",` : ''}
+      ${duration ? `"duration": "${duration}",` : ''}
+      "url": "${DOMAIN}${path}",
+      "datePublished": "${track.created_at || new Date().toISOString()}",
+      "publisher": {
+        "@type": "Organization",
+        "name": "${SITE_NAME}",
+        "logo": {"@type": "ImageObject", "url": "${LOGO}"}
+      }
+    }
+    </script>`;
+
+        articleHtml = `
+    <article>
+      <h1>${esc(title)}</h1>
+      <p>${esc(artist)}${genre ? ' · ' + esc(genre) : ''}</p>
+      <p>${esc(desc)}</p>
+    </article>`;
+      }
+    } catch (e) {
+      console.error('[seo] Track lookup error:', e);
+    }
+  }
+
   if (!meta) meta = PAGE_META['/']!;
   return c.json({ title: meta.title, description: meta.desc, type: meta.type, url: `${DOMAIN}${path}` });
+});
+
+
+// ─── GET /turbo-rss.xml — Yandex Turbo Pages RSS ───
+seoRoutes.get('/turbo-rss.xml', async (c) => {
+  const allNews = await newsPublicStore.getAll();
+  const published = (allNews || [])
+    .filter((n: any) => n?.status === 'published' && n?.id)
+    .sort((a: any, b: any) => new Date(b.publishedAt || 0).getTime() - new Date(a.publishedAt || 0).getTime())
+    .slice(0, 50);
+
+  let xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:yandex="http://news.yandex.ru" xmlns:media="http://search.yahoo.com/mrss/" xmlns:turbo="http://turbo.yandex.ru" version="2.0">
+<channel>
+  <title>${SITE_NAME} — Новости музыки</title>
+  <link>${DOMAIN}/news</link>
+  <description>Свежие новости музыкальной индустрии</description>
+  <language>ru</language>
+`;
+
+  for (const n of published) {
+    const title = esc(n.title || '');
+    const link = `${DOMAIN}/news/${n.id}`;
+    const pubDate = n.publishedAt ? new Date(n.publishedAt).toUTCString() : new Date().toUTCString();
+    const author = esc(n.authorName || SITE_NAME);
+    const img = n.imageUrl || n.coverImage || n.banner || '';
+    const imgFull = img.startsWith('/') ? `${DOMAIN}${img}` : img;
+    let turboContent = (n.content || n.excerpt || '').replace(/^\s*```html\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+    turboContent = turboContent.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+
+    xml += `  <item turbo="true">
+    <title>${title}</title>
+    <link>${link}</link>
+    <pubDate>${pubDate}</pubDate>
+    <author>${author}</author>
+    <turbo:content><![CDATA[
+      <header>
+        <h1>${title}</h1>
+        <p>${author}</p>
+        ${imgFull ? `<figure><img src="${esc(imgFull)}" /></figure>` : ''}
+      </header>
+      ${turboContent}
+    ]]></turbo:content>
+  </item>
+`;
+  }
+
+  xml += `</channel>\n</rss>`;
+  c.header('Content-Type', 'application/rss+xml; charset=utf-8');
+  c.header('Cache-Control', 'public, max-age=600');
+  return c.body(xml);
 });
 
 export default seoRoutes;

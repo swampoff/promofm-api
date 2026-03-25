@@ -26,6 +26,7 @@ interface RadioProfile {
   city: string;
   country: string;
   frequency: string;
+  broadcast_cities: string[];
   formats: string[];
   listeners: string;
   status: string;
@@ -49,7 +50,7 @@ interface RadioProfile {
 }
 
 const ALLOWED_UPDATE_FIELDS = new Set([
-  'name', 'email', 'city', 'country', 'frequency', 'formats',
+  'name', 'email', 'city', 'country', 'frequency', 'broadcast_cities', 'formats',
   'description', 'founded', 'phone', 'website', 'address',
   'streamUrl', 'backupStreamUrl', 'bitrate', 'audioFormat',
   'socials', 'listeners', 'status',
@@ -66,6 +67,7 @@ function makeRadioProfile(overrides: Partial<RadioProfile> & { id: string; name:
     city: '',
     country: 'Россия',
     frequency: '',
+    broadcast_cities: [],
     formats: [],
     listeners: '0',
     status: 'Online',
