@@ -1094,6 +1094,83 @@ landing.post('/investor-inquiry', async (c) => {
   }
 });
 
+
+// ============================================
+// LEAD CAPTURE — scroll form submissions → DB + Telegram
+// ============================================
+
+landing.post('/lead', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { name, email, phone, message, page, referrer } = body;
+
+    if (!name || !email || !message) {
+      return c.json({ success: false, error: 'Имя, email и сообщение обязательны' }, 400);
+    }
+
+    // 1. Save to DB
+    const result = await pool.query(
+      `INSERT INTO leads (name, email, phone, message, page, referrer)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, created_at`,
+      [
+        sanitizeString(name).slice(0, 200),
+        sanitizeString(email).slice(0, 200),
+        phone ? sanitizeString(phone).slice(0, 50) : null,
+        sanitizeString(message).slice(0, 5000),
+        page ? sanitizeString(page).slice(0, 500) : null,
+        referrer ? sanitizeString(referrer).slice(0, 1000) : null,
+      ]
+    );
+
+    const leadId = result.rows[0]?.id;
+    const createdAt = result.rows[0]?.created_at;
+
+    // 2. Send to Telegram (fire-and-forget)
+    const tgToken = process.env.TELEGRAM_BOT_TOKEN;
+    const tgChatId = process.env.TELEGRAM_LEAD_CHAT_ID;
+
+    if (tgToken && tgChatId) {
+      const tgText = [
+        `\u{1F4E9} <b>Новая заявка с сайта</b>`,
+        ``,
+        `\u{1F464} <b>Имя:</b> ${name}`,
+        `\u{1F4E7} <b>Email:</b> ${email}`,
+        phone ? `\u{1F4F1} <b>Тел:</b> ${phone}` : `\u{1F4F1} <b>Тел:</b> не указан`,
+        ``,
+        `\u{1F4AC} <b>Вопрос:</b>`,
+        message,
+        ``,
+        `\u{1F4CD} <b>Страница:</b> ${page || '/'}`,
+        referrer ? `\u{1F517} <b>Источник:</b> ${referrer}` : `\u{1F517} <b>Источник:</b> прямой заход`,
+        `\u{1F552} ${new Date(createdAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`,
+      ].join('\n');
+
+      fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: tgChatId,
+          text: tgText,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+      })
+        .then(async (resp) => {
+          if (resp.ok) {
+            await pool.query('UPDATE leads SET telegram_sent = true WHERE id = $1', [leadId]);
+          }
+        })
+        .catch((err) => console.error('[Lead] Telegram error:', err));
+    }
+
+    return c.json({ success: true, message: 'Заявка отправлена' });
+  } catch (error) {
+    console.error('[Lead] Error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 // ============================================
 // ADMIN: SEED LIVE DATA
 // ============================================
