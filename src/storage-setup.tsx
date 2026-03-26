@@ -4,7 +4,7 @@
  * Provides file upload/delete/list/stats operations.
  */
 import { mkdirSync, existsSync, writeFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
-import { join, extname, basename } from 'node:path';
+import { join, resolve, extname, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { safeErrorMessage } from './security.tsx';
 
@@ -183,7 +183,13 @@ export async function deleteFile(
     const config = BUCKET_CONFIGS[bucketName];
     if (!config) return { success: false, error: `Unknown bucket: ${bucketName}` };
 
-    const filePath = join(UPLOADS_DIR, config.subdir, path);
+    // Path traversal protection: resolve and verify path stays within bucket
+    const baseDir = resolve(UPLOADS_DIR, config.subdir);
+    const filePath = resolve(baseDir, path);
+    if (!filePath.startsWith(baseDir)) {
+      return { success: false, error: 'Invalid path' };
+    }
+
     if (existsSync(filePath)) {
       unlinkSync(filePath);
     }
@@ -202,7 +208,10 @@ export async function listFiles(
     const config = BUCKET_CONFIGS[bucketName];
     if (!config) return { success: false, error: `Unknown bucket: ${bucketName}` };
 
-    const dir = join(UPLOADS_DIR, config.subdir, pathPrefix);
+    const baseDir = resolve(UPLOADS_DIR, config.subdir);
+    const dir = resolve(baseDir, pathPrefix);
+    // Path traversal protection
+    if (!dir.startsWith(baseDir)) return { success: false, error: 'Invalid path' };
     if (!existsSync(dir)) return { success: true, files: [] };
 
     const entries = readdirSync(dir);

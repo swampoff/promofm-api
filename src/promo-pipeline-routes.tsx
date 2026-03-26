@@ -7,6 +7,7 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { runAgent } from './ecosystem-modes.ts';
+import { requireAuth } from './auth-middleware.tsx';
 
 const promoPipelineRoutes = new Hono();
 
@@ -24,7 +25,7 @@ const STATE_AGENTS: Record<string, string> = {
 
 // ─── POST /start — Create pipeline for a track ────────────────────────────────
 
-promoPipelineRoutes.post('/start', async (c) => {
+promoPipelineRoutes.post('/start', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { trackId, genre, goal, artistId } = body;
@@ -63,7 +64,7 @@ promoPipelineRoutes.post('/start', async (c) => {
 
 // ─── POST /advance/:id — Advance pipeline to next state ──────────────────────
 
-promoPipelineRoutes.post('/advance/:id', async (c) => {
+promoPipelineRoutes.post('/advance/:id', requireAuth, async (c) => {
   const id = c.req.param('id');
   try {
     const pipeline = await pool.query(`SELECT * FROM promo_pipelines WHERE id = $1`, [id]);
@@ -127,7 +128,7 @@ promoPipelineRoutes.post('/advance/:id', async (c) => {
 
 // ─── GET /status/:id — Get pipeline status ────────────────────────────────────
 
-promoPipelineRoutes.get('/status/:id', async (c) => {
+promoPipelineRoutes.get('/status/:id', requireAuth, async (c) => {
   const id = c.req.param('id');
   try {
     const res = await pool.query(`SELECT * FROM promo_pipelines WHERE id = $1`, [id]);
@@ -154,7 +155,7 @@ promoPipelineRoutes.get('/status/:id', async (c) => {
 
 // ─── GET /list — List all pipelines ───────────────────────────────────────────
 
-promoPipelineRoutes.get('/list', async (c) => {
+promoPipelineRoutes.get('/list', requireAuth, async (c) => {
   try {
     const artistId = c.req.query('artist_id');
     const state = c.req.query('state');

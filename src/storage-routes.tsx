@@ -16,7 +16,7 @@ import {
   getBucketConfig,
   BUCKET_NAMES,
 } from './storage-setup.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { spawnSync } from 'child_process';
 import { join } from 'path';

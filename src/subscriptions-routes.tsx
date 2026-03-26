@@ -9,6 +9,7 @@ import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const subscriptions = new Hono();
 
@@ -98,8 +99,13 @@ const SUBSCRIPTION_PLANS = {
  * GET /subscriptions/:userId
  * Получить подписку пользователя
  */
-subscriptions.get('/:userId', async (c) => {
+subscriptions.get('/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  const userRole = c.get('userRole');
+  if (userId !== authUserId && userRole !== 'admin') {
+    return c.json({ success: false, error: 'Access denied' }, 403);
+  }
   
   try {
     const subscription = await getSubscription(userId);
@@ -161,12 +167,13 @@ subscriptions.get('/:userId', async (c) => {
  * POST /subscriptions/subscribe
  * Оформить/изменить подписку
  */
-subscriptions.post('/subscribe', async (c) => {
+subscriptions.post('/subscribe', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { user_id, tier, interval: requestedInterval } = body;
+    const user_id = c.get('userId');
+    const { tier, interval: requestedInterval } = body;
     
-    if (!user_id || !tier) {
+    if (!tier) {
       return c.json({ 
         success: false, 
         error: 'Missing required fields' 
@@ -323,8 +330,13 @@ subscriptions.post('/subscribe', async (c) => {
  * POST /subscriptions/:userId/cancel
  * Отменить подписку
  */
-subscriptions.post('/:userId/cancel', async (c) => {
+subscriptions.post('/:userId/cancel', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  const userRole = c.get('userRole');
+  if (userId !== authUserId && userRole !== 'admin') {
+    return c.json({ success: false, error: 'Access denied' }, 403);
+  }
   
   try {
     const subscription = await getSubscription(userId);
@@ -387,8 +399,13 @@ subscriptions.post('/:userId/cancel', async (c) => {
  * GET /subscriptions/:userId/limits
  * Получить лимиты подписки (discounts, donation_fee, coins_bonus, credits)
  */
-subscriptions.get('/:userId/limits', async (c) => {
+subscriptions.get('/:userId/limits', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  const userRole = c.get('userRole');
+  if (userId !== authUserId && userRole !== 'admin') {
+    return c.json({ success: false, error: 'Access denied' }, 403);
+  }
   
   try {
     const subscription = await getSubscription(userId);
@@ -431,8 +448,12 @@ subscriptions.get('/:userId/limits', async (c) => {
  * POST /subscriptions/:userId/check-limit
  * Проверить доступные кредиты рассылок
  */
-subscriptions.post('/:userId/check-limit', async (c) => {
+subscriptions.post('/:userId/check-limit', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  if (userId !== authUserId) {
+    return c.json({ success: false, error: 'Access denied' }, 403);
+  }
   
   try {
     const body = await c.req.json();
@@ -471,8 +492,13 @@ subscriptions.post('/:userId/check-limit', async (c) => {
  * GET /subscriptions/:userId/current
  * Получить текущую подписку пользователя
  */
-subscriptions.get('/:userId/current', async (c) => {
+subscriptions.get('/:userId/current', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  const userRole = c.get('userRole');
+  if (userId !== authUserId && userRole !== 'admin') {
+    return c.json({ success: false, error: 'Access denied' }, 403);
+  }
   
   try {
     const subscription = await getSubscription(userId);
@@ -619,8 +645,12 @@ subscriptions.get('/plans', async (c) => {
  * POST /subscriptions/:userId/change-plan
  * Изменить план подписки
  */
-subscriptions.post('/:userId/change-plan', async (c) => {
+subscriptions.post('/:userId/change-plan', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  if (userId !== authUserId) {
+    return c.json({ success: false, error: 'Access denied' }, 403);
+  }
   
   try {
     const body = await c.req.json();

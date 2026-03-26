@@ -12,7 +12,7 @@
 import { Hono } from 'hono';
 import { contentOrdersStore, contentOrdersByStatusStore, venueOrdersIndexStore } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const app = new Hono();
 
@@ -49,7 +49,7 @@ export interface ContentOrder {
 // CREATE ORDER (Venue)
 // =====================================================
 
-app.post("/orders", async (c) => {
+app.post("/orders", requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { venueId, venueName, contentType, text, style, duration, voiceType, price } = body;
@@ -209,7 +209,7 @@ app.get("/orders", async (c) => {
 // GET ORDER BY ID
 // =====================================================
 
-app.get("/orders/:id", async (c) => {
+app.get("/orders/:id", requireAuth, async (c) => {
   try {
     const orderId = c.req.param("id");
     const order = await contentOrdersStore.get(orderId);
@@ -239,7 +239,7 @@ app.get("/orders/:id", async (c) => {
 // UPDATE ORDER STATUS (Admin)
 // =====================================================
 
-app.put("/orders/:id", async (c) => {
+app.put("/orders/:id", requireAuth, async (c) => {
   try {
     const orderId = c.req.param("id");
     const body = await c.req.json();

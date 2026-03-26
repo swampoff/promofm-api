@@ -2,12 +2,13 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth } from './auth-middleware.tsx';
 
 const coinsRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
 
 // GET /coins/balance
-coinsRoutes.get('/balance', async (c) => {
+coinsRoutes.get('/balance', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const balance = await db.getCoinBalance(userId);
@@ -18,7 +19,7 @@ coinsRoutes.get('/balance', async (c) => {
 });
 
 // GET /coins/transactions
-coinsRoutes.get('/transactions', async (c) => {
+coinsRoutes.get('/transactions', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const txns = await db.getCoinTransactions(userId);
@@ -29,7 +30,7 @@ coinsRoutes.get('/transactions', async (c) => {
 });
 
 // POST /coins/transactions
-coinsRoutes.post('/transactions', async (c) => {
+coinsRoutes.post('/transactions', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const body = await c.req.json();
@@ -63,7 +64,7 @@ coinsRoutes.post('/transactions', async (c) => {
 // POST /coins/topup — create payment session to buy coins
 const COINS_PER_RUBLE = 10;
 
-coinsRoutes.post('/topup', async (c) => {
+coinsRoutes.post('/topup', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const body = await c.req.json();

@@ -7,14 +7,15 @@ import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth } from './auth-middleware.tsx';
 
 const tracksRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
 
 // GET / — Get all tracks for current user
-tracksRoutes.get('/', async (c) => {
+tracksRoutes.get('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const tracks = await typed.getTracksByUser(userId);
     return c.json({ success: true, data: tracks });
   } catch (error) {
@@ -38,9 +39,9 @@ tracksRoutes.get('/:id', async (c) => {
 });
 
 // POST / — Create new track
-tracksRoutes.post('/', async (c) => {
+tracksRoutes.post('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
 
     const track = await typed.insertTrack({

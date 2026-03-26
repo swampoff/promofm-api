@@ -28,6 +28,8 @@ import { getArtistProfile, getNotificationsByUser, publishEmailPrefsStore, publi
 import { emitSSE } from './sse-routes.tsx';
 import { safeErrorMessage } from './security.tsx';
 
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+
 const app = new Hono();
 
 // ── Types ────────────────────────────────────────────────
@@ -175,13 +177,14 @@ app.get('/pricing', (c) => {
 
 // ── POST /orders ─────────────────────────────────────────
 
-app.post('/orders', async (c) => {
+app.post('/orders', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { userId, type, title, description, plan = 'free', ...rest } = body;
+    const userId = c.get('userId');
+    const { type, title, description, plan = 'free', ...rest } = body;
 
-    if (!userId || !type || !title) {
-      return c.json({ success: false, error: 'Missing required fields: userId, type, title' }, 400);
+    if (!type || !title) {
+      return c.json({ success: false, error: 'Missing required fields: type, title' }, 400);
     }
 
     if (!['video', 'concert'].includes(type)) {
@@ -241,9 +244,9 @@ app.post('/orders', async (c) => {
 
 // ── GET /orders ──────────────────────────────────────────
 
-app.get('/orders', async (c) => {
+app.get('/orders', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('userId');
+    const userId = c.get('userId');
     if (!userId) {
       return c.json({ success: false, error: 'userId is required' }, 400);
     }
@@ -262,7 +265,7 @@ app.get('/orders', async (c) => {
 
 // ── GET /orders/:id ──────────────────────────────────────
 
-app.get('/orders/:id', async (c) => {
+app.get('/orders/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const data = await publishOrdersStore.get(id);
@@ -277,7 +280,7 @@ app.get('/orders/:id', async (c) => {
 
 // ── PUT /orders/:id ──────────────────────────────────────
 
-app.put('/orders/:id', async (c) => {
+app.put('/orders/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
@@ -311,7 +314,7 @@ app.put('/orders/:id', async (c) => {
 
 // ── PUT /orders/:id/submit ───────────────────────────────
 
-app.put('/orders/:id/submit', async (c) => {
+app.put('/orders/:id/submit', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const data = await publishOrdersStore.get(id);
@@ -340,7 +343,7 @@ app.put('/orders/:id/submit', async (c) => {
 
 // ── PUT /orders/:id/pay ──────────────────────────────────
 
-app.put('/orders/:id/pay', async (c) => {
+app.put('/orders/:id/pay', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
@@ -378,7 +381,7 @@ app.put('/orders/:id/pay', async (c) => {
 
 // ── PUT /orders/:id/status (admin) ───────────────────────
 
-app.put('/orders/:id/status', async (c) => {
+app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
@@ -465,7 +468,7 @@ app.put('/orders/:id/status', async (c) => {
 
 // ── DELETE /orders/:id ───────────────────────────────────
 
-app.delete('/orders/:id', async (c) => {
+app.delete('/orders/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const data = await publishOrdersStore.get(id);
@@ -485,7 +488,7 @@ app.delete('/orders/:id', async (c) => {
 
 // ── GET /admin/all ───────────────────────────────────────
 
-app.get('/admin/all', async (c) => {
+app.get('/admin/all', requireAuth, requireAdmin, async (c) => {
   try {
     const rawValues = await publishOrdersStore.getAll();
     const orders = rawValues
@@ -501,7 +504,7 @@ app.get('/admin/all', async (c) => {
 
 // ── GET /admin/stats ─────────────────────────────────────
 
-app.get('/admin/stats', async (c) => {
+app.get('/admin/stats', requireAuth, requireAdmin, async (c) => {
   try {
     const rawValues = await publishOrdersStore.getAll();
     const orders = rawValues
@@ -530,7 +533,7 @@ app.get('/admin/stats', async (c) => {
 
 // ── PUT /admin/batch-status ──────────────────────────────
 
-app.put('/admin/batch-status', async (c) => {
+app.put('/admin/batch-status', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { orderIds, status, comment, reason } = body;
@@ -645,9 +648,10 @@ app.put('/admin/batch-status', async (c) => {
 
 // ── GET /notifications/:userId ───────────────────────────
 
-app.get('/notifications/:userId', async (c) => {
+app.get('/notifications/:userId', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
+    if (userId !== c.get('userId')) return c.json({ success: false, error: 'Access denied' }, 403);
     const notifications = await getNotificationsByUser(userId);
     const unreadCount = notifications.filter((n: any) => !n.read).length;
 
@@ -660,9 +664,10 @@ app.get('/notifications/:userId', async (c) => {
 
 // ── PUT /notifications/:userId/read ──────────────────────
 
-app.put('/notifications/:userId/read', async (c) => {
+app.put('/notifications/:userId/read', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
+    if (userId !== c.get('userId')) return c.json({ success: false, error: 'Access denied' }, 403);
     const body = await c.req.json().catch(() => ({}));
     const { notificationIds } = body;
 
@@ -797,9 +802,10 @@ async function sendCriticalEmailNotification(
 }
 
 // GET /email-prefs/:userId
-app.get('/email-prefs/:userId', async (c) => {
+app.get('/email-prefs/:userId', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
+    if (userId !== c.get('userId')) return c.json({ success: false, error: 'Access denied' }, 403);
     const prefs = await getEmailPrefs(userId);
     return c.json({ success: true, prefs });
   } catch (error: any) {
@@ -809,9 +815,10 @@ app.get('/email-prefs/:userId', async (c) => {
 });
 
 // PUT /email-prefs/:userId
-app.put('/email-prefs/:userId', async (c) => {
+app.put('/email-prefs/:userId', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
+    if (userId !== c.get('userId')) return c.json({ success: false, error: 'Access denied' }, 403);
     const body = await c.req.json();
     const existing = await getEmailPrefs(userId);
 
@@ -873,9 +880,10 @@ app.post('/webhook/status-change', async (c) => {
 });
 
 // GET /email-log/:userId - История отправленных email
-app.get('/email-log/:userId', async (c) => {
+app.get('/email-log/:userId', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
+    if (userId !== c.get('userId')) return c.json({ success: false, error: 'Access denied' }, 403);
     const prefs = await getEmailPrefs(userId);
     const emails: any[] = (prefs.emailLog || [])
       .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());

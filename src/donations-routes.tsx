@@ -2,11 +2,12 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth } from './auth-middleware.tsx';
 
 const donationsRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
 
-donationsRoutes.get('/', async (c) => {
+donationsRoutes.get('/', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const donations = await db.getDonationsByArtist(userId);
@@ -16,7 +17,7 @@ donationsRoutes.get('/', async (c) => {
   }
 });
 
-donationsRoutes.post('/', async (c) => {
+donationsRoutes.post('/', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const body = await c.req.json();

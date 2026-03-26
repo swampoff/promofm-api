@@ -7,6 +7,8 @@
 import { Hono } from 'hono';
 import { getDjProfile, upsertDjProfile, djBookingsByDjStore, djBookingsStore, djCalendarStore, djMarketplaceIndexStore, djMixesStore, djReviewsStore } from './db.tsx';
 
+import { requireAuth } from './auth-middleware.tsx';
+
 const app = new Hono();
 
 // ═══════ SEED DATA (initial profiles) ═══════

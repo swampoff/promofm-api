@@ -8,6 +8,8 @@ import * as typed from './db-typed.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 
+import { requireAuth } from './auth-middleware.tsx';
+
 const app = new Hono();
 const FALLBACK_USER = 'anonymous';
 
@@ -43,7 +45,7 @@ app.get('/promoted', async (c) => {
 // ═══════════════════════════════════════
 
 // GET / — Get all concerts for current user
-app.get('/', async (c) => {
+app.get('/', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const concerts = await typed.getConcertsByUser(userId);
@@ -55,7 +57,7 @@ app.get('/', async (c) => {
 });
 
 // GET /:id — Get single concert
-app.get('/:id', async (c) => {
+app.get('/:id', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
     // Skip if it matches a known sub-route
@@ -71,7 +73,7 @@ app.get('/:id', async (c) => {
 });
 
 // POST / — Create new concert
-app.post('/', async (c) => {
+app.post('/', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const body = await c.req.json();
@@ -95,7 +97,7 @@ app.post('/', async (c) => {
 });
 
 // PUT /:id — Update concert
-app.put('/:id', async (c) => {
+app.put('/:id', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
     const body = await c.req.json();
@@ -112,7 +114,7 @@ app.put('/:id', async (c) => {
 });
 
 // DELETE /:id — Delete concert
-app.delete('/:id', async (c) => {
+app.delete('/:id', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
     await typed.deleteConcert(concertId);
@@ -123,7 +125,7 @@ app.delete('/:id', async (c) => {
 });
 
 // POST /:id/submit — Submit concert for moderation
-app.post('/:id/submit', async (c) => {
+app.post('/:id/submit', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
     const concert = await typed.updateConcert(concertId, {
@@ -139,7 +141,7 @@ app.post('/:id/submit', async (c) => {
 });
 
 // POST /:id/promote — Request promotion (costs coins)
-app.post('/:id/promote', async (c) => {
+app.post('/:id/promote', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
     const userId = await resolveUserId(c, FALLBACK_USER);

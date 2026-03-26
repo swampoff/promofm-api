@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import { getDbClient } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth } from './auth-middleware.tsx';
 
 const promotion = new Hono();
 
@@ -96,7 +97,7 @@ function getEmptyResponseWithMeta(tableName: string, error?: any) {
  * GET /promotion/pitching
  * Получить все питчинг-запросы текущего пользователя
  */
-promotion.get('/pitching', async (c) => {
+promotion.get('/pitching', requireAuth, async (c) => {
   try {
     const dbClient = getDbClient();
     
@@ -136,7 +137,7 @@ promotion.get('/pitching', async (c) => {
  * POST /promotion/pitching
  * Создать новую заявку на питчинг
  */
-promotion.post('/pitching', async (c) => {
+promotion.post('/pitching', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { track_title, pitch_type, target_channels, message, total_price } = body;
@@ -204,7 +205,7 @@ promotion.post('/pitching', async (c) => {
  * POST /promotion/pitching/submit
  * Отправить трек на питчинг с валидацией (старый маршрут для совместимости)
  */
-promotion.post('/pitching/submit', async (c) => {
+promotion.post('/pitching/submit', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { artist_id, track_id, track_title, pitch_type, target_channels, message, budget } = body;
@@ -301,7 +302,7 @@ promotion.post('/pitching/submit', async (c) => {
  * GET /promotion/pitching/:artistId
  * Получить все питчинг-запросы артиста с пагинацией
  */
-promotion.get('/pitching/:artistId', async (c) => {
+promotion.get('/pitching/:artistId', requireAuth, async (c) => {
   const artistId = c.req.param('artistId');
   const page = parseInt(c.req.query('page') || '1');
   const limit = parseInt(c.req.query('limit') || '20');
@@ -377,7 +378,7 @@ promotion.get('/pitching/:artistId', async (c) => {
  * POST /promotion/pitching/:requestId/response
  * Редактор отвечает на питчинг
  */
-promotion.post('/pitching/:requestId/response', async (c) => {
+promotion.post('/pitching/:requestId/response', requireAuth, async (c) => {
   const requestId = c.req.param('requestId');
   
   try {
@@ -455,7 +456,7 @@ promotion.post('/pitching/:requestId/response', async (c) => {
  * GET /promotion/pitching/:requestId/responses
  * Получить все ответы редакторов по заявке
  */
-promotion.get('/pitching/:requestId/responses', async (c) => {
+promotion.get('/pitching/:requestId/responses', requireAuth, async (c) => {
   const requestId = c.req.param('requestId');
   
   try {
@@ -483,7 +484,7 @@ promotion.get('/pitching/:requestId/responses', async (c) => {
  * PATCH /promotion/pitching/:requestId/status
  * Обновить статус заявки (после оплаты)
  */
-promotion.patch('/pitching/:requestId/status', async (c) => {
+promotion.patch('/pitching/:requestId/status', requireAuth, async (c) => {
   const requestId = c.req.param('requestId');
   
   try {
@@ -519,7 +520,7 @@ promotion.patch('/pitching/:requestId/status', async (c) => {
 // 360° PRODUCTION (Видео, дизайн, контент)
 // ============================================
 
-promotion.post('/production360/submit', async (c) => {
+promotion.post('/production360/submit', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { artist_id, service_type, project_title, description, budget, deadline } = body;
@@ -562,7 +563,7 @@ promotion.post('/production360/submit', async (c) => {
   }
 });
 
-promotion.get('/production360/:artistId', async (c) => {
+promotion.get('/production360/:artistId', requireAuth, async (c) => {
   const artistId = c.req.param('artistId');
   const page = parseInt(c.req.query('page') || '1');
   const limit = parseInt(c.req.query('limit') || '20');
@@ -620,7 +621,7 @@ promotion.get('/production360/:artistId', async (c) => {
 // MARKETING CAMPAIGNS (Маркетинг)
 // ============================================
 
-promotion.post('/marketing/submit', async (c) => {
+promotion.post('/marketing/submit', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { artist_id, campaign_name, campaign_type, budget, duration_days, platforms, target_audience } = body;
@@ -664,7 +665,7 @@ promotion.post('/marketing/submit', async (c) => {
   }
 });
 
-promotion.get('/marketing/:artistId', async (c) => {
+promotion.get('/marketing/:artistId', requireAuth, async (c) => {
   const artistId = c.req.param('artistId');
   
   try {
@@ -699,7 +700,7 @@ promotion.get('/marketing/:artistId', async (c) => {
 // MEDIA OUTREACH (PR и СМИ)
 // ============================================
 
-promotion.post('/media/submit', async (c) => {
+promotion.post('/media/submit', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { artist_id, outreach_type, topic, angle, target_media, budget } = body;
@@ -742,7 +743,7 @@ promotion.post('/media/submit', async (c) => {
   }
 });
 
-promotion.get('/media/:artistId', async (c) => {
+promotion.get('/media/:artistId', requireAuth, async (c) => {
   const artistId = c.req.param('artistId');
   
   try {
@@ -776,7 +777,7 @@ promotion.get('/media/:artistId', async (c) => {
 // EVENTS (Концерты и события)
 // ============================================
 
-promotion.post('/event/submit', async (c) => {
+promotion.post('/event/submit', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { artist_id, event_type, event_name, city, venue, event_date, budget } = body;
@@ -821,7 +822,7 @@ promotion.post('/event/submit', async (c) => {
   }
 });
 
-promotion.get('/event/:artistId', async (c) => {
+promotion.get('/event/:artistId', requireAuth, async (c) => {
   const artistId = c.req.param('artistId');
   
   try {
@@ -855,7 +856,7 @@ promotion.get('/event/:artistId', async (c) => {
 // PROMO LAB (Экспериментальное продвижение)
 // ============================================
 
-promotion.post('/promolab/submit', async (c) => {
+promotion.post('/promolab/submit', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { artist_id, experiment_name, experiment_type, hypothesis, description, budget, duration_days } = body;
@@ -900,7 +901,7 @@ promotion.post('/promolab/submit', async (c) => {
   }
 });
 
-promotion.get('/promolab/:artistId', async (c) => {
+promotion.get('/promolab/:artistId', requireAuth, async (c) => {
   const artistId = c.req.param('artistId');
   
   try {

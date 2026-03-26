@@ -150,8 +150,7 @@ async function syncSubscriptionToTransaction(userId: string, subscriptionData: a
 
 paymentsRoutes.get('/transactions', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('user_id');
-    if (!userId) return c.json({ error: 'user_id is required' }, 400);
+    const userId = c.get('userId');
     const filters = {
       type: c.req.query('type') as any,
       category: c.req.query('category') as any,
@@ -171,11 +170,12 @@ paymentsRoutes.get('/transactions', requireAuth, async (c) => {
 paymentsRoutes.post('/transactions', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { user_id, type, category, amount, description, metadata } = body;
-    if (!user_id || !type || !category || !amount || !description) {
-      return c.json({ error: 'Missing required fields: user_id, type, category, amount, description' }, 400);
+    const userId = c.get('userId');
+    const { type, category, amount, description, metadata } = body;
+    if (!type || !category || !amount || !description) {
+      return c.json({ error: 'Missing required fields: type, category, amount, description' }, 400);
     }
-    const transactionId = await createTransaction(user_id, type, category, amount, description, metadata);
+    const transactionId = await createTransaction(userId, type, category, amount, description, metadata);
     return c.json({ success: true, data: { transaction_id: transactionId } });
   } catch (error: any) {
     console.error('Error in POST /payments/transactions:', error);
@@ -189,8 +189,7 @@ paymentsRoutes.post('/transactions', requireAuth, async (c) => {
 
 paymentsRoutes.get('/balance', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('user_id');
-    if (!userId) return c.json({ error: 'user_id is required' }, 400);
+    const userId = c.get('userId');
     const balance = await getUserBalance(userId);
     return c.json({ success: true, data: balance });
   } catch (error: any) {
@@ -201,8 +200,7 @@ paymentsRoutes.get('/balance', requireAuth, async (c) => {
 
 paymentsRoutes.get('/stats', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('user_id');
-    if (!userId) return c.json({ error: 'user_id is required' }, 400);
+    const userId = c.get('userId');
     const stats = await getUserStats(userId);
     return c.json({ success: true, data: stats });
   } catch (error: any) {
@@ -213,10 +211,10 @@ paymentsRoutes.get('/stats', requireAuth, async (c) => {
 
 paymentsRoutes.get('/category-stats', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('user_id');
+    const userId = c.get('userId');
     const type = c.req.query('type') as any;
     const period = (c.req.query('period') || 'month') as 'month' | 'year' | 'all';
-    if (!userId || !type) return c.json({ error: 'user_id and type are required' }, 400);
+    if (!type) return c.json({ error: 'type is required' }, 400);
     const stats = await getCategoryStats(userId, type, period);
     return c.json({ success: true, data: stats });
   } catch (error: any) {
@@ -231,8 +229,7 @@ paymentsRoutes.get('/category-stats', requireAuth, async (c) => {
 
 paymentsRoutes.get('/payment-methods', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('user_id');
-    if (!userId) return c.json({ error: 'user_id is required' }, 400);
+    const userId = c.get('userId');
     const methods = await getPaymentMethodsList(userId);
     return c.json({ success: true, data: methods });
   } catch (error: any) {
@@ -244,9 +241,10 @@ paymentsRoutes.get('/payment-methods', requireAuth, async (c) => {
 paymentsRoutes.post('/payment-methods', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { user_id, ...methodData } = body;
-    if (!user_id || !methodData.type) return c.json({ error: 'user_id and type are required' }, 400);
-    const method = await addPaymentMethod(user_id, methodData);
+    const userId = c.get('userId');
+    const methodData = body;
+    if (!methodData.type) return c.json({ error: 'type is required' }, 400);
+    const method = await addPaymentMethod(userId, methodData);
     return c.json({ success: true, data: method });
   } catch (error: any) {
     console.error('Error in POST /payments/payment-methods:', error);
@@ -260,9 +258,8 @@ paymentsRoutes.post('/payment-methods', requireAuth, async (c) => {
 
 paymentsRoutes.get('/withdrawals', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('user_id');
+    const userId = c.get('userId');
     const status = c.req.query('status') as any;
-    if (!userId) return c.json({ error: 'user_id is required' }, 400);
     const requests = await getWithdrawRequests(userId, status);
     return c.json({ success: true, data: requests });
   } catch (error: any) {
@@ -274,11 +271,12 @@ paymentsRoutes.get('/withdrawals', requireAuth, async (c) => {
 paymentsRoutes.post('/withdrawals', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { user_id, amount, payment_method_id } = body;
-    if (!user_id || !amount || !payment_method_id) {
-      return c.json({ error: 'Missing required fields: user_id, amount, payment_method_id' }, 400);
+    const userId = c.get('userId');
+    const { amount, payment_method_id } = body;
+    if (!amount || !payment_method_id) {
+      return c.json({ error: 'Missing required fields: amount, payment_method_id' }, 400);
     }
-    const requestId = await createWithdrawRequest(user_id, amount, payment_method_id);
+    const requestId = await createWithdrawRequest(userId, amount, payment_method_id);
     return c.json({ success: true, data: { request_id: requestId } });
   } catch (error: any) {
     console.error('Error in POST /payments/withdrawals:', error);
@@ -293,9 +291,10 @@ paymentsRoutes.post('/withdrawals', requireAuth, async (c) => {
 paymentsRoutes.post('/sync/donation', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { user_id, donation_data } = body;
-    if (!user_id || !donation_data) return c.json({ error: 'user_id and donation_data are required' }, 400);
-    const transactionId = await syncDonationToTransaction(user_id, donation_data);
+    const userId = c.get('userId');
+    const { donation_data } = body;
+    if (!donation_data) return c.json({ error: 'donation_data is required' }, 400);
+    const transactionId = await syncDonationToTransaction(userId, donation_data);
     return c.json({ success: true, data: { transaction_id: transactionId } });
   } catch (error: any) {
     console.error('Error in POST /payments/sync/donation:', error);
@@ -306,9 +305,10 @@ paymentsRoutes.post('/sync/donation', requireAuth, async (c) => {
 paymentsRoutes.post('/sync/subscription', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { user_id, subscription_data } = body;
-    if (!user_id || !subscription_data) return c.json({ error: 'user_id and subscription_data are required' }, 400);
-    const transactionId = await syncSubscriptionToTransaction(user_id, subscription_data);
+    const userId = c.get('userId');
+    const { subscription_data } = body;
+    if (!subscription_data) return c.json({ error: 'subscription_data is required' }, 400);
+    const transactionId = await syncSubscriptionToTransaction(userId, subscription_data);
     return c.json({ success: true, data: { transaction_id: transactionId } });
   } catch (error: any) {
     console.error('Error in POST /payments/sync/subscription:', error);

@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth } from './auth-middleware.tsx';
 
 const notifications = new Hono();
 
@@ -50,7 +51,7 @@ export interface NotificationSettings {
 }
 
 // Получить все уведомления пользователя
-notifications.get('/user/:userId', async (c) => {
+notifications.get('/user/:userId', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
     const notifs = await db.getNotificationsByUser(userId);
@@ -71,7 +72,7 @@ notifications.get('/user/:userId', async (c) => {
 });
 
 // Получить настройки уведомлений
-notifications.get('/settings/:userId', async (c) => {
+notifications.get('/settings/:userId', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
     const settings = await db.getNotificationSettings(userId);
@@ -102,7 +103,7 @@ notifications.get('/settings/:userId', async (c) => {
 });
 
 // Обновить настройки уведомлений
-notifications.put('/settings/:userId', async (c) => {
+notifications.put('/settings/:userId', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
     const body = await c.req.json();
@@ -130,7 +131,7 @@ notifications.put('/settings/:userId', async (c) => {
 });
 
 // Создать напоминание о концерте
-notifications.post('/reminder', async (c) => {
+notifications.post('/reminder', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
 
@@ -161,7 +162,7 @@ notifications.post('/reminder', async (c) => {
 });
 
 // Автоматическое создание напоминаний для концерта
-notifications.post('/auto-reminders/:concertId', async (c) => {
+notifications.post('/auto-reminders/:concertId', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('concertId');
     const body = await c.req.json();
@@ -214,7 +215,7 @@ notifications.post('/auto-reminders/:concertId', async (c) => {
 });
 
 // Получить email-кампании артиста
-notifications.get('/campaigns/:artistId', async (c) => {
+notifications.get('/campaigns/:artistId', requireAuth, async (c) => {
   try {
     const artistId = c.req.param('artistId');
     const campaigns = await db.getEmailCampaigns(artistId);
@@ -235,7 +236,7 @@ notifications.get('/campaigns/:artistId', async (c) => {
 });
 
 // Создать email-кампанию
-notifications.post('/campaigns', async (c) => {
+notifications.post('/campaigns', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
 
@@ -264,7 +265,7 @@ notifications.post('/campaigns', async (c) => {
 });
 
 // Отправить email-кампанию
-notifications.post('/campaigns/:campaignId/send', async (c) => {
+notifications.post('/campaigns/:campaignId/send', requireAuth, async (c) => {
   try {
     const campaignId = c.req.param('campaignId');
     const body = await c.req.json();

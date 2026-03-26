@@ -24,6 +24,8 @@ import * as db from './db.tsx';
 import { collabMessagesStore, collabOffersByArtistStore, collabOffersByProducerStore } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
+import { requireAuth } from './auth-middleware.tsx';
+
 const app = new Hono();
 
 interface CollabOffer {
@@ -68,13 +70,14 @@ function genId(prefix: string): string {
 
 // ── POST /offers - Создать предложение ──
 
-app.post('/offers', async (c) => {
+app.post('/offers', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { producerId, producerName, artistId, artistName, type, title, description, price, audioPreviewUrl, bpm, key: musicKey, genre, tags, deadline } = body;
+    const producerId = c.get('userId'); // IDOR fix: from JWT
+    const { producerName, artistId, artistName, type, title, description, price, audioPreviewUrl, bpm, key: musicKey, genre, tags, deadline } = body;
 
-    if (!producerId || !artistId || !title) {
-      return c.json({ success: false, error: 'producerId, artistId, title required' }, 400);
+    if (!artistId || !title) {
+      return c.json({ success: false, error: 'artistId, title required' }, 400);
     }
 
     const offer: CollabOffer = {
@@ -133,7 +136,7 @@ app.post('/offers', async (c) => {
 
 // ── GET /offers/artist/:id ──
 
-app.get('/offers/artist/:id', async (c) => {
+app.get('/offers/artist/:id', requireAuth, async (c) => {
   const artistId = c.req.param('id');
   try {
     const offers: CollabOffer[] = (await collabOffersByArtistStore.get(artistId)) || [];
@@ -145,7 +148,7 @@ app.get('/offers/artist/:id', async (c) => {
 
 // ── GET /offers/producer/:id ──
 
-app.get('/offers/producer/:id', async (c) => {
+app.get('/offers/producer/:id', requireAuth, async (c) => {
   const producerId = c.req.param('id');
   try {
     const offers: CollabOffer[] = (await collabOffersByProducerStore.get(producerId)) || [];
@@ -215,7 +218,7 @@ app.put('/offers/:id/respond', async (c) => {
 
 // ── GET /chat/:offerId ──
 
-app.get('/chat/:offerId', async (c) => {
+app.get('/chat/:offerId', requireAuth, async (c) => {
   const offerId = c.req.param('offerId');
   try {
     const messages: CollabMessage[] = (await collabMessagesStore.get(offerId)) || [];
@@ -286,7 +289,7 @@ app.post('/chat/:offerId', async (c) => {
 
 // ── GET /stats/:userId ──
 
-app.get('/stats/:userId', async (c) => {
+app.get('/stats/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
   try {
     const asArtist: CollabOffer[] = (await collabOffersByArtistStore.get(userId)) || [];

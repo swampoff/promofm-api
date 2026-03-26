@@ -12,7 +12,7 @@
 
 import { Hono } from 'hono';
 import { createCoinTransactionKv, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, paymentTransactionsStore, paymentWebhookLogsStore } from './db.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
+import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import {
   getGateway,
@@ -24,7 +24,7 @@ import {
 } from './payment-gateway.tsx';
 
 const checkoutRoutes = new Hono();
-const FALLBACK_USER = 'anonymous';
+
 
 // ── Helper: process successful payment ──
 
@@ -270,9 +270,9 @@ async function processPaymentCanceled(session: PaymentSession) {
 
 // ── POST /create-session ──
 
-checkoutRoutes.post('/create-session', async (c) => {
+checkoutRoutes.post('/create-session', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
 
     const { gateway, amount, type, description, returnUrl, savePaymentMethod, metadata } = body;
@@ -372,9 +372,9 @@ checkoutRoutes.get('/session/:orderId', async (c) => {
 
 // ── GET /methods ──
 
-checkoutRoutes.get('/methods', async (c) => {
+checkoutRoutes.get('/methods', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const methods = await getPaymentMethods(userId);
     return c.json({ success: true, data: methods || [] });
   } catch (error: any) {
@@ -384,10 +384,10 @@ checkoutRoutes.get('/methods', async (c) => {
 
 // ── DELETE /methods/:id ──
 
-checkoutRoutes.delete('/methods/:id', async (c) => {
+checkoutRoutes.delete('/methods/:id', requireAuth, async (c) => {
   try {
     const methodId = c.req.param('id');
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     await deletePaymentMethod(methodId);
     return c.json({ success: true, message: 'Способ оплаты удалён' });
   } catch (error: any) {

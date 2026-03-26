@@ -19,13 +19,17 @@ import { Hono } from 'hono';
 import { notificationCampaignsStore, getNotificationCampaignsByUser, upsertNotificationCampaign } from './db.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const marketing = new Hono();
 
 // ── GET /campaigns/:userId - кампании пользователя ──
 
-marketing.get('/campaigns/:userId', async (c) => {
+marketing.get('/campaigns/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  const userRole = c.get('userRole');
+  if (userId !== authUserId && userRole !== 'admin') return c.json({ success: false, error: 'Access denied' }, 403);
   try {
     const campaigns = await getNotificationCampaignsByUser(userId);
     const valid = (campaigns || []).filter(Boolean);
@@ -40,7 +44,7 @@ marketing.get('/campaigns/:userId', async (c) => {
 
 // ── GET /campaigns/all - все кампании (админ) ──
 
-marketing.get('/campaigns/all', async (c) => {
+marketing.get('/campaigns/all', requireAuth, requireAdmin, async (c) => {
   try {
     const campaigns = await notificationCampaignsStore.getAll();
     const valid = (campaigns || []).filter(Boolean);
@@ -54,7 +58,7 @@ marketing.get('/campaigns/all', async (c) => {
 
 // ── GET /campaigns/pending - ожидающие модерации (админ) ──
 
-marketing.get('/campaigns/pending', async (c) => {
+marketing.get('/campaigns/pending', requireAuth, requireAdmin, async (c) => {
   try {
     const campaigns = await notificationCampaignsStore.getAll();
     const pending = (campaigns || []).filter((c: any) => c && c.status === 'pending_review');
@@ -68,7 +72,7 @@ marketing.get('/campaigns/pending', async (c) => {
 
 // ── GET /campaigns/detail/:campaignId ──
 
-marketing.get('/campaigns/detail/:campaignId', async (c) => {
+marketing.get('/campaigns/detail/:campaignId', requireAuth, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
     const campaign = await notificationCampaignsStore.get(campaignId);
@@ -81,7 +85,7 @@ marketing.get('/campaigns/detail/:campaignId', async (c) => {
 
 // ── POST /campaigns - создать кампанию (артист) ──
 
-marketing.post('/campaigns', async (c) => {
+marketing.post('/campaigns', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     if (!body.campaign_name || !body.user_id) {
@@ -93,7 +97,7 @@ marketing.post('/campaigns', async (c) => {
     const campaign = {
       id: campaignId,
       campaign_name: body.campaign_name,
-      user_id: body.user_id,
+      user_id: authUserId,
       artist_name: body.artist_name || 'Артист',
       description: body.description || '',
       content_ids: body.content_ids || [],
@@ -145,7 +149,7 @@ marketing.post('/campaigns', async (c) => {
 
 // ── PATCH /campaigns/:campaignId ──
 
-marketing.patch('/campaigns/:campaignId', async (c) => {
+marketing.patch('/campaigns/:campaignId', requireAuth, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
     const body = await c.req.json();
@@ -162,7 +166,7 @@ marketing.patch('/campaigns/:campaignId', async (c) => {
 
 // ── DELETE /campaigns/:campaignId ──
 
-marketing.delete('/campaigns/:campaignId', async (c) => {
+marketing.delete('/campaigns/:campaignId', requireAuth, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
     const campaign = await notificationCampaignsStore.get(campaignId) as any;
@@ -178,7 +182,7 @@ marketing.delete('/campaigns/:campaignId', async (c) => {
 
 // ── POST /campaigns/:campaignId/approve - одобрить (админ) ──
 
-marketing.post('/campaigns/:campaignId/approve', async (c) => {
+marketing.post('/campaigns/:campaignId/approve', requireAuth, requireAdmin, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
     const body = await c.req.json().catch(() => ({}));
@@ -215,7 +219,7 @@ marketing.post('/campaigns/:campaignId/approve', async (c) => {
 
 // ── POST /campaigns/:campaignId/reject - отклонить (админ) ──
 
-marketing.post('/campaigns/:campaignId/reject', async (c) => {
+marketing.post('/campaigns/:campaignId/reject', requireAuth, requireAdmin, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
     const body = await c.req.json().catch(() => ({}));
@@ -252,7 +256,7 @@ marketing.post('/campaigns/:campaignId/reject', async (c) => {
 
 // ── POST /campaigns/:campaignId/launch - запустить кампанию (админ) ──
 
-marketing.post('/campaigns/:campaignId/launch', async (c) => {
+marketing.post('/campaigns/:campaignId/launch', requireAuth, requireAdmin, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
     const campaign = await notificationCampaignsStore.get(campaignId) as any;

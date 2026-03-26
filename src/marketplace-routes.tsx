@@ -55,6 +55,8 @@ import { deleteBeat, getBeat, getBeatReview, getBeats, upsertBeat, upsertBeatRev
 import { emitSSE } from './sse-routes.tsx';
 import { getRevenueStats, recordRevenue } from './platform-revenue.tsx';
 
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+
 const app = new Hono();
 
 // ═══════════════════════════════════════
@@ -257,9 +259,9 @@ app.get('/beats/stats', async (c) => {
 /**
  * GET /beats/favorites - Избранные биты пользователя
  */
-app.get('/beats/favorites', async (c) => {
+app.get('/beats/favorites', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('userId');
+    const userId = c.get('userId'); // IDOR fix: from JWT
     if (!userId) return c.json({ success: false, error: 'userId required' }, 400);
 
     const raw = await beatFavoritesStore.get(userId);
@@ -274,9 +276,9 @@ app.get('/beats/favorites', async (c) => {
 /**
  * GET /beats/purchases - Покупки пользователя
  */
-app.get('/beats/purchases', async (c) => {
+app.get('/beats/purchases', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('userId');
+    const userId = c.get('userId'); // IDOR fix: from JWT
     if (!userId) return c.json({ success: false, error: 'userId required' }, 400);
 
     const raw = await beatPurchasesByUserStore.get(userId);
@@ -319,7 +321,7 @@ app.get('/beats/:id', async (c) => {
 /**
  * POST /beats - Загрузить новый бит (для продюсеров)
  */
-app.post('/beats', async (c) => {
+app.post('/beats', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { producerId, producer, title, genre, bpm, key, tags, duration, price, licenseTypes } = body;
@@ -375,7 +377,7 @@ app.post('/beats', async (c) => {
 /**
  * PUT /beats/:id - Обновить бит
  */
-app.put('/beats/:id', async (c) => {
+app.put('/beats/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
@@ -409,7 +411,7 @@ app.put('/beats/:id', async (c) => {
 /**
  * DELETE /beats/:id - Удалить бит
  */
-app.delete('/beats/:id', async (c) => {
+app.delete('/beats/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const producerId = c.req.query('producerId');
@@ -446,7 +448,7 @@ app.delete('/beats/:id', async (c) => {
  * POST /beats/:id/purchase - Купить бит
  * Body: { buyerId, buyerName, licenseType: 'basic'|'premium'|'exclusive' }
  */
-app.post('/beats/:id/purchase', async (c) => {
+app.post('/beats/:id/purchase', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
@@ -562,7 +564,7 @@ app.post('/beats/:id/purchase', async (c) => {
  * POST /beats/:id/favorite - Toggle избранное
  * Body: { userId }
  */
-app.post('/beats/:id/favorite', async (c) => {
+app.post('/beats/:id/favorite', requireAuth, async (c) => {
   try {
     const beatId = c.req.param('id');
     const body = await c.req.json();
@@ -662,7 +664,7 @@ app.get('/beats/:id/reviews', async (c) => {
  * Body: { userId, userName, rating (1-5), title?, text, licenseType? }
  * Валидация: пользователь должен иметь покупку этого бита
  */
-app.post('/beats/:id/review', async (c) => {
+app.post('/beats/:id/review', requireAuth, async (c) => {
   try {
     const beatId = c.req.param('id');
     const body = await c.req.json();
@@ -786,7 +788,7 @@ app.post('/beats/:id/review', async (c) => {
  * POST /beats/:id/reviews/:reviewId/helpful - Отметить отзыв как полезный
  * Body: { userId }
  */
-app.post('/beats/:id/reviews/:reviewId/helpful', async (c) => {
+app.post('/beats/:id/reviews/:reviewId/helpful', requireAuth, async (c) => {
   try {
     const beatId = c.req.param('id');
     const reviewId = c.req.param('reviewId');
@@ -935,7 +937,7 @@ app.get('/services/:id', async (c) => {
  * POST /services/:id/order - Заказать услугу
  * Body: { clientId, clientName, message, details, urgency }
  */
-app.post('/services/:id/order', async (c) => {
+app.post('/services/:id/order', requireAuth, async (c) => {
   try {
     const serviceId = c.req.param('id');
     const body = await c.req.json();
@@ -1026,9 +1028,9 @@ app.post('/services/:id/order', async (c) => {
  * GET /orders - Заказы пользователя (как клиент или продюсер)
  * Query: userId, role ('client'|'producer')
  */
-app.get('/orders', async (c) => {
+app.get('/orders', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('userId');
+    const userId = c.get('userId'); // IDOR fix: from JWT
     const role = c.req.query('role') || 'client';
 
     if (!userId) return c.json({ success: false, error: 'userId required' }, 400);
@@ -1056,7 +1058,7 @@ app.get('/orders', async (c) => {
  * Body: { producerId, status, progress?, message? }
  * Статусы: pending -> accepted -> in_progress -> revision -> completed
  */
-app.put('/orders/:id/status', async (c) => {
+app.put('/orders/:id/status', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -1163,7 +1165,7 @@ app.put('/orders/:id/status', async (c) => {
  * POST /orders/:id/contract - Создать контракт с этапами из принятого заказа
  * Body: { milestones: [{ title, description, amount, dueDate }] }
  */
-app.post('/orders/:id/contract', async (c) => {
+app.post('/orders/:id/contract', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -1236,7 +1238,7 @@ app.post('/orders/:id/contract', async (c) => {
 /**
  * GET /contracts/:id - Детали контракта по orderId
  */
-app.get('/contracts/:id', async (c) => {
+app.get('/contracts/:id', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const raw = await contractsStore.get(orderId);
@@ -1260,7 +1262,7 @@ app.get('/contracts/:id', async (c) => {
  *   submitted -> revision (client: revision)
  *   revision -> in_progress (producer: start)
  */
-app.put('/contracts/:id/milestones/:mid', async (c) => {
+app.put('/contracts/:id/milestones/:mid', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const mid = c.req.param('mid');
@@ -1495,7 +1497,7 @@ app.get('/digital-goods/:id', async (c) => {
 /**
  * POST /digital-goods - Создать цифровой товар
  */
-app.post('/digital-goods', async (c) => {
+app.post('/digital-goods', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { producerId, producer, title, category, description, price, tags, fileSize, format } = body;
@@ -1535,7 +1537,7 @@ app.post('/digital-goods', async (c) => {
  * POST /digital-goods/:id/purchase - Купить цифровой товар
  * Body: { buyerId, buyerName }
  */
-app.post('/digital-goods/:id/purchase', async (c) => {
+app.post('/digital-goods/:id/purchase', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
@@ -1630,7 +1632,7 @@ app.post('/digital-goods/:id/purchase', async (c) => {
  * Источник: platform:revenue:log (единый реестр из platform-revenue.tsx)
  * Query: channel (marketplace_beat|dj_booking|track_test|...), limit, offset
  */
-app.get('/admin/transactions', async (c) => {
+app.get('/admin/transactions', requireAuth, requireAdmin, async (c) => {
   try {
     const raw = await platformRevenueLogStore.get('singleton');
     let txs: any[] = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
@@ -1679,7 +1681,7 @@ app.get('/admin/transactions', async (c) => {
  * GET /admin/stats - Единая статистика ВСЕХ доходов платформы
  * Данные из platform:revenue:log (все каналы: маркетплейс, букинг, тест трека и т.д.)
  */
-app.get('/admin/stats', async (c) => {
+app.get('/admin/stats', requireAuth, requireAdmin, async (c) => {
   try {
     const stats = await getRevenueStats();
     return c.json({ success: true, data: stats });

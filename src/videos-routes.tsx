@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth } from './auth-middleware.tsx';
 
 const videosRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
@@ -22,7 +23,7 @@ videosRoutes.get('/newClips', async (c) => {
   }
 });
 
-videosRoutes.get('/', async (c) => {
+videosRoutes.get('/', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const videos = await db.getVideosByUser(userId);
@@ -32,7 +33,7 @@ videosRoutes.get('/', async (c) => {
   }
 });
 
-videosRoutes.post('/', async (c) => {
+videosRoutes.post('/', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const body = await c.req.json();

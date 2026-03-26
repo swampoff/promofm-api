@@ -8,6 +8,7 @@ import * as db from './db.tsx';
 import { agentQueueStore, agentSessionsIndexStore, agentSessionsStore } from './db.tsx';
 import { callLLM, getLLMStatus } from './llm-router.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const agentsRoutes = new Hono();
 
@@ -126,7 +127,7 @@ async function updateSessionIndex(id: string, title: string, createdAt: string) 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 // POST /discuss - новая дискуссия агентов
-agentsRoutes.post('/discuss', async (c) => {
+agentsRoutes.post('/discuss', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const task: string = body.task?.trim();
@@ -165,7 +166,7 @@ agentsRoutes.post('/discuss', async (c) => {
 });
 
 // POST /sessions/:id/continue - продолжение дискуссии
-agentsRoutes.post('/sessions/:id/continue', async (c) => {
+agentsRoutes.post('/sessions/:id/continue', requireAuth, async (c) => {
   try {
     const { id } = c.req.param();
     const body = await c.req.json();
@@ -205,7 +206,7 @@ agentsRoutes.post('/sessions/:id/continue', async (c) => {
 });
 
 // GET /sessions - список сессий
-agentsRoutes.get('/sessions', async (c) => {
+agentsRoutes.get('/sessions', requireAuth, async (c) => {
   try {
     const idx = (await agentSessionsIndexStore.get('singleton') as any) || [];
     return c.json({ success: true, sessions: idx });
@@ -215,7 +216,7 @@ agentsRoutes.get('/sessions', async (c) => {
 });
 
 // GET /sessions/:id - конкретная сессия
-agentsRoutes.get('/sessions/:id', async (c) => {
+agentsRoutes.get('/sessions/:id', requireAuth, async (c) => {
   try {
     const { id } = c.req.param();
     const session = await agentSessionsStore.get(id);
@@ -227,7 +228,7 @@ agentsRoutes.get('/sessions/:id', async (c) => {
 });
 
 // DELETE /sessions/:id - удалить сессию
-agentsRoutes.delete('/sessions/:id', async (c) => {
+agentsRoutes.delete('/sessions/:id', requireAuth, async (c) => {
   try {
     const { id } = c.req.param();
     await agentSessionsStore.del(id);
@@ -240,7 +241,7 @@ agentsRoutes.delete('/sessions/:id', async (c) => {
 });
 
 // GET /queue - очередь задач
-agentsRoutes.get('/queue', async (c) => {
+agentsRoutes.get('/queue', requireAuth, async (c) => {
   try {
     const queue = (await agentQueueStore.get('singleton') as any) || [];
     return c.json({ success: true, queue });
@@ -250,7 +251,7 @@ agentsRoutes.get('/queue', async (c) => {
 });
 
 // POST /queue - добавить задачу в очередь
-agentsRoutes.post('/queue', async (c) => {
+agentsRoutes.post('/queue', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const queue: QueueItem[] = (await agentQueueStore.get('singleton') as any) || [];
@@ -271,7 +272,7 @@ agentsRoutes.post('/queue', async (c) => {
 });
 
 // POST /queue/process - обработать одну или все задачи из очереди
-agentsRoutes.post('/queue/process', async (c) => {
+agentsRoutes.post('/queue/process', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const processAll: boolean = body.all ?? false;
@@ -325,7 +326,7 @@ agentsRoutes.post('/queue/process', async (c) => {
 });
 
 // DELETE /queue/:id - удалить из очереди
-agentsRoutes.delete('/queue/:id', async (c) => {
+agentsRoutes.delete('/queue/:id', requireAuth, async (c) => {
   try {
     const { id } = c.req.param();
     const queue: any[] = (await agentQueueStore.get('singleton') as any) || [];

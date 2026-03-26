@@ -8,12 +8,13 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { classifyAndLog } from './error-classifier.ts';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const feedbackRoutes = new Hono();
 
 // ─── POST /report ─────────────────────────────────────────────────────────────
 
-feedbackRoutes.post('/report', async (c) => {
+feedbackRoutes.post('/report', requireAuth, async (c) => {
   try {
     const body = await c.req.json().catch(() => null);
     if (!body || !body.message) {
@@ -63,7 +64,7 @@ feedbackRoutes.post('/report', async (c) => {
 
 // ─── GET /reports ─────────────────────────────────────────────────────────────
 
-feedbackRoutes.get('/reports', async (c) => {
+feedbackRoutes.get('/reports', requireAuth, requireAdmin, async (c) => {
   try {
     const type = c.req.query('type');
     const resolved = c.req.query('resolved');
@@ -110,7 +111,7 @@ feedbackRoutes.get('/reports', async (c) => {
 
 // ─── PUT /reports/:id/resolve ─────────────────────────────────────────────────
 
-feedbackRoutes.put('/reports/:id/resolve', async (c) => {
+feedbackRoutes.put('/reports/:id/resolve', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const body = await c.req.json().catch(() => ({}));

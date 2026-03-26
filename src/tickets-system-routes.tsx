@@ -98,8 +98,8 @@ app.get('/:ticketId', requireAuth, async (c) => {
 app.post('/create', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
+    const user_id = c.get('userId'); // IDOR fix: from JWT
     const {
-      user_id,
       subject,
       description,
       category,
@@ -107,7 +107,7 @@ app.post('/create', requireAuth, async (c) => {
       attachments,
     } = body;
 
-    if (!user_id || !subject || !description || !category) {
+    if (!subject || !description || !category) {
       return c.json({
         success: false,
         error: 'Missing required fields'
@@ -334,15 +334,15 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
 
   try {
     const body = await c.req.json();
+    const sender_id = c.get('userId'); // IDOR fix: from JWT
     const {
-      sender_id,
       sender_type, // 'user' | 'support' | 'admin'
       message,
       attachments,
       internal_note,
     } = body;
 
-    if (!sender_id || !sender_type || !message) {
+    if (!sender_type || !message) {
       return c.json({
         success: false,
         error: 'Missing required fields'
