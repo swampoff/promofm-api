@@ -27,6 +27,7 @@ const PAGE_META: Record<string, { title: string; desc: string; type: string; ima
   '/news': { title: `Новости музыки — ${SITE_NAME}`, desc: 'Свежие новости музыкальной индустрии: релизы, фестивали, интервью, аналитика', type: 'website' },
   '/charts': { title: `Музыкальные чарты TOP 50 — ${SITE_NAME}`, desc: 'Еженедельный чарт из Spotify, Apple Music, Яндекс Музыки, радиостанций и ВКонтакте', type: 'website' },
   '/concerts': { title: `Концерты и фестивали — ${SITE_NAME}`, desc: 'Афиша концертов и музыкальных событий', type: 'website' },
+  '/airplay-monitoring': { title: `Мониторинг эфира радиостанций — ${SITE_NAME}`, desc: 'Узнайте, когда ваш трек звучит на радио. Автоматический мониторинг 500+ радиостанций России с детальной статистикой ротаций', type: 'website' },
   '/promo-air': { title: `ПРОМО.ЭИР — радиоротации — ${SITE_NAME}`, desc: 'Попади в ротацию радиостанций с ПРОМО.ЭИР', type: 'website' },
   '/promo-lab': { title: `ПРОМО.ЛАБ — оценка треков — ${SITE_NAME}`, desc: 'Профессиональная оценка треков от экспертов индустрии', type: 'website' },
   '/promo-guide': { title: `ПРОМО.ГИД — руководства — ${SITE_NAME}`, desc: 'Гайды по продвижению музыки и развитию карьеры артиста', type: 'website' },
