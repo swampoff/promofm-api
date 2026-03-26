@@ -1,5 +1,6 @@
 
 import { Hono } from 'hono';
+import { requireAuth } from './auth-middleware.tsx';
 
 const app = new Hono();
 
@@ -27,7 +28,7 @@ app.get('/radio-stations', (c) => {
   return c.json({ stations: RADIO_STATIONS });
 });
 
-app.post('/submit-pitch', async (c) => {
+app.post('/submit-pitch', requireAuth, async (c) => {
   const body = await c.req.json();
   console.log('Pitch submission:', body);
   return c.json({ 
@@ -37,7 +38,7 @@ app.post('/submit-pitch', async (c) => {
   });
 });
 
-app.post('/submit-radio', async (c) => {
+app.post('/submit-radio', requireAuth, async (c) => {
   const body = await c.req.json();
   console.log('Radio submission:', body);
   return c.json({ 

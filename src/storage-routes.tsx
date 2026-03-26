@@ -20,6 +20,7 @@ import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { spawnSync } from 'child_process';
 import { join } from 'path';
+// file-type loaded dynamically in upload handler
 
 const storage = new Hono();
 
@@ -154,6 +155,21 @@ storage.post('/upload', requireAuth, async (c) => {
       }, 400);
     }
     
+    // Validate file content (magic bytes) — defense-in-depth
+    const fileData = Buffer.from(await file.arrayBuffer());
+    const { fileTypeFromBuffer } = await import("file-type");
+    const detectedType = await fileTypeFromBuffer(fileData);
+    if (detectedType && bucketConfig.allowedMimeTypes.length > 0 && !bucketConfig.allowedMimeTypes.includes('*')) {
+      const allowedExts = bucketConfig.allowedMimeTypes.map((m: string) => m.split('/')[1]);
+      const detectedExt = detectedType.ext;
+      // Block if detected content doesn't match any allowed type
+      const mimeMatch = bucketConfig.allowedMimeTypes.includes(detectedType.mime);
+      if (!mimeMatch) {
+        console.warn('[storage] Magic bytes mismatch:', { claimed: file.type, detected: detectedType.mime, filename: file.name });
+        return c.json({ success: false, error: 'File content does not match declared type' }, 400);
+      }
+    }
+
     // Validate file size
     if (file.size > bucketConfig.fileSizeLimit) {
       const limitMB = (bucketConfig.fileSizeLimit / (1024 * 1024)).toFixed(1);
@@ -167,11 +183,27 @@ storage.post('/upload', requireAuth, async (c) => {
     const filename = generateUniqueFilename(file.name, path);
     
     // Upload file
-    const fileData = await file.arrayBuffer();
+    // fileData already declared above (magic bytes check)
+    // ClamAV virus scan (if available)
+    try {
+      const tmpPath = join('/tmp', 'upload_scan_' + Date.now() + '_' + filename);
+      const { writeFileSync, unlinkSync } = await import('fs');
+      writeFileSync(tmpPath, fileData);
+      const scanResult = spawnSync('clamscan', ['--no-summary', tmpPath], { timeout: 30000, encoding: 'utf8' });
+      unlinkSync(tmpPath);
+      if (scanResult.status === 1) {
+        console.error('[storage] VIRUS DETECTED:', { filename, output: scanResult.stdout?.trim() });
+        return c.json({ success: false, error: 'File rejected by security scan' }, 400);
+      }
+    } catch (e) {
+      // ClamAV not available — continue without scan
+      console.warn('[storage] ClamAV scan skipped:', (e as Error).message);
+    }
+
     const result = await uploadFile(
       bucketName,
       filename,
-      fileData,
+      fileData,  // Buffer from line 159
       file.type
     );
     

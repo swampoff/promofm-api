@@ -6,6 +6,7 @@
 import { Hono } from "hono";
 import { spawn } from "child_process";
 import { pool } from "./db-client.tsx";
+import { requireAuth } from "./auth-middleware.tsx";
 
 const app = new Hono();
 
@@ -160,7 +161,7 @@ app.get("/stations", async (c) => {
 
 // ─── Trigger fingerprinting for a track ───────────────────────────────────────
 
-app.post("/process/:trackId", async (c) => {
+app.post("/process/:trackId", requireAuth, async (c) => {
   const { trackId } = c.req.param();
 
   const track = await query<{ audio_url: string }>(

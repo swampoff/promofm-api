@@ -12,6 +12,7 @@
 import { Hono } from 'hono';
 import { contentOrdersStore, contentOrdersByStatusStore, venueOrdersIndexStore } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth } from './auth-middleware.tsx';
 
 const app = new Hono();
 

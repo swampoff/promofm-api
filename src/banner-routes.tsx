@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const app = new Hono();
 const FALLBACK_USER = 'anonymous';
@@ -56,7 +57,7 @@ app.post('/click/:id', async (c) => {
 // ═══════════════════════════════════════
 
 // GET / — Get all banners for current user
-app.get('/', async (c) => {
+app.get('/', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const banners = await typed.getBannersByUser(userId);
@@ -68,7 +69,7 @@ app.get('/', async (c) => {
 });
 
 // GET /:id — Get single banner
-app.get('/:id', async (c) => {
+app.get('/:id', requireAuth, async (c) => {
   try {
     const bannerId = c.req.param('id');
     if (['active', 'moderation'].includes(bannerId)) return c.notFound();
@@ -83,7 +84,7 @@ app.get('/:id', async (c) => {
 });
 
 // POST / — Create new banner
-app.post('/', async (c) => {
+app.post('/', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const body = await c.req.json();
@@ -106,7 +107,7 @@ app.post('/', async (c) => {
 });
 
 // PUT /:id — Update banner
-app.put('/:id', async (c) => {
+app.put('/:id', requireAuth, async (c) => {
   try {
     const bannerId = c.req.param('id');
     const body = await c.req.json();
@@ -123,7 +124,7 @@ app.put('/:id', async (c) => {
 });
 
 // DELETE /:id — Delete banner
-app.delete('/:id', async (c) => {
+app.delete('/:id', requireAuth, async (c) => {
   try {
     const bannerId = c.req.param('id');
     await typed.deleteBanner(bannerId);
@@ -134,7 +135,7 @@ app.delete('/:id', async (c) => {
 });
 
 // POST /:id/activate — Activate banner (deduct coins)
-app.post('/:id/activate', async (c) => {
+app.post('/:id/activate', requireAuth, async (c) => {
   try {
     const bannerId = c.req.param('id');
     const userId = await resolveUserId(c, FALLBACK_USER);
@@ -179,7 +180,7 @@ app.post('/:id/activate', async (c) => {
 // ═══════════════════════════════════════
 
 // GET /moderation/pending — Get banners for moderation
-app.get('/moderation/pending', async (c) => {
+app.get('/moderation/pending', requireAuth, requireAdmin, async (c) => {
   try {
     const status = c.req.query('status') || 'pending';
     const banners = await typed.getAllBannersForModeration(status === 'all' ? undefined : status);
@@ -191,7 +192,7 @@ app.get('/moderation/pending', async (c) => {
 });
 
 // POST /moderation/manage — Approve or reject banner
-app.post('/moderation/manage', async (c) => {
+app.post('/moderation/manage', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { bannerId, action, moderator_notes, rejection_reason } = body;

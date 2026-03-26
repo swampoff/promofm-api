@@ -12,6 +12,8 @@ import * as db from './db.tsx';
 const app = new Hono();
 
 // CORS headers for SSE responses (raw Response bypasses Hono middleware)
+import { requireAuth } from './auth-middleware.tsx';
+
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User-Id, Cache-Control, Accept',
@@ -136,7 +138,7 @@ app.get('/stream/:userId', (c) => {
 });
 
 // POST /emit/:userId - отправить событие программно
-app.post('/emit/:userId', async (c) => {
+app.post('/emit/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
   try {
     const body = await c.req.json();
@@ -148,7 +150,7 @@ app.post('/emit/:userId', async (c) => {
 });
 
 // GET /connections - статистика активных подключений
-app.get('/connections', (c) => {
+app.get('/connections', requireAuth, (c) => {
   const stats: Record<string, number> = {};
   for (const [userId, conns] of connections) {
     stats[userId] = conns.size;

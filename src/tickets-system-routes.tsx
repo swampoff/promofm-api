@@ -7,6 +7,7 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { getTicketsByUser, upsertTicket } from './db.tsx';
 import { getDbClient } from './db-client.tsx';
 
@@ -22,8 +23,13 @@ const supaDb = () => getDbClient();
  * GET /user/:userId
  * Получить все тикеты пользователя
  */
-app.get('/user/:userId', async (c) => {
+app.get('/user/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  const authRole = c.get('userRole');
+  if (userId !== authUserId && authRole !== 'admin') {
+    return c.json({ success: false, error: 'Access denied' }, 403);
+  }
 
   try {
     const tickets = await getTicketsByUser(userId);
@@ -51,7 +57,7 @@ app.get('/user/:userId', async (c) => {
  * GET /:ticketId
  * Получить конкретный тикет
  */
-app.get('/:ticketId', async (c) => {
+app.get('/:ticketId', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
@@ -89,7 +95,7 @@ app.get('/:ticketId', async (c) => {
  * POST /create
  * Создать новый тикет
  */
-app.post('/create', async (c) => {
+app.post('/create', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const {
@@ -174,7 +180,7 @@ app.post('/create', async (c) => {
  * PUT /:ticketId
  * Обновить тикет
  */
-app.put('/:ticketId', async (c) => {
+app.put('/:ticketId', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
@@ -236,7 +242,7 @@ app.put('/:ticketId', async (c) => {
  * DELETE /:ticketId
  * Удалить тикет
  */
-app.delete('/:ticketId', async (c) => {
+app.delete('/:ticketId', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
@@ -288,7 +294,7 @@ app.delete('/:ticketId', async (c) => {
  * GET /:ticketId/messages
  * Получить все сообщения тикета
  */
-app.get('/:ticketId/messages', async (c) => {
+app.get('/:ticketId/messages', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
@@ -323,7 +329,7 @@ app.get('/:ticketId/messages', async (c) => {
  * POST /:ticketId/messages
  * Добавить сообщение в тикет
  */
-app.post('/:ticketId/messages', async (c) => {
+app.post('/:ticketId/messages', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
@@ -412,7 +418,7 @@ app.post('/:ticketId/messages', async (c) => {
  * POST /:ticketId/rate
  * Оценить решение тикета
  */
-app.post('/:ticketId/rate', async (c) => {
+app.post('/:ticketId/rate', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
@@ -470,8 +476,13 @@ app.post('/:ticketId/rate', async (c) => {
  * GET /stats/:userId
  * Получить статистику тикетов пользователя
  */
-app.get('/stats/:userId', async (c) => {
+app.get('/stats/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  const authRole = c.get('userRole');
+  if (userId !== authUserId && authRole !== 'admin') {
+    return c.json({ success: false, error: 'Access denied' }, 403);
+  }
 
   try {
     const tickets = await getTicketsByUser(userId);
@@ -601,7 +612,7 @@ function calculateAvgRating(tickets: any[]): number {
 /**
  * GET /admin/all - Все тикеты для админки (без привязки к userId)
  */
-app.get('/admin/all', async (c) => {
+app.get('/admin/all', requireAuth, requireAdmin, async (c) => {
   try {
     const statusFilter = c.req.query('status');
     const priorityFilter = c.req.query('priority');
@@ -663,7 +674,7 @@ app.get('/admin/all', async (c) => {
 /**
  * GET /admin/stats - Общая статистика по всем тикетам для админки
  */
-app.get('/admin/stats', async (c) => {
+app.get('/admin/stats', requireAuth, requireAdmin, async (c) => {
   try {
     // Fetch all tickets from support_tickets table
     const { data: rows, error } = await supaDb()

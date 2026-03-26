@@ -9,6 +9,17 @@ const REPLY_TO = 'noreply@promo-music.ru';
 const SITE_URL = 'https://promo-music.ru';
 const API_BASE = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/server` : 'https://promo-music.ru/server';
 
+
+// HTML entity escaping for safe email template interpolation
+function escapeHtml(str: string): string {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 
 // SMTP transport (Reg.ru mail hosting)
@@ -124,7 +135,7 @@ export async function sendPasswordResetEmail(email: string, name: string, token:
   const resetUrl = `${SITE_URL}/reset-password?token=${token}`;
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Сброс пароля</h2>
-    <p>Здравствуйте, <strong>${name}</strong>!</p>
+    <p>Здравствуйте, <strong>${escapeHtml(name)}</strong>!</p>
     <p>Вы запросили сброс пароля для вашего аккаунта на ПРОМО.МУЗЫКА.</p>
     <p style="text-align: center; margin: 28px 0;">
       <a href="${resetUrl}" style="${buttonStyle}">Сбросить пароль</a>
@@ -139,7 +150,7 @@ export async function sendVerificationEmail(email: string, name: string, token: 
   const verifyUrl = `${API_BASE}/auth/verify-email-page?token=${token}`;
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Подтвердите ваш email</h2>
-    <p>Здравствуйте, <strong>${name}</strong>!</p>
+    <p>Здравствуйте, <strong>${escapeHtml(name)}</strong>!</p>
     <p>Спасибо за регистрацию на ПРОМО.МУЗЫКА! Подтвердите ваш email-адрес.</p>
     <p style="text-align: center; margin: 28px 0;">
       <a href="${verifyUrl}" style="${buttonStyle}">Подтвердить email</a>
@@ -151,29 +162,29 @@ export async function sendVerificationEmail(email: string, name: string, token: 
 }
 
 export async function notifyArtistRequest(data: { artistName: string; trackTitle: string; genre?: string; stationName?: string; stationId: string; }) {
-  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: #FF577F;">Новая заявка артиста на радио</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px; font-weight: bold;">Артист:</td><td>${data.artistName}</td></tr><tr><td style="padding: 8px; font-weight: bold;">Трек:</td><td>${data.trackTitle}</td></tr>${data.genre ? `<tr><td style="padding: 8px; font-weight: bold;">Жанр:</td><td>${data.genre}</td></tr>` : ''}<tr><td style="padding: 8px; font-weight: bold;">Радиостанция:</td><td>${data.stationName || data.stationId}</td></tr></table></div>`;
-  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Заявка: ${data.artistName} — ${data.trackTitle}`, html });
+  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: #FF577F;">Новая заявка артиста на радио</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px; font-weight: bold;">Артист:</td><td>${escapeHtml(data.artistName)}</td></tr><tr><td style="padding: 8px; font-weight: bold;">Трек:</td><td>${escapeHtml(data.trackTitle)}</td></tr>${data.genre ? `<tr><td style="padding: 8px; font-weight: bold;">Жанр:</td><td>${data.genre}</td></tr>` : ''}<tr><td style="padding: 8px; font-weight: bold;">Радиостанция:</td><td>${escapeHtml(data.stationName || data.stationId)}</td></tr></table></div>`;
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Заявка: ${escapeHtml(data.artistName)} — ${escapeHtml(data.trackTitle)}`, html });
 }
 
 export async function notifyVenueRequest(data: { venueName: string; venueCity?: string; packageType?: string; totalPrice?: number; stationName?: string; stationId: string; }) {
-  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: #7C3AED;">Заявка заведения</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Заведение:</td><td>${data.venueName}</td></tr>${data.venueCity ? `<tr><td style="padding: 8px;">Город:</td><td>${data.venueCity}</td></tr>` : ''}${data.totalPrice ? `<tr><td style="padding: 8px;">Сумма:</td><td>${data.totalPrice}</td></tr>` : ''}<tr><td style="padding: 8px;">Станция:</td><td>${data.stationName || data.stationId}</td></tr></table></div>`;
-  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Заведение: ${data.venueName}`, html });
+  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: #7C3AED;">Заявка заведения</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Заведение:</td><td>${escapeHtml(data.venueName)}</td></tr>${data.venueCity ? `<tr><td style="padding: 8px;">Город:</td><td>${data.venueCity}</td></tr>` : ''}${data.totalPrice ? `<tr><td style="padding: 8px;">Сумма:</td><td>${data.totalPrice}</td></tr>` : ''}<tr><td style="padding: 8px;">Станция:</td><td>${escapeHtml(data.stationName || data.stationId)}</td></tr></table></div>`;
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Заведение: ${escapeHtml(data.venueName)}`, html });
 }
 
 export async function notifyBookingRequest(data: { venueName: string; performerName?: string; eventTitle: string; eventDate: string; offeredPrice?: number; }) {
-  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: #10B981;">Новое бронирование</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Заведение:</td><td>${data.venueName}</td></tr>${data.performerName ? `<tr><td style="padding: 8px;">Артист:</td><td>${data.performerName}</td></tr>` : ''}<tr><td style="padding: 8px;">Событие:</td><td>${data.eventTitle}</td></tr><tr><td style="padding: 8px;">Дата:</td><td>${data.eventDate}</td></tr></table></div>`;
-  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Бронирование: ${data.eventTitle} — ${data.eventDate}`, html });
+  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: #10B981;">Новое бронирование</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Заведение:</td><td>${escapeHtml(data.venueName)}</td></tr>${data.performerName ? `<tr><td style="padding: 8px;">Артист:</td><td>${escapeHtml(data.performerName || "")}</td></tr>` : ''}<tr><td style="padding: 8px;">Событие:</td><td>${escapeHtml(data.eventTitle)}</td></tr><tr><td style="padding: 8px;">Дата:</td><td>${escapeHtml(data.eventDate)}</td></tr></table></div>`;
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Бронирование: ${escapeHtml(data.eventTitle)} — ${escapeHtml(data.eventDate)}`, html });
 }
 
 export async function notifyNewUser(data: { email: string; name: string; role: string; via?: string; needsApproval?: boolean; }) {
-  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: ${data.needsApproval ? '#F59E0B' : '#3B82F6'};">${data.needsApproval ? 'Заявка — требует одобрения' : 'Новый пользователь'}</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Имя:</td><td>${data.name}</td></tr><tr><td style="padding: 8px;">Email:</td><td>${data.email}</td></tr><tr><td style="padding: 8px;">Роль:</td><td>${data.role}</td></tr>${data.via ? `<tr><td style="padding: 8px;">Через:</td><td>${data.via}</td></tr>` : ''}</table></div>`;
-  await sendEmail({ to: ADMIN_EMAIL, subject: data.needsApproval ? `[ПРОМО] ЗАЯВКА: ${data.role} ${data.name}` : `[ПРОМО] Новый ${data.role}: ${data.name}`, html });
+  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: ${data.needsApproval ? '#F59E0B' : '#3B82F6'};">${data.needsApproval ? 'Заявка — требует одобрения' : 'Новый пользователь'}</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Имя:</td><td>${escapeHtml(data.name)}</td></tr><tr><td style="padding: 8px;">Email:</td><td>${escapeHtml(data.email)}</td></tr><tr><td style="padding: 8px;">Роль:</td><td>${escapeHtml(data.role)}</td></tr>${data.via ? `<tr><td style="padding: 8px;">Через:</td><td>${data.via}</td></tr>` : ''}</table></div>`;
+  await sendEmail({ to: ADMIN_EMAIL, subject: data.needsApproval ? `[ПРОМО] ЗАЯВКА: ${escapeHtml(data.role)} ${escapeHtml(data.name)}` : `[ПРОМО] Новый ${escapeHtml(data.role)}: ${escapeHtml(data.name)}`, html });
 }
 
 export async function sendAccountApprovedEmail(email: string, name: string): Promise<boolean> {
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #10B981;">Аккаунт одобрен!</h2>
-    <p>Здравствуйте, <strong>${name}</strong>!</p>
+    <p>Здравствуйте, <strong>${escapeHtml(name)}</strong>!</p>
     <p>Ваша заявка одобрена. Войдите и пользуйтесь всеми функциями платформы.</p>
     <p style="text-align: center; margin: 28px 0;"><a href="${SITE_URL}/login" style="${buttonStyle}">Войти</a></p>
   `);
@@ -183,9 +194,9 @@ export async function sendAccountApprovedEmail(email: string, name: string): Pro
 export async function sendAccountRejectedEmail(email: string, name: string, reason: string): Promise<boolean> {
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #EF4444;">Заявка отклонена</h2>
-    <p>Здравствуйте, <strong>${name}</strong>!</p>
+    <p>Здравствуйте, <strong>${escapeHtml(name)}</strong>!</p>
     <p>К сожалению, ваша заявка была отклонена.</p>
-    ${reason ? `<p style="padding: 12px; background: #1a1a2e; border-left: 3px solid #EF4444; border-radius: 4px;"><strong>Причина:</strong> ${reason}</p>` : ''}
+    ${reason ? `<p style="padding: 12px; background: #1a1a2e; border-left: 3px solid #EF4444; border-radius: 4px;"><strong>Причина:</strong> ${escapeHtml(reason)}</p>` : ''}
     <p>Свяжитесь с нами: <a href="mailto:info@promofm.ru" style="color: #FF577F;">info@promofm.ru</a></p>
   `);
   return sendEmail({ to: email, subject: 'Заявка отклонена — ПРОМО.МУЗЫКА', html });
