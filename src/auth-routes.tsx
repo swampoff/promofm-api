@@ -12,10 +12,18 @@ import { upsertNotification } from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsStoreToken, vpsGetToken, vpsUseToken } from './vps-userdata.tsx';
 import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail } from "./email-helper.tsx";
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import {
+  checkAccountLockout, recordLoginAttempt, getFailedAttemptsCount,
+  verifyCaptcha,
+  isMFAEnabled, verifyMFACode, setupMFA, verifyAndEnableMFA, disableMFA,
+  createRefreshToken, validateRefreshToken, rotateRefreshToken, revokeAllRefreshTokens, revokeRefreshToken,
+  sendSecurityAlert,
+} from './auth-security.tsx';
 
 const PARTNER_ROLES = ['radio_station', 'radio', 'venue'];
+const MAX_FAILED_ATTEMPTS = 5;
 const JWT_SECRET = process.env.JWT_SECRET!;
-const JWT_EXPIRES_IN = '7d';
+const JWT_EXPIRES_IN = '15m';
 
 // ── PostgreSQL ──
 let pool: Pool | null = null;
@@ -40,7 +48,7 @@ function verifyToken(token: string): { sub: string; email: string; role: string;
   catch { return null; }
 }
 function tokenExpiresAt(): number {
-  return Math.floor(Date.now() / 1000) + 7 * 24 * 3600;
+  return Math.floor(Date.now() / 1000) + 15 * 60;
 }
 
 // ── Username generator ──
@@ -174,15 +182,23 @@ auth.post("/signin", async (c) => {
     const { email, password } = await c.req.json();
     if (!email || !password) return c.json({ success: false, error: "Email и пароль обязательны" }, 400);
 
+    const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || c.req.header('x-real-ip') || '';
+    const ua = c.req.header('user-agent') || '';
+
+    // H5: Check account lockout
+    const lockout = await checkAccountLockout(email, ip);
+    if (lockout.locked) {
+      return c.json({ success: false, error: `Аккаунт временно заблокирован. Попробуйте через ${lockout.remainingMinutes} мин.` }, 429);
+    }
+
     const result = await sql(
       `SELECT id, email, password_hash, full_name, username, role::text, status::text, is_email_verified, avatar_url, token_version
        FROM users WHERE email = $1 AND deleted_at IS NULL`, [email]
     );
     if (result.rows.length === 0) {
+      await recordLoginAttempt(email, ip, ua, false);
       logAuthEvent('signin_fail', {
-        description: `Пользователь не найден: ${email}`, error: 'user_not_found',
-        ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
-        userAgent: c.req.header('user-agent') || '',
+        description: `Пользователь не найден: ${email}`, error: 'user_not_found', ip, userAgent: ua,
       });
       return c.json({ success: false, error: "Ошибка входа: Invalid login credentials" }, 401);
     }
@@ -195,23 +211,49 @@ auth.post("/signin", async (c) => {
 
     const valid = await bcrypt.compare(password, user.password_hash || '');
     if (!valid) {
+      await recordLoginAttempt(email, ip, ua, false);
+      const remaining = MAX_FAILED_ATTEMPTS - await getFailedAttemptsCount(email) - 1;
       logAuthEvent('signin_fail', {
-        description: `Неверный пароль: ${email}`, error: 'wrong_password',
-        ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
-        userAgent: c.req.header('user-agent') || '',
+        description: `Неверный пароль: ${email}`, error: 'wrong_password', ip, userAgent: ua,
       });
-      return c.json({ success: false, error: "Ошибка входа: Invalid login credentials" }, 401);
+      return c.json({
+        success: false,
+        error: remaining > 0
+          ? `Неверный пароль. Осталось попыток: ${remaining}`
+          : "Ошибка входа: Invalid login credentials"
+      }, 401);
     }
 
     if (user.status === 'pending') return c.json({ success: false, error: 'Ваш аккаунт на модерации.', accountStatus: 'pending' }, 403);
     if (user.status === 'rejected') return c.json({ success: false, error: 'Ваша заявка отклонена.', accountStatus: 'rejected' }, 403);
 
+    // H7: Check if MFA is enabled
+    const mfaEnabled = await isMFAEnabled(user.id);
+    const { mfaCode } = await c.req.json().catch(() => ({}));
+
+    if (mfaEnabled) {
+      if (!mfaCode) {
+        // Return partial success — client must provide MFA code
+        return c.json({
+          success: false,
+          mfaRequired: true,
+          error: "Введите код из приложения-аутентификатора",
+        }, 200);
+      }
+      const mfaValid = await verifyMFACode(user.id, mfaCode);
+      if (!mfaValid) {
+        await recordLoginAttempt(email, ip, ua, false);
+        return c.json({ success: false, error: "Неверный код 2FA" }, 401);
+      }
+    }
+
+    // Success: record + generate tokens
+    await recordLoginAttempt(email, ip, ua, true);
     const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
+    const refreshTokenData = await createRefreshToken(user.id, ip, ua);
     await sql(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id]);
     logAuthEvent('signin_success', {
-      userId: user.id, description: `Вход: ${email}, роль: ${user.role}`,
-      ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
-      userAgent: c.req.header('user-agent') || '',
+      userId: user.id, description: `Вход: ${email}, роль: ${user.role}`, ip, userAgent: ua,
     });
 
     // Sync VPS profile
@@ -230,6 +272,8 @@ auth.post("/signin", async (c) => {
       data: {
         user: { id: user.id, email, name: profile.name || user.full_name, role: user.role, isEmailVerified: true, accountStatus: user.status },
         accessToken, expiresAt: tokenExpiresAt(),
+        refreshToken: refreshTokenData.token,
+        refreshExpiresAt: Math.floor(refreshTokenData.expiresAt.getTime() / 1000),
       },
     });
   } catch (error) {
@@ -443,6 +487,7 @@ auth.post("/signout", async (c) => {
       const decoded = verifyToken(token);
       if (decoded) {
         await sql(`UPDATE users SET token_version = COALESCE(token_version, 1) + 1 WHERE id = $1`, [decoded.sub]);
+        await revokeAllRefreshTokens(decoded.sub);
         console.log(`User signed out (tokens revoked): ${decoded.email} (${decoded.sub})`);
       }
     }
@@ -723,5 +768,120 @@ auth.post("/exchange-auto-login", async (c) => {
     return c.json({ success: false, error: "Internal error" }, 500);
   }
 });
+
+// ──────────────────────────────────────────────────────────────────────
+// POST /auth/refresh — H9: Exchange refresh token for new access token
+// ──────────────────────────────────────────────────────────────────────
+auth.post("/refresh", async (c) => {
+  try {
+    const { refreshToken } = await c.req.json();
+    if (!refreshToken) return c.json({ success: false, error: "Refresh token required" }, 400);
+
+    const validation = await validateRefreshToken(refreshToken);
+    if (!validation.valid || !validation.userId) {
+      return c.json({ success: false, error: validation.error || "Invalid refresh token" }, 401);
+    }
+
+    const result = await sql(
+      `SELECT id, email, role::text, full_name, token_version FROM users WHERE id = $1 AND deleted_at IS NULL`,
+      [validation.userId]
+    );
+    if (result.rows.length === 0) return c.json({ success: false, error: "User not found" }, 404);
+
+    const user = result.rows[0];
+    const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || c.req.header('x-real-ip') || '';
+    const ua = c.req.header('user-agent') || '';
+
+    // Rotate refresh token (old one revoked, new one issued)
+    const newRefresh = await rotateRefreshToken(refreshToken, user.id, ip, ua);
+    if (!newRefresh) return c.json({ success: false, error: "Token rotation failed" }, 401);
+
+    const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
+
+    return c.json({
+      success: true,
+      data: {
+        accessToken, expiresAt: tokenExpiresAt(),
+        refreshToken: newRefresh.token,
+        refreshExpiresAt: Math.floor(newRefresh.expiresAt.getTime() / 1000),
+      },
+    });
+  } catch (error) {
+    console.error("Refresh error:", error);
+    return c.json({ success: false, error: "Internal server error" }, 500);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// POST /auth/mfa/setup — H7: Initialize MFA (requires auth)
+// ──────────────────────────────────────────────────────────────────────
+auth.post("/mfa/setup", requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const result = await setupMFA(userId);
+    return c.json({ success: true, data: result });
+  } catch (error) {
+    console.error("MFA setup error:", error);
+    return c.json({ success: false, error: "Internal server error" }, 500);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// POST /auth/mfa/verify — H7: Verify TOTP code and enable MFA
+// ──────────────────────────────────────────────────────────────────────
+auth.post("/mfa/verify", requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const { code } = await c.req.json();
+    if (!code) return c.json({ success: false, error: "Code required" }, 400);
+
+    const result = await verifyAndEnableMFA(userId, code);
+    if (!result.success) return c.json({ success: false, error: result.error }, 400);
+
+    sendSecurityAlert('MFA Enabled', `User ${userId} enabled 2FA`).catch(() => {});
+    return c.json({ success: true, message: "2FA включена" });
+  } catch (error) {
+    console.error("MFA verify error:", error);
+    return c.json({ success: false, error: "Internal server error" }, 500);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// POST /auth/mfa/disable — H7: Disable MFA (requires password)
+// ──────────────────────────────────────────────────────────────────────
+auth.post("/mfa/disable", requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const { password } = await c.req.json();
+    if (!password) return c.json({ success: false, error: "Password required" }, 400);
+
+    const result = await sql(`SELECT password_hash FROM users WHERE id = $1`, [userId]);
+    if (result.rows.length === 0) return c.json({ success: false, error: "Not found" }, 404);
+
+    const valid = await bcrypt.compare(password, result.rows[0].password_hash || '');
+    if (!valid) return c.json({ success: false, error: "Wrong password" }, 401);
+
+    await disableMFA(userId);
+    sendSecurityAlert('MFA Disabled', `User ${userId} disabled 2FA`).catch(() => {});
+    return c.json({ success: true, message: "2FA отключена" });
+  } catch (error) {
+    console.error("MFA disable error:", error);
+    return c.json({ success: false, error: "Internal server error" }, 500);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// GET /auth/mfa/status — H7: Check MFA status
+// ──────────────────────────────────────────────────────────────────────
+auth.get("/mfa/status", requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const enabled = await isMFAEnabled(userId);
+    return c.json({ success: true, data: { mfaEnabled: enabled } });
+  } catch (error) {
+    return c.json({ success: false, error: "Internal server error" }, 500);
+  }
+});
+
 
 export default auth;
