@@ -29,7 +29,7 @@ app.get("/stats/:trackId", async (c) => {
       `SELECT COUNT(*) as total,
               COUNT(*) FILTER (WHERE watermark_confirmed = true) as confirmed
        FROM promo_check_detections
-       WHERE track_id = $1 AND detected_at >= NOW() - INTERVAL '${days} days'`,
+       WHERE track_id = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}`,
       [trackId]
     ),
     query<{ station_name: string; count: string; last_detected: string }>(
@@ -37,7 +37,7 @@ app.get("/stats/:trackId", async (c) => {
               COUNT(*) as count,
               MAX(detected_at) as last_detected
        FROM promo_check_detections
-       WHERE track_id = $1 AND detected_at >= NOW() - INTERVAL '${days} days'
+       WHERE track_id = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}
        GROUP BY station_name
        ORDER BY count DESC`,
       [trackId]
@@ -45,7 +45,7 @@ app.get("/stats/:trackId", async (c) => {
     query<{ day: string; count: string }>(
       `SELECT DATE(detected_at) as day, COUNT(*) as count
        FROM promo_check_detections
-       WHERE track_id = $1 AND detected_at >= NOW() - INTERVAL '${days} days'
+       WHERE track_id = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}
        GROUP BY DATE(detected_at)
        ORDER BY day ASC`,
       [trackId]
@@ -86,7 +86,7 @@ app.get("/artist/:artistId", async (c) => {
      FROM tracks t
      LEFT JOIN promo_check_detections d
        ON d.track_id = t.id
-       AND d.detected_at >= NOW() - INTERVAL '${days} days'
+       AND d.detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}
      WHERE t.artist_id = $1
      GROUP BY t.id, t.title
      ORDER BY total DESC, t.created_at DESC

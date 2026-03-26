@@ -3,6 +3,16 @@
  * Entry point: replaces Supabase Edge Functions handler
  */
 import 'dotenv/config';
+// Security: validate critical env vars at startup
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+  console.error('FATAL: JWT_SECRET is missing or too short (min 32 chars). Refusing to start.');
+  process.exit(1);
+}
+if (!process.env.DATABASE_URL) {
+  console.error('FATAL: DATABASE_URL is missing. Refusing to start.');
+  process.exit(1);
+}
+
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';

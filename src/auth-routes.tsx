@@ -115,20 +115,9 @@ auth.post("/signup", async (c) => {
           userAgent: c.req.header('user-agent') || '',
         });
         return c.json({ success: false, error: "Пользователь с таким email уже зарегистрирован" }, 409);
-        if (err.constraint?.includes('username')) {
-          // Retry with different username
-          const result = await sql(
-            `INSERT INTO users (email, password_hash, username, full_name, role, status, is_email_verified, consent_personal_data, consent_newsletter, consent_at)
-             VALUES ($1, $2, $3, $4, $5::user_role, $6::user_status, false, $7, $8, now()) RETURNING id`,
-            [email, passwordHash, username + '_' + Math.random().toString(36).substring(2, 6), userName, userRole, accountStatus, !!consentPersonalData, !!consentNewsletter]
-          );
-          userId = result.rows[0].id;
-        } else {
-          return c.json({ success: false, error: "Пользователь уже существует" }, 409);
-        }
       } else {
         console.error("DB insert user error:", err);
-        return c.json({ success: false, error: `Ошибка регистрации: ${err.message}` }, 400);
+        return c.json({ success: false, error: 'Ошибка регистрации' }, 400);
       }
     }
 
@@ -159,7 +148,7 @@ auth.post("/signup", async (c) => {
       ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
       userAgent: c.req.header('user-agent') || '',
     });
-    return c.json({ success: false, error: `Ошибка сервера: ${error}` }, 500);
+    return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
   }
 });
 
@@ -231,7 +220,7 @@ auth.post("/signin", async (c) => {
     });
   } catch (error) {
     console.error("Signin error:", error);
-    return c.json({ success: false, error: `Ошибка сервера: ${error}` }, 500);
+    return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
   }
 });
 
@@ -388,7 +377,7 @@ auth.post("/set-role", async (c) => {
     return c.json({ success: true, role });
   } catch (error) {
     console.error("Set role error:", error);
-    return c.json({ success: false, error: `Ошибка сервера: ${error}` }, 500);
+    return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
   }
 });
 
@@ -464,7 +453,7 @@ auth.post("/request-reset", async (c) => {
     return c.json({ success: true, message: "Если аккаунт с таким email существует, мы отправили письмо." });
   } catch (error) {
     console.error("Request reset error:", error);
-    return c.json({ success: false, error: `Ошибка сервера: ${error}` }, 500);
+    return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
   }
 });
 
