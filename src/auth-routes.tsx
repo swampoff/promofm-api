@@ -32,11 +32,11 @@ async function sql(text: string, params?: any[]) {
 }
 
 // ── JWT helpers ──
-function signToken(user: { id: string; email: string; role: string }) {
-  return jwt.sign({ sub: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+function signToken(user: { id: string; email: string; role: string; token_version?: number }) {
+  return jwt.sign({ sub: user.id, email: user.email, role: user.role, tv: user.token_version || 1 }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN, algorithm: 'HS256' });
 }
-function verifyToken(token: string): { sub: string; email: string; role: string } | null {
-  try { return jwt.verify(token, JWT_SECRET) as any; }
+function verifyToken(token: string): { sub: string; email: string; role: string; tv?: number } | null {
+  try { return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }) as any; }
   catch { return null; }
 }
 function tokenExpiresAt(): number {
@@ -47,6 +47,19 @@ function tokenExpiresAt(): number {
 function makeUsername(email: string, name?: string): string {
   const base = (name || email.split('@')[0]).toLowerCase().replace(/[^a-z0-9а-яё_]/gi, '_').substring(0, 80);
   return base + '_' + (Date.now() % 100000);
+}
+
+
+// ── Password complexity ──
+function validatePassword(password: string): string | null {
+  if (password.length < 8) return 'Пароль минимум 8 символов';
+  if (!/[A-ZА-ЯЁ]/.test(password)) return 'Пароль должен содержать хотя бы одну заглавную букву';
+  if (!/[a-zа-яё]/.test(password)) return 'Пароль должен содержать хотя бы одну строчную букву';
+  if (!/[0-9]/.test(password)) return 'Пароль должен содержать хотя бы одну цифру';
+  if (!/[!@#$%^&*()_+\-=\[\]{}|;:'",.<>?/`~]/.test(password)) return 'Пароль должен содержать хотя бы один спецсимвол';
+  const common = ['password', '12345678', 'qwerty12', 'letmein1', 'admin123', 'welcome1', 'iloveyou', 'monkey12', 'dragon12', 'master12', 'qwerty123', 'password1', 'Password1', '123456789', 'abc12345'];
+  if (common.includes(password.toLowerCase())) return 'Этот пароль слишком распространён';
+  return null;
 }
 
 const auth = new Hono();
@@ -89,7 +102,8 @@ auth.post("/signup", async (c) => {
   try {
     const { email, password, name, role, consentPersonalData, consentNewsletter } = await c.req.json();
     if (!email || !password) return c.json({ success: false, error: "Email и пароль обязательны" }, 400);
-    if (password.length < 6) return c.json({ success: false, error: "Пароль минимум 6 символов" }, 400);
+    const pwErr = validatePassword(password);
+    if (pwErr) return c.json({ success: false, error: pwErr }, 400);
     if (!consentPersonalData) return c.json({ success: false, error: "Необходимо согласие на обработку персональных данных" }, 400);
 
     const userRole = role || "artist";
@@ -114,7 +128,7 @@ auth.post("/signup", async (c) => {
           ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
           userAgent: c.req.header('user-agent') || '',
         });
-        return c.json({ success: false, error: "Пользователь с таким email уже зарегистрирован" }, 409);
+        return c.json({ success: false, error: "Ошибка регистрации. Если у вас уже есть аккаунт, попробуйте войти или восстановить пароль." }, 409);
       } else {
         console.error("DB insert user error:", err);
         return c.json({ success: false, error: 'Ошибка регистрации' }, 400);
@@ -161,7 +175,7 @@ auth.post("/signin", async (c) => {
     if (!email || !password) return c.json({ success: false, error: "Email и пароль обязательны" }, 400);
 
     const result = await sql(
-      `SELECT id, email, password_hash, full_name, username, role::text, status::text, is_email_verified, avatar_url
+      `SELECT id, email, password_hash, full_name, username, role::text, status::text, is_email_verified, avatar_url, token_version
        FROM users WHERE email = $1 AND deleted_at IS NULL`, [email]
     );
     if (result.rows.length === 0) {
@@ -192,7 +206,7 @@ auth.post("/signin", async (c) => {
     if (user.status === 'pending') return c.json({ success: false, error: 'Ваш аккаунт на модерации.', accountStatus: 'pending' }, 403);
     if (user.status === 'rejected') return c.json({ success: false, error: 'Ваша заявка отклонена.', accountStatus: 'rejected' }, 403);
 
-    const accessToken = signToken({ id: user.id, email: user.email, role: user.role });
+    const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
     await sql(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id]);
     logAuthEvent('signin_success', {
       userId: user.id, description: `Вход: ${email}, роль: ${user.role}`,
@@ -325,7 +339,8 @@ auth.post("/vk-callback", async (c) => {
         }
         return c.json({ success: false, error: "Пользователь с таким email уже зарегистрирован." }, 409);
       }
-      return c.json({ success: false, error: `Ошибка создания аккаунта: ${err.message}` }, 400);
+      console.error('VK user create error:', err);
+      return c.json({ success: false, error: 'Ошибка создания аккаунта' }, 400);
     }
 
     await createVpsProfile(userId, userEmail, vkName, vkRole, vkAvatar);
@@ -340,28 +355,32 @@ auth.post("/vk-callback", async (c) => {
     });
   } catch (error) {
     console.error("VK callback error:", error);
-    return c.json({ success: false, error: `VK OAuth ошибка: ${error}` }, 500);
+    return c.json({ success: false, error: "VK OAuth ошибка" }, 500);
   }
 });
 
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/set-role
 // ──────────────────────────────────────────────────────────────────────
-auth.post("/set-role", async (c) => {
+auth.post("/set-role", requireAuth, async (c) => {
   try {
+    const authUserId = c.get('userId');
+    const authRole = c.get('userRole');
     const { userId, role } = await c.req.json();
     if (!userId || !role) return c.json({ success: false, error: "userId and role are required" }, 400);
+
+    // Only admin or self can change role
+    if (userId !== authUserId && authRole !== 'admin') {
+      return c.json({ success: false, error: "Access denied" }, 403);
+    }
 
     const validRoles = ["artist", "dj", "radio_station", "venue", "producer"];
     if (!validRoles.includes(role)) return c.json({ success: false, error: `Недопустимая роль: ${role}` }, 400);
 
     const result = await sql(`UPDATE users SET role = $1::user_role WHERE id = $2 RETURNING *`, [role, userId]);
-    if (result.rows.length === 0) logAuthEvent('signin_fail', {
-      description: `Пользователь не найден: ${email}`, error: 'user_not_found',
-      ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
-      userAgent: c.req.header('user-agent') || '',
-    });
-    return c.json({ success: false, error: "Пользователь не найден" }, 404);
+    if (result.rows.length === 0) {
+      return c.json({ success: false, error: "Пользователь не найден" }, 404);
+    }
 
     let profile = await vpsGetProfile(userId);
     if (profile) {
@@ -410,7 +429,7 @@ auth.get("/me", async (c) => {
     });
   } catch (error) {
     console.error("Auth me error:", error);
-    return c.json({ success: false, error: `Error: ${error}` }, 500);
+    return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
 
@@ -422,7 +441,10 @@ auth.post("/signout", async (c) => {
     const token = c.req.header("Authorization")?.split(" ")[1];
     if (token) {
       const decoded = verifyToken(token);
-      if (decoded) console.log(`User signed out: ${decoded.email} (${decoded.sub})`);
+      if (decoded) {
+        await sql(`UPDATE users SET token_version = COALESCE(token_version, 1) + 1 WHERE id = $1`, [decoded.sub]);
+        console.log(`User signed out (tokens revoked): ${decoded.email} (${decoded.sub})`);
+      }
     }
     return c.json({ success: true, message: "Signed out successfully" });
   } catch {
@@ -464,7 +486,8 @@ auth.post("/reset-password", async (c) => {
   try {
     const { token, newPassword } = await c.req.json();
     if (!token || !newPassword) return c.json({ success: false, error: "Токен и пароль обязательны" }, 400);
-    if (newPassword.length < 6) return c.json({ success: false, error: "Пароль минимум 6 символов" }, 400);
+    const pwErr = validatePassword(newPassword);
+    if (pwErr) return c.json({ success: false, error: pwErr }, 400);
 
     const resetData = await vpsGetToken(token);
     if (!resetData) return c.json({ success: false, error: "Недействительная ссылка" }, 400);
@@ -472,14 +495,14 @@ auth.post("/reset-password", async (c) => {
     if (resetData.usedAt) return c.json({ success: false, error: "Ссылка уже использована." }, 400);
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
-    await sql(`UPDATE users SET password_hash = $1 WHERE id = $2`, [passwordHash, resetData.userId]);
+    await sql(`UPDATE users SET password_hash = $1, token_version = COALESCE(token_version, 1) + 1 WHERE id = $2`, [passwordHash, resetData.userId]);
     await vpsUseToken(token);
 
     console.log(`Password reset for: ${resetData.userId}`);
     return c.json({ success: true, message: "Пароль обновлён." });
   } catch (error) {
     console.error("Reset password error:", error);
-    return c.json({ success: false, error: `Ошибка: ${error}` }, 500);
+    return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
 
@@ -503,7 +526,7 @@ auth.post("/verify-email", async (c) => {
 
     return c.json({ success: true, message: "Email подтверждён!" });
   } catch (error) {
-    return c.json({ success: false, error: `Ошибка: ${error}` }, 500);
+    return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
 
@@ -528,7 +551,7 @@ auth.post("/resend-verification", async (c) => {
     await sendVerificationEmail(user.email, profile?.name || user.full_name || "User", verificationToken);
     return c.json({ success: true, message: "Письмо отправлено" });
   } catch (error) {
-    return c.json({ success: false, error: `Ошибка: ${error}` }, 500);
+    return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
 
@@ -551,12 +574,10 @@ auth.get("/verify-email-page", async (c) => {
   const userResult = await sql(`SELECT id, email, role::text, full_name FROM users WHERE id = $1`, [verifyData.userId]);
   if (userResult.rows.length > 0) {
     const user = userResult.rows[0];
-    const accessToken = signToken({ id: user.id, email: user.email, role: user.role });
-    const role = user.role || 'artist';
-    const routes: Record<string, string> = { artist: '/artist', dj: '/dj', producer: '/producer', engineer: '/engineer', radio_station: '/radio', venue: '/venue' };
-    const cabinet = routes[role] || '/artist';
-    const params = new URLSearchParams({ token: accessToken, role, name: user.full_name || '', email: user.email, id: user.id });
-    return c.redirect(`https://promo-music.ru/login?verified=true&auto_login=true&${params.toString()}`);
+    // Generate short-lived auto-login token (5 min) stored server-side
+    const autoLoginToken = crypto.randomUUID();
+    await vpsStoreToken(user.id, autoLoginToken, "auto_login", 0.083); // 5 minutes
+    return c.redirect(`https://promo-music.ru/login?verified=true&auto_login_token=${autoLoginToken}`);
   }
 
   return c.redirect("https://promo-music.ru/login?verified=true");
@@ -581,7 +602,7 @@ auth.post("/resend-verification-by-email", async (c) => {
     await sendVerificationEmail(email, profile?.name || user.full_name || email.split("@")[0], verificationToken);
     return c.json({ success: true, message: "Письмо отправлено" });
   } catch (error) {
-    return c.json({ success: false, error: `Ошибка: ${error}` }, 500);
+    return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
 
@@ -597,7 +618,8 @@ auth.post("/change-password", async (c) => {
 
     const { currentPassword, newPassword } = await c.req.json();
     if (!currentPassword || !newPassword) return c.json({ success: false, error: "Оба пароля обязательны" }, 400);
-    if (newPassword.length < 6) return c.json({ success: false, error: "Пароль минимум 6 символов" }, 400);
+    const pwErr2 = validatePassword(newPassword);
+    if (pwErr2) return c.json({ success: false, error: pwErr2 }, 400);
 
     const result = await sql(`SELECT id, password_hash FROM users WHERE id = $1`, [decoded.sub]);
     if (result.rows.length === 0) return c.json({ success: false, error: "Not found" }, 404);
@@ -606,10 +628,10 @@ auth.post("/change-password", async (c) => {
     if (!valid) return c.json({ success: false, error: "Неверный текущий пароль" }, 400);
 
     const newHash = await bcrypt.hash(newPassword, 12);
-    await sql(`UPDATE users SET password_hash = $1 WHERE id = $2`, [newHash, decoded.sub]);
-    return c.json({ success: true, message: "Пароль изменён" });
+    await sql(`UPDATE users SET password_hash = $1, token_version = COALESCE(token_version, 1) + 1 WHERE id = $2`, [newHash, decoded.sub]);
+    return c.json({ success: true, message: "Пароль изменён. Все сессии завершены, войдите заново." });
   } catch (error) {
-    return c.json({ success: false, error: `Ошибка: ${error}` }, 500);
+    return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
 
@@ -621,7 +643,7 @@ auth.get("/admin/pending-users", requireAuth, requireAdmin, async (c) => {
     const result = await sql(`SELECT id, email, full_name, role::text, created_at FROM users WHERE status = 'pending' ORDER BY created_at DESC`);
     return c.json({ success: true, data: result.rows.map((u: any) => ({ userId: u.id, email: u.email, name: u.full_name, role: u.role, createdAt: u.created_at })) });
   } catch (error) {
-    return c.json({ success: false, error: `Ошибка: ${error}` }, 500);
+    return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
 
@@ -640,7 +662,7 @@ auth.post("/admin/approve-user", requireAuth, requireAdmin, async (c) => {
     await upsertNotification(userId, notifId, { id: notifId, userId, type: "info", title: "Аккаунт одобрен!", message: "Ваша заявка одобрена.", read: false, createdAt: new Date().toISOString() });
     return c.json({ success: true, message: "Одобрен" });
   } catch (error) {
-    return c.json({ success: false, error: `Ошибка: ${error}` }, 500);
+    return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
 
@@ -659,7 +681,46 @@ auth.post("/admin/reject-user", requireAuth, requireAdmin, async (c) => {
     await upsertNotification(userId, notifId, { id: notifId, userId, type: "info", title: "Заявка отклонена", message: reason ? `Причина: ${reason}` : "Заявка отклонена.", read: false, createdAt: new Date().toISOString() });
     return c.json({ success: true, message: "Отклонено" });
   } catch (error) {
-    return c.json({ success: false, error: `Ошибка: ${error}` }, 500);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+
+// ──────────────────────────────────────────────────────────────────────
+// POST /auth/exchange-auto-login — exchange short-lived token for JWT
+// ──────────────────────────────────────────────────────────────────────
+auth.post("/exchange-auto-login", async (c) => {
+  try {
+    const { token } = await c.req.json();
+    if (!token) return c.json({ success: false, error: "Token required" }, 400);
+
+    const tokenData = await vpsGetToken(token);
+    if (!tokenData || tokenData.type !== 'auto_login') {
+      return c.json({ success: false, error: "Invalid or expired token" }, 400);
+    }
+
+    await vpsUseToken(token);
+
+    const result = await sql(
+      `SELECT id, email, role::text, full_name, status::text, token_version FROM users WHERE id = $1`,
+      [tokenData.userId]
+    );
+    if (result.rows.length === 0) return c.json({ success: false, error: "User not found" }, 404);
+
+    const user = result.rows[0];
+    const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
+    const profile = await vpsGetProfile(user.id);
+
+    return c.json({
+      success: true,
+      data: {
+        user: { id: user.id, email: user.email, name: profile?.name || user.full_name, role: user.role },
+        accessToken, expiresAt: tokenExpiresAt(),
+      },
+    });
+  } catch (error) {
+    console.error("Exchange auto-login error:", error);
+    return c.json({ success: false, error: "Internal error" }, 500);
   }
 });
 

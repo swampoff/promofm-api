@@ -14,7 +14,16 @@ export async function requireAuth(c: Context, next: Next) {
   }
 
   try {
-    const decoded = jwt.verify(accessToken, process.env.JWT_SECRET!) as any;
+    const decoded = jwt.verify(accessToken, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as any;
+
+    // Check token_version — invalidated tokens are rejected
+    if (decoded.tv) {
+      const { pool } = await import('./db-client.tsx');
+      const res = await pool.query('SELECT token_version FROM users WHERE id = $1', [decoded.sub]);
+      if (res.rows.length > 0 && res.rows[0].token_version > (decoded.tv || 0)) {
+        return c.json({ success: false, error: 'Session expired. Please sign in again.' }, 401);
+      }
+    }
 
     c.set('userId', decoded.sub);
     c.set('userEmail', decoded.email || '');

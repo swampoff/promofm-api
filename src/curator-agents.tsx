@@ -64,7 +64,7 @@ const INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 const PLACEHOLDER_USER = '00000000-0000-0000-0000-000000000000';
 
 const CURATOR_EMAIL = 'curator@promo-music.ru';
-const CURATOR_PASSWORD = 'CuratorBot2024!Secure';
+const CURATOR_PASSWORD = process.env.CURATOR_PASSWORD || '';
 
 export const CURATOR_ROLES: { id: RoleId; name: string; description: string }[] = [
   { id: 'artist', name: 'Артист', description: 'Профиль, треки, аналитика, питчинг, публикации' },
