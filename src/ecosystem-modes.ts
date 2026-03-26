@@ -5,6 +5,7 @@
  */
 
 import { callLLM } from "./llm-router.tsx";
+import { pool } from "./db-client.tsx";
 import {
   getAgent,
   getAgentsByMode,
@@ -163,6 +164,76 @@ function parseJsonResponse(text: string): Record<string, unknown> {
 
 // ─── Generate Daily Brief ─────────────────────────────────────────────────────
 
+
+// ─── Platform Stats for Daily Brief ──────────────────────────────────────────
+
+async function getPlatformStats(): Promise<string> {
+  try {
+    const since24h = new Date(Date.now() - 86400000).toISOString();
+    const since7d = new Date(Date.now() - 7 * 86400000).toISOString();
+
+    const [
+      visitors24h, views24h, visitors7d,
+      totalUsers, newUsers24h,
+      totalTracks, newTracks24h,
+      totalNews, newNews24h,
+      topPages, topReferrers,
+      registrations24h,
+    ] = await Promise.all([
+      pool.query(`SELECT COUNT(DISTINCT session_id) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false`, [since24h]),
+      pool.query(`SELECT COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false`, [since24h]),
+      pool.query(`SELECT COUNT(DISTINCT session_id) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false`, [since7d]),
+      pool.query(`SELECT COUNT(*) as cnt FROM profiles`),
+      pool.query(`SELECT COUNT(*) as cnt FROM profiles WHERE created_at >= $1`, [since24h]),
+      pool.query(`SELECT COUNT(*) as cnt FROM tracks WHERE moderation_status = 'approved'`),
+      pool.query(`SELECT COUNT(*) as cnt FROM tracks WHERE created_at >= $1`, [since24h]),
+      pool.query(`SELECT COUNT(*) as cnt FROM news_public`),
+      pool.query(`SELECT COUNT(*) as cnt FROM news_public WHERE data->>'publishedAt' >= $1`, [since24h]),
+      pool.query(`SELECT path, COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false GROUP BY path ORDER BY cnt DESC LIMIT 5`, [since24h]),
+      pool.query(`SELECT referrer, COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false AND referrer IS NOT NULL AND referrer != '' GROUP BY referrer ORDER BY cnt DESC LIMIT 5`, [since24h]),
+      pool.query(`SELECT COUNT(*) as cnt FROM profiles WHERE created_at >= $1`, [since24h]),
+    ]);
+
+    const topPagesStr = (topPages.rows || [])
+      .map((r: any) => `  ${r.path}: ${r.cnt}`)
+      .join("\n") || "  нет данных";
+
+    const topRefsStr = (topReferrers.rows || [])
+      .map((r: any) => `  ${r.referrer?.slice(0, 50)}: ${r.cnt}`)
+      .join("\n") || "  нет данных";
+
+    return `
+📊 СТАТИСТИКА ПЛАТФОРМЫ
+━━━━━━━━━━━━━━━━━━━━━━
+Трафик за 24ч:
+  Уникальные посетители: ${visitors24h.rows[0]?.cnt || 0}
+  Просмотры страниц: ${views24h.rows[0]?.cnt || 0}
+  Посетители за 7 дней: ${visitors7d.rows[0]?.cnt || 0}
+
+Пользователи:
+  Всего: ${totalUsers.rows[0]?.cnt || 0}
+  Новых за 24ч: ${newUsers24h.rows[0]?.cnt || 0}
+
+Контент:
+  Треков: ${totalTracks.rows[0]?.cnt || 0} (новых за 24ч: ${newTracks24h.rows[0]?.cnt || 0})
+  Новостей: ${totalNews.rows[0]?.cnt || 0} (новых за 24ч: ${newNews24h.rows[0]?.cnt || 0})
+
+Топ страниц (24ч):
+${topPagesStr}
+
+Источники трафика (24ч):
+${topRefsStr}
+
+Аналитика:
+  Яндекс.Метрика: 108247499 (metrika.yandex.ru)
+  Google Analytics: G-G10RSZ9T6Z (analytics.google.com)
+━━━━━━━━━━━━━━━━━━━━━━`;
+  } catch (e) {
+    console.error("[ecosystem] Platform stats error:", e);
+    return "📊 Статистика платформы: не удалось получить данные";
+  }
+}
+
 async function generateDailyBrief(
   results: AgentResult[],
   errors: Array<{ agent: string; error: string }>
@@ -210,7 +281,14 @@ async function generateDailyBrief(
     agentReports.push(`**${name}**: Не смог выполнить задачу — ${e.error}`);
   }
 
-  return agentReports.join("\n\n---\n\n");
+  // Add platform stats at the top
+  let platformStats = "";
+  try {
+    platformStats = await getPlatformStats();
+  } catch {}
+
+  const briefParts = [platformStats, ...agentReports];
+  return briefParts.filter(Boolean).join("\n\n---\n\n");
 }
 
 // ─── Run Single Agent ─────────────────────────────────────────────────────────
