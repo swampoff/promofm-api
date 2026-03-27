@@ -9,6 +9,7 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as db from './db.tsx';
 import { chartAggregationStore, chartSourcesStore, newsPipelineStore, newsPublicStore } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -306,7 +307,7 @@ async function collectHealthData(): Promise<ContentHealthData> {
  * GET /health
  * Полная сводка здоровья контента
  */
-contentHealth.get('/health', async (c) => {
+contentHealth.get('/health', requireAuth, requireAdmin, async (c) => {
   try {
     const data = await collectHealthData();
     return c.json({ success: true, data });
@@ -321,7 +322,7 @@ contentHealth.get('/health', async (c) => {
  * Отправка произвольного текстового алерта в Telegram
  * Body: { message: string }
  */
-contentHealth.post('/telegram', async (c) => {
+contentHealth.post('/telegram', requireAuth, requireAdmin, async (c) => {
   try {
     const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
     const telegramChatId = process.env.TELEGRAM_CHAT_ID;
@@ -371,7 +372,7 @@ contentHealth.post('/telegram', async (c) => {
  * POST /telegram-report
  * Собирает данные здоровья и отправляет форматированный отчёт в Telegram
  */
-contentHealth.post('/telegram-report', async (c) => {
+contentHealth.post('/telegram-report', requireAuth, requireAdmin, async (c) => {
   try {
     const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
     const telegramChatId = process.env.TELEGRAM_CHAT_ID;

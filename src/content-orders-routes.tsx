@@ -132,7 +132,7 @@ app.get("/orders", async (c) => {
   try {
     const venueId = c.req.query("venueId");
     const status = c.req.query("status") as OrderStatus | undefined;
-    const role = c.req.query("role"); // 'admin' or 'venue'
+    const role = c.get('userRole'); // 'admin' or 'venue'
 
     console.log('GET /orders - role:', role, 'venueId:', venueId, 'status:', status);
 

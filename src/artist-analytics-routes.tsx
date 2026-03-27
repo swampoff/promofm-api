@@ -14,13 +14,14 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth } from './auth-middleware.tsx';
 import * as db from './db.tsx';
 import { getArtistProfile, artistAnalyticsCacheStore, artistTracksStatsStore } from './db.tsx';
 
 const app = new Hono();
 
 // GET /overview/:artistId
-app.get('/overview/:artistId', async (c) => {
+app.get('/overview/:artistId', requireAuth, async (c) => {
   const artistId = c.req.param('artistId');
   const period = c.req.query('period') || 'month';
   
@@ -97,7 +98,7 @@ app.get('/overview/:artistId', async (c) => {
 });
 
 // GET /timeline/:artistId
-app.get('/timeline/:artistId', async (c) => {
+app.get('/timeline/:artistId', requireAuth, async (c) => {
   const artistId = c.req.param('artistId');
   const period = c.req.query('period') || 'month';
   
@@ -146,7 +147,7 @@ app.get('/timeline/:artistId', async (c) => {
 });
 
 // GET /tracks/:artistId - статистика по трекам
-app.get('/tracks/:artistId', async (c) => {
+app.get('/tracks/:artistId', requireAuth, async (c) => {
   const artistId = c.req.param('artistId');
   try {
     const cached = await artistTracksStatsStore.get(artistId);

@@ -4,6 +4,7 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 
 const memoryRoutes = new Hono();
@@ -26,7 +27,7 @@ function validLayer(layer: string): layer is Layer {
 
 // ─── POST /:layer/store ───────────────────────────────────────────────────────
 
-memoryRoutes.post('/:layer/store', async (c) => {
+memoryRoutes.post('/:layer/store', requireAuth, requireAdmin, async (c) => {
   const layer = c.req.param('layer');
   if (!validLayer(layer)) return c.json({ error: `Invalid layer: ${layer}` }, 400);
 
@@ -119,7 +120,7 @@ memoryRoutes.post('/:layer/store', async (c) => {
 
 // ─── GET /:layer/search ───────────────────────────────────────────────────────
 
-memoryRoutes.get('/:layer/search', async (c) => {
+memoryRoutes.get('/:layer/search', requireAuth, requireAdmin, async (c) => {
   const layer = c.req.param('layer');
   if (!validLayer(layer)) return c.json({ error: `Invalid layer: ${layer}` }, 400);
 
@@ -159,7 +160,7 @@ memoryRoutes.get('/:layer/search', async (c) => {
 
 // ─── GET /:layer/:key ─────────────────────────────────────────────────────────
 
-memoryRoutes.get('/:layer/:key', async (c) => {
+memoryRoutes.get('/:layer/:key', requireAuth, requireAdmin, async (c) => {
   const layer = c.req.param('layer');
   const key = c.req.param('key');
   if (!validLayer(layer)) return c.json({ error: `Invalid layer: ${layer}` }, 400);
@@ -190,7 +191,7 @@ memoryRoutes.get('/:layer/:key', async (c) => {
 
 // ─── GET /context ─────────────────────────────────────────────────────────────
 
-memoryRoutes.get('/context', async (c) => {
+memoryRoutes.get('/context', requireAuth, requireAdmin, async (c) => {
   const agent = c.req.query('agent') || '';
   const task = c.req.query('task') || '';
   const userId = c.req.query('user_id');
@@ -245,7 +246,7 @@ memoryRoutes.get('/context', async (c) => {
 
 // ─── DELETE /short/expired ────────────────────────────────────────────────────
 
-memoryRoutes.delete('/short/expired', async (c) => {
+memoryRoutes.delete('/short/expired', requireAuth, requireAdmin, async (c) => {
   try {
     const res = await pool.query(
       `DELETE FROM memory_short WHERE expires_at < NOW() RETURNING id`

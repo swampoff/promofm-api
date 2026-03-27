@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -7,7 +8,7 @@ const analyticsRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
 
 // GET /analytics/track/:trackId
-analyticsRoutes.get('/track/:trackId', async (c) => {
+analyticsRoutes.get('/track/:trackId', requireAuth, requireAdmin, async (c) => {
   try {
     const trackId = c.req.param('trackId');
     const userId = await resolveUserId(c, FALLBACK_USER);
@@ -38,7 +39,7 @@ analyticsRoutes.get('/track/:trackId', async (c) => {
 });
 
 // POST /analytics/track/:trackId/play — record play
-analyticsRoutes.post('/track/:trackId/play', async (c) => {
+analyticsRoutes.post('/track/:trackId/play', requireAuth, requireAdmin, async (c) => {
   try {
     const trackId = c.req.param('trackId');
     const userId = await resolveUserId(c, FALLBACK_USER);

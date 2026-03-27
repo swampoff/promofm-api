@@ -4,6 +4,7 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as typed from './db-typed.tsx';
 
 const app = new Hono();
@@ -11,7 +12,7 @@ const app = new Hono();
 const COINS_ON_APPROVE = 30;
 
 // GET /pending — Get concerts for moderation
-app.get('/pending', async (c) => {
+app.get('/pending', requireAuth, requireAdmin, async (c) => {
   try {
     const status = c.req.query('status') || 'pending';
     const concerts = await typed.getAllConcertsForModeration(status === 'all' ? undefined : status);
@@ -49,7 +50,7 @@ app.get('/pending', async (c) => {
 });
 
 // POST /manage — Approve or reject concert
-app.post('/manage', async (c) => {
+app.post('/manage', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { concertId, action, moderator_notes, rejection_reason } = body;
@@ -108,7 +109,7 @@ app.post('/manage', async (c) => {
 });
 
 // POST /batch — Batch approve/reject
-app.post('/batch', async (c) => {
+app.post('/batch', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { concertIds, action } = body;
@@ -149,7 +150,7 @@ app.post('/batch', async (c) => {
 });
 
 // GET /stats — Concert moderation stats
-app.get('/stats', async (c) => {
+app.get('/stats', requireAuth, requireAdmin, async (c) => {
   try {
     const all = await typed.getAllConcertsForModeration();
     const pending = all.filter((c: any) => c.moderation_status === 'pending').length;

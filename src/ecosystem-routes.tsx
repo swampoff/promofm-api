@@ -18,6 +18,7 @@ import {
   MODES,
   type ModeName,
 } from "./ecosystem-modes.ts";
+import { requireAuth, requireAdmin } from "./auth-middleware.tsx";
 
 const app = new Hono();
 
@@ -72,7 +73,7 @@ async function getSession(
 
 // ─── GET /manifest ────────────────────────────────────────────────────────────
 
-app.get("/manifest", (c) => {
+app.get("/manifest", requireAuth, requireAdmin, (c) => {
   const manifest = getManifest();
   return c.json(
     jsonOk(manifest, {
@@ -85,7 +86,7 @@ app.get("/manifest", (c) => {
 
 // ─── POST /mode/:mode/run ─────────────────────────────────────────────────────
 
-app.post("/mode/:mode/run", async (c) => {
+app.post("/mode/:mode/run", requireAuth, requireAdmin, async (c) => {
   const modeName = c.req.param("mode");
 
   if (!MODES[modeName as ModeName]) {
@@ -172,7 +173,7 @@ ${report.dailyBrief.replace(/\n/g, "<br/>")}
 
 // ─── GET /mode/:mode/status ───────────────────────────────────────────────────
 
-app.get("/mode/:mode/status", async (c) => {
+app.get("/mode/:mode/status", requireAuth, requireAdmin, async (c) => {
   const modeName = c.req.param("mode");
 
   if (!MODES[modeName as ModeName]) {
@@ -229,7 +230,7 @@ app.get("/mode/:mode/status", async (c) => {
 
 // ─── POST /agent/:name/run ────────────────────────────────────────────────────
 
-app.post("/agent/:name/run", async (c) => {
+app.post("/agent/:name/run", requireAuth, requireAdmin, async (c) => {
   const agentName = c.req.param("name");
   const agent = getAgent(agentName);
 
@@ -297,7 +298,7 @@ app.post("/agent/:name/run", async (c) => {
 
 // ─── POST /chain ──────────────────────────────────────────────────────────────
 
-app.post("/chain", async (c) => {
+app.post("/chain", requireAuth, requireAdmin, async (c) => {
   let body: {
     task?: string;
     trackId?: string;
@@ -360,7 +361,7 @@ app.post("/chain", async (c) => {
 
 // ─── GET /reports ─────────────────────────────────────────────────────────────
 
-app.get("/reports", async (c) => {
+app.get("/reports", requireAuth, requireAdmin, async (c) => {
   const limit = Math.min(parseInt(c.req.query("limit") || "20", 10), 100);
   const mode = c.req.query("mode");
   const type = c.req.query("type");
@@ -416,7 +417,7 @@ app.get("/reports", async (c) => {
 
 // ─── GET /agents ──────────────────────────────────────────────────────────────
 
-app.get("/agents", (c) => {
+app.get("/agents", requireAuth, requireAdmin, (c) => {
   const mode = c.req.query("mode");
   const manifest = getManifest();
 
@@ -443,7 +444,7 @@ app.get("/agents", (c) => {
 
 // ─── GET /health ──────────────────────────────────────────────────────────────
 
-app.get("/health", async (c) => {
+app.get("/health", requireAuth, requireAdmin, async (c) => {
   let dbOk = false;
   try {
     await pool.query("SELECT 1");

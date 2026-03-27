@@ -23,6 +23,7 @@
 import { getDbClient } from './db-client.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { Hono } from 'hono';
+import { requireAuth } from './auth-middleware.tsx';
 import { getArtistProfile, getBooking, getBookingsByUser, getDjProfile, getVenueProfile, upsertBooking, upsertNotification, bookingCalendarStore, bookingPaymentsStore, bookingsByUserStore } from './db.tsx';
 import { notifyBookingRequest } from './email-helper.tsx';
 import { emitSSE } from './sse-routes.tsx';
@@ -136,7 +137,7 @@ async function getPerformerProfile(performerId: string, performerType: string) {
 // =====================================================
 // POST /create - Создать заявку на букинг
 // =====================================================
-app.post('/create', async (c) => {
+app.post('/create', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
@@ -280,7 +281,7 @@ app.post('/create', async (c) => {
 // =====================================================
 // GET /list - Получить список букингов
 // =====================================================
-app.get('/list', async (c) => {
+app.get('/list', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
@@ -330,7 +331,7 @@ app.get('/list', async (c) => {
 // =====================================================
 // GET /:id - Получить детали букинга
 // =====================================================
-app.get('/:id', async (c) => {
+app.get('/:id', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
@@ -362,7 +363,7 @@ app.get('/:id', async (c) => {
 // =====================================================
 // PUT /:id/accept - Принять заявку (Artist)
 // =====================================================
-app.put('/:id/accept', async (c) => {
+app.put('/:id/accept', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
@@ -414,7 +415,7 @@ app.put('/:id/accept', async (c) => {
 // =====================================================
 // PUT /:id/reject - О��клонить заявку (Artist)
 // =====================================================
-app.put('/:id/reject', async (c) => {
+app.put('/:id/reject', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
@@ -467,7 +468,7 @@ app.put('/:id/reject', async (c) => {
 // =====================================================
 // POST /:id/pay-deposit - Оплатить депозит (Venue)
 // =====================================================
-app.post('/:id/pay-deposit', async (c) => {
+app.post('/:id/pay-deposit', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
@@ -556,7 +557,7 @@ app.post('/:id/pay-deposit', async (c) => {
 // =====================================================
 // POST /:id/pay-final - Оплатить остаток (Venue)
 // =====================================================
-app.post('/:id/pay-final', async (c) => {
+app.post('/:id/pay-final', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
@@ -649,7 +650,7 @@ app.post('/:id/pay-final', async (c) => {
 // =====================================================
 // PUT /:id/cancel - Отменить букинг
 // =====================================================
-app.put('/:id/cancel', async (c) => {
+app.put('/:id/cancel', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {

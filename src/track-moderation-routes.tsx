@@ -5,6 +5,7 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as typed from './db-typed.tsx';
 
 const app = new Hono();
@@ -20,7 +21,7 @@ const GENRES = [
 const COINS_ON_APPROVE = 50;
 
 // POST /submitTrack — Submit track for moderation
-app.post('/submitTrack', async (c) => {
+app.post('/submitTrack', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
 
@@ -55,7 +56,7 @@ app.post('/submitTrack', async (c) => {
 });
 
 // GET /pendingTracks — Get tracks by status with filters
-app.get('/pendingTracks', async (c) => {
+app.get('/pendingTracks', requireAuth, requireAdmin, async (c) => {
   try {
     const status = c.req.query('status') || 'pending';
     const genre = c.req.query('genre');
@@ -97,7 +98,7 @@ app.get('/pendingTracks', async (c) => {
 });
 
 // POST /manageTrackModeration — Approve or reject a track
-app.post('/manageTrackModeration', async (c) => {
+app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { pendingTrackId, action, moderator_notes, rejection_reason, overall_score } = body;
@@ -162,7 +163,7 @@ app.post('/manageTrackModeration', async (c) => {
 });
 
 // POST /batchModeration — Batch approve/reject
-app.post('/batchModeration', async (c) => {
+app.post('/batchModeration', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { trackIds, action } = body;
@@ -208,12 +209,12 @@ app.post('/batchModeration', async (c) => {
 });
 
 // GET /genres
-app.get('/genres', async (c) => {
+app.get('/genres', requireAuth, requireAdmin, async (c) => {
   return c.json({ genres: GENRES });
 });
 
 // GET /uploadStats
-app.get('/uploadStats', async (c) => {
+app.get('/uploadStats', requireAuth, requireAdmin, async (c) => {
   try {
     return c.json({
       current: 0,
@@ -227,7 +228,7 @@ app.get('/uploadStats', async (c) => {
 });
 
 // GET /stats — Moderation statistics
-app.get('/stats', async (c) => {
+app.get('/stats', requireAuth, requireAdmin, async (c) => {
   try {
     const stats = await typed.getTrackModerationStats();
     return c.json(stats);
@@ -239,7 +240,7 @@ app.get('/stats', async (c) => {
 
 
 // ─── Public: New Releases with YouTube playback ─────────────
-app.get('/newReleases', async (c) => {
+app.get('/newReleases', requireAuth, requireAdmin, async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '25');
     const { platformStatsStore } = await import('./db.tsx');

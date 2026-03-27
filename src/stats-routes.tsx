@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 
@@ -6,7 +7,7 @@ const statsRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
 
 // GET /stats/dashboard
-statsRoutes.get('/dashboard', async (c) => {
+statsRoutes.get('/dashboard', requireAuth, requireAdmin, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
 

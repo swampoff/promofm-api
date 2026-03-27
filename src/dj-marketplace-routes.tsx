@@ -130,7 +130,7 @@ const SEED_REVIEWS: Record<string, any[]> = {
 //   await djMarketplaceIndexStore.delete('seeded');
 // Then call POST /seed again, or let the auto-seed in GET /djs trigger.
 
-app.post('/seed', async (c) => {
+app.post('/seed', requireAuth, async (c) => {
   try {
     console.log('Seeding DJ Marketplace data...');
 
@@ -169,7 +169,7 @@ app.post('/seed', async (c) => {
 
 // ═══════ GET /djs — List all DJs (public) ═══════
 
-app.get('/djs', async (c) => {
+app.get('/djs', requireAuth, async (c) => {
   try {
     // Get index
     let index = await djMarketplaceIndexStore.get('singleton') as string[] | null;
@@ -248,7 +248,7 @@ app.get('/djs', async (c) => {
 
 // ═══════ GET /djs/:id — Single DJ profile (public) ═══════
 
-app.get('/djs/:id', async (c) => {
+app.get('/djs/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const profile = await getDjProfile(id);
@@ -264,7 +264,7 @@ app.get('/djs/:id', async (c) => {
 
 // ═══════ GET /djs/:id/mixes — DJ mixes (public) ═══════
 
-app.get('/djs/:id/mixes', async (c) => {
+app.get('/djs/:id/mixes', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const mixes = await djMixesStore.get(id) || [];
@@ -277,7 +277,7 @@ app.get('/djs/:id/mixes', async (c) => {
 
 // ═══════ GET /djs/:id/reviews — DJ reviews (public) ═══════
 
-app.get('/djs/:id/reviews', async (c) => {
+app.get('/djs/:id/reviews', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const reviews = await djReviewsStore.get(id) || [];
@@ -290,7 +290,7 @@ app.get('/djs/:id/reviews', async (c) => {
 
 // ═══════ GET /djs/:id/calendar — DJ availability (public) ═══════
 
-app.get('/djs/:id/calendar', async (c) => {
+app.get('/djs/:id/calendar', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     // Check for stored calendar, or generate default
@@ -321,7 +321,7 @@ app.get('/djs/:id/calendar', async (c) => {
 
 // ═══════ POST /djs/:id/book — Request booking (requires login intent) ═══════
 
-app.post('/djs/:id/book', async (c) => {
+app.post('/djs/:id/book', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();

@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { requireAuth } from './auth-middleware.tsx';
 import { paymentTransactionsStore, trackTestAllRequestsStore, trackTestExpertsStore, trackTestExpertStatsStore, trackTestRequestReviewsStore, trackTestRequestsStore, trackTestReviewsStore, trackTestUserRequestsStore } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
@@ -88,7 +89,7 @@ interface ExpertReview {
 // 1. СОЗДАНИЕ ЗАЯВКИ (для артистов и гостей)
 // =====================================================
 
-app.post('/submit', async (c) => {
+app.post('/submit', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { 
@@ -171,7 +172,7 @@ app.post('/submit', async (c) => {
 // 2. ОБРАБОТКА ОПЛАТЫ
 // =====================================================
 
-app.post('/payment', async (c) => {
+app.post('/payment', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { request_id, payment_method, transaction_id } = body;
@@ -249,7 +250,7 @@ app.post('/payment', async (c) => {
 // 3. МОДЕРАЦИЯ (администратор)
 // =====================================================
 
-app.post('/moderate', async (c) => {
+app.post('/moderate', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { request_id, action, notes } = body;
@@ -324,7 +325,7 @@ app.post('/moderate', async (c) => {
 // 4. НАЗНАЧЕНИЕ ЭКСПЕРТОВ (администратор)
 // =====================================================
 
-app.post('/assign-experts', async (c) => {
+app.post('/assign-experts', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { request_id, expert_emails, required_count } = body;
@@ -410,7 +411,7 @@ app.post('/assign-experts', async (c) => {
 // 5. ОТПРАВКА ОЦЕНКИ ЭКСПЕРТОМ
 // =====================================================
 
-app.post('/submit-review', async (c) => {
+app.post('/submit-review', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { 
@@ -753,7 +754,7 @@ function templateConsolidatedRecommendations(reviews: ExpertReview[]): string {
 // 7. ФИНАЛИЗАЦИЯ И ОТПРАВКА РЕЗУЛЬТАТОВ (админстратор)
 // =====================================================
 
-app.post('/finalize', async (c) => {
+app.post('/finalize', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { request_id, action, rejection_reason } = body;
@@ -814,7 +815,7 @@ app.post('/finalize', async (c) => {
 // 7a. ОТПРАВКА ОТЧЁТА АРТИСТУ (sendFeedbackToArtist)
 // =====================================================
 
-app.post('/send-feedback', async (c) => {
+app.post('/send-feedback', requireAuth, async (c) => {
   try {
     const { request_id } = await c.req.json();
 
@@ -870,7 +871,7 @@ app.post('/send-feedback', async (c) => {
 // =====================================================
 
 // Получить список заявок пользователя
-app.get('/requests', async (c) => {
+app.get('/requests', requireAuth, async (c) => {
   try {
     const userId = c.req.query('user_id');
     
@@ -901,7 +902,7 @@ app.get('/requests', async (c) => {
 });
 
 // Получить детали заявки
-app.get('/requests/:id', async (c) => {
+app.get('/requests/:id', requireAuth, async (c) => {
   try {
     const requestId = c.req.param('id');
     
@@ -935,7 +936,7 @@ app.get('/requests/:id', async (c) => {
 });
 
 // Получить все заявки (для администратора)
-app.get('/admin/requests', async (c) => {
+app.get('/admin/requests', requireAuth, async (c) => {
   try {
     const status = c.req.query('status');
     const allRequestIds = await trackTestAllRequestsStore.get('singleton') || [];
@@ -963,7 +964,7 @@ app.get('/admin/requests', async (c) => {
 });
 
 // Получить назначенные оценки для эксперта
-app.get('/expert/reviews', async (c) => {
+app.get('/expert/reviews', requireAuth, async (c) => {
   try {
     const expertEmail = c.req.query('email');
     
@@ -1008,7 +1009,7 @@ app.get('/expert/reviews', async (c) => {
 
 // No demo data — only real track test requests from the database
 
-app.get('/available-for-review', async (c) => {
+app.get('/available-for-review', requireAuth, async (c) => {
   try {
     const allIds = (await trackTestAllRequestsStore.get('singleton') || []) as string[];
     const expertId = c.req.query('expert_id') || '';
@@ -1040,7 +1041,7 @@ app.get('/available-for-review', async (c) => {
 // 10. ЭКСПЕРТ БЕРЁТ ТЕСТ В РАБОТУ
 // =====================================================
 
-app.post('/claim-review', async (c) => {
+app.post('/claim-review', requireAuth, async (c) => {
   try {
     const { request_id, expert_id, expert_name, expert_role } = await c.req.json();
 
@@ -1152,7 +1153,7 @@ app.post('/claim-review', async (c) => {
 // 11. СТАТИСТИКА ЭКСПЕРТА
 // =====================================================
 
-app.get('/expert/stats', async (c) => {
+app.get('/expert/stats', requireAuth, async (c) => {
   try {
     const expertId = c.req.query('expert_id');
     if (!expertId) return c.json({ error: 'expert_id required' }, 400);
@@ -1207,7 +1208,7 @@ app.get('/expert/stats', async (c) => {
 // 12. РЕВЬЮ ЭКСПЕРТА ПО expert_id (не email)
 // =====================================================
 
-app.get('/expert/my-reviews', async (c) => {
+app.get('/expert/my-reviews', requireAuth, async (c) => {
   try {
     const expertId = c.req.query('expert_id');
     if (!expertId) return c.json({ error: 'expert_id required' }, 400);

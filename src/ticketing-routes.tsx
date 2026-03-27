@@ -4,6 +4,7 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth } from './auth-middleware.tsx';
 import { getAllConcerts, getTicketProvidersByConcert, getTicketSalesByConcert, ticketSalesStore, upsertTicketProvider, upsertTicketSale } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 
@@ -80,7 +81,7 @@ const TICKET_PROVIDERS: TicketProvider[] = [
 ];
 
 // Получить список провайдеров
-ticketing.get('/providers', async (c) => {
+ticketing.get('/providers', requireAuth, async (c) => {
   try {
     return c.json({ success: true, data: TICKET_PROVIDERS });
   } catch (error) {
@@ -93,7 +94,7 @@ ticketing.get('/providers', async (c) => {
 });
 
 // Подключить провайдера
-ticketing.post('/providers/:providerId/connect', async (c) => {
+ticketing.post('/providers/:providerId/connect', requireAuth, async (c) => {
   try {
     const providerId = c.req.param('providerId');
     const body = await c.req.json();
@@ -128,7 +129,7 @@ ticketing.post('/providers/:providerId/connect', async (c) => {
 });
 
 // Получить подключённых провайдеров артиста
-ticketing.get('/providers/connected/:artistId', async (c) => {
+ticketing.get('/providers/connected/:artistId', requireAuth, async (c) => {
   try {
     const artistId = c.req.param('artistId');
     const connections = await getTicketProvidersByConcert(artistId);
@@ -144,7 +145,7 @@ ticketing.get('/providers/connected/:artistId', async (c) => {
 });
 
 // Создать продажу билета (webhook или мануальная запись)
-ticketing.post('/sales', async (c) => {
+ticketing.post('/sales', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     
@@ -186,7 +187,7 @@ ticketing.post('/sales', async (c) => {
 });
 
 // Получить все продажи концерта
-ticketing.get('/sales/:concertId', async (c) => {
+ticketing.get('/sales/:concertId', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('concertId');
     const sales = await getTicketSalesByConcert(concertId);
@@ -202,7 +203,7 @@ ticketing.get('/sales/:concertId', async (c) => {
 });
 
 // Получить статистику продаж
-ticketing.get('/sales/:concertId/stats', async (c) => {
+ticketing.get('/sales/:concertId/stats', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('concertId');
     const sales = await getTicketSalesByConcert(concertId);
@@ -240,7 +241,7 @@ ticketing.get('/sales/:concertId/stats', async (c) => {
 });
 
 // Получить воронку продаж (Sales Funnel)
-ticketing.get('/funnel/:concertId', async (c) => {
+ticketing.get('/funnel/:concertId', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('concertId');
     
@@ -287,7 +288,7 @@ ticketing.get('/funnel/:concertId', async (c) => {
 });
 
 // Генерация тестовых продаж (для демонстрации)
-ticketing.post('/generate-test-sales/:concertId', async (c) => {
+ticketing.post('/generate-test-sales/:concertId', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('concertId');
     const body = await c.req.json();
@@ -340,7 +341,7 @@ ticketing.post('/generate-test-sales/:concertId', async (c) => {
 });
 
 // Отменить продажу
-ticketing.put('/sales/:saleId/cancel', async (c) => {
+ticketing.put('/sales/:saleId/cancel', requireAuth, async (c) => {
   try {
     const saleId = c.req.param('saleId');
     const body = await c.req.json();

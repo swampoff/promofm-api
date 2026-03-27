@@ -7,11 +7,12 @@ import { Hono } from 'hono';
 import { runAllMigrations, checkTablesStatus } from './migration-runner.tsx';
 import { initializeStorage, getStorageStats } from './storage-setup.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const migrations = new Hono();
 
 // Run all migrations
-migrations.post('/run', async (c) => {
+migrations.post('/run', requireAuth, requireAdmin, async (c) => {
   try {
     console.log('Starting migration process...');
     
@@ -35,7 +36,7 @@ migrations.post('/run', async (c) => {
 });
 
 // Check migration status
-migrations.get('/status', async (c) => {
+migrations.get('/status', requireAuth, requireAdmin, async (c) => {
   try {
     const tablesStatus = await checkTablesStatus();
     
@@ -53,7 +54,7 @@ migrations.get('/status', async (c) => {
 });
 
 // Initialize everything (migrations + storage)
-migrations.post('/initialize', async (c) => {
+migrations.post('/initialize', requireAuth, requireAdmin, async (c) => {
   try {
     console.log('Initializing full backend...');
     
@@ -95,7 +96,7 @@ migrations.post('/initialize', async (c) => {
 });
 
 // Health check
-migrations.get('/health', (c) => {
+migrations.get('/health', requireAuth, requireAdmin, (c) => {
   return c.json({
     success: true,
     message: 'Migration service is ready',

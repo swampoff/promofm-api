@@ -71,7 +71,7 @@ tracksRoutes.post('/', requireAuth, async (c) => {
 });
 
 // PUT /:id — Update track
-tracksRoutes.put('/:id', async (c) => {
+tracksRoutes.put('/:id', requireAuth, async (c) => {
   try {
     const trackId = c.req.param('id');
     const body = await c.req.json();
@@ -88,7 +88,7 @@ tracksRoutes.put('/:id', async (c) => {
 });
 
 // DELETE /:id — Delete track
-tracksRoutes.delete('/:id', async (c) => {
+tracksRoutes.delete('/:id', requireAuth, async (c) => {
   try {
     const trackId = c.req.param('id');
     await typed.deleteTrack(trackId);

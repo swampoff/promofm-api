@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import { publishEmailPrefsStore, emailHistoryStore, emailTemplatesStore } from './db.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const app = new Hono();
 
@@ -18,7 +19,7 @@ const app = new Hono();
  * GET /subscriptions/:userId
  * Получить настройки email-подписок пользователя
  */
-app.get('/subscriptions/:userId', async (c) => {
+app.get('/subscriptions/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
   
   try {
@@ -70,7 +71,7 @@ app.get('/subscriptions/:userId', async (c) => {
  * PUT /subscriptions/:userId
  * Обновить настройки email-подписок
  */
-app.put('/subscriptions/:userId', async (c) => {
+app.put('/subscriptions/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
   
   try {
@@ -104,7 +105,7 @@ app.put('/subscriptions/:userId', async (c) => {
  * GET /history/:userId
  * Получить историю отправленных email
  */
-app.get('/history/:userId', async (c) => {
+app.get('/history/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
   
   try {
@@ -128,7 +129,7 @@ app.get('/history/:userId', async (c) => {
  * POST /send
  * Отправить email (сохраняет в историю)
  */
-app.post('/send', async (c) => {
+app.post('/send', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const {
@@ -187,7 +188,7 @@ app.post('/send', async (c) => {
  * PUT /history/:emailId/opened
  * Отметить email как открытый (tracking pixel)
  */
-app.put('/history/:emailId/opened', async (c) => {
+app.put('/history/:emailId/opened', requireAuth, async (c) => {
   const emailId = c.req.param('emailId');
   
   try {
@@ -224,7 +225,7 @@ app.put('/history/:emailId/opened', async (c) => {
  * GET /templates
  * Получить все шаблоны email
  */
-app.get('/templates', async (c) => {
+app.get('/templates', requireAuth, async (c) => {
   try {
     const templateList = await emailTemplatesStore.getAll();
 
@@ -290,7 +291,7 @@ app.get('/templates', async (c) => {
  * GET /templates/:templateId
  * Получить конкретный шаблон
  */
-app.get('/templates/:templateId', async (c) => {
+app.get('/templates/:templateId', requireAuth, async (c) => {
   const templateId = c.req.param('templateId');
   
   try {
@@ -318,7 +319,7 @@ app.get('/templates/:templateId', async (c) => {
  * GET /stats/:userId
  * ��олучить статистику email
  */
-app.get('/stats/:userId', async (c) => {
+app.get('/stats/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
   
   try {

@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { requireAuth } from './auth-middleware.tsx';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -7,7 +8,7 @@ const profileRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
 
 // GET /profile
-profileRoutes.get('/', async (c) => {
+profileRoutes.get('/', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const profile = await db.getProfile(userId);
@@ -27,7 +28,7 @@ profileRoutes.get('/', async (c) => {
 });
 
 // PUT /profile
-profileRoutes.put('/', async (c) => {
+profileRoutes.put('/', requireAuth, async (c) => {
   try {
     const userId = await resolveUserId(c, FALLBACK_USER);
     const body = await c.req.json();

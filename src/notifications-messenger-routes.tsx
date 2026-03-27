@@ -4,6 +4,7 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth } from './auth-middleware.tsx';
 import {
   upsertNotification,
   getNotification,
@@ -26,7 +27,7 @@ const app = new Hono();
  * GET /notifications/user/:userId
  * Получить все уведомления пользователя
  */
-app.get('/user/:userId', async (c) => {
+app.get('/user/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
 
   try {
@@ -50,7 +51,7 @@ app.get('/user/:userId', async (c) => {
  * POST /notifications/send
  * Создать и отправить уведомление
  */
-app.post('/send', async (c) => {
+app.post('/send', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const {
@@ -121,7 +122,7 @@ app.post('/send', async (c) => {
  * PUT /notifications/:notificationId/read
  * Отметить уведомление как прочитанное
  */
-app.put('/:notificationId/read', async (c) => {
+app.put('/:notificationId/read', requireAuth, async (c) => {
   const notificationId = c.req.param('notificationId');
 
   try {
@@ -170,7 +171,7 @@ app.put('/:notificationId/read', async (c) => {
  * PUT /notifications/:notificationId/star
  * Переключить избранное
  */
-app.put('/:notificationId/star', async (c) => {
+app.put('/:notificationId/star', requireAuth, async (c) => {
   const notificationId = c.req.param('notificationId');
 
   try {
@@ -213,7 +214,7 @@ app.put('/:notificationId/star', async (c) => {
  * DELETE /notifications/:notificationId
  * Удалить уведомление
  */
-app.delete('/:notificationId', async (c) => {
+app.delete('/:notificationId', requireAuth, async (c) => {
   const notificationId = c.req.param('notificationId');
 
   try {
@@ -260,7 +261,7 @@ app.delete('/:notificationId', async (c) => {
  * GET /messenger/conversations/:userId
  * Получить все разговоры пользователя
  */
-app.get('/conversations/:userId', async (c) => {
+app.get('/conversations/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
 
   try {
@@ -299,7 +300,7 @@ app.get('/conversations/:userId', async (c) => {
  * POST /messenger/conversation/create
  * Создать новый разговор
  */
-app.post('/conversation/create', async (c) => {
+app.post('/conversation/create', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const {
@@ -354,7 +355,7 @@ app.post('/conversation/create', async (c) => {
  * GET /messenger/messages/:conversationId
  * Получить сообщения разговора
  */
-app.get('/messages/:conversationId', async (c) => {
+app.get('/messages/:conversationId', requireAuth, async (c) => {
   const conversationId = c.req.param('conversationId');
 
   try {
@@ -383,7 +384,7 @@ app.get('/messages/:conversationId', async (c) => {
  * POST /messenger/send
  * Отправить сообщение
  */
-app.post('/send', async (c) => {
+app.post('/send', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const {
@@ -502,7 +503,7 @@ app.post('/send', async (c) => {
  * PUT /messenger/conversations/:conversationId/read
  * Отметить разговор как прочитанный
  */
-app.put('/conversations/:conversationId/read', async (c) => {
+app.put('/conversations/:conversationId/read', requireAuth, async (c) => {
   const conversationId = c.req.param('conversationId');
 
   try {

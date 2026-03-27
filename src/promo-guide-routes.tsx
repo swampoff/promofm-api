@@ -10,6 +10,7 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth } from './auth-middleware.tsx';
 import { guideDataStore } from './db.tsx';
 
 const app = new Hono();
@@ -35,7 +36,7 @@ async function loadAllVenues(): Promise<any[]> {
 // ==============================================
 // GET /public/guide/venues
 // ==============================================
-app.get('/public/guide/venues', async (c) => {
+app.get('/public/guide/venues', requireAuth, async (c) => {
   try {
     const city = c.req.query('city');
     const type = c.req.query('type');
@@ -72,7 +73,7 @@ app.get('/public/guide/venues', async (c) => {
 // ==============================================
 // GET /public/guide/venues/:id
 // ==============================================
-app.get('/public/guide/venues/:id', async (c) => {
+app.get('/public/guide/venues/:id', requireAuth, async (c) => {
   try {
     const venueId = c.req.param('id');
     const raw = await guideDataStore.get(`guide:venue:${venueId}`);
@@ -91,7 +92,7 @@ app.get('/public/guide/venues/:id', async (c) => {
 // GET /public/guide/live-feed
 // Что играет ПРЯМО СЕЙЧАС
 // ==============================================
-app.get('/public/guide/live-feed', async (c) => {
+app.get('/public/guide/live-feed', requireAuth, async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '20');
     const venues = await loadAllVenues();
@@ -126,7 +127,7 @@ app.get('/public/guide/live-feed', async (c) => {
 // GET /public/guide/cities
 // Уникальные города
 // ==============================================
-app.get('/public/guide/cities', async (c) => {
+app.get('/public/guide/cities', requireAuth, async (c) => {
   try {
     const venues = await loadAllVenues();
     const cityMap = new Map<string, number>();
@@ -146,7 +147,7 @@ app.get('/public/guide/cities', async (c) => {
 // GET /public/guide/genres
 // Уникальные жанры
 // ==============================================
-app.get('/public/guide/genres', async (c) => {
+app.get('/public/guide/genres', requireAuth, async (c) => {
   try {
     const venues = await loadAllVenues();
     const genreMap = new Map<string, number>();
