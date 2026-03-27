@@ -19,11 +19,59 @@ pool.on('error', (err) => {
 
 export { pool };
 
+// ─── RLS-aware query wrapper ─────────────────────────────────
+// Uses dedicated connection with SET LOCAL for RLS policy enforcement.
+// Falls back to plain pool.query() if no userId provided.
+
+export async function rlsQuery(
+  sql: string,
+  params: any[] = [],
+  userId?: string,
+  userRole?: string
+): Promise<pg.QueryResult> {
+  if (!userId) {
+    // No user context — plain query (for internal/cron/system calls)
+    return pool.query(sql, params);
+  }
+  const client = await pool.connect();
+  try {
+    // SET LOCAL scopes to current transaction only
+    await client.query('BEGIN');
+    await client.query("SELECT set_config('app.current_user_id', $1, true)", [userId]);
+    await client.query("SELECT set_config('app.current_user_role', $1, true)", [userRole || 'artist']);
+    const result = await client.query(sql, params);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Hono middleware: set RLS context from JWT for downstream pool.query calls
+export function rlsMiddleware() {
+  return async (c: any, next: any) => {
+    const userId = c.get('userId');
+    const userRole = c.get('userRole');
+    if (userId) {
+      // Store for use by route handlers that call rlsQuery
+      c.set('rlsUserId', userId);
+      c.set('rlsUserRole', userRole || 'artist');
+    }
+    await next();
+  };
+}
+
 // ─── Query Builder (PostgreSQL API) ───
 
 type Filter = { col: string; op: string; val: any };
 
 class QueryBuilder {
+  // RLS context — set per-request via withContext()
+  private _rlsUserId: string | undefined;
+  private _rlsUserRole: string | undefined;
   private table: string;
   private _select: string = '*';
   private _filters: Filter[] = [];
@@ -157,6 +205,13 @@ class QueryBuilder {
     this._single = true;
     this._returnData = true;
     this._limit = 1;
+    return this;
+  }
+
+  /** Set RLS context for this query chain */
+  withContext(userId?: string, role?: string) {
+    this._rlsUserId = userId;
+    this._rlsUserRole = role;
     return this;
   }
 

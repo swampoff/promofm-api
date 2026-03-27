@@ -288,6 +288,20 @@ auth.post("/signin", async (c) => {
 auth.post("/vk-callback", async (c) => {
   try {
     const { code, redirect_uri, code_verifier, device_id, role: vkRequestedRole } = await c.req.json();
+
+    // Validate redirect_uri — prevent OAuth redirect manipulation
+    const ALLOWED_REDIRECT_URIS = [
+      'https://promo-music.ru/login',
+      'https://www.promo-music.ru/login',
+      'https://promo-music.ru/register',
+      'https://www.promo-music.ru/register',
+      'https://promo-music.ru/auth/vk/callback',
+      'https://www.promo-music.ru/auth/vk/callback',
+    ];
+    const effectiveRedirectUri = redirect_uri || 'https://promo-music.ru/login';
+    if (!ALLOWED_REDIRECT_URIS.includes(effectiveRedirectUri)) {
+      return c.json({ success: false, error: 'Invalid redirect_uri' }, 400);
+    }
     if (!code) return c.json({ success: false, error: "VK authorization code required" }, 400);
 
     const VK_CLIENT_ID = process.env.VK_CLIENT_ID || "";
@@ -297,7 +311,7 @@ auth.post("/vk-callback", async (c) => {
     // 1. Exchange code for access_token
     const tokenBody: Record<string, string> = {
       grant_type: "authorization_code", client_id: VK_CLIENT_ID, client_secret: VK_CLIENT_SECRET,
-      code, redirect_uri: redirect_uri || "https://promo-music.ru/login",
+      code, redirect_uri: effectiveRedirectUri,
     };
     if (device_id) tokenBody.device_id = device_id;
     if (code_verifier) tokenBody.code_verifier = code_verifier;

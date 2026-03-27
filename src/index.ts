@@ -93,6 +93,7 @@ import { classifyAndLog } from "./error-classifier.ts";
 import { authLimiter, uploadLimiter, apiLimiter } from './rate-limiter.tsx';
 import { safeErrorMessage, scanForSqlInjection } from './security.tsx';
 import { wafMiddleware, honeypotMiddleware } from './threat-detector.tsx';
+import { rlsMiddleware } from './db-client.tsx';
 import { startSecurityWarden } from './security-warden.tsx';
 
 // Global unhandled rejection handler (replaces Deno version)
@@ -152,6 +153,9 @@ app.use('*', wafMiddleware());
 
 // Logger
 app.use('*', logger());
+
+// RLS context — propagate JWT userId/role to database layer
+app.use('*', rlsMiddleware());
 
 // CORS
 app.use('/*', cors({

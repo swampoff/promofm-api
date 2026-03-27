@@ -322,7 +322,7 @@ storage.get('/list/:bucket', requireAuth, async (c) => {
 });
 
 // Delete file
-storage.delete('/:bucket/:path', requireAuth, async (c) => {
+storage.delete('/:bucket/:path', requireAuth, requireAdmin, async (c) => {
   try {
     const bucket = c.req.param('bucket');
     const path = c.req.param('path');
