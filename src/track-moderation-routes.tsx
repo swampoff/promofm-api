@@ -19,6 +19,48 @@ const GENRES = [
 ];
 
 const COINS_ON_APPROVE = 50;
+const AI_DETECTOR_URL = 'http://127.0.0.1:8085';
+const UPLOADS_DIR = process.env.UPLOADS_DIR || '/var/www/promofm/uploads';
+
+// Fire-and-forget AI analysis for uploaded track
+async function triggerAiAnalysis(trackId: string, audioUrl: string) {
+  try {
+    // Convert URL to local file path
+    let filePath = '';
+    if (audioUrl.startsWith('/') || audioUrl.startsWith('/var/')) {
+      filePath = audioUrl;
+    } else if (audioUrl.includes('/uploads/track-audio/')) {
+      const filename = audioUrl.split('/uploads/track-audio/').pop();
+      filePath = `${UPLOADS_DIR}/track-audio/${filename}`;
+    } else {
+      console.log(`[ai-detector] Cannot analyze track ${trackId}: audio is external URL`);
+      return;
+    }
+
+    console.log(`[ai-detector] Starting analysis for track ${trackId}: ${filePath}`);
+    const resp = await fetch(`${AI_DETECTOR_URL}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_path: filePath, track_id: trackId }),
+    });
+
+    if (!resp.ok) {
+      console.error(`[ai-detector] HTTP ${resp.status} for track ${trackId}`);
+      return;
+    }
+
+    const result = await resp.json();
+    await typed.updateTrack(trackId, {
+      ai_score: result.ai_score,
+      ai_analysis: result,
+      ai_verdict: result.verdict,
+      ai_analyzed_at: new Date().toISOString(),
+    });
+    console.log(`[ai-detector] Track ${trackId}: score=${result.ai_score}% verdict=${result.verdict}`);
+  } catch (err) {
+    console.error(`[ai-detector] Failed for track ${trackId}:`, err);
+  }
+}
 
 // POST /submitTrack — Submit track for moderation
 app.post('/submitTrack', requireAuth, requireAdmin, async (c) => {
@@ -42,6 +84,12 @@ app.post('/submitTrack', requireAuth, requireAdmin, async (c) => {
 
     if (!track) {
       return c.json({ error: 'Failed to create track' }, 500);
+    }
+
+    // Fire-and-forget AI analysis (don't block the response)
+    const audioUrl = track.audio_url || body.audio_file_url || body.audio_url || '';
+    if (audioUrl) {
+      triggerAiAnalysis(track.id, audioUrl).catch(() => {});
     }
 
     return c.json({
@@ -88,6 +136,11 @@ app.get('/pendingTracks', requireAuth, requireAdmin, async (c) => {
       rejection_reason: t.rejection_reason || null,
       created_at: t.created_at,
       updated_at: t.updated_at,
+      // AI detection fields
+      ai_score: t.ai_score ?? null,
+      ai_verdict: t.ai_verdict || null,
+      ai_analysis: t.ai_analysis || null,
+      ai_analyzed_at: t.ai_analyzed_at || null,
     }));
 
     return c.json({ tracks: mapped });
@@ -252,6 +305,56 @@ app.get('/newReleases', requireAuth, requireAdmin, async (c) => {
   } catch (error) {
     console.error('Error fetching new releases:', error);
     return c.json({ success: true, releases: [] });
+  }
+});
+
+// POST /reanalyze — Re-run AI analysis on a specific track
+app.post('/reanalyze', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { trackId } = await c.req.json();
+    const track = await typed.getTrackById(trackId);
+    if (!track) {
+      return c.json({ error: 'Track not found' }, 404);
+    }
+
+    const audioUrl = track.audio_url || '';
+    if (!audioUrl) {
+      return c.json({ error: 'No audio file to analyze' }, 400);
+    }
+
+    // Run analysis synchronously (admin waits for result)
+    let filePath = '';
+    if (audioUrl.startsWith('/')) {
+      filePath = audioUrl;
+    } else if (audioUrl.includes('/uploads/track-audio/')) {
+      const filename = audioUrl.split('/uploads/track-audio/').pop();
+      filePath = `${UPLOADS_DIR}/track-audio/${filename}`;
+    } else {
+      return c.json({ error: 'Cannot analyze external URL' }, 400);
+    }
+
+    const resp = await fetch(`${AI_DETECTOR_URL}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_path: filePath, track_id: trackId }),
+    });
+
+    if (!resp.ok) {
+      return c.json({ error: `AI detector returned ${resp.status}` }, 502);
+    }
+
+    const result = await resp.json();
+    await typed.updateTrack(trackId, {
+      ai_score: result.ai_score,
+      ai_analysis: result,
+      ai_verdict: result.verdict,
+      ai_analyzed_at: new Date().toISOString(),
+    });
+
+    return c.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Error in reanalyze:', error);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
