@@ -404,28 +404,45 @@ auth.post("/vk-callback", async (c) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────
-// POST /auth/set-role
+// POST /auth/set-role — ADMIN ONLY with RBAC validation
 // ──────────────────────────────────────────────────────────────────────
-auth.post("/set-role", requireAuth, async (c) => {
+auth.post("/set-role", requireAuth, requireAdmin, async (c) => {
   try {
-    const authUserId = c.get('userId');
-    const authRole = c.get('userRole');
-    const { userId, role } = await c.req.json();
+    const actorId = c.get('userId');
+    const actorRole = c.get('userRole');
+    const actorEmail = c.get('userEmail') || '';
+    const ip = c.req.header('x-real-ip') || c.req.header('x-forwarded-for') || 'unknown';
+    const { userId, role, reason } = await c.req.json();
     if (!userId || !role) return c.json({ success: false, error: "userId and role are required" }, 400);
 
-    // Only admin or self can change role
-    if (userId !== authUserId && authRole !== 'admin') {
-      return c.json({ success: false, error: "Access denied" }, 403);
-    }
+    // Import RBAC module
+    const { validateRoleChange, formatRoleChangeLog, SUPERADMIN_EMAIL } = await import('./roles.tsx');
 
-    const validRoles = ["artist", "dj", "radio_station", "venue", "producer"];
-    if (!validRoles.includes(role)) return c.json({ success: false, error: `Недопустимая роль: ${role}` }, 400);
-
-    const result = await sql(`UPDATE users SET role = $1::user_role WHERE id = $2 RETURNING *`, [role, userId]);
-    if (result.rows.length === 0) {
+    // Get target user's current role
+    const targetUser = await sql('SELECT role::text, email FROM users WHERE id = $1', [userId]);
+    if (targetUser.rows.length === 0) {
       return c.json({ success: false, error: "Пользователь не найден" }, 404);
     }
+    const targetCurrentRole = targetUser.rows[0].role;
+    const targetEmail = targetUser.rows[0].email;
 
+    // Determine effective actor role (superadmin check by email)
+    const effectiveRole = actorEmail === SUPERADMIN_EMAIL ? 'superadmin' : actorRole;
+
+    // RBAC validation
+    const validation = validateRoleChange(effectiveRole, actorEmail, targetCurrentRole, role);
+    if (!validation.allowed) {
+      console.warn(`[RBAC] DENIED role change: ${actorEmail} tried to set ${userId} to ${role}: ${validation.reason}`);
+      return c.json({ success: false, error: validation.reason }, 403);
+    }
+
+    // Apply role change
+    const result = await sql('UPDATE users SET role = $1::user_role WHERE id = $2 RETURNING *', [role, userId]);
+
+    // Invalidate existing tokens by bumping token_version
+    await sql('UPDATE users SET token_version = COALESCE(token_version, 0) + 1 WHERE id = $1', [userId]);
+
+    // Update profile
     let profile = await vpsGetProfile(userId);
     if (profile) {
       profile.role = role;
@@ -436,8 +453,25 @@ auth.post("/set-role", requireAuth, async (c) => {
       await createVpsProfile(userId, user.email, user.full_name, role, user.avatar_url);
     }
 
-    console.log(`Role set for ${userId}: ${role}`);
-    return c.json({ success: true, role });
+    // Audit log
+    const log = {
+      timestamp: new Date().toISOString(),
+      actorId, actorEmail, actorRole: effectiveRole,
+      targetUserId: userId, previousRole: targetCurrentRole, newRole: role,
+      reason: reason || null, ip,
+    };
+    console.info(formatRoleChangeLog(log));
+
+    // Persist audit log to DB
+    try {
+      await sql(
+        `INSERT INTO audit_logs (action, actor_id, target_id, details, ip_address, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())`,
+        ['role_change', actorId, userId, JSON.stringify(log), ip]
+      );
+    } catch {}
+
+    return c.json({ success: true, role, previousRole: targetCurrentRole });
   } catch (error) {
     console.error("Set role error:", error);
     return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);

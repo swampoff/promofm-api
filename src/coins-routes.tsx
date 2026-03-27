@@ -71,6 +71,19 @@ coinsRoutes.post('/topup', requireAuth, async (c) => {
 
     const { gateway, amount, returnUrl } = body;
 
+    // Validate returnUrl — prevent open redirect
+    if (returnUrl) {
+      const ALLOWED_ORIGINS = ['https://promo-music.ru', 'https://www.promo-music.ru', 'https://promofm.org'];
+      try {
+        const returnOrigin = new URL(returnUrl).origin;
+        if (!ALLOWED_ORIGINS.includes(returnOrigin)) {
+          return c.json({ success: false, error: 'returnUrl must be on promo-music.ru' }, 400);
+        }
+      } catch {
+        return c.json({ success: false, error: 'Invalid returnUrl format' }, 400);
+      }
+    }
+
     if (!gateway || !['yookassa', 'tbank'].includes(gateway)) {
       return c.json({ success: false, error: 'Укажите gateway: "yookassa" или "tbank"' }, 400);
     }

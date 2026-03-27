@@ -54,3 +54,61 @@ export function requireOwner(paramName: string) {
     await next();
   };
 }
+
+
+// ─── RBAC ROLE-BASED MIDDLEWARE ────────────────────────────────
+
+/**
+ * Require specific role(s). Usage: requireRole('admin', 'superadmin')
+ * Must be placed AFTER requireAuth in middleware chain.
+ */
+export function requireRole(...allowedRoles: string[]) {
+  return async (c: Context, next: Next) => {
+    const role = c.get('userRole');
+    if (!allowedRoles.includes(role)) {
+      return c.json({ success: false, error: 'Insufficient role' }, 403);
+    }
+    await next();
+  };
+}
+
+/**
+ * Require minimum role level. Usage: requireMinRole('producer')
+ * Checks if user's role level >= specified role level.
+ */
+export function requireMinRole(minRole: string) {
+  return async (c: Context, next: Next) => {
+    const { getRoleLevel } = await import('./roles.tsx');
+    const userRole = c.get('userRole');
+    if (getRoleLevel(userRole) < getRoleLevel(minRole)) {
+      return c.json({ success: false, error: 'Insufficient privileges' }, 403);
+    }
+    await next();
+  };
+}
+
+/**
+ * Require specific permission. Usage: requirePermission('tracks:moderate')
+ */
+export function requirePermission(permission: string) {
+  return async (c: Context, next: Next) => {
+    const { hasPermission } = await import('./roles.tsx');
+    const role = c.get('userRole');
+    if (!hasPermission(role, permission as any)) {
+      return c.json({ success: false, error: 'Permission denied' }, 403);
+    }
+    await next();
+  };
+}
+
+/**
+ * Superadmin-only middleware. Checks email against hardcoded SUPERADMIN_EMAIL.
+ */
+export async function requireSuperadmin(c: Context, next: Next) {
+  const { SUPERADMIN_EMAIL } = await import('./roles.tsx');
+  const email = c.get('userEmail');
+  if (email !== SUPERADMIN_EMAIL) {
+    return c.json({ success: false, error: 'Superadmin access required' }, 403);
+  }
+  await next();
+}
