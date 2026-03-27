@@ -173,6 +173,11 @@ async function scanAndCreate(trackDir) {
       const coverUrl = '/server/uploads/covers/' + encodeURIComponent(coverSlug + '.jpg');
       await pool.query('UPDATE tracks SET cover_url = $1 WHERE id = $2', [coverUrl, trackId]);
       console.log(`  Cover extracted: ${coverSlug}.jpg`);
+      // Also set as artist avatar if missing
+      await pool.query(
+        "UPDATE artist_profiles SET avatar_url = $1, cover_url = $1 WHERE id = $2 AND (avatar_url IS NULL OR avatar_url = '')",
+        [coverUrl, finalArtistId]
+      );
     }
 
     // Ensure symlinks for nginx
