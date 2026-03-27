@@ -20,6 +20,11 @@ import { randomUUID } from 'crypto';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
+// Set admin role for RLS bypass on all connections
+pool.on('connect', (client) => {
+  client.query("SELECT set_config('app.current_role', 'admin', false)");
+});
+
 // ── Helpers ──────────────────────────────
 
 function slugify(name) {
@@ -55,6 +60,19 @@ function getDuration(filePath) {
   } catch {
     return 0;
   }
+}
+
+// Extract cover art from MP3
+function extractCover(filePath, outputPath) {
+  try {
+    // Check if MP3 has embedded cover
+    const probe = execSync(`ffprobe -v quiet -show_streams -select_streams v "${filePath}" 2>/dev/null`, { encoding: 'utf8' });
+    if (probe.includes('codec_name=mjpeg') || probe.includes('codec_name=png')) {
+      execSync(`ffmpeg -y -i "${filePath}" -an -vcodec mjpeg -q:v 2 "${outputPath}" 2>/dev/null`);
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 // Get MP3 metadata via ffprobe
@@ -144,6 +162,25 @@ async function scanAndCreate(trackDir) {
       now.toISOString(),
       JSON.stringify({ album: meta.album, source: 'friday_release', week: weekNum, year }),
     ]);
+
+    // Extract cover art from MP3
+    const coversDir = '/opt/promofm-api/uploads/covers';
+    const coverSlug = slugify(title) || basename(file, extname(file)).replace(/^\d+\s*/, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+    const coverPath = join(coversDir, coverSlug + '.jpg');
+    try { execSync(`mkdir -p ${coversDir}`); } catch {}
+
+    if (extractCover(filePath, coverPath)) {
+      const coverUrl = '/server/uploads/covers/' + encodeURIComponent(coverSlug + '.jpg');
+      await pool.query('UPDATE tracks SET cover_url = $1 WHERE id = $2', [coverUrl, trackId]);
+      console.log(`  Cover extracted: ${coverSlug}.jpg`);
+    }
+
+    // Ensure symlinks for nginx
+    try {
+      execSync('mkdir -p /var/www/promofm/html/server/uploads');
+      execSync('ln -sfn /opt/promofm-api/uploads/covers /var/www/promofm/html/server/uploads/covers');
+      execSync('ln -sfn /opt/promofm-api/uploads/tracks /var/www/promofm/html/server/uploads/tracks');
+    } catch {}
 
     trackIds.push(trackId);
     console.log(`  ✓ ${artistName} — ${title} (${Math.floor(duration/60)}:${(duration%60).toString().padStart(2,'0')})`);
