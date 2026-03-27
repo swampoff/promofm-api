@@ -190,6 +190,16 @@ app.get('/profile/:artistId', async (c) => {
           .maybeSingle();
         apRow = apRow2;
       }
+
+      // 3c. Try by slug (e.g., /profile/feduk)
+      if (!apRow) {
+        const { data: apRow3 } = await dbClient
+          .from('artist_profiles')
+          .select('*')
+          .eq('slug', artistId.toLowerCase())
+          .maybeSingle();
+        apRow = apRow3;
+      }
       
       if (apRow) {
         const sqlProfile = makeProfile({

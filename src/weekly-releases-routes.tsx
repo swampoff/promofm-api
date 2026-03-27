@@ -350,4 +350,169 @@ app.get('/artist/:slug', async (c) => {
   }
 });
 
+
+// ═══════════════════════════════════════════
+// POST /:id/add-track — Add track to release (admin)
+// Body: { trackId: string }
+// ═══════════════════════════════════════════
+app.post('/:id/add-track', requireAdmin, async (c) => {
+  try {
+    const pool = await getPool();
+    const releaseId = c.req.param('id');
+    const { trackId } = await c.req.json();
+
+    if (!trackId) return c.json({ success: false, error: 'trackId required' }, 400);
+
+    // Verify track exists
+    const trackCheck = await pool.query('SELECT id FROM tracks WHERE id = $1', [trackId]);
+    if (trackCheck.rows.length === 0) {
+      return c.json({ success: false, error: 'Track not found' }, 404);
+    }
+
+    const result = await pool.query(
+      `UPDATE weekly_releases
+       SET track_ids = array_append(track_ids, $1::uuid)
+       WHERE id = $2 AND NOT ($1::uuid = ANY(track_ids))
+       RETURNING *`,
+      [trackId, releaseId]
+    );
+
+    if (result.rows.length === 0) {
+      return c.json({ success: false, error: 'Release not found or track already in release' }, 404);
+    }
+
+    return c.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('[weekly-releases] POST /:id/add-track:', error);
+    return c.json({ success: false, error: 'Failed to add track' }, 500);
+  }
+});
+
+// ═══════════════════════════════════════════
+// POST /:id/remove-track — Remove track from release (admin)
+// Body: { trackId: string }
+// ═══════════════════════════════════════════
+app.post('/:id/remove-track', requireAdmin, async (c) => {
+  try {
+    const pool = await getPool();
+    const releaseId = c.req.param('id');
+    const { trackId } = await c.req.json();
+
+    if (!trackId) return c.json({ success: false, error: 'trackId required' }, 400);
+
+    const result = await pool.query(
+      `UPDATE weekly_releases
+       SET track_ids = array_remove(track_ids, $1::uuid)
+       WHERE id = $2
+       RETURNING *`,
+      [trackId, releaseId]
+    );
+
+    if (result.rows.length === 0) {
+      return c.json({ success: false, error: 'Release not found' }, 404);
+    }
+
+    return c.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('[weekly-releases] POST /:id/remove-track:', error);
+    return c.json({ success: false, error: 'Failed to remove track' }, 500);
+  }
+});
+
+// ═══════════════════════════════════════════
+// POST /tracks/create — Create a new track (admin)
+// Body: { title, artist_name, genre?, duration?, audio_url?, cover_url?, artist_id? }
+// ═══════════════════════════════════════════
+app.post('/tracks/create', requireAdmin, async (c) => {
+  try {
+    const pool = await getPool();
+    const body = await c.req.json();
+    const { title, artist_name, genre, duration, audio_url, cover_url, artist_id } = body;
+
+    if (!title || !artist_name) {
+      return c.json({ success: false, error: 'title and artist_name required' }, 400);
+    }
+
+    // Auto-find or create artist profile
+    let finalArtistId = artist_id;
+    if (!finalArtistId) {
+      const artistCheck = await pool.query(
+        'SELECT id FROM artist_profiles WHERE artist_name ILIKE $1 LIMIT 1',
+        [artist_name]
+      );
+      if (artistCheck.rows.length > 0) {
+        finalArtistId = artistCheck.rows[0].id;
+      }
+    }
+
+    const result = await pool.query(
+      `INSERT INTO tracks (title, artist_name, genre, duration, audio_url, cover_url, artist_id, moderation_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'approved')
+       RETURNING *`,
+      [title, artist_name, genre || null, duration || null, audio_url || null, cover_url || null, finalArtistId || null]
+    );
+
+    return c.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('[weekly-releases] POST /tracks/create:', error);
+    return c.json({ success: false, error: 'Failed to create track' }, 500);
+  }
+});
+
+// ═══════════════════════════════════════════
+// POST /tracks/create-with-artist — Create track + artist profile (admin)
+// Body: { title, artist_name, genre?, duration?, audio_url?, cover_url?, artist_bio?, artist_city?, artist_country? }
+// ═══════════════════════════════════════════
+app.post('/tracks/create-with-artist', requireAdmin, async (c) => {
+  try {
+    const pool = await getPool();
+    const body = await c.req.json();
+    const { title, artist_name, genre, duration, audio_url, cover_url, artist_bio, artist_city, artist_country } = body;
+
+    if (!title || !artist_name) {
+      return c.json({ success: false, error: 'title and artist_name required' }, 400);
+    }
+
+    // Create slug from artist_name
+    const slug = artist_name
+      .toLowerCase()
+      .replace(/[а-яё]/g, (ch) => {
+        const map: Record<string, string> = {
+          'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'zh','з':'z','и':'i','й':'y',
+          'к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f',
+          'х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'sch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya',
+        };
+        return map[ch] || ch;
+      })
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+
+    // Upsert artist profile
+    const artistResult = await pool.query(
+      `INSERT INTO artist_profiles (artist_name, slug, genre, bio, city, country, user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, 'system-admin')
+       ON CONFLICT (slug) DO UPDATE SET
+         artist_name = EXCLUDED.artist_name,
+         genre = COALESCE(EXCLUDED.genre, artist_profiles.genre)
+       RETURNING *`,
+      [artist_name, slug, genre || null, artist_bio || null, artist_city || null, artist_country || null]
+    );
+
+    const artistId = artistResult.rows[0].id;
+
+    // Create track
+    const trackResult = await pool.query(
+      `INSERT INTO tracks (title, artist_name, genre, duration, audio_url, cover_url, artist_id, moderation_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'approved')
+       RETURNING *`,
+      [title, artist_name, genre || null, duration || null, audio_url || null, cover_url || null, artistId]
+    );
+
+    return c.json({ success: true, data: { track: trackResult.rows[0], artist: artistResult.rows[0] } });
+  } catch (error) {
+    console.error('[weekly-releases] POST /tracks/create-with-artist:', error);
+    return c.json({ success: false, error: 'Failed to create track with artist' }, 500);
+  }
+});
+
 export default app;

@@ -289,48 +289,72 @@ landing.get('/charts/weekly', async (c) => {
  */
 landing.get('/new-releases', async (c) => {
   try {
-    const cached = await platformStatsStore.get('weekly:new_releases');
-    if (cached && cached.tracks?.length) {
-      // Enrich with iTunes preview URLs (Deezer previews expire after ~24h)
-      try {
-        const chartData: any = await platformStatsStore.get('chart:promofm');
-        if (chartData?.entries?.length) {
-          const itunesMap = new Map<string, string>();
-          for (const e of chartData.entries) {
-            if (e.previewUrl && e.previewUrl.includes('itunes.apple.com')) {
-              const key = (e.title + '|' + e.artist).toLowerCase().trim();
-              itunesMap.set(key, e.previewUrl);
-            }
-          }
-          const fetchPromises: Promise<void>[] = [];
-          for (const track of cached.tracks) {
-            const key = (track.title + '|' + track.artist).toLowerCase().trim();
-            const itunesUrl = itunesMap.get(key);
-            if (itunesUrl) {
-              track.previewUrl = itunesUrl;
-            } else if (!track.previewUrl || track.previewUrl.includes('dzcdn.net')) {
-              // Fallback: search iTunes for preview URL
-              fetchPromises.push(
-                fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(track.title + ' ' + track.artist)}&media=music&limit=1`)
-                  .then(r => r.json())
-                  .then(data => {
-                    const url = data.results?.[0]?.previewUrl;
-                    if (url) {
-                      track.previewUrl = url;
-                    }
-                  })
-                  .catch(() => {})
-              );
-            }
-          }
-          if (fetchPromises.length > 0) {
-            await Promise.allSettled(fetchPromises);
-          }
-        }
-      } catch {}
-      return c.json({ success: true, data: cached });
+    // Новинки недели — ТОЛЬКО наши треки из weekly_releases
+    const latestRelease = await pool.query(
+      'SELECT id, track_ids, release_date FROM weekly_releases WHERE is_published = true ORDER BY release_date DESC LIMIT 1'
+    );
+
+    if (!latestRelease.rows.length || !latestRelease.rows[0].track_ids?.length) {
+      return c.json({ success: true, data: { tracks: [], updatedAt: null } });
     }
-    return c.json({ success: true, data: { tracks: [], updatedAt: null } });
+
+    const tids = latestRelease.rows[0].track_ids;
+    const releaseDate = latestRelease.rows[0].release_date;
+
+    const tracksResult = await pool.query(
+      `SELECT t.id, t.title, t.artist_name, t.genre, t.duration,
+              t.audio_url, t.cover_url, t.likes_count, t.plays_count,
+              ap.slug as artist_slug, ap.is_verified
+       FROM tracks t
+       LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
+       WHERE t.id = ANY($1)
+       ORDER BY t.likes_count DESC`,
+      [tids]
+    );
+
+    const pickupsResult = await pool.query(
+      `SELECT track_id,
+        COUNT(DISTINCT station_name)::int as stations_count,
+        COUNT(DISTINCT city)::int as cities_count,
+        array_agg(DISTINCT station_name) as stations
+       FROM track_radio_pickups WHERE track_id = ANY($1)
+       GROUP BY track_id`,
+      [tids]
+    );
+
+    const pickupsMap: Record<string, any> = {};
+    for (const row of pickupsResult.rows) {
+      pickupsMap[row.track_id] = {
+        stationsCount: row.stations_count,
+        broadcastCitiesCount: row.cities_count,
+        stations: row.stations || [],
+      };
+    }
+
+    const tracks = tracksResult.rows.map((t: any, idx: number) => ({
+      position: idx + 1,
+      title: t.title,
+      artist: t.artist_name,
+      artistSlug: t.artist_slug,
+      source: 'platform',
+      sourceLabel: 'ПРОМО.МУЗЫКА',
+      isOurArtist: true,
+      coverUrl: t.cover_url || '',
+      audioUrl: t.audio_url || '',
+      previewUrl: t.audio_url || '',
+      genre: t.genre,
+      duration: t.duration,
+      likesCount: t.likes_count || 0,
+      playsCount: t.plays_count || 0,
+      stationsCount: pickupsMap[t.id]?.stationsCount || 0,
+      broadcastCitiesCount: pickupsMap[t.id]?.broadcastCitiesCount || 0,
+      stations: pickupsMap[t.id]?.stations || [],
+    }));
+
+    return c.json({
+      success: true,
+      data: { tracks, updatedAt: releaseDate || new Date().toISOString() },
+    });
   } catch (error) {
     console.error('Error fetching new releases:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
