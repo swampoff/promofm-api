@@ -105,6 +105,7 @@ import { rlsMiddleware } from './db-client.tsx';
 import { startSecurityWarden } from './security-warden.tsx';
 import { initSentry, sentryErrorHandler, captureError } from './sentry.tsx';
 import { metricsRegistry, metricsMiddleware } from './metrics.tsx';
+import weeklyReleasesRoutes from './weekly-releases-routes.tsx';
 
 // Global unhandled rejection handler (replaces Deno version)
 process.on('unhandledRejection', (reason) => {
@@ -304,6 +305,7 @@ app.route("/server/api/feedback", feedbackRoutes);
 app.route("/server/api/promo-pipeline", promoPipelineRoutes);
 app.route("/server/api/promo-check", promoCheckRoutes);
 app.route("/server/api/consent", consentRoutes);
+app.route("/server/api/weekly-releases", weeklyReleasesRoutes);
 
 app.route("/server/api/docs", apiDocs);
 // Prometheus metrics endpoint (internal only)
