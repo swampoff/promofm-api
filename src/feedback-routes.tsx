@@ -9,6 +9,7 @@ import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { classifyAndLog } from './error-classifier.ts';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { apiError } from './error-codes.tsx';
 
 const feedbackRoutes = new Hono();
 
@@ -18,7 +19,7 @@ feedbackRoutes.post('/report', requireAuth, async (c) => {
   try {
     const body = await c.req.json().catch(() => null);
     if (!body || !body.message) {
-      return c.json({ error: 'message is required' }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'message is required');
     }
 
     const {
@@ -58,7 +59,7 @@ feedbackRoutes.post('/report', requireAuth, async (c) => {
       type,
     });
   } catch (err: any) {
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -105,7 +106,7 @@ feedbackRoutes.get('/reports', requireAuth, requireAdmin, async (c) => {
       offset,
     });
   } catch (err: any) {
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -121,7 +122,7 @@ feedbackRoutes.put('/reports/:id/resolve', requireAuth, requireAdmin, async (c) 
       [id, body.resolution || null]
     );
 
-    if (!res.rows.length) return c.json({ error: 'Report not found' }, 404);
+    if (!res.rows.length) return apiError(c, 'NOT_FOUND', 'Report not found');
 
     // Also resolve related memory_errors
     await pool.query(
@@ -131,7 +132,7 @@ feedbackRoutes.put('/reports/:id/resolve', requireAuth, requireAdmin, async (c) 
 
     return c.json({ data: res.rows[0], resolved: true });
   } catch (err: any) {
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 

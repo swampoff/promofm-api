@@ -19,6 +19,10 @@ import * as crypto from 'crypto';
 import { execSync, spawn } from 'child_process';
 import { pool } from './db-client.tsx';
 
+import { createLogger } from "./logger.tsx";
+
+const log = createLogger("warden");
+
 // ─── CONFIGURATION ──────────────────────────────────────────────
 
 const SCAN_INTERVAL = 15 * 60 * 1000;  // 15 minutes
@@ -120,7 +124,7 @@ function saveState(): void {
     if (state.killChains.length > 200) state.killChains = state.killChains.slice(-200);
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
   } catch (err) {
-    console.error('[WARDEN] Failed to save state:', err);
+    log.error({ err }, 'warden_save_state_error');
   }
 }
 
@@ -128,7 +132,7 @@ function addAlert(alert: Omit<SecurityAlert, 'timestamp'>): void {
   const full: SecurityAlert = { ...alert, timestamp: new Date().toISOString() };
   state.alerts.push(full);
   const icon = { INFO: 'ℹ️', LOW: '🟡', MEDIUM: '🟠', HIGH: '🔴', CRITICAL: '🚨' }[full.severity];
-  console.warn(`${icon} [WARDEN] ${full.severity} ${full.category}: ${full.message}`);
+  log.warn({ severity: full.severity, category: full.category, message: full.message, mitre: full.mitre }, 'warden_alert');
 
   if (full.severity === 'HIGH' || full.severity === 'CRITICAL') {
     sendSecurityAlert(full);
@@ -200,7 +204,7 @@ function scanFileIntegrity(): void {
   }
 
   if (isFirstRun) {
-    console.info(`[WARDEN] FIM baseline established: ${MONITORED_FILES.length} files hashed`);
+    log.info({ fileCount: MONITORED_FILES.length }, 'warden_fim_baseline');
   }
 }
 
@@ -237,7 +241,7 @@ function scanProcesses(): void {
       }
     }
   } catch (err) {
-    console.error('[WARDEN] Process scan error:', err);
+    log.error({ err }, 'warden_process_scan_error');
   }
 }
 
@@ -283,7 +287,7 @@ function scanCronJobs(): void {
       }
     }
   } catch (err) {
-    console.error('[WARDEN] Cron scan error:', err);
+    log.error({ err }, 'warden_cron_scan_error');
   }
 }
 
@@ -328,7 +332,7 @@ function scanOutboundConnections(): void {
       }
     }
   } catch (err) {
-    console.error('[WARDEN] Connection scan error:', err);
+    log.error({ err }, 'warden_connection_scan_error');
   }
 }
 
@@ -558,7 +562,7 @@ async function persistAlertsToDb(): Promise<void> {
       );
     }
   } catch (err) {
-    console.error('[WARDEN] DB persist error:', err);
+    log.error({ err }, 'warden_db_persist_error');
   }
 }
 
@@ -569,7 +573,7 @@ async function runFullScan(): Promise<void> {
   state.lastScan = new Date().toISOString();
   state.scanCount++;
 
-  console.info(`[WARDEN] Scan #${state.scanCount} starting...`);
+  log.info({ scanNumber: state.scanCount }, 'warden_scan_start');
 
   try {
     // Phase 1: Passive checks (no network)
@@ -597,9 +601,9 @@ async function runFullScan(): Promise<void> {
     saveState();
 
     const duration = Date.now() - start;
-    console.info(`[WARDEN] Scan #${state.scanCount} complete in ${duration}ms. Alerts: ${state.alerts.length}`);
+    log.info({ scanNumber: state.scanCount, durationMs: duration, alertCount: state.alerts.length }, 'warden_scan_complete');
   } catch (err) {
-    console.error('[WARDEN] Scan error:', err);
+    log.error({ err }, 'warden_scan_error');
   }
 }
 
@@ -632,24 +636,24 @@ export function updateFimBaseline(): void {
   state.fileHashes = {};
   scanFileIntegrity();
   saveState();
-  console.info('[WARDEN] FIM baseline reset');
+  log.info('warden_fim_baseline_reset');
 }
 
 // ─── INIT & SCHEDULER ───────────────────────────────────────────
 
 export function startSecurityWarden(): void {
-  console.info('[WARDEN] Security Warden initializing...');
+  log.info('warden_initializing');
   loadState();
 
   // Initial scan after 30 sec (let the server start first)
   setTimeout(() => {
-    runFullScan().catch(err => console.error('[WARDEN] Initial scan error:', err));
+    runFullScan().catch(err => log.error({ err }, 'warden_initial_scan_error'));
   }, 30000);
 
   // Periodic scan every 15 minutes
   setInterval(() => {
-    runFullScan().catch(err => console.error('[WARDEN] Periodic scan error:', err));
+    runFullScan().catch(err => log.error({ err }, 'warden_periodic_scan_error'));
   }, SCAN_INTERVAL);
 
-  console.info(`[WARDEN] Scheduled: full scan every ${SCAN_INTERVAL / 60000} min`);
+  log.info({ intervalMin: SCAN_INTERVAL / 60000 }, 'warden_scheduled');
 }

@@ -11,6 +11,10 @@ import { Context, Next } from 'hono';
 import { pool } from './db-client.tsx';
 import crypto from 'crypto';
 
+import { createLogger } from "./logger.tsx";
+
+const log = createLogger("auth-sec");
+
 // ─── H5: Account Lockout ───────────────────────────────────────
 
 const MAX_FAILED_ATTEMPTS = 5;
@@ -37,7 +41,7 @@ export async function checkAccountLockout(email: string, ip: string): Promise<{ 
     }
     return { locked: false };
   } catch (err) {
-    console.error('[lockout] check error:', err);
+    log.error({ err }, 'lockout_check_error');
     return { locked: false };
   }
 }
@@ -71,7 +75,7 @@ export async function recordLoginAttempt(email: string, ip: string, ua: string, 
       );
     }
   } catch (err) {
-    console.error('[lockout] record error:', err);
+    log.error({ err }, 'lockout_record_error');
   }
 }
 
@@ -126,7 +130,7 @@ export async function verifyCaptcha(token: string | undefined, action: string): 
     }
     return { ok: true, score: data.score };
   } catch (err) {
-    console.error('[captcha] verification error:', err);
+    log.error({ err }, 'captcha_verification_error');
     // Fail open — don't block users if Google is down
     return { ok: true, score: 0.5 };
   }
@@ -388,7 +392,7 @@ async function sendBruteForceAlert(email: string, ip: string, count: number): Pr
       }),
     });
   } catch (err) {
-    console.error('[alert] Telegram send error:', err);
+    log.error({ err }, 'telegram_alert_error');
   }
 }
 
@@ -406,6 +410,6 @@ export async function sendSecurityAlert(subject: string, details: string): Promi
       }),
     });
   } catch (err) {
-    console.error('[alert] Telegram send error:', err);
+    log.error({ err }, 'telegram_alert_error');
   }
 }

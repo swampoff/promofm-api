@@ -5,6 +5,10 @@
 import { Context, Next } from 'hono';
 import jwt from 'jsonwebtoken';
 
+import { createLogger } from "./logger.tsx";
+
+const log = createLogger("auth-mw");
+
 export async function requireAuth(c: Context, next: Next) {
   const authHeader = c.req.header('Authorization');
   const accessToken = authHeader?.replace('Bearer ', '');
@@ -31,7 +35,7 @@ export async function requireAuth(c: Context, next: Next) {
 
     await next();
   } catch (err) {
-    console.error('Auth middleware error:', err);
+    log.error({ err }, 'auth_middleware_error');
     return c.json({ success: false, error: 'Invalid or expired token' }, 401);
   }
 }

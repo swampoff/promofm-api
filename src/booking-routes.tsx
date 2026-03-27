@@ -21,6 +21,7 @@
  */
 
 import { getDbClient } from './db-client.tsx';
+import { apiError } from './error-codes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
@@ -141,7 +142,7 @@ app.post('/create', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
-      return c.json({ error: 'Unauthorized' }, 401);
+      return apiError(c, 'AUTH_REQUIRED');
     }
 
     const body = await c.req.json();
@@ -164,18 +165,18 @@ app.post('/create', requireAuth, async (c) => {
     } = body;
 
     if (!performerId || !performerType || !eventType || !eventTitle || !eventDate || !durationHours) {
-      return c.json({ error: 'Missing required fields' }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS');
     }
 
     // Получить профиль performer'а из KV
     const performer = await getPerformerProfile(performerId, performerType);
     if (!performer) {
       console.error('Performer not found in KV:', performerId);
-      return c.json({ error: 'Performer not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Исполнитель не найден');
     }
 
     if (!performer.bookingEnabled) {
-      return c.json({ error: 'Performer bookings are disabled' }, 400);
+      return apiError(c, 'BOOKING_DISABLED');
     }
 
     if (durationHours < performer.minimumBookingHours) {
@@ -274,7 +275,7 @@ app.post('/create', requireAuth, async (c) => {
 
   } catch (error: any) {
     console.error('Error creating booking:', error);
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -285,7 +286,7 @@ app.get('/list', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
-      return c.json({ error: 'Unauthorized' }, 401);
+      return apiError(c, 'AUTH_REQUIRED');
     }
 
     const role = c.req.query('role');
@@ -324,7 +325,7 @@ app.get('/list', requireAuth, async (c) => {
 
   } catch (error: any) {
     console.error('Error fetching bookings:', error);
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -335,28 +336,28 @@ app.get('/:id', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
-      return c.json({ error: 'Unauthorized' }, 401);
+      return apiError(c, 'AUTH_REQUIRED');
     }
 
     const bookingId = c.req.param('id');
     const bookingData = await getBooking(bookingId);
 
     if (!bookingData) {
-      return c.json({ error: 'Booking not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Букинг не найден');
     }
 
     const booking = bookingData;
 
     // Проверка доступа
     if (booking.requesterId !== user.id && booking.performerId !== user.id) {
-      return c.json({ error: 'Access denied' }, 403);
+      return apiError(c, 'AUTH_ACCESS_DENIED');
     }
 
     return c.json({ success: true, booking });
 
   } catch (error: any) {
     console.error('Error fetching booking:', error);
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -367,24 +368,24 @@ app.put('/:id/accept', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
-      return c.json({ error: 'Unauthorized' }, 401);
+      return apiError(c, 'AUTH_REQUIRED');
     }
 
     const bookingId = c.req.param('id');
     const bookingData = await getBooking(bookingId);
 
     if (!bookingData) {
-      return c.json({ error: 'Booking not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Букинг не найден');
     }
 
     const booking = bookingData;
 
     if (booking.performerId !== user.id) {
-      return c.json({ error: 'Booking not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Букинг не найден');
     }
 
     if (booking.status !== 'pending') {
-      return c.json({ error: 'Booking already processed' }, 400);
+      return apiError(c, 'ALREADY_PROCESSED');
     }
 
     // Обновить статус
@@ -408,7 +409,7 @@ app.put('/:id/accept', requireAuth, async (c) => {
 
   } catch (error: any) {
     console.error('Error accepting booking:', error);
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -419,7 +420,7 @@ app.put('/:id/reject', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
-      return c.json({ error: 'Unauthorized' }, 401);
+      return apiError(c, 'AUTH_REQUIRED');
     }
 
     const bookingId = c.req.param('id');
@@ -427,17 +428,17 @@ app.put('/:id/reject', requireAuth, async (c) => {
 
     const bookingData = await getBooking(bookingId);
     if (!bookingData) {
-      return c.json({ error: 'Booking not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Букинг не найден');
     }
 
     const booking = bookingData;
 
     if (booking.performerId !== user.id) {
-      return c.json({ error: 'Booking not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Букинг не найден');
     }
 
     if (booking.status !== 'pending') {
-      return c.json({ error: 'Booking already processed' }, 400);
+      return apiError(c, 'ALREADY_PROCESSED');
     }
 
     booking.status = 'rejected';
@@ -461,7 +462,7 @@ app.put('/:id/reject', requireAuth, async (c) => {
 
   } catch (error: any) {
     console.error('Error rejecting booking:', error);
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -472,7 +473,7 @@ app.post('/:id/pay-deposit', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
-      return c.json({ error: 'Unauthorized' }, 401);
+      return apiError(c, 'AUTH_REQUIRED');
     }
 
     const bookingId = c.req.param('id');
@@ -480,21 +481,21 @@ app.post('/:id/pay-deposit', requireAuth, async (c) => {
 
     const bookingData = await getBooking(bookingId);
     if (!bookingData) {
-      return c.json({ error: 'Booking not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Букинг не найден');
     }
 
     const booking = bookingData;
 
     if (booking.requesterId !== user.id) {
-      return c.json({ error: 'Booking not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Букинг не найден');
     }
 
     if (booking.status !== 'accepted') {
-      return c.json({ error: 'Booking must be accepted first' }, 400);
+      return apiError(c, 'ALREADY_PROCESSED', 'Сначала примите заявку');
     }
 
     if (booking.depositPaidAt) {
-      return c.json({ error: 'Deposit already paid' }, 400);
+      return apiError(c, 'DEPOSIT_ALREADY_PAID');
     }
 
     // Mock payment
@@ -550,7 +551,7 @@ app.post('/:id/pay-deposit', requireAuth, async (c) => {
 
   } catch (error: any) {
     console.error('Error paying deposit:', error);
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -561,7 +562,7 @@ app.post('/:id/pay-final', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
-      return c.json({ error: 'Unauthorized' }, 401);
+      return apiError(c, 'AUTH_REQUIRED');
     }
 
     const bookingId = c.req.param('id');
@@ -569,21 +570,21 @@ app.post('/:id/pay-final', requireAuth, async (c) => {
 
     const bookingData = await getBooking(bookingId);
     if (!bookingData) {
-      return c.json({ error: 'Booking not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Букинг не найден');
     }
 
     const booking = bookingData;
 
     if (booking.requesterId !== user.id) {
-      return c.json({ error: 'Booking not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Букинг не найден');
     }
 
     if (booking.status !== 'deposit_paid') {
-      return c.json({ error: 'Deposit must be paid first' }, 400);
+      return apiError(c, 'DEPOSIT_REQUIRED');
     }
 
     if (booking.fullPaymentAt) {
-      return c.json({ error: 'Final payment already completed' }, 400);
+      return apiError(c, 'FINAL_ALREADY_PAID');
     }
 
     const paymentIntentId = `pi_${Math.random().toString(36).substr(2, 9)}`;
@@ -643,7 +644,7 @@ app.post('/:id/pay-final', requireAuth, async (c) => {
 
   } catch (error: any) {
     console.error('Error paying final amount:', error);
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -654,7 +655,7 @@ app.put('/:id/cancel', requireAuth, async (c) => {
   try {
     const user = await getUserFromToken(c.req.header('Authorization'));
     if (!user) {
-      return c.json({ error: 'Unauthorized' }, 401);
+      return apiError(c, 'AUTH_REQUIRED');
     }
 
     const bookingId = c.req.param('id');
@@ -662,17 +663,17 @@ app.put('/:id/cancel', requireAuth, async (c) => {
 
     const bookingData = await getBooking(bookingId);
     if (!bookingData) {
-      return c.json({ error: 'Booking not found' }, 404);
+      return apiError(c, 'NOT_FOUND', 'Букинг не найден');
     }
 
     const booking = bookingData;
 
     if (booking.requesterId !== user.id && booking.performerId !== user.id) {
-      return c.json({ error: 'Access denied' }, 403);
+      return apiError(c, 'AUTH_ACCESS_DENIED');
     }
 
     if (booking.status === 'cancelled' || booking.status === 'completed') {
-      return c.json({ error: 'Booking cannot be cancelled' }, 400);
+      return apiError(c, 'CANNOT_CANCEL');
     }
 
     booking.status = 'cancelled';
@@ -701,7 +702,7 @@ app.put('/:id/cancel', requireAuth, async (c) => {
 
   } catch (error: any) {
     console.error('Error cancelling booking:', error);
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 

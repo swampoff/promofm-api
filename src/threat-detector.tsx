@@ -9,6 +9,10 @@
 
 import type { Context, Next } from 'hono';
 
+import { createLogger } from "./logger.tsx";
+
+const log = createLogger("waf");
+
 // ─── THREAT CATEGORIES ──────────────────────────────────────────
 
 export type ThreatCategory =
@@ -288,7 +292,7 @@ function recordEvent(event: ThreatEvent): void {
 
   // Log to console with structured format
   const icon = event.blocked ? '🛑' : '⚠️';
-  console.warn(`${icon} [WAF] ${event.severity} ${event.category} | IP: ${event.ip} | ${event.method} ${event.path} | payload: ${event.payload.slice(0, 80)}`);
+  log.warn({ severity: event.severity, category: event.category, ip: event.ip, method: event.method, path: event.path, payload: event.payload.slice(0, 80), blocked: event.blocked }, 'waf_threat_detected');
 }
 
 // ─── TELEGRAM ALERTING ──────────────────────────────────────────
@@ -342,12 +346,12 @@ function checkAutoBan(ip: string): boolean {
   if (!data) return false;
   if (data.score >= BAN_THRESHOLD) {
     BANNED_IPS.add(ip);
-    console.warn(`🔒 [WAF] AUTO-BAN IP: ${ip} (score: ${data.score}, events: ${data.events})`);
+    log.warn({ ip, score: data.score, events: data.events }, 'waf_auto_ban');
     // Auto-unban after duration
     setTimeout(() => {
       BANNED_IPS.delete(ip);
       ipThreatScores.delete(ip);
-      console.info(`🔓 [WAF] AUTO-UNBAN IP: ${ip}`);
+      log.info({ ip }, 'waf_auto_unban');
     }, BAN_DURATION);
     return true;
   }

@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { apiError } from './error-codes.tsx';
 import { pool } from './db-client.tsx';
 
 const memoryRoutes = new Hono();
@@ -29,17 +30,17 @@ function validLayer(layer: string): layer is Layer {
 
 memoryRoutes.post('/:layer/store', requireAuth, requireAdmin, async (c) => {
   const layer = c.req.param('layer');
-  if (!validLayer(layer)) return c.json({ error: `Invalid layer: ${layer}` }, 400);
+  if (!validLayer(layer)) return apiError(c, 'VALIDATION_INVALID_LAYER', `Invalid layer: ${layer}`);
 
   const body = await c.req.json().catch(() => null);
-  if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
+  if (!body) return apiError(c, 'VALIDATION_INVALID_BODY');
 
   try {
     const table = TABLE_MAP[layer];
 
     if (layer === 'short') {
       const { key, value, namespace, agent_name, ttl_minutes } = body;
-      if (!key || !value) return c.json({ error: 'key and value required' }, 400);
+      if (!key || !value) return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'key and value required');
       const ttl = Math.max(1, Math.min(Math.floor(Number(ttl_minutes) || 60), 10080)); // 1 min to 7 days, integer only
       const res = await pool.query(
         `INSERT INTO ${table} (key, value, namespace, agent_name, expires_at)
@@ -51,7 +52,7 @@ memoryRoutes.post('/:layer/store', requireAuth, requireAdmin, async (c) => {
 
     if (layer === 'long') {
       const { key, value, namespace, importance } = body;
-      if (!key || !value) return c.json({ error: 'key and value required' }, 400);
+      if (!key || !value) return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'key and value required');
       const res = await pool.query(
         `INSERT INTO ${table} (key, value, namespace, importance)
          VALUES ($1, $2, $3, $4)
@@ -64,7 +65,7 @@ memoryRoutes.post('/:layer/store', requireAuth, requireAdmin, async (c) => {
 
     if (layer === 'shared') {
       const { key, value, owner_agent } = body;
-      if (!key || !value) return c.json({ error: 'key and value required' }, 400);
+      if (!key || !value) return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'key and value required');
       const res = await pool.query(
         `INSERT INTO ${table} (key, value, owner_agent)
          VALUES ($1, $2, $3)
@@ -77,7 +78,7 @@ memoryRoutes.post('/:layer/store', requireAuth, requireAdmin, async (c) => {
 
     if (layer === 'user') {
       const { user_id, preferences, interaction_style, promo_context } = body;
-      if (!user_id) return c.json({ error: 'user_id required' }, 400);
+      if (!user_id) return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'user_id required');
       const res = await pool.query(
         `INSERT INTO ${table} (user_id, preferences, interaction_style, promo_context)
          VALUES ($1, $2, $3, $4)
@@ -94,7 +95,7 @@ memoryRoutes.post('/:layer/store', requireAuth, requireAdmin, async (c) => {
 
     if (layer === 'errors') {
       const { error_type, message, context, user_id, endpoint, stack, severity, fix_suggestion } = body;
-      if (!error_type || !message) return c.json({ error: 'error_type and message required' }, 400);
+      if (!error_type || !message) return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'error_type and message required');
       const res = await pool.query(
         `INSERT INTO ${table} (error_type, message, context, user_id, endpoint, stack, severity, fix_suggestion)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
@@ -105,7 +106,7 @@ memoryRoutes.post('/:layer/store', requireAuth, requireAdmin, async (c) => {
 
     if (layer === 'creative') {
       const { category, title, content, source, quality_score } = body;
-      if (!category || !content) return c.json({ error: 'category and content required' }, 400);
+      if (!category || !content) return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'category and content required');
       const res = await pool.query(
         `INSERT INTO ${table} (category, title, content, source, quality_score)
          VALUES ($1, $2, $3, $4, $5) RETURNING id`,
@@ -114,7 +115,7 @@ memoryRoutes.post('/:layer/store', requireAuth, requireAdmin, async (c) => {
       return c.json({ id: res.rows[0].id, layer });
     }
   } catch (err: any) {
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -122,7 +123,7 @@ memoryRoutes.post('/:layer/store', requireAuth, requireAdmin, async (c) => {
 
 memoryRoutes.get('/:layer/search', requireAuth, requireAdmin, async (c) => {
   const layer = c.req.param('layer');
-  if (!validLayer(layer)) return c.json({ error: `Invalid layer: ${layer}` }, 400);
+  if (!validLayer(layer)) return apiError(c, 'VALIDATION_INVALID_LAYER', `Invalid layer: ${layer}`);
 
   const q = c.req.query('q') || '';
   const limit = Math.min(parseInt(c.req.query('limit') || '20'), 100);
@@ -154,7 +155,7 @@ memoryRoutes.get('/:layer/search', requireAuth, requireAdmin, async (c) => {
     }
     return c.json({ data: res.rows, count: res.rows.length });
   } catch (err: any) {
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -163,7 +164,7 @@ memoryRoutes.get('/:layer/search', requireAuth, requireAdmin, async (c) => {
 memoryRoutes.get('/:layer/:key', requireAuth, requireAdmin, async (c) => {
   const layer = c.req.param('layer');
   const key = c.req.param('key');
-  if (!validLayer(layer)) return c.json({ error: `Invalid layer: ${layer}` }, 400);
+  if (!validLayer(layer)) return apiError(c, 'VALIDATION_INVALID_LAYER', `Invalid layer: ${layer}`);
 
   const table = TABLE_MAP[layer];
 
@@ -185,7 +186,7 @@ memoryRoutes.get('/:layer/:key', requireAuth, requireAdmin, async (c) => {
     }
     return c.json({ data: res.rows[0] || null });
   } catch (err: any) {
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -240,7 +241,7 @@ memoryRoutes.get('/context', requireAuth, requireAdmin, async (c) => {
       },
     });
   } catch (err: any) {
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -253,7 +254,7 @@ memoryRoutes.delete('/short/expired', requireAuth, requireAdmin, async (c) => {
     );
     return c.json({ deleted: res.rowCount });
   } catch (err: any) {
-    return c.json({ error: 'Internal server error' }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 

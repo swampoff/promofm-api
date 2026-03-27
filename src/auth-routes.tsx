@@ -20,6 +20,10 @@ import {
   sendSecurityAlert,
 } from './auth-security.tsx';
 
+import { createLogger } from "./logger.tsx";
+
+const log = createLogger("auth");
+
 const PARTNER_ROLES = ['radio_station', 'radio', 'venue'];
 const MAX_FAILED_ATTEMPTS = 5;
 const JWT_SECRET = process.env.JWT_SECRET!;
@@ -98,7 +102,7 @@ async function logAuthEvent(action: string, details: Record<string, any>, status
       [userId, action, details.description || '', ip || '0.0.0.0', ua, status, errorMsg]
     );
   } catch (e) {
-    console.error('Audit log error:', e);
+    log.error({ err: e }, 'audit_log_error');
   }
 }
 
@@ -138,13 +142,13 @@ auth.post("/signup", async (c) => {
         });
         return c.json({ success: false, error: "Ошибка регистрации. Если у вас уже есть аккаунт, попробуйте войти или восстановить пароль." }, 409);
       } else {
-        console.error("DB insert user error:", err);
+        log.error({ err }, "db_insert_user_error");
         return c.json({ success: false, error: 'Ошибка регистрации' }, 400);
       }
     }
 
     await createVpsProfile(userId, email, userName, userRole);
-    console.log(`User registered: ${email} (${userId}), role: ${userRole}, status: ${accountStatus}`);
+    log.info({ email, userId, role: userRole, status: accountStatus }, 'user_registered');
     logAuthEvent('signup_success', {
       userId, description: `Регистрация: ${email}, роль: ${userRole}`,
       ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
@@ -155,7 +159,7 @@ auth.post("/signup", async (c) => {
 
     const verificationToken = crypto.randomUUID();
     await vpsStoreToken(userId, verificationToken, "email_verify", 24);
-    sendVerificationEmail(email, userName, verificationToken).catch((e) => console.warn("Verification email failed:", e));
+    sendVerificationEmail(email, userName, verificationToken).catch((e) => log.warn({ err: e, email }, "verification_email_failed"));
 
     return c.json({
       success: true, emailVerificationRequired: true,
@@ -164,7 +168,7 @@ auth.post("/signup", async (c) => {
       data: { user: { id: userId, email, name: userName, role: userRole } },
     }, 201);
   } catch (error) {
-    console.error("Signup error:", error);
+    log.error({ err: error }, "signup_error");
     logAuthEvent('signup_error', {
       description: `Ошибка регистрации`, error: String(error),
       ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
@@ -266,7 +270,7 @@ auth.post("/signin", async (c) => {
       await vpsSaveProfile(user.id, profile);
     }
 
-    console.log(`User signed in: ${email} (${user.id})`);
+    log.info({ email, userId: user.id }, 'user_signed_in');
     return c.json({
       success: true,
       data: {
@@ -277,7 +281,7 @@ auth.post("/signin", async (c) => {
       },
     });
   } catch (error) {
-    console.error("Signin error:", error);
+    log.error({ err: error }, "signin_error");
     return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
   }
 });
@@ -316,7 +320,7 @@ auth.post("/vk-callback", async (c) => {
     if (device_id) tokenBody.device_id = device_id;
     if (code_verifier) tokenBody.code_verifier = code_verifier;
 
-    console.log(`VK token exchange: client_id=${VK_CLIENT_ID}, redirect_uri=${tokenBody.redirect_uri}`);
+    log.info({ clientId: VK_CLIENT_ID, redirectUri: tokenBody.redirect_uri }, 'vk_token_exchange');
     const tokenResp = await fetch("https://id.vk.com/oauth2/auth", {
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams(tokenBody).toString(),
@@ -344,7 +348,7 @@ auth.post("/vk-callback", async (c) => {
     const vkAvatar = vkProfile.user?.avatar || null;
     const email = vkEmail || vkProfile.user?.email || null;
 
-    console.log(`VK OAuth: user ${vkUserId}, name: ${vkName}, email: ${email}`);
+    log.info({ vkUserId, vkName, email }, 'vk_oauth_user');
 
     // 3. Find existing user by vk_id
     const existing = await sql(`SELECT id, email, full_name, role::text, status::text, avatar_url FROM users WHERE vk_id = $1 AND deleted_at IS NULL`, [String(vkUserId)]);
@@ -397,7 +401,7 @@ auth.post("/vk-callback", async (c) => {
         }
         return c.json({ success: false, error: "Пользователь с таким email уже зарегистрирован." }, 409);
       }
-      console.error('VK user create error:', err);
+      log.error({ err }, 'vk_user_create_error');
       return c.json({ success: false, error: 'Ошибка создания аккаунта' }, 400);
     }
 
@@ -405,14 +409,14 @@ auth.post("/vk-callback", async (c) => {
     notifyNewUser({ email: userEmail, name: vkName, role: vkRole, via: "vk_oauth" }).catch(() => {});
 
     const accessToken = signToken({ id: userId, email: userEmail, role: vkRole });
-    console.log(`VK new user created: ${userEmail} (${userId})`);
+    log.info({ email: userEmail, userId }, 'vk_user_created');
 
     return c.json({
       success: true, newUser: true,
       data: { user: { id: userId, email: userEmail, name: vkName, avatar: vkAvatar, role: vkRole }, accessToken },
     });
   } catch (error) {
-    console.error("VK callback error:", error);
+    log.error({ err: error }, "vk_callback_error");
     return c.json({ success: false, error: "VK OAuth ошибка" }, 500);
   }
 });
@@ -446,7 +450,7 @@ auth.post("/set-role", requireAuth, requireAdmin, async (c) => {
     // RBAC validation
     const validation = validateRoleChange(effectiveRole, actorEmail, targetCurrentRole, role);
     if (!validation.allowed) {
-      console.warn(`[RBAC] DENIED role change: ${actorEmail} tried to set ${userId} to ${role}: ${validation.reason}`);
+      log.warn({ actorEmail, userId, role, reason: validation.reason }, 'rbac_role_change_denied');
       return c.json({ success: false, error: validation.reason }, 403);
     }
 
@@ -468,26 +472,26 @@ auth.post("/set-role", requireAuth, requireAdmin, async (c) => {
     }
 
     // Audit log
-    const log = {
+    const auditEntry = {
       timestamp: new Date().toISOString(),
       actorId, actorEmail, actorRole: effectiveRole,
       targetUserId: userId, previousRole: targetCurrentRole, newRole: role,
       reason: reason || null, ip,
     };
-    console.info(formatRoleChangeLog(log));
+    log.info({ audit: auditEntry }, formatRoleChangeLog(auditEntry));
 
     // Persist audit log to DB
     try {
       await sql(
         `INSERT INTO audit_logs (action, actor_id, target_id, details, ip_address, created_at)
          VALUES ($1, $2, $3, $4, $5, NOW())`,
-        ['role_change', actorId, userId, JSON.stringify(log), ip]
+        ['role_change', actorId, userId, JSON.stringify(auditEntry), ip]
       );
     } catch {}
 
     return c.json({ success: true, role, previousRole: targetCurrentRole });
   } catch (error) {
-    console.error("Set role error:", error);
+    log.error({ err: error }, "set_role_error");
     return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
   }
 });
@@ -520,7 +524,7 @@ auth.get("/me", async (c) => {
       },
     });
   } catch (error) {
-    console.error("Auth me error:", error);
+    log.error({ err: error }, "auth_me_error");
     return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
@@ -536,7 +540,7 @@ auth.post("/signout", async (c) => {
       if (decoded) {
         await sql(`UPDATE users SET token_version = COALESCE(token_version, 1) + 1 WHERE id = $1`, [decoded.sub]);
         await revokeAllRefreshTokens(decoded.sub);
-        console.log(`User signed out (tokens revoked): ${decoded.email} (${decoded.sub})`);
+        log.info({ email: decoded.email, userId: decoded.sub }, 'user_signed_out');
       }
     }
     return c.json({ success: true, message: "Signed out successfully" });
@@ -564,10 +568,10 @@ auth.post("/request-reset", async (c) => {
 
     const profile = await vpsGetProfile(user.id);
     await sendPasswordResetEmail(email, profile?.name || user.full_name || email.split("@")[0], resetToken);
-    console.log(`Password reset email sent to: ${email}`);
+    log.info({ email }, 'password_reset_sent');
     return c.json({ success: true, message: "Если аккаунт с таким email существует, мы отправили письмо." });
   } catch (error) {
-    console.error("Request reset error:", error);
+    log.error({ err: error }, "request_reset_error");
     return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
   }
 });
@@ -591,10 +595,10 @@ auth.post("/reset-password", async (c) => {
     await sql(`UPDATE users SET password_hash = $1, token_version = COALESCE(token_version, 1) + 1 WHERE id = $2`, [passwordHash, resetData.userId]);
     await vpsUseToken(token);
 
-    console.log(`Password reset for: ${resetData.userId}`);
+    log.info({ userId: resetData.userId }, 'password_reset_completed');
     return c.json({ success: true, message: "Пароль обновлён." });
   } catch (error) {
-    console.error("Reset password error:", error);
+    log.error({ err: error }, "reset_password_error");
     return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
@@ -812,7 +816,7 @@ auth.post("/exchange-auto-login", async (c) => {
       },
     });
   } catch (error) {
-    console.error("Exchange auto-login error:", error);
+    log.error({ err: error }, "exchange_auto_login_error");
     return c.json({ success: false, error: "Internal error" }, 500);
   }
 });
@@ -855,7 +859,7 @@ auth.post("/refresh", async (c) => {
       },
     });
   } catch (error) {
-    console.error("Refresh error:", error);
+    log.error({ err: error }, "refresh_error");
     return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
@@ -869,7 +873,7 @@ auth.post("/mfa/setup", requireAuth, async (c) => {
     const result = await setupMFA(userId);
     return c.json({ success: true, data: result });
   } catch (error) {
-    console.error("MFA setup error:", error);
+    log.error({ err: error }, "mfa_setup_error");
     return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
@@ -889,7 +893,7 @@ auth.post("/mfa/verify", requireAuth, async (c) => {
     sendSecurityAlert('MFA Enabled', `User ${userId} enabled 2FA`).catch(() => {});
     return c.json({ success: true, message: "2FA включена" });
   } catch (error) {
-    console.error("MFA verify error:", error);
+    log.error({ err: error }, "mfa_verify_error");
     return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });
@@ -913,7 +917,7 @@ auth.post("/mfa/disable", requireAuth, async (c) => {
     sendSecurityAlert('MFA Disabled', `User ${userId} disabled 2FA`).catch(() => {});
     return c.json({ success: true, message: "2FA отключена" });
   } catch (error) {
-    console.error("MFA disable error:", error);
+    log.error({ err: error }, "mfa_disable_error");
     return c.json({ success: false, error: "Internal server error" }, 500);
   }
 });

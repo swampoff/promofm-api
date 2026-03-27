@@ -5,10 +5,12 @@
 import 'dotenv/config';
 // Security: validate critical env vars at startup
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+  // eslint-disable-next-line no-console
   console.error('FATAL: JWT_SECRET is missing or too short (min 32 chars). Refusing to start.');
   process.exit(1);
 }
 if (!process.env.DATABASE_URL) {
+  // eslint-disable-next-line no-console
   console.error('FATAL: DATABASE_URL is missing. Refusing to start.');
   process.exit(1);
 }
@@ -16,7 +18,7 @@ if (!process.env.DATABASE_URL) {
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
+import { logger as honoLogger } from 'hono/logger';
 import * as db from './db.tsx';
 import { platformStatsStore, systemConfigStore } from './db.tsx';
 
@@ -87,14 +89,22 @@ import helpRoutes from "./help-routes.tsx";
 import ecosystemRoutes from "./ecosystem-routes.tsx";
 import { memoryRoutes } from "./memory-routes.tsx";
 import { feedbackRoutes } from "./feedback-routes.tsx";
+import apiDocs from "./api-docs-routes.tsx";
 import { promoPipelineRoutes } from "./promo-pipeline-routes.tsx";
 import { promoCheckRoutes } from "./promo-check-routes.tsx";
+import consentRoutes from "./consent-routes.tsx";
 import { classifyAndLog } from "./error-classifier.ts";
+import { createLogger } from './logger.tsx';
+import { requestIdMiddleware } from './request-id.tsx';
+
+const log = createLogger('server');
 import { authLimiter, uploadLimiter, apiLimiter } from './rate-limiter.tsx';
 import { safeErrorMessage, scanForSqlInjection } from './security.tsx';
 import { wafMiddleware, honeypotMiddleware } from './threat-detector.tsx';
 import { rlsMiddleware } from './db-client.tsx';
 import { startSecurityWarden } from './security-warden.tsx';
+import { initSentry, sentryErrorHandler, captureError } from './sentry.tsx';
+import { metricsRegistry, metricsMiddleware } from './metrics.tsx';
 
 // Global unhandled rejection handler (replaces Deno version)
 process.on('unhandledRejection', (reason) => {
@@ -107,20 +117,23 @@ process.on('unhandledRejection', (reason) => {
   ) {
     return; // Suppress client disconnect errors
   }
-  console.error('Unhandled rejection:', reason);
+  log.error({ err: reason }, 'unhandled_rejection');
 });
+
+// Initialize Sentry error tracking
+initSentry();
 
 const app = new Hono();
 
-console.log('Starting ПРОМО.МУЗЫКА Server (Node.js)...');
+log.info('server_starting');
 
 // Initialize Storage (creates upload directories)
 initializeStorage().then(result => {
   if (result.success) {
-    console.log('Storage initialized successfully');
+    log.info('storage_initialized');
   }
 }).catch(error => {
-  console.warn('Storage initialization deferred:', error?.message);
+  log.warn({ err: error?.message }, 'storage_init_deferred');
 });
 
 // Seed demo data with retry
@@ -128,18 +141,18 @@ const seedWithRetry = async (attempt = 1, maxAttempts = 3): Promise<void> => {
   try {
     const result = await seedDemoData();
     if (result.seeded) {
-      console.log(`Seed: ${result.message}`);
+      log.info({ message: result.message }, 'seed_result');
     } else {
-      console.log(`Seed: ${result.message}`);
+      log.info({ message: result.message }, 'seed_result');
     }
   } catch (error: any) {
     if (attempt < maxAttempts) {
       const delay = 2000 * attempt;
-      console.warn(`Seed attempt ${attempt}/${maxAttempts} failed, retrying in ${delay}ms...`);
+      log.warn({ attempt, maxAttempts, delay }, 'seed_retry');
       await new Promise(r => setTimeout(r, delay));
       return seedWithRetry(attempt + 1, maxAttempts);
     }
-    console.warn('Demo seed deferred:', error?.message);
+    log.warn({ err: error?.message }, 'seed_deferred');
   }
 };
 setTimeout(() => { seedWithRetry(); }, 2000);
@@ -147,12 +160,18 @@ setTimeout(() => { seedWithRetry(); }, 2000);
 // Start Security Warden (FIM, process monitor, beacon detection, kill chain correlation)
 startSecurityWarden();
 
+// Sentry error handler (captures unhandled errors)
+app.use('*', sentryErrorHandler());
+
 // WAF — threat detection (first middleware — blocks before anything else)
 app.use('*', honeypotMiddleware());
 app.use('*', wafMiddleware());
 
-// Logger
-app.use('*', logger());
+// Request ID
+app.use('*', requestIdMiddleware());
+
+// Logger (Hono built-in — HTTP access log)
+app.use('*', honoLogger());
 
 // RLS context — propagate JWT userId/role to database layer
 app.use('*', rlsMiddleware());
@@ -166,6 +185,9 @@ app.use('/*', cors({
   maxAge: 600,
   credentials: true,
 }));
+
+// Prometheus metrics collection
+app.use('*', metricsMiddleware());
 
 // Body size limit (200MB for audio uploads)
 app.use('*', async (c, next) => {
@@ -281,6 +303,18 @@ app.route("/server/api/memory", memoryRoutes);
 app.route("/server/api/feedback", feedbackRoutes);
 app.route("/server/api/promo-pipeline", promoPipelineRoutes);
 app.route("/server/api/promo-check", promoCheckRoutes);
+app.route("/server/api/consent", consentRoutes);
+
+app.route("/server/api/docs", apiDocs);
+// Prometheus metrics endpoint (internal only)
+app.get('/server/metrics', async (c) => {
+  const internalKey = c.req.header('X-Internal-Key');
+  if (internalKey !== process.env.VPS_INTERNAL_KEY) {
+    return c.text('Unauthorized', 401);
+  }
+  const metrics = await metricsRegistry.metrics();
+  return c.text(metrics, 200, { 'Content-Type': metricsRegistry.contentType });
+});
 
 // 404
 app.notFound((c) => {
@@ -293,10 +327,12 @@ app.onError(async (err, c) => {
   if (msg.includes('connection closed') || msg.includes('ECONNRESET') || msg.includes('broken pipe')) {
     return new Response(null, { status: 499 });
   }
-  console.error('Server error:', err);
+  log.error({ err, path: c.req.path }, 'server_error');
   // Classify and log error asynchronously (don't block response)
   const userId = c.req.header('X-User-Id') || undefined;
   classifyAndLog(err instanceof Error ? err : String(err), c.req.path, userId).catch(() => {});
+  // Report to Sentry
+  if (err instanceof Error) captureError(err, { path: c.req.path, userId });
   return c.json({ success: false, error: safeErrorMessage(err) }, 500);
 });
 
@@ -304,7 +340,7 @@ app.onError(async (err, c) => {
 const port = parseInt(process.env.PORT || '3000');
 
 serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, (info) => {
-  console.log(`PromoFM API running on http://localhost:${info.port}`);
+  log.info({ port: info.port }, 'server_started');
 });
 
 export default app;

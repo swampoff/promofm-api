@@ -23,6 +23,10 @@ import {
   type WebhookPayload,
 } from './payment-gateway.tsx';
 
+import { createLogger } from "./logger.tsx";
+
+const log = createLogger("checkout");
+
 const checkoutRoutes = new Hono();
 
 
@@ -129,10 +133,10 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           updated_at: now,
         };
         await upsertSubscription(session.userId, subData);
-        console.log('Subscription activated:', session.userId, '->', planKey, interval);
+        log.info({ userId: session.userId, plan: planKey, interval }, 'subscription_activated');
       }
     } catch (err) {
-      console.error('Subscription activation error:', err);
+      log.error({ err, userId: session.userId }, 'subscription_activation_error');
     }
   }
 
@@ -161,7 +165,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             createdAt: now,
           };
           await beatPurchasesStore.set(purchase.id, purchase);
-          console.log('Beat purchase fulfilled:', purchase.id, beat.title);
+          log.info({ purchaseId: purchase.id, beatTitle: beat.title }, 'beat_purchase_fulfilled');
           
           // Notify seller via SSE
           if (beat.producerId) {
@@ -188,7 +192,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           createdAt: now,
         };
         await digitalPurchasesStore.set(purchase.id, purchase);
-        console.log('Digital good purchase fulfilled:', purchase.id);
+        log.info({ purchaseId: purchase.id }, 'digital_good_fulfilled');
       }
       
       if (itemType === 'radio_campaign' && session.metadata.stationId) {
@@ -208,7 +212,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           createdAt: now,
         };
         await venueAdCampaignsStore.set(campaign.id, campaign);
-        console.log('Radio campaign created after payment:', campaign.id);
+        log.info({ campaignId: campaign.id }, 'radio_campaign_created');
         
         // Notify station owner
         if (session.metadata.stationOwnerId) {
@@ -219,7 +223,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         }
       }
     } catch (err) {
-      console.error('Marketplace purchase fulfillment error:', err);
+      log.error({ err }, 'marketplace_fulfillment_error');
     }
   }
 
@@ -255,17 +259,17 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       metadata: { orderId: session.orderId, gateway: session.gateway },
     });
   } catch (err) {
-    console.warn('Revenue recording skipped:', err);
+    log.warn({ err }, 'revenue_recording_skipped');
   }
 
-  console.log(`Payment completed: ${session.orderId} (${session.gateway}) ${session.amount} ${session.currency}`);
+  log.info({ orderId: session.orderId, gateway: session.gateway, amount: session.amount, currency: session.currency }, 'payment_completed');
 }
 
 async function processPaymentCanceled(session: PaymentSession) {
   session.status = 'canceled';
   session.completedAt = new Date().toISOString();
   await upsertPaymentSession(session.orderId, session);
-  console.log(`Payment canceled: ${session.orderId}`);
+  log.info({ orderId: session.orderId }, 'payment_canceled');
 }
 
 // ── POST /create-session ──
@@ -346,7 +350,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       },
     });
   } catch (error: any) {
-    console.error('Error in POST /create-session:', error);
+    log.error({ err: error }, 'create_session_error');
     return c.json({ success: false, error: 'Payment session creation failed' }, 500);
   }
 });
@@ -410,7 +414,7 @@ checkoutRoutes.delete('/methods/:id', requireAuth, async (c) => {
 checkoutRoutes.post('/webhook/yookassa', async (c) => {
   try {
     const body = await c.req.json();
-    console.log('YooKassa webhook received:', JSON.stringify(body).slice(0, 500));
+    log.info({ gateway: 'yookassa', bodyPreview: JSON.stringify(body).slice(0, 300) }, 'webhook_received');
 
     // Log raw webhook
     const webhookOrderId = body?.object?.metadata?.order_id;
@@ -422,20 +426,20 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
     const payload = await gw.verifyWebhook(c.req.raw, body);
 
     if (!payload) {
-      console.warn('YooKassa webhook: verification failed');
+      log.warn({ gateway: 'yookassa' }, 'webhook_verification_failed');
       return c.json({ success: false, error: 'Verification failed' }, 400);
     }
 
     // Find session
     const session = await getPaymentSession(payload.orderId) as PaymentSession | null;
     if (!session) {
-      console.warn('YooKassa webhook: session not found for orderId', payload.orderId);
+      log.warn({ gateway: 'yookassa', orderId: payload.orderId }, 'webhook_session_not_found');
       return c.json({ success: false, error: 'Session not found' }, 404);
     }
 
     // Idempotency: skip if already processed
     if (session.status !== 'pending') {
-      console.log('YooKassa webhook: session already processed', session.status);
+      log.info({ gateway: 'yookassa', orderId: session.orderId, status: session.status }, 'webhook_already_processed');
       return c.json({ success: true, message: 'Already processed' });
     }
 
@@ -447,7 +451,7 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
 
     return c.json({ success: true });
   } catch (error: any) {
-    console.error('YooKassa webhook error:', error);
+    log.error({ err: error, gateway: 'yookassa' }, 'webhook_error');
     return c.json({ success: false, error: 'Webhook processing failed' }, 500);
   }
 });
@@ -457,7 +461,7 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
 checkoutRoutes.post('/webhook/tbank', async (c) => {
   try {
     const body = await c.req.json();
-    console.log('TBank webhook received:', JSON.stringify(body).slice(0, 500));
+    log.info({ gateway: 'tbank', bodyPreview: JSON.stringify(body).slice(0, 300) }, 'webhook_received');
 
     // Log raw webhook
     if (body.OrderId) {
@@ -468,7 +472,7 @@ checkoutRoutes.post('/webhook/tbank', async (c) => {
     const payload = await gw.verifyWebhook(c.req.raw, body);
 
     if (!payload) {
-      console.warn('TBank webhook: verification failed');
+      log.warn({ gateway: 'tbank' }, 'webhook_verification_failed');
       // T-Bank expects "OK" even on error to stop retries
       return c.text('OK');
     }
@@ -476,7 +480,7 @@ checkoutRoutes.post('/webhook/tbank', async (c) => {
     // Find session
     const session = await getPaymentSession(payload.orderId) as PaymentSession | null;
     if (!session) {
-      console.warn('TBank webhook: session not found for orderId', payload.orderId);
+      log.warn({ gateway: 'tbank', orderId: payload.orderId }, 'webhook_session_not_found');
       return c.text('OK');
     }
 
@@ -498,7 +502,7 @@ checkoutRoutes.post('/webhook/tbank', async (c) => {
     // T-Bank requires "OK" as response
     return c.text('OK');
   } catch (error: any) {
-    console.error('TBank webhook error:', error);
+    log.error({ err: error, gateway: 'tbank' }, 'webhook_error');
     return c.text('OK');
   }
 });
@@ -508,7 +512,7 @@ checkoutRoutes.post('/webhook/tbank', async (c) => {
 checkoutRoutes.post('/webhook/stripe', async (c) => {
   try {
     const body = await c.req.json();
-    console.log('Stripe webhook received:', body.type, JSON.stringify(body).slice(0, 500));
+    log.info({ gateway: 'stripe', eventType: body.type, bodyPreview: JSON.stringify(body).slice(0, 300) }, 'webhook_received');
 
     // Log raw webhook
     const orderId = body?.data?.object?.metadata?.order_id;
@@ -520,20 +524,20 @@ checkoutRoutes.post('/webhook/stripe', async (c) => {
     const payload = await gw.verifyWebhook(c.req.raw, body);
 
     if (!payload) {
-      console.warn('Stripe webhook: verification failed');
+      log.warn({ gateway: 'stripe' }, 'webhook_verification_failed');
       return c.json({ success: false, error: 'Verification failed' }, 400);
     }
 
     // Find session
     const session = await getPaymentSession(payload.orderId) as PaymentSession | null;
     if (!session) {
-      console.warn('Stripe webhook: session not found for orderId', payload.orderId);
+      log.warn({ gateway: 'stripe', orderId: payload.orderId }, 'webhook_session_not_found');
       return c.json({ success: false, error: 'Session not found' }, 404);
     }
 
     // Idempotency: skip if already processed
     if (session.status !== 'pending') {
-      console.log('Stripe webhook: session already processed', session.status);
+      log.info({ gateway: 'stripe', orderId: session.orderId, status: session.status }, 'webhook_already_processed');
       return c.json({ success: true, message: 'Already processed' });
     }
 
@@ -549,7 +553,7 @@ checkoutRoutes.post('/webhook/stripe', async (c) => {
 
     return c.json({ success: true, received: true });
   } catch (error: any) {
-    console.error('Stripe webhook error:', error);
+    log.error({ err: error, gateway: 'stripe' }, 'webhook_error');
     return c.json({ success: false, error: 'Webhook processing failed' }, 500);
   }
 });

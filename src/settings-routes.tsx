@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { apiError } from './error-codes.tsx';
 import * as db from "./db.tsx";
 import { requireAuth, requireOwner } from './auth-middleware.tsx';
 
@@ -10,7 +11,7 @@ app.get("/user/:userId", requireAuth, requireOwner('userId'), async (c) => {
     const userId = c.req.param("userId");
 
     if (!userId) {
-      return c.json({ error: "User ID is required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID is required');
     }
 
     const settings = await db.getUserSettings(userId);
@@ -71,7 +72,7 @@ app.get("/user/:userId", requireAuth, requireOwner('userId'), async (c) => {
     return c.json({ settings });
   } catch (error) {
     console.error("Error fetching user settings:", error);
-    return c.json({ error: "Failed to fetch settings" }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -82,11 +83,11 @@ app.put("/user/:userId", requireAuth, requireOwner('userId'), async (c) => {
     const body = await c.req.json();
 
     if (!userId) {
-      return c.json({ error: "User ID is required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID is required');
     }
 
     if (!body.settings) {
-      return c.json({ error: "Settings data is required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'Settings data is required');
     }
 
     await db.upsertUserSettings(userId, body.settings);
@@ -98,7 +99,7 @@ app.put("/user/:userId", requireAuth, requireOwner('userId'), async (c) => {
     });
   } catch (error) {
     console.error("Error updating user settings:", error);
-    return c.json({ error: "Failed to update settings" }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -109,7 +110,7 @@ app.patch("/user/:userId/profile", requireAuth, requireOwner('userId'), async (c
     const body = await c.req.json();
 
     if (!userId) {
-      return c.json({ error: "User ID is required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID is required');
     }
 
     const currentSettings = await db.getUserSettings(userId) || {};
@@ -131,7 +132,7 @@ app.patch("/user/:userId/profile", requireAuth, requireOwner('userId'), async (c
     });
   } catch (error) {
     console.error("Error updating profile:", error);
-    return c.json({ error: "Failed to update profile" }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -141,14 +142,14 @@ app.get("/user/:userId/sessions", requireAuth, requireOwner('userId'), async (c)
     const userId = c.req.param("userId");
 
     if (!userId) {
-      return c.json({ error: "User ID is required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID is required');
     }
 
     const sessions = await db.getUserSessions(userId);
     return c.json({ sessions: sessions || [] });
   } catch (error) {
     console.error("Error fetching sessions:", error);
-    return c.json({ error: "Failed to fetch sessions" }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -159,7 +160,7 @@ app.delete("/user/:userId/sessions/:sessionId", requireAuth, requireOwner('userI
     const sessionId = parseInt(c.req.param("sessionId"));
 
     if (!userId || !sessionId) {
-      return c.json({ error: "User ID and Session ID are required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID and Session ID are required');
     }
 
     // For now, sessions are mock data — just return success
@@ -169,7 +170,7 @@ app.delete("/user/:userId/sessions/:sessionId", requireAuth, requireOwner('userI
     });
   } catch (error) {
     console.error("Error terminating session:", error);
-    return c.json({ error: "Failed to terminate session" }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -180,17 +181,17 @@ app.post("/user/:userId/change-password", requireAuth, requireOwner('userId'), a
     const body = await c.req.json();
 
     if (!userId) {
-      return c.json({ error: "User ID is required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID is required');
     }
 
     const { currentPassword, newPassword } = body;
 
     if (!currentPassword || !newPassword) {
-      return c.json({ error: "Current and new passwords are required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'Current and new passwords are required');
     }
 
     if (newPassword.length < 8) {
-      return c.json({ error: "Password must be at least 8 characters" }, 400);
+      return apiError(c, 'VALIDATION_PASSWORD_TOO_SHORT');
     }
 
     return c.json({
@@ -199,7 +200,7 @@ app.post("/user/:userId/change-password", requireAuth, requireOwner('userId'), a
     });
   } catch (error) {
     console.error("Error changing password:", error);
-    return c.json({ error: "Failed to change password" }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -209,14 +210,14 @@ app.get("/user/:userId/payment-methods", requireAuth, requireOwner('userId'), as
     const userId = c.req.param("userId");
 
     if (!userId) {
-      return c.json({ error: "User ID is required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID is required');
     }
 
     const methods = await db.getPaymentMethods(userId);
     return c.json({ methods: methods || [] });
   } catch (error) {
     console.error("Error fetching payment methods:", error);
-    return c.json({ error: "Failed to fetch payment methods" }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -227,7 +228,7 @@ app.post("/user/:userId/payment-methods", requireAuth, requireOwner('userId'), a
     const body = await c.req.json();
 
     if (!userId) {
-      return c.json({ error: "User ID is required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID is required');
     }
 
     const existingMethods = await db.getPaymentMethods(userId);
@@ -248,7 +249,7 @@ app.post("/user/:userId/payment-methods", requireAuth, requireOwner('userId'), a
     });
   } catch (error) {
     console.error("Error adding payment method:", error);
-    return c.json({ error: "Failed to add payment method" }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
@@ -259,7 +260,7 @@ app.delete("/user/:userId/payment-methods/:methodId", requireAuth, requireOwner(
     const methodId = c.req.param("methodId");
 
     if (!userId || !methodId) {
-      return c.json({ error: "User ID and Method ID are required" }, 400);
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID and Method ID are required');
     }
 
     await db.deletePaymentMethod(methodId);
@@ -270,7 +271,7 @@ app.delete("/user/:userId/payment-methods/:methodId", requireAuth, requireOwner(
     });
   } catch (error) {
     console.error("Error deleting payment method:", error);
-    return c.json({ error: "Failed to delete payment method" }, 500);
+    return apiError(c, 'INTERNAL_ERROR');
   }
 });
 
