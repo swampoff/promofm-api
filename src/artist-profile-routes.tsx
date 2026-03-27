@@ -386,18 +386,35 @@ app.get('/popular', async (c) => {
  * Возвращает треки артиста из БД
  */
 app.get('/profile/:artistId/tracks', async (c) => {
-  const artistId = c.req.param('artistId');
-  console.log(`[ArtistProfile] GET /profile/${artistId}/tracks`);
+  const artistIdParam = c.req.param('artistId');
+  console.log(`[ArtistProfile] GET /profile/${artistIdParam}/tracks`);
 
   try {
     // Get real tracks from tracks table (linked by artist_id FK)
     try {
       const { getDbClient } = await import('./db-client.tsx');
       const dbClient = getDbClient();
+
+      // Resolve slug/user_id/id to actual artist_profiles.id (UUID)
+      let resolvedId = artistIdParam;
+      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artistIdParam);
+      if (!isUUID) {
+        // Try slug first, then user_id
+        const { data: bySlug } = await dbClient
+          .from('artist_profiles').select('id').eq('slug', artistIdParam.toLowerCase()).maybeSingle();
+        if (bySlug) {
+          resolvedId = bySlug.id;
+        } else {
+          const { data: byUserId } = await dbClient
+            .from('artist_profiles').select('id').eq('user_id', artistIdParam).maybeSingle();
+          if (byUserId) resolvedId = byUserId.id;
+        }
+      }
+
       const { data: tracks } = await dbClient
         .from('tracks')
         .select('*')
-        .eq('artist_id', artistId)
+        .eq('artist_id', resolvedId)
         .order('created_at', { ascending: false });
       
       const formatted = (tracks || []).map((t: any) => ({
