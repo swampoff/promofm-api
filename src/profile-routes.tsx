@@ -3,6 +3,8 @@ import { requireAuth } from './auth-middleware.tsx';
 import * as db from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { pool } from './db-client.tsx';
+import bcrypt from 'bcryptjs';
 
 const profileRoutes = new Hono();
 const FALLBACK_USER = 'anonymous';
@@ -43,6 +45,182 @@ profileRoutes.put('/', requireAuth, async (c) => {
     return c.json({ success: true, data: updated });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+
+
+// ── GET /data-export — выгрузка всех данных пользователя (GDPR/152-ФЗ) ──
+profileRoutes.get('/data-export', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+
+    // Rate limit: 1 export per 24 hours
+    const lastExport = await pool.query(
+      `SELECT created_at FROM audit_logs WHERE user_id = $1 AND action = 'data_export' AND created_at > NOW() - INTERVAL '24 hours' LIMIT 1`,
+      [userId]
+    ).catch(() => ({ rows: [] }));
+
+    if (lastExport.rows.length > 0) {
+      return c.json({
+        success: false,
+        error: 'Экспорт данных доступен раз в 24 часа. Следующий будет доступен после ' + lastExport.rows[0].created_at,
+      }, 429);
+    }
+
+    // Collect all user data from major tables
+    const tables = [
+      { name: 'users', query: 'SELECT id, email, role, created_at, consent_at FROM users WHERE id = $1', sensitive: true },
+      { name: 'profiles', query: 'SELECT * FROM profiles WHERE user_id = $1' },
+      { name: 'artist_profiles', query: 'SELECT * FROM artist_profiles WHERE user_id = $1' },
+      { name: 'producer_profiles', query: 'SELECT * FROM producer_profiles WHERE user_id = $1' },
+      { name: 'dj_profiles', query: 'SELECT * FROM dj_profiles WHERE user_id = $1' },
+      { name: 'radio_profiles', query: 'SELECT * FROM radio_profiles WHERE user_id = $1' },
+      { name: 'venue_profiles', query: 'SELECT * FROM venue_profiles WHERE user_id = $1' },
+      { name: 'tracks', query: 'SELECT id, title, genre, release_date, created_at FROM tracks WHERE user_id = $1' },
+      { name: 'comments', query: 'SELECT id, content, created_at FROM comments WHERE user_id = $1' },
+      { name: 'likes', query: 'SELECT * FROM likes WHERE user_id = $1' },
+      { name: 'bookings', query: 'SELECT * FROM bookings WHERE user_id = $1' },
+      { name: 'subscriptions', query: 'SELECT * FROM subscriptions WHERE user_id = $1' },
+      { name: 'payment_sessions', query: 'SELECT order_id, amount, currency, status, type, created_at FROM payment_sessions WHERE user_id = $1' },
+      { name: 'payment_transactions', query: 'SELECT * FROM payment_transactions WHERE user_id = $1' },
+      { name: 'notifications', query: 'SELECT id, type, title, created_at FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100' },
+      { name: 'user_settings', query: 'SELECT * FROM user_settings WHERE user_id = $1' },
+      { name: 'notification_settings', query: 'SELECT * FROM notification_settings WHERE user_id = $1' },
+      { name: 'pitches', query: 'SELECT * FROM pitches WHERE user_id = $1' },
+      { name: 'concerts', query: 'SELECT * FROM concerts WHERE user_id = $1' },
+    ];
+
+    const exportData: Record<string, any> = {
+      export_date: new Date().toISOString(),
+      user_id: userId,
+      format_version: '1.0',
+    };
+
+    for (const table of tables) {
+      try {
+        const result = await pool.query(table.query, [userId]);
+        if (result.rows.length > 0) {
+          exportData[table.name] = result.rows;
+        }
+      } catch {
+        // Table might not exist or have different schema
+      }
+    }
+
+    // Also try UUID match
+    for (const table of tables) {
+      if (!exportData[table.name]) {
+        try {
+          const uuidQuery = table.query.replace('= $1', '= $1::uuid');
+          const result = await pool.query(uuidQuery, [userId]);
+          if (result.rows.length > 0) {
+            exportData[table.name] = result.rows;
+          }
+        } catch {}
+      }
+    }
+
+    // Remove password_hash from export
+    if (exportData.users) {
+      exportData.users = exportData.users.map((u: any) => {
+        const { password_hash, ...safe } = u;
+        return safe;
+      });
+    }
+
+    // Log the export
+    await pool.query(
+      `INSERT INTO audit_logs (user_id, action, details, created_at) VALUES ($1, 'data_export', '{"tables": ${Object.keys(exportData).length}}', NOW())`,
+      [userId]
+    ).catch(() => {});
+
+    return c.json({
+      success: true,
+      data: exportData,
+    });
+  } catch (error) {
+    console.error('Data export error:', error);
+    return c.json({ success: false, error: 'Ошибка при экспорте данных' }, 500);
+  }
+});
+
+// ── DELETE /account — полное удаление аккаунта (GDPR/152-ФЗ) ──
+profileRoutes.delete('/account', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const body = await c.req.json().catch(() => ({}));
+    const { password, confirmation } = body;
+
+    // Require explicit confirmation
+    if (confirmation !== 'DELETE_MY_ACCOUNT') {
+      return c.json({
+        success: false,
+        error: 'Для удаления аккаунта отправьте confirmation: "DELETE_MY_ACCOUNT"',
+      }, 400);
+    }
+
+    // Verify password
+    if (!password) {
+      return c.json({ success: false, error: 'Введите пароль для подтверждения' }, 400);
+    }
+
+    // Get user record to verify password
+    const userResult = await pool.query(
+      'SELECT id, password_hash FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return c.json({ success: false, error: 'Пользователь не найден' }, 404);
+    }
+
+    const user = userResult.rows[0];
+    const passwordValid = await bcrypt.compare(password, user.password_hash);
+
+    if (!passwordValid) {
+      return c.json({ success: false, error: 'Неверный пароль' }, 403);
+    }
+
+    // Execute cascading deletion
+    const deleteResult = await pool.query(
+      'SELECT delete_user_account($1) AS result',
+      [userId]
+    );
+
+    const deletedCounts = deleteResult.rows[0]?.result || {};
+
+    // Log the deletion event (anonymized)
+    await pool.query(
+      `INSERT INTO audit_logs (user_id, action, details, created_at)
+       VALUES ('DELETED', 'account_deleted', $1, NOW())`,
+      [JSON.stringify({ tables_affected: Object.keys(deletedCounts).length, timestamp: new Date().toISOString() })]
+    ).catch(() => {});
+
+    // Send Telegram alert about account deletion
+    try {
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      const chatId = process.env.TELEGRAM_LEAD_CHAT_ID;
+      if (token && chatId) {
+        const msg = `🗑️ Аккаунт удалён\n\nUser ID: ${userId.slice(0, 8)}...\nТаблиц затронуто: ${Object.keys(deletedCounts).length}\nВремя: ${new Date().toISOString()}`;
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: msg }),
+        }).catch(() => {});
+      }
+    } catch {}
+
+    return c.json({
+      success: true,
+      message: 'Ваш аккаунт и все данные полностью удалены',
+      details: {
+        tables_cleaned: Object.keys(deletedCounts).length,
+      },
+    });
+  } catch (error) {
+    console.error('Account deletion error:', error);
+    return c.json({ success: false, error: 'Ошибка при удалении аккаунта' }, 500);
   }
 });
 

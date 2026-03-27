@@ -101,13 +101,15 @@ export class TBankGateway implements PaymentGateway {
   async verifyWebhook(_request: Request, body: any): Promise<WebhookPayload | null> {
     const { secretKey } = getCredentials();
 
-    // Verify signature
-    if (secretKey) {
-      const valid = await verifyTBankSignature(body, secretKey);
-      if (!valid) {
-        console.warn('TBank webhook: invalid signature');
-        return null;
-      }
+    // Verify signature — MANDATORY (reject if secret not configured)
+    if (!secretKey) {
+      console.error('TBank webhook: TBANK_SECRET_KEY not configured — rejecting webhook');
+      return null;
+    }
+    const valid = await verifyTBankSignature(body, secretKey);
+    if (!valid) {
+      console.warn('TBank webhook: invalid signature');
+      return null;
     }
 
     // Map status to event type

@@ -159,7 +159,7 @@ app.use('*', rlsMiddleware());
 
 // CORS
 app.use('/*', cors({
-  origin: ['https://promo-music.ru', 'https://www.promo-music.ru', 'https://admin.promo-music.ru', 'http://localhost:3000', 'http://localhost:5173'],
+  origin: ['https://promo-music.ru', 'https://www.promo-music.ru', 'https://admin.promo-music.ru', 'https://promofm.org', 'https://www.promofm.org'],
   allowHeaders: ['Content-Type', 'Authorization', 'X-User-Id', 'X-Internal-Key', 'Cache-Control', 'Accept'],
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   exposeHeaders: ['Content-Length'],

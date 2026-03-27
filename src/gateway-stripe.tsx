@@ -161,13 +161,15 @@ export class StripeGateway implements PaymentGateway {
       return null;
     }
 
-    // Verify signature if webhook secret is configured
-    if (webhookSecret) {
-      const valid = await verifyStripeSignature(rawBody, sigHeader, webhookSecret);
-      if (!valid) {
-        console.warn('Stripe webhook: invalid signature');
-        return null;
-      }
+    // Verify signature — MANDATORY (reject if secret not configured)
+    if (!webhookSecret) {
+      console.error('Stripe webhook: STRIPE_WEBHOOK_SECRET not configured — rejecting webhook');
+      return null;
+    }
+    const valid = await verifyStripeSignature(rawBody, sigHeader, webhookSecret);
+    if (!valid) {
+      console.warn('Stripe webhook: invalid signature');
+      return null;
     }
 
     // Map Stripe event types
