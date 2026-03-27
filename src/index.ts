@@ -3,6 +3,7 @@
  * Entry point: replaces Supabase Edge Functions handler
  */
 import 'dotenv/config';
+import { readFileSync, existsSync } from 'fs';
 // Security: validate critical env vars at startup
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   // eslint-disable-next-line no-console
@@ -238,6 +239,34 @@ app.get('/server/health', async (c) => {
 app.get('/api/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString(), version: '3.0.0-vps' }));
 
 // Mount routes — same paths as Supabase Edge Functions
+// ── Static files: tracks & covers ──
+app.get('/server/uploads/tracks/*', async (c) => {
+  const filename = decodeURIComponent(c.req.path.replace('/server/uploads/tracks/', ''));
+  const filePath = '/opt/promofm-api/uploads/tracks/' + filename;
+  try {
+    if (!existsSync(filePath)) return c.text('Not found', 404);
+    const file = readFileSync(filePath);
+    c.header('Content-Type', 'audio/mpeg');
+    c.header('Accept-Ranges', 'bytes');
+    c.header('Cache-Control', 'public, max-age=31536000');
+    c.header('Access-Control-Allow-Origin', '*');
+    return c.body(file);
+  } catch { return c.text('Not found', 404); }
+});
+
+app.get('/server/uploads/covers/*', async (c) => {
+  const filename = decodeURIComponent(c.req.path.replace('/server/uploads/covers/', ''));
+  const filePath = '/opt/promofm-api/uploads/covers/' + filename;
+  try {
+    if (!existsSync(filePath)) return c.text('Not found', 404);
+    const file = readFileSync(filePath);
+    c.header('Content-Type', 'image/jpeg');
+    c.header('Cache-Control', 'public, max-age=31536000');
+    c.header('Access-Control-Allow-Origin', '*');
+    return c.body(file);
+  } catch { return c.text('Not found', 404); }
+});
+
 app.route('/server/auth', authRoutes);
 app.route('/server/api/concerts', concertsRoutes);
 app.route('/server/api/concert-moderation', concertModerationRoutes);
