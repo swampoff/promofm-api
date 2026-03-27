@@ -92,6 +92,8 @@ import { promoCheckRoutes } from "./promo-check-routes.tsx";
 import { classifyAndLog } from "./error-classifier.ts";
 import { authLimiter, uploadLimiter, apiLimiter } from './rate-limiter.tsx';
 import { safeErrorMessage, scanForSqlInjection } from './security.tsx';
+import { wafMiddleware, honeypotMiddleware } from './threat-detector.tsx';
+import { startSecurityWarden } from './security-warden.tsx';
 
 // Global unhandled rejection handler (replaces Deno version)
 process.on('unhandledRejection', (reason) => {
@@ -141,6 +143,13 @@ const seedWithRetry = async (attempt = 1, maxAttempts = 3): Promise<void> => {
 };
 setTimeout(() => { seedWithRetry(); }, 2000);
 
+// Start Security Warden (FIM, process monitor, beacon detection, kill chain correlation)
+startSecurityWarden();
+
+// WAF — threat detection (first middleware — blocks before anything else)
+app.use('*', honeypotMiddleware());
+app.use('*', wafMiddleware());
+
 // Logger
 app.use('*', logger());
 
@@ -181,28 +190,7 @@ app.use('/server/storage/*', uploadLimiter);
 // Rate limiting: general API (200 req/min per IP)
 app.use('/server/api/*', apiLimiter);
 
-// SQL injection detection middleware (defense-in-depth)
-app.use('/server/*', async (c, next) => {
-  // Skip GET requests and SSE
-  if (c.req.method === 'GET' || c.req.path.includes('/sse/')) {
-    return next();
-  }
-  try {
-    const contentType = c.req.header('content-type') || '';
-    if (contentType.includes('application/json')) {
-      const body = await c.req.json();
-      const suspicious = scanForSqlInjection(body);
-      if (suspicious) {
-        const ip = c.req.header('x-real-ip') || c.req.header('x-forwarded-for') || 'unknown';
-        console.warn('[SQLi BLOCKED]', { ip, path: c.req.path, payload: suspicious.slice(0, 100) });
-        return c.json({ success: false, error: 'Invalid input detected' }, 400);
-      }
-    }
-  } catch {
-    // If body parsing fails, let the route handler deal with it
-  }
-  await next();
-});
+// SQL injection detection — now handled by WAF (threat-detector.tsx)
 
 
 // Health check
