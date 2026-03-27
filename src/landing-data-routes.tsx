@@ -1045,32 +1045,132 @@ landing.post('/reseed', async (c) => {
 });
 
 // ============================================
-// CONTACT FORM (KV — unchanged)
+// CONTACT FORM — strict validation + PostgreSQL + Email + Telegram
 // ============================================
 
-landing.post('/contact', async (c) => {
+const VALID_SUBJECTS = ["general", "support", "partnership", "business", "other"];
+const CONTACT_EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+const TG_LEAD_CHAT = process.env.TELEGRAM_LEAD_CHAT_ID || "";
+const SUBJECT_LABELS: Record<string, string> = {
+  general: "Общий вопрос", support: "Тех. поддержка",
+  partnership: "Партнерство", business: "Для бизнеса", other: "Другое",
+};
+
+landing.post("/contact", async (c) => {
   try {
     const body = await c.req.json();
     const { name, email, subject, message } = body;
 
-    if (!name || !email || !subject || !message) {
-      return c.json({ success: false, error: 'Все поля обязательны для заполнения' }, 400);
+    const errors: Record<string, string> = {};
+
+    if (!name || typeof name !== "string" || name.trim().length < 2) {
+      errors.name = "Имя: минимум 2 символа";
+    } else if (name.trim().length > 100) {
+      errors.name = "Имя: максимум 100 символов";
+    } else if (/<script|javascript:|on\w+=/i.test(name)) {
+      errors.name = "Имя содержит недопустимые символы";
     }
 
-    const id = `contact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    await contactFormsStore.set(id, {
-      id, name, email, subject, message,
-      createdAt: new Date().toISOString(),
-      status: 'new',
-    });
+    if (!email || typeof email !== "string" || !CONTACT_EMAIL_RE.test(email.trim())) {
+      errors.email = "Введите корректный email";
+    }
 
-    return c.json({ success: true, message: 'Сообщение успешно отправлено' });
+    if (!subject || !VALID_SUBJECTS.includes(subject)) {
+      errors.subject = "Выберите тему обращения";
+    }
+
+    if (!message || typeof message !== "string" || message.trim().length < 10) {
+      errors.message = "Сообщение: минимум 10 символов";
+    } else if (message.trim().length > 2000) {
+      errors.message = "Сообщение: максимум 2000 символов";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return c.json({ success: false, errors }, 400);
+    }
+
+    const clean = {
+      name: name.trim().replace(/<[^>]*>/g, ""),
+      email: email.trim().toLowerCase(),
+      subject: subject,
+      message: message.trim().replace(/<[^>]*>/g, ""),
+    };
+
+    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || c.req.header("x-real-ip") || "unknown";
+    const ipHash = Buffer.from(ip).toString("base64").slice(0, 16);
+
+    const rateCheck = await pool.query(
+      "SELECT count(*) FROM contact_forms WHERE ip_hash = $1 AND created_at > NOW() - INTERVAL '1 hour'",
+      [ipHash]
+    );
+    if (parseInt(rateCheck.rows[0].count) >= 3) {
+      return c.json({ success: false, error: "Слишком много обращений. Попробуйте позже." }, 429);
+    }
+
+    const result = await pool.query(
+      "INSERT INTO contact_forms (name, email, subject, message, ip_hash) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+      [clean.name, clean.email, clean.subject, clean.message, ipHash]
+    );
+    const contactId = result.rows[0].id;
+    const subjectLabel = SUBJECT_LABELS[clean.subject] || clean.subject;
+
+    let emailSent = false;
+    try {
+      const { sendEmail } = await import("./email-helper.tsx");
+      emailSent = await sendEmail({
+        to: "info@promofm.ru",
+        subject: `[Контакт] ${subjectLabel}: ${clean.name}`,
+        html: `<div style="font-family:Arial,sans-serif;max-width:600px;">
+          <h2 style="color:#FF577F;">Новое обращение с сайта</h2>
+          <table style="width:100%;border-collapse:collapse;">
+            <tr><td style="padding:8px;font-weight:bold;">Имя:</td><td>${clean.name}</td></tr>
+            <tr><td style="padding:8px;font-weight:bold;">Email:</td><td><a href="mailto:${clean.email}">${clean.email}</a></td></tr>
+            <tr><td style="padding:8px;font-weight:bold;">Тема:</td><td>${subjectLabel}</td></tr>
+          </table>
+          <div style="margin:16px 0;padding:16px;background:#f5f5f5;border-radius:8px;">
+            <strong>Сообщение:</strong><br>${clean.message.replace(/\n/g, "<br>")}
+          </div>
+          <p style="color:#999;font-size:12px;">ID: ${contactId}</p>
+        </div>`,
+      });
+    } catch (e) { /* email failed */ }
+
+    let telegramSent = false;
+    if (TG_TOKEN && TG_LEAD_CHAT) {
+      try {
+        const tgLines = [
+          "\u{1F4E9} Новое обращение с сайта",
+          "",
+          `\u{1F464} ${clean.name}`,
+          `\u{1F4E7} ${clean.email}`,
+          `\u{1F3F7}\u{FE0F} ${subjectLabel}`,
+          "",
+          `\u{1F4AC} ${clean.message}`,
+          "",
+          `ID: ${contactId}`,
+        ];
+        const resp = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: TG_LEAD_CHAT, text: tgLines.join("\n") }),
+        });
+        telegramSent = resp.ok;
+      } catch (e) { /* telegram failed */ }
+    }
+
+    await pool.query(
+      "UPDATE contact_forms SET email_sent = $1, telegram_sent = $2 WHERE id = $3",
+      [emailSent, telegramSent, contactId]
+    );
+
+    return c.json({ success: true, message: "Сообщение отправлено! Мы ответим в ближайшее время." });
   } catch (error) {
-    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+    return c.json({ success: false, error: "Ошибка сервера. Попробуйте позже." }, 500);
   }
 });
 
-landing.post('/investor-inquiry', async (c) => {
+landing.post("/investor-inquiry", async (c) => {
   try {
     const body = await c.req.json();
     const { name, email, company, message } = body;
