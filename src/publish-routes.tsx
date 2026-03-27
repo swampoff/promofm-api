@@ -238,7 +238,7 @@ app.post('/orders', requireAuth, async (c) => {
     return c.json({ success: true, order });
   } catch (error: any) {
     console.error('Error creating publish order:', error);
-    return c.json({ success: false, error: `Failed to create order: ${error.message}` }, 500);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 

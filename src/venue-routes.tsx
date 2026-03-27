@@ -97,7 +97,7 @@ app.get('/profile', requireAuth, async (c) => {
     return c.json(profile);
   } catch (error: any) {
     console.error('Error in GET /venue/profile:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -136,7 +136,7 @@ app.put('/profile', requireAuth, async (c) => {
     return c.json(profile);
   } catch (error: any) {
     console.error('Error in PUT /venue/profile:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -148,7 +148,7 @@ app.post('/profile/logo', requireAuth, async (c) => {
     });
   } catch (error: any) {
     console.error('Error in POST /venue/profile/logo:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -160,7 +160,7 @@ app.post('/profile/cover', requireAuth, async (c) => {
     });
   } catch (error: any) {
     console.error('Error in POST /venue/profile/cover:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -218,7 +218,7 @@ app.get('/stats', requireAuth, async (c) => {
     });
   } catch (error: any) {
     console.error('Error in GET /venue/stats:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 

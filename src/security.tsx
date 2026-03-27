@@ -108,8 +108,10 @@ export async function sanitizeUrl(url: string): Promise<string> {
  */
 export function sanitizeString(input: unknown, maxLen = 1000): string {
   if (typeof input !== 'string') return '';
-  // Remove control characters (except newline, tab)
-  const cleaned = input.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  // Remove control characters (except newline, tab) and HTML angle brackets
+  const cleaned = input
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(/[<>]/g, '');
   return cleaned.trim().slice(0, maxLen);
 }
 

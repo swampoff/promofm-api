@@ -58,7 +58,7 @@ promoPipelineRoutes.post('/start', requireAuth, async (c) => {
       message: 'Pipeline created. Call /advance to move to strategy phase.',
     });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -122,7 +122,7 @@ promoPipelineRoutes.post('/advance/:id', requireAuth, async (c) => {
       message: hasNext ? `Advanced to ${nextState}. Call /advance to continue.` : 'Pipeline complete!',
     });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -149,7 +149,7 @@ promoPipelineRoutes.get('/status/:id', requireAuth, async (c) => {
       updated_at: p.updated_at,
     });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -174,7 +174,7 @@ promoPipelineRoutes.get('/list', requireAuth, async (c) => {
     const res = await pool.query(sql, params);
     return c.json({ data: res.rows, count: res.rows.length });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 

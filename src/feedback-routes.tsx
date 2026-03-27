@@ -58,7 +58,7 @@ feedbackRoutes.post('/report', requireAuth, async (c) => {
       type,
     });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -105,7 +105,7 @@ feedbackRoutes.get('/reports', requireAuth, requireAdmin, async (c) => {
       offset,
     });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -131,7 +131,7 @@ feedbackRoutes.put('/reports/:id/resolve', requireAuth, requireAdmin, async (c) 
 
     return c.json({ data: res.rows[0], resolved: true });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 

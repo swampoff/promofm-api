@@ -292,7 +292,7 @@ app.route("/server/api/promo-check", promoCheckRoutes);
 
 // 404
 app.notFound((c) => {
-  return c.json({ success: false, error: 'Route not found', path: c.req.path }, 404);
+  return c.json({ success: false, error: 'Route not found', path: c.req.path.replace(/[<>"'&]/g, '') }, 404);
 });
 
 // Error handler with classification

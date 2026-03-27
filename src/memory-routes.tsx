@@ -39,11 +39,11 @@ memoryRoutes.post('/:layer/store', async (c) => {
     if (layer === 'short') {
       const { key, value, namespace, agent_name, ttl_minutes } = body;
       if (!key || !value) return c.json({ error: 'key and value required' }, 400);
-      const ttl = ttl_minutes || 60;
+      const ttl = Math.max(1, Math.min(Math.floor(Number(ttl_minutes) || 60), 10080)); // 1 min to 7 days, integer only
       const res = await pool.query(
         `INSERT INTO ${table} (key, value, namespace, agent_name, expires_at)
-         VALUES ($1, $2, $3, $4, NOW() + interval '${ttl} minutes') RETURNING id`,
-        [key, JSON.stringify(value), namespace || 'global', agent_name || null]
+         VALUES ($1, $2, $3, $4, NOW() + make_interval(mins => $5)) RETURNING id`,
+        [key, JSON.stringify(value), namespace || 'global', agent_name || null, ttl]
       );
       return c.json({ id: res.rows[0].id, layer, key });
     }
@@ -113,7 +113,7 @@ memoryRoutes.post('/:layer/store', async (c) => {
       return c.json({ id: res.rows[0].id, layer });
     }
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -153,7 +153,7 @@ memoryRoutes.get('/:layer/search', async (c) => {
     }
     return c.json({ data: res.rows, count: res.rows.length });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -184,7 +184,7 @@ memoryRoutes.get('/:layer/:key', async (c) => {
     }
     return c.json({ data: res.rows[0] || null });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -239,7 +239,7 @@ memoryRoutes.get('/context', async (c) => {
       },
     });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -252,7 +252,7 @@ memoryRoutes.delete('/short/expired', async (c) => {
     );
     return c.json({ deleted: res.rowCount });
   } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 

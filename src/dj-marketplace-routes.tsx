@@ -163,7 +163,7 @@ app.post('/seed', async (c) => {
     return c.json({ success: true, count: SEED_PROFILES.length });
   } catch (err: any) {
     console.error('Seed error:', err);
-    return c.json({ success: false, error: `Seed error: ${err.message}` }, 500);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 
@@ -242,7 +242,7 @@ app.get('/djs', async (c) => {
     return c.json({ success: true, data: result, total: result.length });
   } catch (err: any) {
     console.error('Error fetching DJ list:', err);
-    return c.json({ success: false, error: `Failed to fetch DJs: ${err.message}` }, 500);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 
@@ -258,7 +258,7 @@ app.get('/djs/:id', async (c) => {
     return c.json({ success: true, data: profile });
   } catch (err: any) {
     console.error('Error fetching DJ profile:', err);
-    return c.json({ success: false, error: `Failed to fetch DJ: ${err.message}` }, 500);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 
@@ -271,7 +271,7 @@ app.get('/djs/:id/mixes', async (c) => {
     return c.json({ success: true, data: mixes });
   } catch (err: any) {
     console.error('Error fetching DJ mixes:', err);
-    return c.json({ success: false, error: `Failed to fetch mixes: ${err.message}` }, 500);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 
@@ -284,7 +284,7 @@ app.get('/djs/:id/reviews', async (c) => {
     return c.json({ success: true, data: reviews });
   } catch (err: any) {
     console.error('Error fetching DJ reviews:', err);
-    return c.json({ success: false, error: `Failed to fetch reviews: ${err.message}` }, 500);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 
@@ -315,7 +315,7 @@ app.get('/djs/:id/calendar', async (c) => {
     return c.json({ success: true, data: calendar });
   } catch (err: any) {
     console.error('Error fetching DJ calendar:', err);
-    return c.json({ success: false, error: `Failed to fetch calendar: ${err.message}` }, 500);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 
@@ -356,7 +356,7 @@ app.post('/djs/:id/book', async (c) => {
     return c.json({ success: true, data: booking });
   } catch (err: any) {
     console.error('Booking error:', err);
-    return c.json({ success: false, error: `Booking failed: ${err.message}` }, 500);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 

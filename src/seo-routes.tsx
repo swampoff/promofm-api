@@ -21,6 +21,23 @@ function stripHtml(s: string): string {
   return (s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
 }
 
+/** Strip dangerous HTML: scripts, event handlers, iframes, objects, embeds */
+function sanitizeHtml(html: string): string {
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, '')
+    .replace(/<object[^>]*>[\s\S]*?<\/object>/gi, '')
+    .replace(/<embed[^>]*>/gi, '')
+    .replace(/<link[^>]*>/gi, '')
+    .replace(/<meta[^>]*>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<base[^>]*>/gi, '')
+    .replace(/\s*on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)/gi, '')
+    .replace(/href\s*=\s*"\s*javascript:/gi, 'href="')
+    .replace(/src\s*=\s*"\s*javascript:/gi, 'src="')
+    .replace(/src\s*=\s*"\s*data:/gi, 'src="');
+}
+
 // ─── Page meta configs ───
 const PAGE_META: Record<string, { title: string; desc: string; type: string; image?: string }> = {
   '/': { title: `${SITE_NAME} — музыкальная платформа для артистов`, desc: SITE_DESC, type: 'website' },
@@ -85,13 +102,13 @@ seoRoutes.get('/prerender/*', async (c) => {
         "name": "${SITE_NAME}",
         "logo": {"@type": "ImageObject", "url": "${LOGO}"}
       },
-      "mainEntityOfPage": {"@type": "WebPage", "@id": "${DOMAIN}${path}"}
+      "mainEntityOfPage": {"@type": "WebPage", "@id": "${DOMAIN}${escJson(path)}"}
     }
     </script>`;
 
       // Render article content for bots
-      const content = (article.content || article.excerpt || '')
-        .replace(/^\s*```html\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+      const content = sanitizeHtml((article.content || article.excerpt || '')
+        .replace(/^\s*```html\s*\n?/i, '').replace(/\n?```\s*$/i, ''));
       articleHtml = `
     <article>
       <h1>${esc(title)}</h1>
@@ -132,7 +149,7 @@ seoRoutes.get('/prerender/*', async (c) => {
       "byArtist": {"@type": "MusicGroup", "name": "${escJson(artist)}"},
       ${genre ? `"genre": "${escJson(genre)}",` : ''}
       ${duration ? `"duration": "${duration}",` : ''}
-      "url": "${DOMAIN}${path}",
+      "url": "${DOMAIN}${escJson(path)}",
       "datePublished": "${track.created_at || new Date().toISOString()}",
       "publisher": {
         "@type": "Organization",
@@ -177,7 +194,7 @@ seoRoutes.get('/prerender/*', async (c) => {
       "@type": "BreadcrumbList",
       "itemListElement": [
         {"@type": "ListItem", "position": 1, "name": "Главная", "item": "${DOMAIN}/"},
-        {"@type": "ListItem", "position": 2, "name": "${escJson(meta.title.split(' — ')[0])}", "item": "${DOMAIN}${path}"}
+        {"@type": "ListItem", "position": 2, "name": "${escJson(meta.title.split(' — ')[0])}", "item": "${DOMAIN}${escJson(path)}"}
       ]
     }
     </script>`;
@@ -189,22 +206,22 @@ seoRoutes.get('/prerender/*', async (c) => {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${esc(meta.title)}</title>
   <meta name="description" content="${esc(meta.desc)}">
-  <link rel="canonical" href="${DOMAIN}${path}">
+  <link rel="canonical" href="${DOMAIN}${esc(path)}">
   
   <!-- Open Graph -->
   <meta property="og:type" content="${meta.type}">
-  <meta property="og:url" content="${DOMAIN}${path}">
+  <meta property="og:url" content="${DOMAIN}${esc(path)}">
   <meta property="og:site_name" content="${SITE_NAME}">
   <meta property="og:title" content="${esc(meta.title)}">
   <meta property="og:description" content="${esc(meta.desc)}">
-  <meta property="og:image" content="${meta.image || LOGO}">
+  <meta property="og:image" content="${esc(meta.image || LOGO)}">
   <meta property="og:locale" content="ru_RU">
   
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="${esc(meta.title)}">
   <meta name="twitter:description" content="${esc(meta.desc)}">
-  <meta name="twitter:image" content="${meta.image || LOGO}">
+  <meta name="twitter:image" content="${esc(meta.image || LOGO)}">
   
   ${orgLd}
   ${crumbs}
@@ -328,7 +345,7 @@ seoRoutes.get('/meta/*', async (c) => {
       "byArtist": {"@type": "MusicGroup", "name": "${escJson(artist)}"},
       ${genre ? `"genre": "${escJson(genre)}",` : ''}
       ${duration ? `"duration": "${duration}",` : ''}
-      "url": "${DOMAIN}${path}",
+      "url": "${DOMAIN}${escJson(path)}",
       "datePublished": "${track.created_at || new Date().toISOString()}",
       "publisher": {
         "@type": "Organization",
@@ -380,7 +397,7 @@ seoRoutes.get('/turbo-rss.xml', async (c) => {
     const img = n.imageUrl || n.coverImage || n.banner || '';
     const imgFull = img.startsWith('/') ? `${DOMAIN}${img}` : img;
     let turboContent = (n.content || n.excerpt || '').replace(/^\s*```html\s*\n?/i, '').replace(/\n?```\s*$/i, '');
-    turboContent = turboContent.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+    turboContent = sanitizeHtml(turboContent);
 
     xml += `  <item turbo="true">
     <title>${title}</title>

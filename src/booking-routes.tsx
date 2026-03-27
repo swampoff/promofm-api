@@ -273,7 +273,7 @@ app.post('/create', async (c) => {
 
   } catch (error: any) {
     console.error('Error creating booking:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -323,7 +323,7 @@ app.get('/list', async (c) => {
 
   } catch (error: any) {
     console.error('Error fetching bookings:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -355,7 +355,7 @@ app.get('/:id', async (c) => {
 
   } catch (error: any) {
     console.error('Error fetching booking:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -407,7 +407,7 @@ app.put('/:id/accept', async (c) => {
 
   } catch (error: any) {
     console.error('Error accepting booking:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -460,7 +460,7 @@ app.put('/:id/reject', async (c) => {
 
   } catch (error: any) {
     console.error('Error rejecting booking:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -549,7 +549,7 @@ app.post('/:id/pay-deposit', async (c) => {
 
   } catch (error: any) {
     console.error('Error paying deposit:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -642,7 +642,7 @@ app.post('/:id/pay-final', async (c) => {
 
   } catch (error: any) {
     console.error('Error paying final amount:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -700,7 +700,7 @@ app.put('/:id/cancel', async (c) => {
 
   } catch (error: any) {
     console.error('Error cancelling booking:', error);
-    return c.json({ error: 'Internal server error', details: error.message }, 500);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
