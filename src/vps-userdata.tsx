@@ -4,7 +4,7 @@
  * Все данные хранятся в таблицах users + profiles на этом же сервере
  */
 
-import { pool } from './db-client.tsx';
+import { pool, rlsQuery } from './db-client.tsx';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 import { verificationTokensStore } from './db.tsx';
@@ -87,7 +87,7 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
     }
 
     // Upsert profiles table (for genre, city, social_links, extra data)
-    await pool.query(
+    await rlsQuery(
       `INSERT INTO profiles (user_id, artist_name, genre, city, bio, avatar_url, social_links, data, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
        ON CONFLICT (user_id) DO UPDATE SET
@@ -108,7 +108,8 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
         data.avatar || null,
         data.socialLinks ? JSON.stringify(data.socialLinks) : '{}',
         data.extraData ? JSON.stringify(data.extraData) : '{}',
-      ]
+      ],
+      userId
     );
   } catch (err) {
     console.error(`[profile] saveProfile error for ${userId}:`, err);
@@ -122,7 +123,7 @@ export async function vpsUpdateProfile(userId: string, updates: Record<string, u
 
 export async function vpsDeleteProfile(userId: string): Promise<void> {
   try {
-    await pool.query('DELETE FROM profiles WHERE user_id = $1', [userId]);
+    await rlsQuery('DELETE FROM profiles WHERE user_id = $1', [userId], userId);
     // Don't delete from users — that's handled by auth
   } catch (err) {
     console.error(`[profile] deleteProfile error:`, err);
