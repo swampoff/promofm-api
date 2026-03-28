@@ -11,11 +11,14 @@ import { getDbClient } from './db-client.tsx';
 
 const db = () => getDbClient();
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // ═══════════════════════════════════════
 // TRACKS (typed `tracks` table)
 // ═══════════════════════════════════════
 
 export async function getTrackById(trackId: string) {
+  if (!UUID_RE.test(trackId)) return null;  // non-UUID id (e.g. 'marketplace') — skip
   const { data, error } = await db()
     .from('tracks')
     .select('*')
@@ -385,6 +388,67 @@ export async function deleteBanner(bannerId: string) {
 }
 
 // ═══════════════════════════════════════
+// ═══════════════════════════════════════
+// UPCOMING RELEASES (typed `upcoming_releases` table)
+// ═══════════════════════════════════════
+
+export async function getUpcomingReleases(limit = 6) {
+  const today = new Date().toISOString().split("T")[0];
+  const { data, error } = await db()
+    .from("upcoming_releases")
+    .select("*")
+    .eq("is_archived", false)
+    .gte("release_date", today)
+    .order("release_date", { ascending: true })
+    .limit(limit);
+  if (error) console.error("[db-typed] getUpcomingReleases:", error);
+  return data || [];
+}
+
+export async function getAllUpcomingReleases() {
+  const { data, error } = await db()
+    .from("upcoming_releases")
+    .select("*")
+    .eq("is_archived", false)
+    .order("release_date", { ascending: true });
+  if (error) console.error("[db-typed] getAllUpcomingReleases:", error);
+  return data || [];
+}
+
+export async function upsertUpcomingRelease(release: Record<string, any>) {
+  const { data, error } = await db()
+    .from("upcoming_releases")
+    .upsert({
+      title: release.title || "",
+      artist_name: release.artist_name || "",
+      release_date: release.release_date || null,
+      cover_url: release.cover_url || "",
+      genre: release.genre || "",
+      release_type: release.release_type || "album",
+      source: release.source || "manual",
+      source_url: release.source_url || "",
+      spotify_url: release.spotify_url || "",
+      apple_music_url: release.apple_music_url || "",
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "artist_name,title" })
+    .select()
+    .single();
+  if (error) console.error("[db-typed] upsertUpcomingRelease:", error);
+  return data;
+}
+
+export async function archivePastReleases() {
+  const today = new Date().toISOString().split("T")[0];
+  const { data, error } = await db()
+    .from("upcoming_releases")
+    .update({ is_archived: true, updated_at: new Date().toISOString() })
+    .lt("release_date", today)
+    .eq("is_archived", false)
+    .select();
+  if (error) console.error("[db-typed] archivePastReleases:", error);
+  return data || [];
+}
+
 // COINS — bridge functions for awarding coins on moderation
 // ═══════════════════════════════════════
 

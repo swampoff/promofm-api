@@ -5,11 +5,14 @@
  */
 
 import { pool } from './db-client.tsx';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 import { verificationTokensStore } from './db.tsx';
 
 // ── Profiles ──
 
 export async function vpsGetProfile(userId: string): Promise<Record<string, unknown> | null> {
+  if (!UUID_RE.test(userId)) return null;  // slug or non-UUID — skip PG query
   try {
     const res = await pool.query(
       `SELECT u.id as "userId", u.email, u.full_name as name, u.role, u.avatar_url as avatar,
