@@ -131,7 +131,9 @@ export async function vpsListProfiles(role?: string): Promise<Record<string, unk
     let query = `SELECT u.id as "userId", u.email, u.full_name as name, u.role,
                         u.avatar_url as avatar, u.status as "accountStatus",
                         u.is_email_verified as "isEmailVerified",
-                        p.genre, p.city
+                        u.created_at as "createdAt",
+                        p.genre, p.city,
+                        (SELECT COUNT(*)::int FROM tracks t WHERE t.artist_id = u.id::text) as "tracksCount"
                  FROM users u
                  LEFT JOIN profiles p ON p.user_id = u.id::text`;
     const values: any[] = [];
@@ -149,6 +151,8 @@ export async function vpsListProfiles(role?: string): Promise<Record<string, unk
       avatar: row.avatar,
       accountStatus: row.accountStatus,
       isEmailVerified: row.isEmailVerified,
+      createdAt: row.createdAt,
+      tracksCount: row.tracksCount || 0,
       genre: row.genre,
       city: row.city,
     }));

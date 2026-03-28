@@ -519,6 +519,33 @@ landing.get('/tracks/by-genre/:genre', async (c) => {
 });
 
 // ============================================
+// ============================================
+// UPCOMING RELEASES (typed SQL table)
+// ============================================
+
+landing.get("/releases/upcoming", async (c) => {
+  try {
+    const limit = parseInt(c.req.query("limit") || "6");
+    const releases = await typed.getUpcomingReleases(limit);
+    const mapped = releases.map((r: any) => ({
+      id: r.id,
+      title: r.title || "",
+      artist_name: r.artist_name || "",
+      release_date: r.release_date || "",
+      cover_url: r.cover_url || "",
+      genre: r.genre || "",
+      release_type: r.release_type || "album",
+      spotify_url: r.spotify_url || "",
+      apple_music_url: r.apple_music_url || "",
+      source: r.source || "",
+    }));
+    return c.json({ success: true, data: mapped });
+  } catch (error) {
+    console.error("Error fetching upcoming releases:", error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
 // NEWS (PUBLIC — KV, unchanged)
 // ============================================
 
@@ -1018,9 +1045,14 @@ landing.get('/producer-reviews/:producerId', async (c) => {
   }
 });
 
-landing.get('/producer-orders/:producerId', async (c) => {
+landing.get('/producer-orders/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
+    const userId = c.get('userId');
+    const role = c.get('userRole');
+    if (userId !== producerId && role !== 'admin') {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
     const status = c.req.query('status');
     const allOrders = await serviceOrdersByProducerStore.get(producerId);
 
@@ -1042,9 +1074,14 @@ landing.get('/producer-orders/:producerId', async (c) => {
   }
 });
 
-landing.get('/producer-wallet/:producerId', async (c) => {
+landing.get('/producer-wallet/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
+    const userId = c.get('userId');
+    const role = c.get('userRole');
+    if (userId !== producerId && role !== 'admin') {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
     const raw = await paymentBalancesStore.get(producerId);
     if (!raw) {
       return c.json({ success: false, error: 'Wallet not found' }, 404);
@@ -1523,6 +1560,298 @@ landing.post('/admin/tracks/publish', requireAdminOrKey, async (c) => {
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
+});
+
+
+// ============================================
+// WEEKLY ALBUMS — Альбомы недели (РФ + Мир)
+// ============================================
+
+/** GET /albums/weekly — публичный endpoint */
+landing.get('/albums/weekly', async (c) => {
+  try {
+    const cached: any = await platformStatsStore.get('albums:weekly');
+    if (cached?.albums?.length) {
+      return c.json({ success: true, data: cached });
+    }
+    return c.json({ success: true, data: { albums: [], updatedAt: null } });
+  } catch (error) {
+    console.error('Error fetching weekly albums:', error);
+    return c.json({ success: true, data: { albums: [], updatedAt: null } });
+  }
+});
+
+/** POST /admin/albums/weekly — обновить альбомы недели (admin/internal) */
+landing.post('/admin/albums/weekly', requireAdminOrKey, async (c) => {
+  try {
+    const body = await c.req.json();
+    const albums = body.albums;
+    if (!Array.isArray(albums)) {
+      return c.json({ success: false, error: 'albums array required' }, 400);
+    }
+
+    const normalized = albums.map((a: any, i: number) => ({
+      id: a.id || 'album-' + Date.now() + '-' + i,
+      title: sanitizeString(a.title || ''),
+      artist: sanitizeString(a.artist || ''),
+      coverUrl: sanitizeUrl(a.coverUrl || a.cover_url || ''),
+      region: a.region || 'world',
+      genre: a.genre || '',
+      releaseDate: a.releaseDate || a.release_date || '',
+      source: a.source || 'manual',
+      position: a.position ?? i + 1,
+    }));
+
+    await platformStatsStore.set('albums:weekly', {
+      albums: normalized,
+      updatedAt: new Date().toISOString(),
+      totalAlbums: normalized.length,
+    });
+
+    return c.json({ success: true, totalAlbums: normalized.length });
+  } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+/** POST /build-albums — автоматический сбор альбомов (Яндекс + Billboard via Firecrawl) */
+landing.post('/build-albums', async (c) => {
+  const internalKey = c.req.header('x-internal-key');
+  if (internalKey !== process.env.VPS_INTERNAL_KEY) {
+    return c.json({ success: false, error: 'Unauthorized' }, 401);
+  }
+
+  const firecrawlKey = process.env.FIRECRAWL_API_KEY;
+  if (!firecrawlKey) {
+    return c.json({ success: false, error: 'FIRECRAWL_API_KEY not set' }, 500);
+  }
+
+  const startTime = Date.now();
+  const errors: string[] = [];
+
+  const fetchMarkdown = async (name: string, url: string, waitFor: number): Promise<string> => {
+    try {
+      const resp = await fetch('https://api.firecrawl.dev/v1/scrape', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + firecrawlKey,
+        },
+        body: JSON.stringify({ url, formats: ['markdown'], waitFor }),
+      });
+      if (!resp.ok) {
+        errors.push(name + ': HTTP ' + resp.status);
+        return '';
+      }
+      const data: any = await resp.json();
+      if (data.success && data.data?.markdown) return data.data.markdown;
+      errors.push(name + ': no markdown');
+      return '';
+    } catch (err: any) {
+      errors.push(name + ': ' + err.message);
+      return '';
+    }
+  };
+
+  // === Яндекс Музыка — новые альбомы (Russia) ===
+  let ruAlbums: any[] = [];
+  try {
+    const ymResp = await fetch('https://music.yandex.ru/handlers/main.jsx?what=new-releases&lang=ru', {
+      headers: { 'Accept': 'application/json' },
+    });
+    if (ymResp.ok) {
+      const ymData: any = await ymResp.json();
+      const releaseIds = (ymData.newReleases || []).slice(0, 30);
+
+      for (let batch = 0; batch < Math.min(releaseIds.length, 20); batch += 10) {
+        const batchIds = releaseIds.slice(batch, batch + 10);
+        const detailPromises = batchIds.map(async (albumId: number, idx: number) => {
+          try {
+            const detResp = await fetch('https://music.yandex.ru/handlers/album.jsx?album=' + albumId + '&lang=ru', {
+              headers: { 'Accept': 'application/json' },
+            });
+            if (!detResp.ok) return null;
+            const det: any = await detResp.json();
+            if (!det.title) return null;
+
+            const artists = (det.artists || []).map((a: any) => a.name).join(', ');
+            const coverId = det.coverUri ? det.coverUri.replace('%%', '400x400') : '';
+
+            return {
+              id: 'ym-' + albumId,
+              title: det.title,
+              artist: artists,
+              coverUrl: coverId ? 'https://' + coverId : '',
+              region: 'ru',
+              genre: det.genre || '',
+              releaseDate: det.releaseDate || '',
+              source: 'yandex_music',
+              position: batch + idx + 1,
+            };
+          } catch { return null; }
+        });
+        const results = await Promise.all(detailPromises);
+        ruAlbums.push(...results.filter(Boolean));
+      }
+    }
+  } catch (err: any) {
+    errors.push('yandex_music: ' + err.message);
+  }
+
+  // === Billboard Global 200 (via Firecrawl) ===
+  let worldAlbums: any[] = [];
+  const billboardMd = await fetchMarkdown(
+    'billboard_global',
+    'https://www.billboard.com/charts/billboard-global-200/',
+    8000
+  );
+
+  if (billboardMd) {
+    const lines = billboardMd.split('\n').map((l: string) => l.trim());
+
+    for (let i = 0; i < lines.length && worldAlbums.length < 15; i++) {
+      // Look for ### headings — these are song titles on Billboard
+      const headingMatch = lines[i].match(/^(?:[-*]\s*)?#{1,4}\s+(.+)$/);
+      if (!headingMatch) continue;
+
+      const title = headingMatch[1].trim();
+      // Skip meta headings
+      if (!title || title.length < 2) continue;
+      if (/Peak Chart|Chart Date|Week of|Billboard|Share|Methodology|Global 200/i.test(title)) continue;
+
+      // Look backwards for rank number and image
+      let rank = 0;
+      let thumb = '';
+      for (let j = i - 1; j >= Math.max(0, i - 6); j--) {
+        const l = lines[j];
+        const rankM = l.match(/^(\d{1,3})$/);
+        if (rankM) { rank = parseInt(rankM[1]); break; }
+        const imgM = l.match(/!\[[^\]]*\]\(([^)]*billboard[^)]+)\)/);
+        if (imgM && !thumb) thumb = imgM[1];
+      }
+
+      if (!rank || rank > 20) continue;
+      // Skip if rank already added
+      if (worldAlbums.some((a: any) => a.position === rank)) continue;
+
+      // Look forward for artist name
+      let artist = '';
+      for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+        const l = lines[j];
+        if (!l || l.length < 2) continue;
+        // Skip headings, images, links, stats, share buttons
+        if (/^(#{1,4}\s|!\[|\[|Last Week|Peak|Wks|NEW|RE-ENTRY|Facebook|Twitter|Share|\d{1,3}$|=|\\\\)/.test(l)) continue;
+        if (l === '-' || l === '---' || l === '\\\\') continue;
+        // Skip short stat labels
+        if (/^(LW|NE|RE|-)$/.test(l)) continue;
+        artist = l.replace(/^[-*]\s*/, '').trim();
+        break;
+      }
+
+      if (!artist || artist.length < 2) continue;
+
+      worldAlbums.push({
+        id: 'bb-' + rank,
+        title,
+        artist,
+        coverUrl: thumb,
+        region: 'world',
+        genre: '',
+        releaseDate: '',
+        source: 'billboard',
+        position: rank,
+      });
+    }
+  }
+
+  // === Apple Music Top Albums (fallback if Billboard < 10) ===
+  if (worldAlbums.length < 10) {
+    var appleMd = await fetchMarkdown(
+      'apple_music_top',
+      'https://music.apple.com/us/browse/top-charts/albums',
+      8000
+    );
+    if (appleMd) {
+      // Format: [Title](apple-url) ... rank number ... artist name
+      var appleLines = appleMd.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+      for (var ai = 0; ai < appleLines.length && worldAlbums.length < 15; ai++) {
+        // Match [Album Title](https://music.apple.com/us/album/...)
+        var linkM = appleLines[ai].match(/^-?\s*\[([^\]]+)\]\(https:\/\/music\.apple\.com\/[^)]+\/album\/[^)]+\)/);
+        if (!linkM) continue;
+        var appleTitle = linkM[1].trim();
+        if (!appleTitle || appleTitle.length < 2) continue;
+        if (/Top Charts|Top Albums|Apple Music|Browse|See All|Sign In/i.test(appleTitle)) continue;
+
+        // Look forward for rank number and artist name
+        var appleRank = 0;
+        var appleArtist = '';
+        for (var aj = ai + 1; aj < Math.min(ai + 5, appleLines.length); aj++) {
+          var al = appleLines[aj];
+          if (!al) continue;
+          // Rank number
+          var rankM = al.match(/^(\d{1,3})$/);
+          if (rankM && !appleRank) { appleRank = parseInt(rankM[1]); continue; }
+          // Skip duplicate link lines, empty, nav elements
+          if (/^-\s*\[|^PLAY|^Shuffle|^Repeat|^Mute|^PREVIOUS|^NEXT|^LIVE|^Sign|^Playback/.test(al)) break;
+          if (/^\[[^\]]+\]\(https:/.test(al)) continue;
+          if (al.length < 2) continue;
+          // Artist name = first non-number non-link text after title
+          if (appleRank && !appleArtist) {
+            appleArtist = al.trim();
+            break;
+          }
+        }
+
+        if (!appleRank || appleRank > 20) continue;
+        if (!appleArtist || appleArtist.length < 2) continue;
+        if (worldAlbums.some(function(a) { return a.position === appleRank; })) continue;
+
+        worldAlbums.push({
+          id: 'am-' + appleRank,
+          title: appleTitle,
+          artist: appleArtist,
+          coverUrl: '',
+          region: 'world',
+          genre: '',
+          releaseDate: '',
+          source: 'apple_music',
+          position: appleRank,
+        });
+      }
+    }
+  }
+
+  // Combine: first 10 RU + first 10 World
+  const finalAlbums = [
+    ...ruAlbums.slice(0, 10),
+    ...worldAlbums.slice(0, 10),
+  ];
+
+  if (finalAlbums.length > 0) {
+    await platformStatsStore.set('albums:weekly', {
+      albums: finalAlbums,
+      updatedAt: new Date().toISOString(),
+      totalAlbums: finalAlbums.length,
+      sources: {
+        yandex_music: ruAlbums.length,
+        billboard: worldAlbums.filter(function(a) { return a.source === 'billboard'; }).length,
+        apple_music: worldAlbums.filter(function(a) { return a.source === 'apple_music'; }).length,
+      },
+    });
+  }
+
+  return c.json({
+    success: true,
+    totalAlbums: finalAlbums.length,
+    sources: {
+      yandex_music: ruAlbums.length,
+      billboard: worldAlbums.filter(function(a) { return a.source === 'billboard'; }).length,
+      apple_music: worldAlbums.filter(function(a) { return a.source === 'apple_music'; }).length,
+    },
+    errors,
+    durationMs: Date.now() - startTime,
+    top5: finalAlbums.slice(0, 5).map((a: any) => a.position + '. ' + a.artist + ' \u2014 ' + a.title + ' (' + a.region + ')'),
+  });
 });
 
 export default landing;
