@@ -1647,4 +1647,273 @@ charts.post('/refresh-previews', async (c) => {
   }
 });
 
+
+
+// ═══════════════════════════════════════════════════════════════
+// INTERNATIONAL CHARTS — Apple Music, Deezer, Shazam multi, Last.fm
+// ═══════════════════════════════════════════════════════════════
+
+const INTERNATIONAL_COUNTRIES = [
+  { code: 'de', name: 'Germany', nameRu: 'Германия', flag: '🇩🇪', shazamSlug: 'germany' },
+  { code: 'fr', name: 'France', nameRu: 'Франция', flag: '🇫🇷', shazamSlug: 'france' },
+  { code: 'gb', name: 'United Kingdom', nameRu: 'Великобритания', flag: '🇬🇧', shazamSlug: 'united-kingdom' },
+  { code: 'es', name: 'Spain', nameRu: 'Испания', flag: '🇪🇸', shazamSlug: 'spain' },
+  { code: 'it', name: 'Italy', nameRu: 'Италия', flag: '🇮🇹', shazamSlug: 'italy' },
+  { code: 'nl', name: 'Netherlands', nameRu: 'Нидерланды', flag: '🇳🇱', shazamSlug: 'netherlands' },
+  { code: 'pl', name: 'Poland', nameRu: 'Польша', flag: '🇵🇱', shazamSlug: 'poland' },
+  { code: 'se', name: 'Sweden', nameRu: 'Швеция', flag: '🇸🇪', shazamSlug: 'sweden' },
+  { code: 'br', name: 'Brazil', nameRu: 'Бразилия', flag: '🇧🇷', shazamSlug: 'brazil' },
+  { code: 'mx', name: 'Mexico', nameRu: 'Мексика', flag: '🇲🇽', shazamSlug: 'mexico' },
+  { code: 'co', name: 'Colombia', nameRu: 'Колумбия', flag: '🇨🇴', shazamSlug: 'colombia' },
+  { code: 'ar', name: 'Argentina', nameRu: 'Аргентина', flag: '🇦🇷', shazamSlug: 'argentina' },
+  { code: 'cl', name: 'Chile', nameRu: 'Чили', flag: '🇨🇱', shazamSlug: 'chile' },
+  { code: 'pe', name: 'Peru', nameRu: 'Перу', flag: '🇵🇪', shazamSlug: 'peru' },
+  { code: 'ng', name: 'Nigeria', nameRu: 'Нигерия', flag: '🇳🇬', shazamSlug: 'nigeria' },
+  { code: 'za', name: 'South Africa', nameRu: 'ЮАР', flag: '🇿🇦', shazamSlug: 'south-africa' },
+  { code: 'ke', name: 'Kenya', nameRu: 'Кения', flag: '🇰🇪', shazamSlug: 'kenya' },
+  { code: 'gh', name: 'Ghana', nameRu: 'Гана', flag: '🇬🇭', shazamSlug: 'ghana' },
+  { code: 'eg', name: 'Egypt', nameRu: 'Египет', flag: '🇪🇬', shazamSlug: 'egypt' },
+  { code: 'us', name: 'United States', nameRu: 'США', flag: '🇺🇸', shazamSlug: 'united-states' },
+];
+
+const INTL_REGIONS = [
+  { id: 'europe', name: 'Europe', nameRu: 'Европа', flag: '🇪🇺',
+    sources: ['apple', 'deezer', 'shazam'],
+    countries: INTERNATIONAL_COUNTRIES.filter(c => ['de','fr','gb','es','it','nl','pl','se'].includes(c.code))
+      .map(c => ({ code: c.code, name: c.name, nameRu: c.nameRu, flag: c.flag })),
+  },
+  { id: 'latam', name: 'Latin America', nameRu: 'Лат. Америка', flag: '🌎',
+    sources: ['apple', 'deezer', 'shazam'],
+    countries: INTERNATIONAL_COUNTRIES.filter(c => ['br','mx','co','ar','cl','pe'].includes(c.code))
+      .map(c => ({ code: c.code, name: c.name, nameRu: c.nameRu, flag: c.flag })),
+  },
+  { id: 'africa', name: 'Africa', nameRu: 'Африка', flag: '🌍',
+    sources: ['apple', 'shazam'],
+    countries: INTERNATIONAL_COUNTRIES.filter(c => ['ng','za','ke','gh','eg'].includes(c.code))
+      .map(c => ({ code: c.code, name: c.name, nameRu: c.nameRu, flag: c.flag })),
+  },
+  { id: 'global', name: 'Global', nameRu: 'Глобальный', flag: '🌐',
+    sources: ['deezer', 'lastfm', 'apple'],
+    countries: [{ code: 'us', name: 'United States', nameRu: 'США', flag: '🇺🇸' }],
+  },
+];
+
+interface IntlChartEntry {
+  position: number;
+  title: string;
+  artist: string;
+  coverUrl?: string;
+  previewUrl?: string;
+  sourceUrl?: string;
+}
+
+// ─── Fetchers ─────────────────────────────────
+
+async function fetchAppleMusicChart(countryCode: string, limit = 25): Promise<IntlChartEntry[]> {
+  try {
+    const url = `https://rss.marketingtools.apple.com/api/v2/${countryCode}/music/most-played/${limit}/songs.json`;
+    const resp = await fetch(url);
+    if (!resp.ok) { console.error(`[charts] Apple Music ${countryCode}: ${resp.status}`); return []; }
+    const json = await resp.json() as any;
+    const results = json?.feed?.results || [];
+    return results.map((r: any, i: number) => ({
+      position: i + 1,
+      title: r.name || '',
+      artist: r.artistName || '',
+      coverUrl: r.artworkUrl100?.replace('100x100', '200x200') || '',
+      sourceUrl: r.url || '',
+    }));
+  } catch (e) { console.error(`[charts] Apple Music ${countryCode} error:`, e); return []; }
+}
+
+async function fetchDeezerGlobalChart(limit = 50): Promise<IntlChartEntry[]> {
+  try {
+    const resp = await fetch(`https://api.deezer.com/chart/0?limit=${limit}`);
+    if (!resp.ok) { console.error(`[charts] Deezer: ${resp.status}`); return []; }
+    const json = await resp.json() as any;
+    const tracks = json?.tracks?.data || [];
+    return tracks.map((t: any, i: number) => ({
+      position: i + 1,
+      title: t.title || '',
+      artist: t.artist?.name || '',
+      coverUrl: t.album?.cover_medium || t.album?.cover || '',
+      previewUrl: t.preview || '',
+    }));
+  } catch (e) { console.error('[charts] Deezer error:', e); return []; }
+}
+
+async function fetchShazamCountryChart(shazamSlug: string, limit = 50): Promise<IntlChartEntry[]> {
+  try {
+    const url = `https://www.shazam.com/charts/top-200/${shazamSlug}`;
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    });
+    if (!resp.ok) { console.error(`[charts] Shazam ${shazamSlug}: ${resp.status}`); return []; }
+    const html = await resp.text();
+    const entries: IntlChartEntry[] = [];
+    const regex = /alt="([^"]+)\s*-\s*([^"]+)"/g;
+    let match;
+    while ((match = regex.exec(html)) !== null && entries.length < limit) {
+      entries.push({
+        position: entries.length + 1,
+        title: match[2]?.trim() || '',
+        artist: match[1]?.trim() || '',
+      });
+    }
+    return entries;
+  } catch (e) { console.error(`[charts] Shazam ${shazamSlug} error:`, e); return []; }
+}
+
+async function fetchLastFmChart(limit = 50): Promise<IntlChartEntry[]> {
+  const apiKey = process.env.LASTFM_API_KEY;
+  if (!apiKey) { console.warn('[charts] LASTFM_API_KEY not set'); return []; }
+  try {
+    const resp = await fetch(`https://ws.audioscrobbler.com/2.0/?method=chart.gettoptracks&api_key=${apiKey}&format=json&limit=${limit}`);
+    if (!resp.ok) return [];
+    const json = await resp.json() as any;
+    const tracks = json?.tracks?.track || [];
+    return tracks.map((t: any, i: number) => ({
+      position: i + 1,
+      title: t.name || '',
+      artist: t.artist?.name || '',
+    }));
+  } catch (e) { console.error('[charts] Last.fm error:', e); return []; }
+}
+
+// ─── KV helpers ─────────────────────────────────
+
+async function saveIntlChart(platform: string, countryCode: string, entries: IntlChartEntry[]) {
+  const key = `intl:${platform}:${countryCode}`;
+  await chartSourcesStore.set(key, {
+    platform, countryCode, entries, fetchedAt: new Date().toISOString(), tracksCount: entries.length,
+  });
+}
+
+async function getIntlChart(platform: string, countryCode: string) {
+  const key = `intl:${platform}:${countryCode}`;
+  return await chartSourcesStore.get(key) as any;
+}
+
+// ─── International Endpoints ─────────────────────────────────
+
+// GET /regions — all regions with countries
+charts.get('/regions', async (c) => {
+  try {
+    const regions = [
+      { id: 'ru', name: 'Россия', nameRu: 'Россия', flag: '🇷🇺',
+        sources: ['yandex', 'shazam', 'radio'],
+        countries: [{ code: 'ru', name: 'Russia', nameRu: 'Россия', flag: '🇷🇺' }],
+      },
+      ...INTL_REGIONS,
+    ];
+    return c.json({ success: true, data: regions });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// GET /country/:code — chart for a specific country
+charts.get('/country/:code', async (c) => {
+  try {
+    const code = c.req.param('code')?.toLowerCase();
+    const platform = c.req.query('platform') || 'apple';
+    const limit = parseInt(c.req.query('limit') || '25', 10);
+
+    // Russia → return PromoFM unified chart
+    if (code === 'ru' && !c.req.query('platform')) {
+      const promofm: any = await platformStatsStore.get('chart:promofm');
+      if (promofm?.entries?.length) {
+        return c.json({ success: true, data: {
+          platform: 'promofm', countryCode: 'ru',
+          entries: promofm.entries.slice(0, limit),
+          fetchedAt: promofm.updatedAt || new Date().toISOString(),
+          tracksCount: promofm.entries.length,
+        }});
+      }
+    }
+
+    // Check cache
+    const cached = await getIntlChart(platform, code);
+    if (cached?.entries?.length) {
+      return c.json({ success: true, data: {
+        ...cached,
+        entries: cached.entries.slice(0, limit),
+      }});
+    }
+
+    // Live fetch if no cache
+    let entries: IntlChartEntry[] = [];
+    if (platform === 'apple') {
+      entries = await fetchAppleMusicChart(code, limit);
+    } else if (platform === 'deezer') {
+      entries = await fetchDeezerGlobalChart(limit);
+    } else if (platform === 'shazam') {
+      const country = INTERNATIONAL_COUNTRIES.find(c2 => c2.code === code);
+      if (country?.shazamSlug) entries = await fetchShazamCountryChart(country.shazamSlug, limit);
+    } else if (platform === 'lastfm') {
+      entries = await fetchLastFmChart(limit);
+    }
+
+    if (entries.length) {
+      await saveIntlChart(platform, code, entries);
+    }
+
+    return c.json({ success: true, data: {
+      platform, countryCode: code, entries: entries.slice(0, limit),
+      fetchedAt: new Date().toISOString(), tracksCount: entries.length,
+    }});
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// POST /fetch-international — batch update all international charts
+charts.post('/fetch-international', requireAdminOrKey, async (c) => {
+  try {
+    const results: any[] = [];
+    const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+    // 1) Deezer Global
+    const deezer = await fetchDeezerGlobalChart(50);
+    if (deezer.length) {
+      await saveIntlChart('deezer', 'global', deezer);
+      results.push({ platform: 'deezer', country: 'global', tracks: deezer.length });
+    }
+    await delay(500);
+
+    // 2) Last.fm Global
+    const lastfm = await fetchLastFmChart(50);
+    if (lastfm.length) {
+      await saveIntlChart('lastfm', 'global', lastfm);
+      results.push({ platform: 'lastfm', country: 'global', tracks: lastfm.length });
+    }
+    await delay(500);
+
+    // 3) Apple Music for all countries
+    for (const country of INTERNATIONAL_COUNTRIES) {
+      const apple = await fetchAppleMusicChart(country.code, 25);
+      if (apple.length) {
+        await saveIntlChart('apple', country.code, apple);
+        results.push({ platform: 'apple', country: country.code, tracks: apple.length });
+      }
+      await delay(300);
+    }
+
+    // 4) Shazam for key countries
+    const shazamCountries = INTERNATIONAL_COUNTRIES.filter(c2 => c2.shazamSlug);
+    for (const country of shazamCountries.slice(0, 8)) {
+      const shazam = await fetchShazamCountryChart(country.shazamSlug, 25);
+      if (shazam.length) {
+        await saveIntlChart('shazam', country.code, shazam);
+        results.push({ platform: 'shazam', country: country.code, tracks: shazam.length });
+      }
+      await delay(1000);
+    }
+
+    return c.json({ success: true, data: { results, totalSources: results.length, timestamp: new Date().toISOString() }});
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
 export default charts;

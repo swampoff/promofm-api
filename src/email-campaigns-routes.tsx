@@ -4,7 +4,7 @@
  * Unsubscribe, pause/resume, open tracking pixel
  */
 
-import { Hono } from 'npm:hono@4';
+import { Hono } from 'hono';
 import { emailHistoryStore, emailTemplatesStore, publishEmailPrefsStore } from './db.tsx';
 import { upsertEmailCampaign, getEmailCampaigns } from './db.tsx';
 import { smtpSendEmail, smtpSendBatch } from './smtp-sender.tsx';
