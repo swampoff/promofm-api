@@ -289,6 +289,14 @@ async function extractNewsWithLLM(
 Твой стиль: ${poster.style}.
 
 Из текста страницы извлеки последние МУЗЫКАЛЬНЫЕ новости и переработай каждую в уникальную статью в своём стиле.
+
+ЗАПРЕЩЁННЫЕ ТЕМЫ — НЕ ВКЛЮЧАЙ статьи про:
+- Политику, выборы, протесты, митинги, санкции
+- Войну, военные действия, армию, мобилизацию
+- Криминал, суды, аресты, уголовные дела
+- Скандалы с насилием, домогательствами, наркотиками
+- Pussy Riot, Навальный и любые политические фигуры
+Если новость смешивает музыку с политикой — НЕ БЕРИ ЕЁ. Мы — музыкальный и культурный портал.
 ${source.parsingHint}
 ${isInternational ? '\n⚠️ ИСТОЧНИК НА АНГЛИЙСКОМ. Ты ОБЯЗАН перевести ВСЁ на русский язык. Заголовок, excerpt, content — всё на русском. Названия артистов, альбомов и песен можно оставить на оригинальном языке.' : ''}
 
@@ -402,6 +410,34 @@ SEO-ПРАВИЛА:
   }
 }
 
+
+// ─── Content Policy Filter ────────────────────────────
+// ПРОМО.МУЗЫКА — музыкальный и культурный портал.
+// НЕ публикуем политику, войну, криминал, скандалы.
+
+const BLOCKED_KEYWORDS = [
+  // Политика
+  'политик', 'политич', 'protest', 'протест', 'митинг', 'sanctions', 'санкци',
+  'выборы', 'election', 'голосовани', 'парламент', 'оппозици', 'депутат',
+  // Война / военное
+  'война', 'военн', 'армия', 'оружие', 'бомб', 'ракет', 'танк', 'снаряд',
+  'обстрел', 'вторжен', 'оккупац', 'мобилизац', 'СВО', 'ВСУ', 'НАТО',
+  // Персоны / организации  
+  'Pussy Riot', 'Навальн', 'Путин', 'Putin', 'Зеленск', 'Zelensky',
+  'Трамп', 'Trump', 'Biden', 'Байден',
+  // Криминал / скандалы
+  'педофил', 'изнасилов', 'домогательств', 'розыск', 'арест', 'уголовн',
+  'наркотик', 'передозир', 'суицид', 'самоубий',
+  // Геополитика
+  'Израил', 'Палестин', 'Украин', 'ДНР', 'ЛНР', 'Крым', 'аннекс',
+  'Тайван', 'Сирия',
+];
+
+function isBlockedContent(title: string, content: string): boolean {
+  const text = (title + ' ' + content).toLowerCase();
+  return BLOCKED_KEYWORDS.some(kw => text.includes(kw.toLowerCase()));
+}
+
 // ─── Deduplication ──────────────────────────────────────
 
 function titleSimilarity(a: string, b: string): number {
@@ -440,6 +476,12 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
 
   let added = 0;
   for (const item of newsItems) {
+    // Content policy filter
+    if (isBlockedContent(item.title, item.content || item.excerpt || '')) {
+      console.log(`[news-agent] BLOCKED: ${item.title} (content policy)`);
+      continue;
+    }
+
     // Check for duplicates
     const isDuplicate = existingTitles.some((t: string) => titleSimilarity(t, item.title) > 0.6);
     if (isDuplicate) continue;
