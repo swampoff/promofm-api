@@ -118,7 +118,7 @@ auth.post("/signup", async (c) => {
     if (pwErr) return c.json({ success: false, error: pwErr }, 400);
     if (!consentPersonalData) return c.json({ success: false, error: "Необходимо согласие на обработку персональных данных" }, 400);
 
-    const userRole = role || "artist";
+    const userRole = (role && role !== "admin" && role !== "superadmin") ? role : "artist";
     const isPartner = PARTNER_ROLES.includes(userRole);
     const accountStatus = isPartner ? 'pending' : 'active';
     const userName = name || email.split("@")[0];
@@ -374,7 +374,7 @@ auth.post("/vk-callback", async (c) => {
     // 4. New user
     const userEmail = email || `vk${vkUserId}@promo-music.ru`;
     const passwordHash = await bcrypt.hash(crypto.randomUUID() + crypto.randomUUID(), 12);
-    const vkRole = vkRequestedRole || "artist";
+    const vkRole = (vkRequestedRole && vkRequestedRole !== "admin" && vkRequestedRole !== "superadmin") ? vkRequestedRole : "artist";
     const username = `vk_${vkUserId}`;
 
     let userId: string;
