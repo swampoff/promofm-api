@@ -1,11 +1,10 @@
 import { Hono } from 'hono';
+import { requireAuth } from './auth-middleware.tsx';
 import { getDbClient } from './db-client.tsx';
 import * as db from './db.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const newsRoutes = new Hono();
-const FALLBACK_USER = 'anonymous';
 
 function mapArticle(r: any) {
   return {
@@ -70,9 +69,9 @@ newsRoutes.get('/:id', async (c) => {
 });
 
 // Create/update article (authenticated)
-newsRoutes.post('/', async (c) => {
+newsRoutes.post('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
     const newsId = body.id || `news-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await db.upsertNews(userId, newsId, {

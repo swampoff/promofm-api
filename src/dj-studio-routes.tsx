@@ -29,7 +29,7 @@ const FALLBACK_DJ_USER_ID = 'anonymous';
 
 // Helper: получить userId через единый хелпер авторизации
 async function getUserId(c: any): Promise<string> {
-  return resolveUserId(c, FALLBACK_DJ_USER_ID);
+  return c.get('userId') || FALLBACK_DJ_USER_ID;
 }
 
 function generateId(prefix: string) {

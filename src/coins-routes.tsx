@@ -1,16 +1,14 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 
 const coinsRoutes = new Hono();
-const FALLBACK_USER = 'anonymous';
 
 // GET /coins/balance
 coinsRoutes.get('/balance', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const balance = await db.getCoinBalance(userId);
     return c.json({ success: true, data: balance || { balance: 0, userId } });
   } catch (error) {
@@ -21,7 +19,7 @@ coinsRoutes.get('/balance', requireAuth, async (c) => {
 // GET /coins/transactions
 coinsRoutes.get('/transactions', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const txns = await db.getCoinTransactions(userId);
     return c.json({ success: true, data: txns || [] });
   } catch (error) {
@@ -32,7 +30,7 @@ coinsRoutes.get('/transactions', requireAuth, async (c) => {
 // POST /coins/transactions
 coinsRoutes.post('/transactions', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
     const txId = `cointx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
@@ -66,7 +64,7 @@ const COINS_PER_RUBLE = 10;
 
 coinsRoutes.post('/topup', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
 
     const { gateway, amount, returnUrl } = body;

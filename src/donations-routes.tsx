@@ -1,15 +1,13 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 
 const donationsRoutes = new Hono();
-const FALLBACK_USER = 'anonymous';
 
 donationsRoutes.get('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const donations = await db.getDonationsByArtist(userId);
     return c.json({ success: true, data: donations || [] });
   } catch (error) {
@@ -19,7 +17,7 @@ donationsRoutes.get('/', requireAuth, async (c) => {
 
 donationsRoutes.post('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
     const donationId = `donation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();

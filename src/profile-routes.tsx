@@ -1,18 +1,16 @@
 import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
 import * as db from './db.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { pool } from './db-client.tsx';
 import bcrypt from 'bcryptjs';
 
 const profileRoutes = new Hono();
-const FALLBACK_USER = 'anonymous';
 
 // GET /profile
 profileRoutes.get('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const profile = await db.getProfile(userId);
     return c.json({
       success: true,
@@ -32,7 +30,7 @@ profileRoutes.get('/', requireAuth, async (c) => {
 // PUT /profile
 profileRoutes.put('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
     const existing = await db.getProfile(userId);
     const updated = {

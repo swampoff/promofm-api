@@ -5,7 +5,6 @@
 
 import { Hono } from 'hono';
 import { getDbClient } from './db-client.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 
@@ -159,7 +158,7 @@ promotion.post('/pitching', requireAuth, async (c) => {
 
     const dbClient = getDbClient();
     const requestId = `pitch-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const userId = await resolveUserId(c, 'anonymous');
+    const userId = c.get('userId');
 
     const requestData = {
       id: requestId,

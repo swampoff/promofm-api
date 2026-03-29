@@ -1,17 +1,15 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as db from './db.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const analyticsRoutes = new Hono();
-const FALLBACK_USER = 'anonymous';
 
 // GET /analytics/track/:trackId
 analyticsRoutes.get('/track/:trackId', requireAuth, requireAdmin, async (c) => {
   try {
     const trackId = c.req.param('trackId');
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const track = await db.getTrack(userId, trackId);
     const analytics = await db.getTrackAnalytics(trackId);
 
@@ -42,7 +40,7 @@ analyticsRoutes.get('/track/:trackId', requireAuth, requireAdmin, async (c) => {
 analyticsRoutes.post('/track/:trackId/play', requireAuth, requireAdmin, async (c) => {
   try {
     const trackId = c.req.param('trackId');
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
 
     // Increment plays on the track itself
     const track = await db.getTrack(userId, trackId);

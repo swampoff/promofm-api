@@ -1,15 +1,13 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as db from './db.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
 
 const statsRoutes = new Hono();
-const FALLBACK_USER = 'anonymous';
 
 // GET /stats/dashboard
 statsRoutes.get('/dashboard', requireAuth, requireAdmin, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
 
     // Aggregate from DB
     const tracks = await db.getTracksByUser(userId);

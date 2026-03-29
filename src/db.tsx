@@ -72,7 +72,7 @@ export async function upsertTrack(userId: string, trackId: string, track: Record
   };
   const { data, error } = await db()
     .from('tracks')
-    .upsert(row, { onConflict: 'user_id' })
+    .upsert(row, { onConflict: 'id' })
     .select()
     .single();
   if (error) console.error('[db] upsertTrack:', error);
@@ -145,7 +145,7 @@ export async function upsertNews(userId: string, newsId: string, news: Record<st
   };
   const { error } = await db()
     .from('news')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertNews:', error);
 }
 
@@ -190,7 +190,7 @@ export async function upsertConcert(userId: string, concertId: string, concert: 
   };
   const { error } = await db()
     .from('concerts')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertConcert:', error);
 }
 
@@ -227,7 +227,7 @@ export async function createDonation(artistId: string, donationId: string, donat
   };
   const { error } = await db()
     .from('donations')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] createDonation:', error);
 }
 
@@ -276,7 +276,7 @@ export async function createCoinTransaction(userId: string, txId: string, tx: Re
   };
   const { error } = await db()
     .from('coin_transactions')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] createCoinTransaction:', error);
 }
 
@@ -461,7 +461,7 @@ export async function upsertTrackAnalytics(trackId: string, analytics: Record<st
   };
   const { error } = await db()
     .from('track_analytics')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertTrackAnalytics:', error);
 }
 
@@ -498,7 +498,7 @@ export async function upsertArtistProfile(artistId: string, profile: Record<stri
   };
   const { error } = await db()
     .from('artist_profiles')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertArtistProfile:', error);
 }
 
@@ -560,7 +560,7 @@ export async function upsertBeat(beatId: string, beat: Record<string, any>) {
   };
   const { error } = await db()
     .from('beats')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertBeat:', error);
 }
 
@@ -656,7 +656,7 @@ export async function upsertTicket(ticketId: string, ticket: Record<string, any>
   };
   const { error } = await db()
     .from('support_tickets')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertTicket:', error);
 }
 
@@ -680,7 +680,7 @@ export async function upsertCampaign(campaignId: string, campaign: Record<string
   };
   const { error } = await db()
     .from('marketing_campaigns')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertCampaign:', error);
 }
 
@@ -705,7 +705,7 @@ export async function upsertBanner(bannerId: string, userId: string, banner: Rec
   };
   const { error } = await db()
     .from('banner_ads')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertBanner:', error);
 }
 
@@ -729,7 +729,7 @@ export async function upsertPlatformStats(stats: Record<string, any>) {
   };
   const { error } = await db()
     .from('platform_stats')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertPlatformStats:', error);
 }
 
@@ -762,7 +762,7 @@ export async function upsertAgentSession(sessionId: string, session: Record<stri
   };
   const { error } = await db()
     .from('agent_sessions')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertAgentSession:', error);
 }
 
@@ -843,7 +843,7 @@ export async function upsertVenueProfile(userId: string, profile: Record<string,
   };
   const { error } = await db()
     .from('venue_profiles')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertVenueProfile:', error);
 }
 
@@ -868,7 +868,7 @@ export async function upsertRadioProfile(userId: string, profile: Record<string,
   };
   const { error } = await db()
     .from('radio_profiles')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertRadioProfile:', error);
 }
 
@@ -893,7 +893,7 @@ export async function upsertProducerProfile(userId: string, profile: Record<stri
   };
   const { error } = await db()
     .from('producer_profiles')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertProducerProfile:', error);
 }
 
@@ -927,7 +927,7 @@ export async function upsertCollabOffer(offerId: string, offer: Record<string, a
   };
   const { error } = await db()
     .from('collab_offers')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertCollabOffer:', error);
 }
 
@@ -950,7 +950,7 @@ export async function upsertContentOrder(orderId: string, order: Record<string, 
   };
   const { error } = await db()
     .from('content_orders')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertContentOrder:', error);
 }
 
@@ -974,7 +974,7 @@ export async function upsertEmailCampaign(campaignId: string, campaign: Record<s
   };
   const { error } = await db()
     .from('email_campaigns')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertEmailCampaign:', error);
 }
 
@@ -998,7 +998,7 @@ export async function setAuthToken(key: string, token: Record<string, any>) {
   };
   const { error } = await db()
     .from('auth_tokens')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] setAuthToken:', error);
 }
 
@@ -1213,7 +1213,7 @@ export async function createCoinTransactionKv(userId: string, txId: string, tx: 
       amount: tx.amount || 0, balance_before: tx.balance_before || 0, balance_after: tx.balance_after || 0,
       description: tx.description || '', metadata: tx.metadata ? JSON.stringify(tx.metadata) : '{}',
       updated_at: new Date().toISOString()
-    }, { onConflict: 'user_id' });
+    }, { onConflict: 'id' });
   if (error) console.error('[db] createCoinTransactionKv:', error);
 }
 
@@ -1233,7 +1233,7 @@ export async function getRadioAdSlot(radioId: string, slotId: string) {
 export async function upsertRadioAdSlot(radioId: string, slotId: string, slot: Record<string, any>) {
   const { error } = await db()
     .from('radio_ad_slots')
-    .upsert({ id: slotId, radio_id: radioId, data: slot, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+    .upsert({ id: slotId, radio_id: radioId, data: slot, updated_at: new Date().toISOString() }, { onConflict: 'id' });
   if (error) console.error('[db] upsertRadioAdSlot:', error);
 }
 
@@ -1251,7 +1251,7 @@ export async function getTicketProvidersByConcert(concertId: string) {
 export async function upsertTicketProvider(concertId: string, providerId: string, provider: Record<string, any>) {
   const { error } = await db()
     .from('ticket_providers')
-    .upsert({ id: providerId, concert_id: concertId, data: provider, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+    .upsert({ id: providerId, concert_id: concertId, data: provider, updated_at: new Date().toISOString() }, { onConflict: 'id' });
   if (error) console.error('[db] upsertTicketProvider:', error);
 }
 
@@ -1267,7 +1267,7 @@ export async function getTicketSalesByConcert(concertId: string) {
 export async function upsertTicketSale(concertId: string, saleId: string, sale: Record<string, any>) {
   const { error } = await db()
     .from('ticket_sales')
-    .upsert({ id: saleId, concert_id: concertId, data: sale, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+    .upsert({ id: saleId, concert_id: concertId, data: sale, updated_at: new Date().toISOString() }, { onConflict: 'id' });
   if (error) console.error('[db] upsertTicketSale:', error);
 }
 
@@ -1286,7 +1286,7 @@ export async function getBeatReview(beatId: string, userId: string) {
 export async function upsertBeatReview(beatId: string, userId: string, review: Record<string, any>) {
   const { error } = await db()
     .from('beat_reviews')
-    .upsert({ id: `${beatId}:${userId}`, beat_id: beatId, user_id: userId, data: review, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+    .upsert({ id: `${beatId}:${userId}`, beat_id: beatId, user_id: userId, data: review, updated_at: new Date().toISOString() }, { onConflict: 'id' });
   if (error) console.error('[db] upsertBeatReview:', error);
 }
 
@@ -1305,7 +1305,7 @@ export async function getCcnByUser(userId: string) {
 export async function upsertCcn(userId: string, notifId: string, notif: Record<string, any>) {
   const { error } = await db()
     .from('cross_cabinet_notifications')
-    .upsert({ id: notifId, target_user_id: userId, data: notif, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+    .upsert({ id: notifId, target_user_id: userId, data: notif, updated_at: new Date().toISOString() }, { onConflict: 'id' });
   if (error) console.error('[db] upsertCcn:', error);
 }
 
@@ -1341,7 +1341,7 @@ export async function getNotificationCampaignsByUser(userId: string) {
 export async function upsertNotificationCampaign(userId: string, campaignId: string, campaign: Record<string, any>) {
   const { error } = await db()
     .from('notification_campaigns')
-    .upsert({ id: campaignId, user_id: userId, data: campaign, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+    .upsert({ id: campaignId, user_id: userId, data: campaign, updated_at: new Date().toISOString() }, { onConflict: 'id' });
   if (error) console.error('[db] upsertNotificationCampaign:', error);
 }
 

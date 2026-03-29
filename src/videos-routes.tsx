@@ -1,12 +1,10 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { platformStatsStore } from './db.tsx';
 
 const videosRoutes = new Hono();
-const FALLBACK_USER = 'anonymous';
 
 // ─── Clip sources config ─────────────────
 const CLIP_SOURCES = {
@@ -176,7 +174,23 @@ videosRoutes.get('/newClips', async (c) => {
     const limit = parseInt(c.req.query('limit') || '20');
     const cached: any = await platformStatsStore.get('videos:new_clips');
     if (cached?.clips?.length) {
-      return c.json({ success: true, clips: cached.clips.slice(0, limit) });
+      // Normalize field names and proxy YouTube thumbnails (YouTube CDN blocked in Russia)
+      const normalized = cached.clips
+        .map((clip: any) => {
+          const vid = clip.videoId || clip.youtubeId || (clip.id || '').replace('yt-', '');
+          const rawThumb = clip.thumbnail || clip.thumbnailUrl || clip.thumbnail_url || '';
+          // Rewrite to local thumbnails (i.ytimg.com blocked in Russia)
+          const localThumb = vid ? '/thumbnails/thumb_' + vid + '.jpg' : rawThumb;
+          return {
+            ...clip,
+            videoId: vid,
+            id: clip.id || vid,
+            thumbnail: localThumb,
+            thumbnail_url: localThumb,
+          };
+        })
+        .filter((clip: any) => clip.thumbnail && clip.videoId);
+      return c.json({ success: true, clips: normalized.slice(0, limit) });
     }
     return c.json({ success: true, clips: [] });
   } catch (error) {
@@ -306,7 +320,7 @@ videosRoutes.post('/build-clips', async (c) => {
 // ─── Authenticated routes ─────────────────
 videosRoutes.get('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const videos = await db.getVideosByUser(userId);
     return c.json({ success: true, data: videos || [] });
   } catch (error) {
@@ -316,7 +330,7 @@ videosRoutes.get('/', requireAuth, async (c) => {
 
 videosRoutes.post('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
     const videoId = body.id || `video-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();

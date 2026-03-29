@@ -49,7 +49,7 @@ const FALLBACK_RADIO_USER_ID = 'anonymous';
 
 // Helper: получить userId через единый хелпер авторизации
 async function getRadioUserId(c: any): Promise<string> {
-  return resolveUserId(c, FALLBACK_RADIO_USER_ID);
+  return c.get('userId') || FALLBACK_RADIO_USER_ID;
 }
 
 // Helper: Get radio station for current user

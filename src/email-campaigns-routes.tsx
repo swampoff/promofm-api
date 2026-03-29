@@ -5,6 +5,7 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { emailHistoryStore, emailTemplatesStore, publishEmailPrefsStore } from './db.tsx';
 import { upsertEmailCampaign, getEmailCampaigns } from './db.tsx';
 import { smtpSendEmail, smtpSendBatch } from './smtp-sender.tsx';
@@ -319,7 +320,7 @@ app.get('/track/click', async (c) => {
 // ============================================
 // POST /campaigns/:id/resend-unopened — Resend to recipients who haven't opened
 // ============================================
-app.post('/campaigns/:id/resend-unopened', async (c) => {
+app.post('/campaigns/:id/resend-unopened', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const campaign = await getCampaignById(id);
@@ -411,7 +412,7 @@ app.post('/campaigns/:id/resend-unopened', async (c) => {
 // ============================================
 // GET /campaigns — List all campaigns
 // ============================================
-app.get('/campaigns', async (c) => {
+app.get('/campaigns', requireAuth, requireAdmin, async (c) => {
   try {
     const campaigns = await getEmailCampaigns('admin');
     // Sort by created_at desc
@@ -428,7 +429,7 @@ app.get('/campaigns', async (c) => {
 // ============================================
 // GET /campaigns/:id — Get single campaign
 // ============================================
-app.get('/campaigns/:id', async (c) => {
+app.get('/campaigns/:id', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const campaign = await getCampaignById(id);
@@ -442,7 +443,7 @@ app.get('/campaigns/:id', async (c) => {
 // ============================================
 // POST /campaigns — Create new campaign
 // ============================================
-app.post('/campaigns', async (c) => {
+app.post('/campaigns', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { name, subject, html, segment, scheduled_at } = body;
@@ -479,7 +480,7 @@ app.post('/campaigns', async (c) => {
 // ============================================
 // PUT /campaigns/:id — Update campaign
 // ============================================
-app.put('/campaigns/:id', async (c) => {
+app.put('/campaigns/:id', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const existing = await getCampaignById(id);
@@ -507,7 +508,7 @@ app.put('/campaigns/:id', async (c) => {
 // ============================================
 // DELETE /campaigns/:id — Delete campaign
 // ============================================
-app.delete('/campaigns/:id', async (c) => {
+app.delete('/campaigns/:id', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const existing = await getCampaignById(id);
@@ -530,7 +531,7 @@ app.delete('/campaigns/:id', async (c) => {
 // ============================================
 // POST /campaigns/:id/pause — Pause sending campaign
 // ============================================
-app.post('/campaigns/:id/pause', async (c) => {
+app.post('/campaigns/:id/pause', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const campaign = await getCampaignById(id);
@@ -554,7 +555,7 @@ app.post('/campaigns/:id/pause', async (c) => {
 // ============================================
 // POST /campaigns/:id/resume — Resume paused campaign
 // ============================================
-app.post('/campaigns/:id/resume', async (c) => {
+app.post('/campaigns/:id/resume', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const campaign = await getCampaignById(id);
@@ -634,7 +635,7 @@ app.post('/campaigns/:id/resume', async (c) => {
 // ============================================
 // POST /campaigns/:id/preview — Get recipient count for segment
 // ============================================
-app.post('/campaigns/:id/preview', async (c) => {
+app.post('/campaigns/:id/preview', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const campaign = await getCampaignById(id);
@@ -656,7 +657,7 @@ app.post('/campaigns/:id/preview', async (c) => {
 // ============================================
 // POST /campaigns/:id/test — Send test email
 // ============================================
-app.post('/campaigns/:id/test', async (c) => {
+app.post('/campaigns/:id/test', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const campaign = await getCampaignById(id);
@@ -690,7 +691,7 @@ app.post('/campaigns/:id/test', async (c) => {
 // ============================================
 // POST /campaigns/:id/send — Start campaign sending
 // ============================================
-app.post('/campaigns/:id/send', async (c) => {
+app.post('/campaigns/:id/send', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const campaign = await getCampaignById(id);
@@ -822,7 +823,7 @@ app.post('/campaigns/:id/send', async (c) => {
 // ============================================
 // GET /campaigns/:id/stats — Campaign statistics
 // ============================================
-app.get('/campaigns/:id/stats', async (c) => {
+app.get('/campaigns/:id/stats', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
   try {
     const campaign = await getCampaignById(id);
@@ -851,7 +852,7 @@ app.get('/campaigns/:id/stats', async (c) => {
 // ============================================
 // GET /segment/preview — Preview segment without campaign
 // ============================================
-app.post('/segment/preview', async (c) => {
+app.post('/segment/preview', requireAuth, requireAdmin, async (c) => {
   try {
     const segment = await c.req.json() as CampaignSegment;
     const recipients = await getRecipientsBySegment(segment);
@@ -870,7 +871,7 @@ app.post('/segment/preview', async (c) => {
 // ============================================
 // GET /stats — Overall campaign stats
 // ============================================
-app.get('/stats', async (c) => {
+app.get('/stats', requireAuth, requireAdmin, async (c) => {
   try {
     const campaigns = await getEmailCampaigns('admin');
     const total = campaigns.length;

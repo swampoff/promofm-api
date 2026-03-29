@@ -21,6 +21,7 @@
  */
 
 import { Hono } from 'npm:hono@4';
+import { requireAuth } from './auth-middleware.tsx';
 import {
   production360OrdersStore,
   production360ByStatusStore,
@@ -186,7 +187,7 @@ function defaultStageProgress(): Record<ProductionStage, number> {
 // CREATE PROJECT
 // =====================================================
 
-app.post('/orders', async (c) => {
+app.post('/orders', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const {
@@ -299,7 +300,7 @@ app.post('/orders', async (c) => {
 // CALCULATE PRICE
 // =====================================================
 
-app.post('/calculate-price', async (c) => {
+app.post('/calculate-price', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { serviceType, addons = [], subscription = 'none' } = body;
@@ -320,7 +321,7 @@ app.post('/calculate-price', async (c) => {
 // GET ORDERS
 // =====================================================
 
-app.get('/orders', async (c) => {
+app.get('/orders', requireAuth, async (c) => {
   try {
     const role = c.req.query('role');
     const artistId = c.req.query('artistId');
@@ -376,7 +377,7 @@ app.get('/orders', async (c) => {
 // GET ORDER BY ID
 // =====================================================
 
-app.get('/orders/:id', async (c) => {
+app.get('/orders/:id', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const order = await production360OrdersStore.get(orderId) as Production360Order | null;
@@ -393,7 +394,7 @@ app.get('/orders/:id', async (c) => {
 // PAY ORDER
 // =====================================================
 
-app.post('/orders/:id/pay', async (c) => {
+app.post('/orders/:id/pay', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const order = await production360OrdersStore.get(orderId) as Production360Order | null;
@@ -458,7 +459,7 @@ app.post('/orders/:id/pay', async (c) => {
 // TRANSITION (универсальный переход статуса)
 // =====================================================
 
-app.post('/orders/:id/transition', async (c) => {
+app.post('/orders/:id/transition', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -522,7 +523,7 @@ app.post('/orders/:id/transition', async (c) => {
 // PROGRESS UPDATE (admin/expert обновляет прогресс этапа)
 // =====================================================
 
-app.post('/orders/:id/progress', async (c) => {
+app.post('/orders/:id/progress', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -568,7 +569,7 @@ app.post('/orders/:id/progress', async (c) => {
 // REVISION (клиент запрашивает доработку)
 // =====================================================
 
-app.post('/orders/:id/revision', async (c) => {
+app.post('/orders/:id/revision', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -625,7 +626,7 @@ app.post('/orders/:id/revision', async (c) => {
 // APPROVE (клиент утверждает результат)
 // =====================================================
 
-app.post('/orders/:id/approve', async (c) => {
+app.post('/orders/:id/approve', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -678,7 +679,7 @@ app.post('/orders/:id/approve', async (c) => {
 // UPLOAD FILE
 // =====================================================
 
-app.post('/orders/:id/upload', async (c) => {
+app.post('/orders/:id/upload', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -726,7 +727,7 @@ app.post('/orders/:id/upload', async (c) => {
 // DELETE PROJECT
 // =====================================================
 
-app.delete('/orders/:id', async (c) => {
+app.delete('/orders/:id', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const order = await production360OrdersStore.get(orderId) as Production360Order | null;

@@ -20,6 +20,7 @@
  */
 
 import { Hono } from 'npm:hono@4';
+import { requireAuth } from './auth-middleware.tsx';
 import {
   audioBrandingOrdersStore,
   audioBrandingByStatusStore,
@@ -123,7 +124,7 @@ async function updateStatusIndex(orderId: string, oldStatus: string, newStatus: 
 // CREATE ORDER
 // =====================================================
 
-app.post('/orders', async (c) => {
+app.post('/orders', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const {
@@ -244,7 +245,7 @@ app.post('/calculate-price', async (c) => {
 // GET ORDERS (admin / venue / artist)
 // =====================================================
 
-app.get('/orders', async (c) => {
+app.get('/orders', requireAuth, async (c) => {
   try {
     const role = c.req.query('role');
     const clientId = c.req.query('clientId');
@@ -305,7 +306,7 @@ app.get('/orders', async (c) => {
 // GET ORDER BY ID
 // =====================================================
 
-app.get('/orders/:id', async (c) => {
+app.get('/orders/:id', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const order = await audioBrandingOrdersStore.get(orderId) as AudioBrandingOrder | null;
@@ -323,7 +324,7 @@ app.get('/orders/:id', async (c) => {
 // PAY ORDER
 // =====================================================
 
-app.post('/orders/:id/pay', async (c) => {
+app.post('/orders/:id/pay', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const order = await audioBrandingOrdersStore.get(orderId) as AudioBrandingOrder | null;
@@ -389,7 +390,7 @@ app.post('/orders/:id/pay', async (c) => {
 // TRANSITION (универсальный переход статуса)
 // =====================================================
 
-app.post('/orders/:id/transition', async (c) => {
+app.post('/orders/:id/transition', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -452,7 +453,7 @@ app.post('/orders/:id/transition', async (c) => {
 // REVISION (клиент запрашивает доработку)
 // =====================================================
 
-app.post('/orders/:id/revision', async (c) => {
+app.post('/orders/:id/revision', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -509,7 +510,7 @@ app.post('/orders/:id/revision', async (c) => {
 // APPROVE (клиент утверждает результат)
 // =====================================================
 
-app.post('/orders/:id/approve', async (c) => {
+app.post('/orders/:id/approve', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -562,7 +563,7 @@ app.post('/orders/:id/approve', async (c) => {
 // UPLOAD AUDIO FILE (admin/expert)
 // =====================================================
 
-app.post('/orders/:id/upload', async (c) => {
+app.post('/orders/:id/upload', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
@@ -610,7 +611,7 @@ app.post('/orders/:id/upload', async (c) => {
 // DELETE ORDER
 // =====================================================
 
-app.delete('/orders/:id', async (c) => {
+app.delete('/orders/:id', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const order = await audioBrandingOrdersStore.get(orderId) as AudioBrandingOrder | null;
@@ -653,7 +654,7 @@ app.delete('/orders/:id', async (c) => {
 // STATS (Admin Dashboard)
 // =====================================================
 
-app.get('/stats', async (c) => {
+app.get('/stats', requireAuth, async (c) => {
   try {
     const allStatuses = [
       'draft', 'pending_payment', 'paid', 'pending_review', 'rejected',

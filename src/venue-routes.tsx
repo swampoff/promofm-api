@@ -1,6 +1,6 @@
 /**
  * VENUE ROUTES - API для кабинета заведений
- * Авторизация через resolveUserId (Supabase auth → X-User-Id → demo fallback)
+ * Авторизация через requireAuth middleware (JWT)
  * 
  * KV ключи:
  * - venue_profile:{userId} - профиль заведения
@@ -39,7 +39,7 @@ const FALLBACK_VENUE_USER_ID = 'anonymous';
 
 // Helper: получить userId через единый хелпер авторизации
 async function getUserId(c: any): Promise<string> {
-  return resolveUserId(c, FALLBACK_VENUE_USER_ID);
+  return c.get('userId') || FALLBACK_VENUE_USER_ID;
 }
 
 // Helper: safely parse kv.get result (may be string or object)

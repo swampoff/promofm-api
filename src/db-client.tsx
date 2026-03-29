@@ -382,10 +382,11 @@ class QueryBuilder {
           valueSets.push(`(${placeholders.join(', ')})`);
         }
 
-        const updateCols = cols.filter(c => c !== this._upsertConflict);
+        const conflictCols = this._upsertConflict.split(",").map(s => s.trim());
+        const updateCols = cols.filter(c => !conflictCols.includes(c));
         const updateClause = updateCols.map(c => `"${c}" = EXCLUDED."${c}"`).join(', ');
 
-        let sql = `INSERT INTO "${this.table}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES ${valueSets.join(', ')} ON CONFLICT ("${this._upsertConflict}") DO UPDATE SET ${updateClause}`;
+        let sql = `INSERT INTO "${this.table}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES ${valueSets.join(', ')} ON CONFLICT (${conflictCols.map(c => `"${c}"`).join(", ")}) DO UPDATE SET ${updateClause}`;
         if (this._returnData || this._single || this._maybeSingle) sql += ' RETURNING *';
 
         const res = await pool.query(sql, values);
