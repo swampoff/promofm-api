@@ -40,7 +40,7 @@ export async function requireAuth(c: Context, next: Next) {
   }
 }
 
-export async function requireAdmin(c: Context, next: Next) {  const role = c.get("userRole");  const email = c.get("userEmail");  const { SUPERADMIN_EMAIL } = await import("./roles.tsx");  if (role !== "admin" || email !== SUPERADMIN_EMAIL) {    return c.json({ success: false, error: "Admin access required" }, 403);  }  await next();}
+export async function requireAdmin(c: Context, next: Next) {  const role = c.get("userRole");  const email = c.get("userEmail");  const { SUPERADMIN_EMAIL } = await import("./roles.tsx");  if ((role !== "admin" && role !== "superadmin") || email !== SUPERADMIN_EMAIL) {    return c.json({ success: false, error: "Admin access required" }, 403);  }  await next();}
 
 export function requireOwner(paramName: string) {
   return async (c: Context, next: Next) => {

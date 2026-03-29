@@ -381,7 +381,7 @@ export async function upsertNotification(userId: string, notifId: string, notif:
   };
   const { error } = await db()
     .from('notifications')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertNotification:', error);
 }
 
@@ -597,12 +597,20 @@ export async function getBooking(bookingId: string) {
 export async function upsertBooking(bookingId: string, booking: Record<string, any>) {
   const row = {
     id: bookingId,
-    data: booking,
+    user_id: booking.requesterId || null,
+    performer_id: booking.performerId || null,
+    venue_id: booking.venueId || null,
+    event_date: booking.eventDate || null,
+    status: booking.status || 'pending',
+    total_price: booking.offeredPrice || null,
+    deposit_amount: booking.depositAmount || null,
+    deposit_paid: booking.status === 'deposit_paid' || booking.status === 'confirmed' || booking.status === 'completed',
+    data: JSON.stringify(booking),
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()
     .from('bookings')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertBooking:', error);
 }
 
@@ -1059,7 +1067,7 @@ function jsonbStore(table: string, pk = 'id') {
       return data ? (data.data ?? data) : null;
     },
     async set(id: string, value: any, extra?: Record<string, any>) {
-      const row = { [pk]: id, data: value, updated_at: new Date().toISOString(), ...extra };
+      const row = { [pk]: id, data: JSON.stringify(value), updated_at: new Date().toISOString(), ...extra };
       const { error } = await db().from(table).upsert(row, { onConflict: pk });
       if (error) console.error(`[db] ${table}.set:`, error);
     },

@@ -134,6 +134,23 @@ async function getPerformerProfile(performerId: string, performerType: string) {
     };
   }
 
+  // Fallback: check users table — any registered user can be a performer
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const res = await pool.query('SELECT id, email, username, full_name FROM users WHERE id = $1', [performerId]);
+    if (res.rows.length > 0) {
+      const u = res.rows[0];
+      return {
+        userId: u.id,
+        displayName: u.full_name || u.username || u.email,
+        avatar: null,
+        hourlyRate: 5000,
+        minimumBookingHours: 2,
+        bookingEnabled: true,
+      };
+    }
+  } catch {}
+
   return null;
 }
 
@@ -142,10 +159,7 @@ async function getPerformerProfile(performerId: string, performerType: string) {
 // =====================================================
 app.post('/create', requireAuth, async (c) => {
   try {
-    const user = await getUserFromToken(c.req.header('Authorization'));
-    if (!user) {
-      return apiError(c, 'AUTH_REQUIRED');
-    }
+    const user = { id: c.get('userId'), email: c.get('userEmail'), role: c.get('userRole') };
 
     const body = await c.req.json();
     const {
@@ -286,27 +300,19 @@ app.post('/create', requireAuth, async (c) => {
 // =====================================================
 app.get('/list', requireAuth, async (c) => {
   try {
-    const user = await getUserFromToken(c.req.header('Authorization'));
-    if (!user) {
-      return apiError(c, 'AUTH_REQUIRED');
-    }
+    const user = { id: c.get('userId'), email: c.get('userEmail'), role: c.get('userRole') };
 
     const role = c.req.query('role');
     const statusFilter = c.req.query('status');
 
-    // Получить ID букингов пользователя
-    const indexData = await getBookingsByUser(user.id);
-    const bookingIds: string[] = Array.isArray(indexData) ? indexData : [];
+    // Получить букинги пользователя (getBookingsByUser returns full objects)
+    const allBookings = await getBookingsByUser(user.id);
 
-    if (bookingIds.length === 0) {
+    if (!allBookings || allBookings.length === 0) {
       return c.json({ success: true, bookings: [] });
     }
 
-    // Загрузить букинги
-    const bookingValues = await Promise.all(bookingIds.map(id => getBooking(id)));
-
-    let bookings = bookingValues
-      .filter(v => v !== null);
+    let bookings = allBookings.filter((v: any) => v !== null);
     
     // Фильтр по роли
     if (role === 'requester') {
@@ -336,10 +342,7 @@ app.get('/list', requireAuth, async (c) => {
 // =====================================================
 app.get('/:id', requireAuth, async (c) => {
   try {
-    const user = await getUserFromToken(c.req.header('Authorization'));
-    if (!user) {
-      return apiError(c, 'AUTH_REQUIRED');
-    }
+    const user = { id: c.get('userId'), email: c.get('userEmail'), role: c.get('userRole') };
 
     const bookingId = c.req.param('id');
     const bookingData = await getBooking(bookingId);
@@ -368,10 +371,7 @@ app.get('/:id', requireAuth, async (c) => {
 // =====================================================
 app.put('/:id/accept', requireAuth, async (c) => {
   try {
-    const user = await getUserFromToken(c.req.header('Authorization'));
-    if (!user) {
-      return apiError(c, 'AUTH_REQUIRED');
-    }
+    const user = { id: c.get('userId'), email: c.get('userEmail'), role: c.get('userRole') };
 
     const bookingId = c.req.param('id');
     const bookingData = await getBooking(bookingId);
@@ -420,10 +420,7 @@ app.put('/:id/accept', requireAuth, async (c) => {
 // =====================================================
 app.put('/:id/reject', requireAuth, async (c) => {
   try {
-    const user = await getUserFromToken(c.req.header('Authorization'));
-    if (!user) {
-      return apiError(c, 'AUTH_REQUIRED');
-    }
+    const user = { id: c.get('userId'), email: c.get('userEmail'), role: c.get('userRole') };
 
     const bookingId = c.req.param('id');
     const { rejectionReason } = await c.req.json();
@@ -473,10 +470,7 @@ app.put('/:id/reject', requireAuth, async (c) => {
 // =====================================================
 app.post('/:id/pay-deposit', requireAuth, async (c) => {
   try {
-    const user = await getUserFromToken(c.req.header('Authorization'));
-    if (!user) {
-      return apiError(c, 'AUTH_REQUIRED');
-    }
+    const user = { id: c.get('userId'), email: c.get('userEmail'), role: c.get('userRole') };
 
     const bookingId = c.req.param('id');
     const { paymentMethodId } = await c.req.json();
@@ -562,10 +556,7 @@ app.post('/:id/pay-deposit', requireAuth, async (c) => {
 // =====================================================
 app.post('/:id/pay-final', requireAuth, async (c) => {
   try {
-    const user = await getUserFromToken(c.req.header('Authorization'));
-    if (!user) {
-      return apiError(c, 'AUTH_REQUIRED');
-    }
+    const user = { id: c.get('userId'), email: c.get('userEmail'), role: c.get('userRole') };
 
     const bookingId = c.req.param('id');
     const { paymentMethodId } = await c.req.json();
@@ -655,10 +646,7 @@ app.post('/:id/pay-final', requireAuth, async (c) => {
 // =====================================================
 app.put('/:id/cancel', requireAuth, async (c) => {
   try {
-    const user = await getUserFromToken(c.req.header('Authorization'));
-    if (!user) {
-      return apiError(c, 'AUTH_REQUIRED');
-    }
+    const user = { id: c.get('userId'), email: c.get('userEmail'), role: c.get('userRole') };
 
     const bookingId = c.req.param('id');
     const { cancellationReason } = await c.req.json();
