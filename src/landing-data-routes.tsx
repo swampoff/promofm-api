@@ -590,6 +590,22 @@ async function pingSitemapAsync(newsId?: string) {
   }
 }
 
+
+const AUTHOR_COVER_MAP: Record<string, string> = {
+  'Пабло': '/avatars/avatar_pablo.png',
+  'Нико': '/avatars/avatar_nico.png',
+  'Марк': '/avatars/mark.png',
+  'Макс': '/avatars/max.png',
+  'Сандра': '/avatars/sandra.png',
+  'DJ Den': '/avatars/djden.png',
+  'Лиана': '/avatars/liana.png',
+  'Лиана Аналитик': '/avatars/liana.png',
+  'РадКат': '/avatars/avatar_radkat.png',
+  'Стелла': '/avatars/stella.png',
+  'Редакция': '/avatars/avatar_radkat.png',
+  'Редакция ПРОМО.МУЗЫКА': '/avatars/avatar_radkat.png',
+};
+
 function normalizeNews(n: any): any {
   let c = n.content || n.excerpt || '';
   // Strip markdown code fences (```html ... ```)
@@ -598,7 +614,7 @@ function normalizeNews(n: any): any {
     ...n,
     artistName: n.artistName || n.authorName || 'ПРОМО.МУЗЫКА',
     artistAvatar: n.artistAvatar || n.authorAvatar || '/logo-promo.svg',
-    coverImage: n.coverImage || n.imageUrl || n.banner || '',
+    coverImage: n.coverImage || n.imageUrl || n.banner || AUTHOR_COVER_MAP[n.authorName || ''] || '/avatars/avatar_radkat.png',
     content: c,
   };
 }
