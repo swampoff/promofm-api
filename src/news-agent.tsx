@@ -1,26 +1,59 @@
 /**
  * NEWS AGENT — автоматический сбор и обработка музыкальных новостей
- * Парсит HTML из русскоязычных источников, обрабатывает через Mistral
+ * Парсит HTML из русских и зарубежных источников, переводит и обрабатывает через OpenRouter (Gemini)
+ * Каждый автор-персонаж имеет свой стиль и специализацию
  */
 
 import { newsPublicStore } from './db.tsx';
 import { isUrlSafe } from './security.tsx';
 
 
-// ─── Poster Personas (round-robin for auto-news) ────────
+// ─── Poster Personas — у каждого свой стиль и специализация ────────
 const POSTERS = [
-  { name: 'DJ Den', avatar: '/avatars/djden.png' },
-  { name: 'Сандра', avatar: '/avatars/sandra.png' },
-  { name: 'Лиана', avatar: '/avatars/liana.png' },
-  { name: 'Макс', avatar: '/avatars/max.png' },
-  { name: 'Стелла', avatar: '/avatars/stella.png' },
-  { name: 'Марк', avatar: '/avatars/mark.png' },
+  { name: 'DJ Den', avatar: '/avatars/avatar_dj_den.png', style: 'клубная культура, электроника, DJ-сцена. Пишет энергично и с инсайдерским знанием клубной жизни' },
+  { name: 'Сандра', avatar: '/avatars/avatar_sandra.png', style: 'поп-музыка, мейнстрим, фестивали. Пишет ярко, эмоционально, с акцентом на тренды' },
+  { name: 'Лиана', avatar: '/avatars/avatar_liana.png', style: 'аналитика, индустрия, бизнес музыки. Пишет вдумчиво, с цифрами и контекстом' },
+  { name: 'Макс', avatar: '/avatars/avatar_max.png', style: 'рок, альтернатива, инди. Пишет дерзко, с юмором и рок-н-ролльным духом' },
+  { name: 'Марк', avatar: '/avatars/avatar_mark.png', style: 'хип-хоп, рэп, R&B. Пишет в уличном стиле, знает культуру изнутри' },
+  { name: 'Пабло', avatar: '/avatars/avatar_pablo.png', style: 'мировая музыка, латинская америка, африка, этно. Пишет с уважением к культурным корням' },
+  { name: 'Нико', avatar: '/avatars/avatar_nico.png', style: 'европейская сцена, классика, джаз, авангард. Пишет изысканно, со знанием музыкальной теории' },
+  { name: 'РадКат', avatar: '/avatars/avatar_radkat.png', style: 'технологии в музыке, AI, стриминг, цифровая индустрия. Пишет технично и футуристично' },
+  { name: 'Стелла', avatar: '/avatars/avatar_stella.png', style: 'женщины в музыке, эмпауэрмент, социальные темы. Пишет вдохновляюще и глубоко' },
 ];
 let posterIndex = 0;
 function nextPoster() {
   const p = POSTERS[posterIndex % POSTERS.length];
   posterIndex++;
   return p;
+}
+
+// Подбор автора по источнику/тематике
+function bestPosterForSource(sourceId: string): typeof POSTERS[number] {
+  const map: Record<string, string[]> = {
+    'pitchfork': ['Макс', 'Марк', 'DJ Den'],
+    'nme': ['Макс', 'DJ Den', 'Нико'],
+    'guardian-music': ['Нико', 'Сандра', 'Пабло'],
+    'guardian-culture': ['Пабло', 'Нико', 'Лиана'],
+    'rollingstone-us': ['Макс', 'DJ Den', 'Марк'],
+    'billboard-us': ['Сандра', 'Марк', 'Лиана'],
+    'consequence': ['Макс', 'Нико', 'DJ Den'],
+    'stereogum': ['Нико', 'Макс', 'Лиана'],
+    'djmag': ['DJ Den', 'Нико', 'Сандра'],
+    'ok-africa': ['Пабло', 'DJ Den', 'Марк'],
+    'remezcla': ['Пабло', 'Марк', 'Сандра'],
+    'intermedia': ['DJ Den', 'Сандра', 'РадКат'],
+    'theflow': ['Марк', 'Макс', 'Стелла'],
+    'rollingstone-ru': ['Макс', 'Нико', 'Лиана'],
+    'lenta-music': ['Лиана', 'Сандра', 'DJ Den'],
+    'afisha-daily': ['Сандра', 'Лиана', 'Стелла'],
+    'cnews-ai': ['РадКат', 'Лиана', 'Нико'],
+  };
+  const candidates = map[sourceId] || [];
+  if (candidates.length > 0) {
+    const name = candidates[Math.floor(Math.random() * candidates.length)];
+    return POSTERS.find(p => p.name === name) || nextPoster();
+  }
+  return nextPoster();
 }
 
 
@@ -53,6 +86,7 @@ export interface NewsSource {
 }
 
 export const NEWS_SOURCES: NewsSource[] = [
+  // ── РОССИЯ ──
   {
     id: 'intermedia',
     name: 'InterMedia',
@@ -68,7 +102,7 @@ export const NEWS_SOURCES: NewsSource[] = [
     parsingHint: 'Издание о хип-хоп и рэп культуре в России. Извлеки новости о релизах, артистах, клипах.',
   },
   {
-    id: 'rollingstone',
+    id: 'rollingstone-ru',
     name: 'Rolling Stone Russia',
     url: 'https://www.rollingstone.ru/',
     category: 'industry',
@@ -79,7 +113,7 @@ export const NEWS_SOURCES: NewsSource[] = [
     name: 'Lenta.ru Музыка',
     url: 'https://lenta.ru/rubrics/culture/music/',
     category: 'industry',
-    parsingHint: 'Раздел музыки Lenta.ru — крупнейший новостной портал. Извлеки новости о музыкальных событиях, артистах, релизах.',
+    parsingHint: 'Раздел музыки Lenta.ru. Извлеки новости о музыкальных событиях, артистах, релизах.',
   },
   {
     id: 'afisha-daily',
@@ -87,6 +121,86 @@ export const NEWS_SOURCES: NewsSource[] = [
     url: 'https://daily.afisha.ru/music/',
     category: 'events',
     parsingHint: 'Раздел музыки Афиша Daily. Извлеки новости о музыкальных событиях, интервью, обзоры.',
+  },
+
+  // ── США ──
+  {
+    id: 'pitchfork',
+    name: 'Pitchfork',
+    url: 'https://pitchfork.com/news/',
+    category: 'releases',
+    parsingHint: 'Pitchfork — ведущее музыкальное издание (США). Извлеки новости о релизах, обзорах альбомов, интервью с артистами. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+  {
+    id: 'nme',
+    name: 'NME',
+    url: 'https://www.nme.com/news/music',
+    category: 'industry',
+    parsingHint: 'NME — британское музыкальное издание. Извлеки новости о рок-музыке, инди, фестивалях, турах. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+  {
+    id: 'rollingstone-us',
+    name: 'Rolling Stone',
+    url: 'https://www.rollingstone.com/music/music-news/',
+    category: 'industry',
+    parsingHint: 'Rolling Stone (USA) — легендарное музыкальное издание. Новости о музыкальной индустрии, артистах, релизах. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+  {
+    id: 'consequence',
+    name: 'Consequence of Sound',
+    url: 'https://consequence.net/',
+    category: 'releases',
+    parsingHint: 'Consequence of Sound — американское музыкальное издание. Новости, рецензии, анонсы туров. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+
+  // ── ЕВРОПА ──
+  {
+    id: 'guardian-music',
+    name: 'The Guardian Music',
+    url: 'https://www.theguardian.com/music',
+    category: 'industry',
+    parsingHint: 'The Guardian Music — раздел музыки британской газеты. Интервью, обзоры, новости индустрии. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+  {
+    id: 'djmag',
+    name: 'DJ Mag',
+    url: 'https://djmag.com/news',
+    category: 'industry',
+    parsingHint: 'DJ Mag — ведущий мировой журнал о DJ-культуре и электронной музыке. Новости, интервью, обзоры. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+  {
+    id: 'stereogum',
+    name: 'Stereogum',
+    url: 'https://www.stereogum.com/',
+    category: 'releases',
+    parsingHint: 'Stereogum — инди-музыкальное издание. Новые релизы, рецензии, инди и альтернатива. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+
+  // ── ЛАТИНСКАЯ АМЕРИКА ──
+  {
+    id: 'remezcla',
+    name: 'Remezcla',
+    url: 'https://remezcla.com/music/',
+    category: 'releases',
+    parsingHint: 'Remezcla — латиноамериканская культура и музыка: reggaetón, Latin trap, cumbia, Brazilian funk. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+
+  // ── АФРИКА ──
+  {
+    id: 'ok-africa',
+    name: 'OkayAfrica',
+    url: 'https://www.okayafrica.com/music',
+    category: 'releases',
+    parsingHint: 'OkayAfrica — африканская музыка и культура: afrobeats, amapiano, Afropop, Afrohouse. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+
+  // ── ТЕХНОЛОГИИ В МУЗЫКЕ ──
+  {
+    id: 'cnews-ai',
+    name: 'CNews AI',
+    url: 'https://www.cnews.ru/',
+    category: 'industry',
+    parsingHint: 'CNews — технологические новости России. Извлеки ТОЛЬКО новости связанные с AI и музыкой, стримингом, музыкальными технологиями. Игнорируй всё остальное.',
   },
 ];
 
@@ -101,7 +215,7 @@ async function fetchPageText(url: string): Promise<string | null> {
   }
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), 30000);
 
     const response = await fetch(url, {
       signal: controller.signal,
@@ -145,7 +259,7 @@ async function fetchPageText(url: string): Promise<string | null> {
   }
 }
 
-// ─── Mistral Extraction ─────────────────────────────────
+// ─── LLM Extraction (OpenRouter + Gemini) ───────────────
 
 interface ParsedNewsItem {
   title: string;
@@ -161,6 +275,7 @@ interface ParsedNewsItem {
 async function extractNewsWithLLM(
   source: NewsSource,
   pageText: string,
+  poster: typeof POSTERS[number],
 ): Promise<ParsedNewsItem[]> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
@@ -168,43 +283,49 @@ async function extractNewsWithLLM(
     return [];
   }
 
-  const systemPrompt = `Ты — SEO-редактор музыкальной платформы ПРОМО.МУЗЫКА (promo-music.ru). Из текста HTML-страницы извлеки последние новости и переработай каждую в SEO-оптимизированную статью.
+  const isInternational = ['pitchfork', 'nme', 'rollingstone-us', 'consequence', 'guardian-music', 'clash-magazine', 'stereogum', 'remezcla', 'ok-africa'].includes(source.id);
+
+  const systemPrompt = `Ты — ${poster.name}, автор-журналист на музыкальной платформе ПРОМО.МУЗЫКА (promo-music.ru).
+Твой стиль: ${poster.style}.
+
+Из текста страницы извлеки последние МУЗЫКАЛЬНЫЕ новости и переработай каждую в уникальную статью в своём стиле.
 ${source.parsingHint}
+${isInternational ? '\n⚠️ ИСТОЧНИК НА АНГЛИЙСКОМ. Ты ОБЯЗАН перевести ВСЁ на русский язык. Заголовок, excerpt, content — всё на русском. Названия артистов, альбомов и песен можно оставить на оригинальном языке.' : ''}
 
 ВАЖНО — СТРУКТУРА КАЖДОЙ СТАТЬИ:
 - Верни ТОЛЬКО валидный JSON с полем "news" — массив объектов
-- Каждый объект: {"title": "SEO-заголовок (60-80 символов, с ключевым словом)", "excerpt": "Meta description 150-160 символов с CTA", "content": "HTML-статья (см. правила ниже)", "category": "одна из: releases, artists, industry, events, charts, interviews", "tags": ["тег1", "тег2", "тег3", "тег4", "тег5"], "publishedAt": "дата ISO или пустая строка"}
+- Каждый объект: {"title": "SEO-заголовок (60-80 символов, с ключевым словом)", "excerpt": "Meta description 150-160 символов с CTA", "content": "HTML-статья (см. правила ниже)", "category": "одна из: releases, artists, industry, events, charts, interviews, clips", "tags": ["тег1", "тег2", "тег3", "тег4", "тег5"], "publishedAt": "дата ISO или пустая строка"}
 
 ПРАВИЛА КОНТЕНТА (content — HTML):
 1. Структура: <h2>Подзаголовок</h2> + абзацы <p> + списки <ul><li> где уместно
 2. Минимум 5-8 предложений, разбитых на 2-3 блока с подзаголовками <h2>
-3. В каждой статье ОБЯЗАТЕЛЬНО 2-3 внутренние ссылки на разделы платформы. Выбирай подходящие по контексту:
-   - <a href="/register">зарегистрироваться на ПРОМО.МУЗЫКА</a> — для призыва к регистрации
-   - <a href="/promo-air">ПРОМО.ЭИР</a> — если речь о радио, ротациях, попадании в эфир
-   - <a href="/marketplace">маркетплейс</a> — если речь о продаже музыки, битов, услугах
-   - <a href="/for-venues">музыка для заведений</a> — если речь о площадках, ресторанах, клубах
-   - <a href="/marketplace">каталог треков</a> — если речь о релизах, новых треках
-   - <a href="/for-djs">раздел для диджеев</a> — если речь о диджеях
-   - <a href="/djs">каталог DJ</a> — если речь о поиске диджеев
-   - <a href="/radio-stations">радиостанции</a> — если речь о радио
-   - <a href="/concerts">афиша концертов</a> — если речь о концертах, фестивалях
-   - <a href="/news">новости</a> — если речь о музыкальных событиях
-4. В конце каждой статьи ОБЯЗАТЕЛЬНО CTA-блок:
+3. ПИШИ В СВОЁМ СТИЛЕ (${poster.name}) — у тебя есть характер, мнение, уникальная подача
+4. В каждой статье ОБЯЗАТЕЛЬНО 2-3 внутренние ссылки на разделы платформы:
+   - <a href="/register">зарегистрироваться на ПРОМО.МУЗЫКА</a>
+   - <a href="/promo-air">ПРОМО.ЭИР</a> — радио, ротации, эфир
+   - <a href="/marketplace">маркетплейс</a> — продажа музыки, биты
+   - <a href="/for-venues">музыка для заведений</a>
+   - <a href="/marketplace">каталог треков</a> — релизы
+   - <a href="/for-djs">раздел для диджеев</a>
+   - <a href="/djs">каталог DJ</a>
+   - <a href="/radio-stations">радиостанции</a>
+   - <a href="/concerts">афиша концертов</a>
+   - <a href="/news">новости</a>
+5. В конце каждой статьи CTA-блок:
    <h3>Следите за новостями музыкальной индустрии</h3>
-   <p><a href="/register"><strong>Присоединяйтесь к ПРОМО.МУЗЫКА</strong></a> — платформе, где артисты, диджеи и продюсеры развивают карьеру вместе. Загружайте треки, находите букинги и попадайте в эфир.</p>
-5. Выделяй <strong>ключевые слова</strong> (2-3 на статью) — имена артистов, названия альбомов, жанры
-6. Перепиши каждую новость своими словами — НЕ копируй дословно
-7. Пиши живым журналистским языком, без канцелярита и AI-штампов
-8. ОБЯЗАТЕЛЬНО пиши заголовок (title) и весь текст ТОЛЬКО НА РУССКОМ ЯЗЫКЕ. Названия групп и альбомов можно оставить на английском
+   <p><a href="/register"><strong>Присоединяйтесь к ПРОМО.МУЗЫКА</strong></a> — платформе, где артисты, диджеи и продюсеры развивают карьеру вместе.</p>
+6. Выделяй <strong>ключевые слова</strong> (2-3 на статью)
+7. Перепиши каждую новость СВОИМИ СЛОВАМИ в стиле ${poster.name} — НЕ копируй дословно
+8. ОБЯЗАТЕЛЬНО пиши заголовок (title) и весь текст ТОЛЬКО НА РУССКОМ ЯЗЫКЕ
 
 SEO-ПРАВИЛА:
-- title: включи главное ключевое слово в начало, добавь год если уместно
-- excerpt: должен быть законченным предложением с призывом, 150-160 символов
-- tags: 5 релевантных тегов (жанр, артист, тип новости, "музыка 2026", "ПРОМО.МУЗЫКА")
+- title: ключевое слово в начало, год если уместно
+- excerpt: законченное предложение с призывом, 150-160 символов
+- tags: 5 тегов (жанр, артист, тип новости, "музыка 2026", "ПРОМО.МУЗЫКА")
 - Один тег ВСЕГДА "ПРОМО.МУЗЫКА"
 
 - Максимум 5 новостей
-- НЕ добавляй markdown-обёртку
+- НЕ добавляй markdown-обёртку (\`\`\`json)
 - Если не удалось извлечь новости, верни {"news": []}`;
 
   try {
@@ -303,7 +424,11 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
     return { added: 0, errors };
   }
 
-  const newsItems = await extractNewsWithLLM(source, pageText);
+  // Pick the best-fit persona for this source
+  const poster = bestPosterForSource(source.id);
+  console.log(`[news-agent] ${source.name} → автор: ${poster.name}`);
+
+  const newsItems = await extractNewsWithLLM(source, pageText, poster);
   if (newsItems.length === 0) {
     errors.push(`No news extracted from ${source.id}`);
     return { added: 0, errors };
@@ -320,7 +445,6 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
     if (isDuplicate) continue;
 
     const id = `news-${source.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const poster = nextPoster();
     const newsRecord = {
       id,
       ...item,
