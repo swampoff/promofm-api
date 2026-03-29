@@ -293,8 +293,15 @@ export async function getPaymentSession(orderId: string) {
 }
 
 export async function upsertPaymentSession(orderId: string, session: Record<string, any>) {
-  const row = {
+  const row: Record<string, any> = {
     order_id: orderId,
+    user_id: session.userId || session.user_id || 'unknown',
+    amount: session.amount || 0,
+    currency: session.currency || 'RUB',
+    purpose: session.type || session.purpose || null,
+    status: session.status || 'created',
+    provider: session.gateway || session.provider || 'yookassa',
+    provider_session_id: session.gatewayPaymentId || session.provider_session_id || null,
     data: session,
     updated_at: new Date().toISOString(),
   };
@@ -571,7 +578,7 @@ export async function getBookingsByUser(userId: string) {
   const { data, error } = await db()
     .from('bookings')
     .select('*')
-    .or(`performer_id.eq.${userId},requester_id.eq.${userId}`)
+    .or(`performer_id.eq.${userId},user_id.eq.${userId}`)
     .order('created_at', { ascending: false });
   if (error) console.error('[db] getBookingsByUser:', error);
   return (data || []).map((r: any) => r.data || r);
@@ -784,14 +791,26 @@ export async function getDjProfile(djId: string) {
 }
 
 export async function upsertDjProfile(djId: string, profile: Record<string, any>) {
-  const row = {
+  const row: Record<string, any> = {
     id: djId,
+    user_id: profile.userId || djId,
+    dj_name: profile.djName || profile.dj_name || null,
+    genres: profile.genres || [],
+    bio: profile.bio || null,
+    avatar_url: profile.avatarUrl || profile.avatar_url || null,
+    location: profile.city || profile.location || null,
+    hourly_rate: profile.hourlyRate || profile.hourly_rate || 0,
+    experience_years: profile.experienceYears || profile.experience_years || 0,
+    equipment: profile.equipment || null,
+    is_available: profile.isAvailable !== undefined ? profile.isAvailable : true,
+    rating: profile.rating || 0,
+    total_reviews: profile.totalReviews || profile.total_reviews || 0,
     data: profile,
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()
     .from('dj_profiles')
-    .upsert(row, { onConflict: 'user_id' });
+    .upsert(row, { onConflict: 'id' });
   if (error) console.error('[db] upsertDjProfile:', error);
 }
 

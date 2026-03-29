@@ -111,7 +111,7 @@ app.post('/offers', requireAuth, async (c) => {
 
     // Сохраняем для продюсера
     const producerKey = `collab_offers_by:${producerId}`;
-    const producerOffers: CollabOffer[] = (await collabOffersByProducerStore.get(producerId)) || [];
+    const producerOffers: CollabOffer[] = (await collabOffersByProducerStore.get(offer.producerId)) || [];
     producerOffers.unshift(offer);
     await collabOffersByProducerStore.set(producerId, producerOffers);
 
@@ -191,11 +191,11 @@ app.put('/offers/:id/respond', async (c) => {
 
     // Обновляем в списке продюсера
     const producerKey = `collab_offers_by:${offer.producerId}`;
-    const producerOffers: CollabOffer[] = (await collabOffersByProducerStore.get(producerId)) || [];
+    const producerOffers: CollabOffer[] = (await collabOffersByProducerStore.get(offer.producerId)) || [];
     const pIdx = producerOffers.findIndex(o => o.id === offerId);
     if (pIdx !== -1) {
       producerOffers[pIdx] = { ...offer };
-      await collabOffersByProducerStore.set(producerId, producerOffers);
+      await collabOffersByProducerStore.set(offer.producerId, producerOffers);
     }
 
     // SSE уведомление продюсеру

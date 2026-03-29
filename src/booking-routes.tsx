@@ -40,11 +40,13 @@ async function getUserFromToken(authHeader: string | null) {
     return null;
   }
   const token = authHeader.split(' ')[1];
-  const { data, error } = await dbClient.auth.getUser(token);
-  if (error || !data.user) {
+  try {
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET) as any;
+    return { id: decoded.userId || decoded.sub, email: decoded.email, role: decoded.role };
+  } catch {
     return null;
   }
-  return data.user;
 }
 
 // =====================================================
