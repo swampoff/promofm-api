@@ -137,3 +137,74 @@ feedbackRoutes.put('/reports/:id/resolve', requireAuth, requireAdmin, async (c) 
 });
 
 export { feedbackRoutes };
+
+// ─── Telegram notification helper ─────────────────────────────────────────────
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TG_CHAT = process.env.TELEGRAM_LEAD_CHAT_ID || '';
+
+async function notifyTelegram(text: string) {
+  if (!TG_TOKEN || !TG_CHAT) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: 'HTML' }),
+    });
+  } catch (_) {}
+}
+
+// ─── POST /bug-report (PUBLIC — no auth required) ─────────────────────────────
+// For the test mode banner on login page
+
+feedbackRoutes.post('/bug-report', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => null);
+    if (!body || !body.message || body.message.trim().length < 3) {
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'message is required (min 3 chars)');
+    }
+
+    const message = body.message.trim().slice(0, 2000);
+    const page = body.page || 'login';
+    const email = body.email || null;
+
+    // Rate limit: max 5 per IP per hour (simple check via DB)
+    const ip = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || 'unknown';
+    const rateCheck = await pool.query(
+      `SELECT COUNT(*) FROM feedback_reports
+       WHERE context->>'ip' = $1 AND created_at > NOW() - INTERVAL '1 hour'`,
+      [ip]
+    ).catch(() => ({ rows: [{ count: '0' }] }));
+    if (parseInt(rateCheck.rows[0].count) >= 5) {
+      return c.json({ error: 'Слишком много сообщений. Попробуйте позже.' }, 429);
+    }
+
+    // Store in DB
+    const res = await pool.query(
+      `INSERT INTO feedback_reports (type, message, page_url, context)
+       VALUES ('bug', $1, $2, $3) RETURNING id, created_at`,
+      [message, page, JSON.stringify({ ip, email, source: 'test_mode_banner' })]
+    );
+
+    const reportId = res.rows[0].id;
+
+    // Classify into memory_errors
+    classifyAndLog(message, page, null, { source: 'test_mode_banner', reportId }).catch(() => {});
+
+    // Send to Telegram
+    const tgText = `<b>🐛 Баг-репорт #${reportId}</b>\n\n` +
+      `<b>Сообщение:</b> ${message}\n` +
+      (email ? `<b>Email:</b> ${email}\n` : '') +
+      `<b>Страница:</b> ${page}\n` +
+      `<b>IP:</b> ${ip}\n` +
+      `<b>Время:</b> ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`;
+    notifyTelegram(tgText).catch(() => {});
+
+    return c.json({
+      success: true,
+      id: reportId,
+      message: 'Спасибо! Мы получили ваше сообщение.',
+    });
+  } catch (err: any) {
+    return apiError(c, 'INTERNAL_ERROR');
+  }
+});
