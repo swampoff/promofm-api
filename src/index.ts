@@ -98,6 +98,7 @@ import apiDocs from "./api-docs-routes.tsx";
 import { promoPipelineRoutes } from "./promo-pipeline-routes.tsx";
 import { promoCheckRoutes } from "./promo-check-routes.tsx";
 import consentRoutes from "./consent-routes.tsx";
+import cabinetAiRoutes from "./cabinet-ai-routes.tsx";
 import { classifyAndLog } from "./error-classifier.ts";
 import { createLogger } from './logger.tsx';
 import { requestIdMiddleware } from './request-id.tsx';
@@ -342,6 +343,7 @@ app.route("/server/api/feedback", feedbackRoutes);
 app.route("/server/api/promo-pipeline", promoPipelineRoutes);
 app.route("/server/api/promo-check", promoCheckRoutes);
 app.route("/server/api/consent", consentRoutes);
+app.route("/server/api/cabinet-ai", cabinetAiRoutes);
 app.route("/server/api/weekly-releases", weeklyReleasesRoutes);
 
 app.route("/server/api/docs", apiDocs);
