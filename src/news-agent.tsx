@@ -56,9 +56,9 @@ export const NEWS_SOURCES: NewsSource[] = [
   {
     id: 'intermedia',
     name: 'InterMedia',
-    url: 'https://www.intermedia.ru/news',
+    url: 'https://www.intermedia.ru/',
     category: 'industry',
-    parsingHint: 'Новостной сайт о шоу-бизнесе и музыкальной индустрии России. Извлеки заголовки новостей, краткое описание и дату публикации.',
+    parsingHint: 'Главная страница InterMedia — новостной сайт о шоу-бизнесе и музыкальной индустрии России. Извлеки заголовки новостей о музыке, краткое описание и дату публикации. Игнорируй новости о кино и ТВ.',
   },
   {
     id: 'theflow',
@@ -68,18 +68,18 @@ export const NEWS_SOURCES: NewsSource[] = [
     parsingHint: 'Издание о хип-хоп и рэп культуре в России. Извлеки новости о релизах, артистах, клипах.',
   },
   {
-    id: 'billboard-ru',
-    name: 'Billboard Russia',
-    url: 'https://billboard.ru/',
-    category: 'charts',
-    parsingHint: 'Российская версия Billboard. Извлеки новости о чартах, релизах и музыкальной индустрии.',
+    id: 'rollingstone',
+    name: 'Rolling Stone Russia',
+    url: 'https://www.rollingstone.ru/',
+    category: 'industry',
+    parsingHint: 'Российская версия Rolling Stone. Извлеки новости о музыке, артистах, релизах, интервью. Игнорируй новости о кино.',
   },
   {
-    id: 'zvuki',
-    name: 'Звуки.ру',
-    url: 'https://zvuki.ru/R/P/',
-    category: 'releases',
-    parsingHint: 'Музыкальный портал. Извлеки новости о музыкальных релизах, обзорах альбомов.',
+    id: 'lenta-music',
+    name: 'Lenta.ru Музыка',
+    url: 'https://lenta.ru/rubrics/culture/music/',
+    category: 'industry',
+    parsingHint: 'Раздел музыки Lenta.ru — крупнейший новостной портал. Извлеки новости о музыкальных событиях, артистах, релизах.',
   },
   {
     id: 'afisha-daily',
@@ -158,13 +158,13 @@ interface ParsedNewsItem {
   publishedAt: string;
 }
 
-async function extractNewsWithMistral(
+async function extractNewsWithLLM(
   source: NewsSource,
   pageText: string,
 ): Promise<ParsedNewsItem[]> {
-  const mistralKey = process.env.MISTRAL_API_KEY;
-  if (!mistralKey) {
-    console.log('[news-agent] MISTRAL_API_KEY not set');
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    console.log('[news-agent] OPENROUTER_API_KEY not set');
     return [];
   }
 
@@ -208,26 +208,27 @@ SEO-ПРАВИЛА:
 - Если не удалось извлечь новости, верни {"news": []}`;
 
   try {
-    const resp = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${mistralKey}`,
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': 'https://promo-music.ru',
+        'X-Title': 'PromoFM News Agent',
       },
       body: JSON.stringify({
-        model: 'mistral-large-latest',
+        model: 'google/gemini-2.0-flash-001',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}` },
         ],
         temperature: 0.3,
         max_tokens: 4000,
-        response_format: { type: 'json_object' },
       }),
     });
 
     if (!resp.ok) {
-      console.log(`[news-agent] Mistral error for ${source.id}: ${await resp.text()}`);
+      console.log(`[news-agent] LLM error for ${source.id}: ${await resp.text()}`);
       return [];
     }
 
@@ -236,12 +237,26 @@ SEO-ПРАВИЛА:
     if (!content) return [];
 
     let parsed: any;
+    // Strip markdown code fences if present
+    let cleanContent = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    // Fix trailing commas before } or ]
+    cleanContent = cleanContent.replace(/,\s*([}\]])/g, '$1');
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(cleanContent);
     } catch {
-      const match = content.match(/\{[\s\S]*\}/);
-      if (match) parsed = JSON.parse(match[0]);
-      else return [];
+      // Try to extract the outermost JSON object
+      const match = cleanContent.match(/\{[\s\S]*\}/);
+      if (match) {
+        try {
+          parsed = JSON.parse(match[0].replace(/,\s*([}\]])/g, '$1'));
+        } catch {
+          console.log('[news-agent] JSON fallback also failed, extracting titles only');
+          const items = [...cleanContent.matchAll(/"title"\s*:\s*"([^"]+)"/g)];
+          if (items.length > 0) {
+            parsed = { news: items.map(m => ({ title: m[1], excerpt: '', content: '', category: 'industry', tags: [], sourceUrl: '', imageUrl: '', publishedAt: '' })) };
+          } else return [];
+        }
+      } else return [];
     }
 
     const rawNews = Array.isArray(parsed) ? parsed : (parsed.news || parsed.articles || []);
@@ -261,7 +276,7 @@ SEO-ПРАВИЛА:
         publishedAt: n.publishedAt || new Date().toISOString(),
       }));
   } catch (error) {
-    console.log(`[news-agent] Mistral extraction error for ${source.id}: ${error}`);
+    console.log(`[news-agent] LLM extraction error for ${source.id}: ${error}`);
     return [];
   }
 }
@@ -288,7 +303,7 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
     return { added: 0, errors };
   }
 
-  const newsItems = await extractNewsWithMistral(source, pageText);
+  const newsItems = await extractNewsWithLLM(source, pageText);
   if (newsItems.length === 0) {
     errors.push(`No news extracted from ${source.id}`);
     return { added: 0, errors };
