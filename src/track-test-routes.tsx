@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { paymentTransactionsStore, trackTestAllRequestsStore, trackTestExpertsStore, trackTestExpertStatsStore, trackTestRequestReviewsStore, trackTestRequestsStore, trackTestReviewsStore, trackTestUserRequestsStore } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
@@ -250,7 +250,7 @@ app.post('/payment', requireAuth, async (c) => {
 // 3. МОДЕРАЦИЯ (администратор)
 // =====================================================
 
-app.post('/moderate', requireAuth, async (c) => {
+app.post('/moderate', requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { request_id, action, notes } = body;
@@ -325,7 +325,7 @@ app.post('/moderate', requireAuth, async (c) => {
 // 4. НАЗНАЧЕНИЕ ЭКСПЕРТОВ (администратор)
 // =====================================================
 
-app.post('/assign-experts', requireAuth, async (c) => {
+app.post('/assign-experts', requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { request_id, expert_emails, required_count } = body;
@@ -754,7 +754,7 @@ function templateConsolidatedRecommendations(reviews: ExpertReview[]): string {
 // 7. ФИНАЛИЗАЦИЯ И ОТПРАВКА РЕЗУЛЬТАТОВ (админстратор)
 // =====================================================
 
-app.post('/finalize', requireAuth, async (c) => {
+app.post('/finalize', requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { request_id, action, rejection_reason } = body;
@@ -815,7 +815,7 @@ app.post('/finalize', requireAuth, async (c) => {
 // 7a. ОТПРАВКА ОТЧЁТА АРТИСТУ (sendFeedbackToArtist)
 // =====================================================
 
-app.post('/send-feedback', requireAuth, async (c) => {
+app.post('/send-feedback', requireAdmin, async (c) => {
   try {
     const { request_id } = await c.req.json();
 
@@ -936,7 +936,7 @@ app.get('/requests/:id', requireAuth, async (c) => {
 });
 
 // Получить все заявки (для администратора)
-app.get('/admin/requests', requireAuth, async (c) => {
+app.get('/admin/requests', requireAdmin, async (c) => {
   try {
     const status = c.req.query('status');
     const allRequestIds = await trackTestAllRequestsStore.get('singleton') || [];
@@ -1052,10 +1052,10 @@ app.post('/claim-review', requireAuth, async (c) => {
     const req: any = await trackTestRequestsStore.get(request_id);
     if (!req) return c.json({ error: 'Request not found' }, 404);
 
-    if (
-      req.status !== 'pending_expert_assignment' &&
-      !(req.status === 'experts_assigned' && (req.assigned_experts || []).length < req.required_expert_count)
-    ) {
+    // Allow claiming while there's room for more experts
+    const acceptingStatuses = ['pending_expert_assignment', 'experts_assigned', 'in_review', 'review_in_progress'];
+    const hasRoom = (req.assigned_experts || []).length < req.required_expert_count;
+    if (!acceptingStatuses.includes(req.status) || (!hasRoom && req.status !== 'pending_expert_assignment')) {
       return c.json({ error: 'This test is not accepting new experts' }, 400);
     }
 
