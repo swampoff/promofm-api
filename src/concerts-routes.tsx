@@ -5,13 +5,11 @@
 
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 import { requireAuth } from './auth-middleware.tsx';
 
 const app = new Hono();
-const FALLBACK_USER = 'anonymous';
 
 // ═══════════════════════════════════════
 // PUBLIC endpoints (no auth required)
@@ -47,7 +45,7 @@ app.get('/promoted', async (c) => {
 // GET / — Get all concerts for current user
 app.get('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const concerts = await typed.getConcertsByUser(userId);
     return c.json({ success: true, data: concerts });
   } catch (error) {
@@ -75,7 +73,7 @@ app.get('/:id', requireAuth, async (c) => {
 // POST / — Create new concert
 app.post('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
 
     const concert = await typed.insertConcert({
@@ -144,7 +142,7 @@ app.post('/:id/submit', requireAuth, async (c) => {
 app.post('/:id/promote', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
     const cost = body.cost || 100;
 

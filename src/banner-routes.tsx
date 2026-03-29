@@ -5,12 +5,10 @@
 
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const app = new Hono();
-const FALLBACK_USER = 'anonymous';
 
 // ═══════════════════════════════════════
 // PUBLIC endpoints (no auth required)
@@ -59,7 +57,7 @@ app.post('/click/:id', async (c) => {
 // GET / — Get all banners for current user
 app.get('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const banners = await typed.getBannersByUser(userId);
     return c.json({ success: true, data: banners });
   } catch (error) {
@@ -86,7 +84,7 @@ app.get('/:id', requireAuth, async (c) => {
 // POST / — Create new banner
 app.post('/', requireAuth, async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
 
     const banner = await typed.insertBanner({
@@ -138,7 +136,7 @@ app.delete('/:id', requireAuth, async (c) => {
 app.post('/:id/activate', requireAuth, async (c) => {
   try {
     const bannerId = c.req.param('id');
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = c.get('userId');
     const body = await c.req.json();
 
     const banner = await typed.getBannerById(bannerId);
