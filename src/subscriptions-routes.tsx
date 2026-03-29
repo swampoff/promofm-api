@@ -96,6 +96,115 @@ const SUBSCRIPTION_PLANS = {
 };
 
 /**
+ * GET /subscriptions/plans
+ * Получить все доступные планы подписок (каноничные)
+ */
+subscriptions.get('/plans', async (c) => {
+  try {
+    const plans = [
+      {
+        id: 'spark',
+        name: 'Тест-драйв',
+        price: 0,
+        price_year: 0,
+        currency: 'RUB',
+        interval: 'month',
+        credits_per_month: 0,
+        extra_mailing_price: 7000,
+        features: [
+          'Профиль артиста',
+          'Загрузка треков',
+          'Пресс-релиз для 1 трека',
+          'Доступ к базе знаний',
+          'Комиссия 10% на донаты',
+        ],
+        color: 'gray',
+      },
+      {
+        id: 'start',
+        name: 'Старт',
+        price: 8990,
+        price_year: 89900,
+        currency: 'RUB',
+        interval: 'month',
+        credits_per_month: 1,
+        extra_mailing_price: 5000,
+        features: [
+          '1 рассылка/мес (экономия 28%)',
+          'Скидка 5% на питчинг',
+          'Скидка 5% на маркетинг',
+          'Скидка 5% на баннеры',
+          'Комиссия 7% на донаты',
+          '+5% бонусных коинов',
+        ],
+        popular: false,
+        color: 'green',
+      },
+      {
+        id: 'pro',
+        name: 'Про',
+        price: 39990,
+        price_year: 399900,
+        currency: 'RUB',
+        interval: 'month',
+        credits_per_month: 3,
+        extra_mailing_price: 4000,
+        features: [
+          '3 рассылки/мес (экономия 43%)',
+          'Скидка 10% на питчинг',
+          'Скидка 15% на маркетинг',
+          'Скидка 10% на тест трека',
+          'Скидка 10% на баннеры',
+          'Комиссия 5% на донаты',
+          '+15% бонусных коинов',
+          'Приоритетная поддержка',
+        ],
+        popular: true,
+        color: 'purple',
+      },
+      {
+        id: 'elite',
+        name: 'Бизнес',
+        price: 149990,
+        price_year: 1499900,
+        currency: 'RUB',
+        interval: 'month',
+        credits_per_month: 10,
+        extra_mailing_price: 3000,
+        features: [
+          '10 рассылок/мес (экономия 57%)',
+          'Скидка 15% на питчинг',
+          'Скидка 25% на маркетинг',
+          'Скидка 20% на тест трека',
+          'Скидка 15% на баннеры',
+          'Комиссия 3% на донаты',
+          '+25% бонусных коинов',
+          'Персональный менеджер',
+        ],
+        popular: false,
+        color: 'yellow',
+      },
+    ];
+    
+    return c.json({
+      success: true,
+      plans
+    });
+  } catch (error) {
+    console.error('Error loading plans:', error);
+    return c.json({ 
+      success: false, 
+      error: 'Failed to load plans' 
+    }, 500);
+  }
+});
+
+/**
+ * POST /subscriptions/:userId/change-plan
+ * Изменить план подписки
+ */
+
+/**
  * GET /subscriptions/:userId
  * Получить подписку пользователя
  */
@@ -537,114 +646,7 @@ subscriptions.get('/:userId/current', requireAuth, async (c) => {
   }
 });
 
-/**
- * GET /subscriptions/plans
- * Получить все доступные планы подписок (каноничные)
- */
-subscriptions.get('/plans', async (c) => {
-  try {
-    const plans = [
-      {
-        id: 'spark',
-        name: 'Тест-драйв',
-        price: 0,
-        price_year: 0,
-        currency: 'RUB',
-        interval: 'month',
-        credits_per_month: 0,
-        extra_mailing_price: 7000,
-        features: [
-          'Профиль артиста',
-          'Загрузка треков',
-          'Пресс-релиз для 1 трека',
-          'Доступ к базе знаний',
-          'Комиссия 10% на донаты',
-        ],
-        color: 'gray',
-      },
-      {
-        id: 'start',
-        name: 'Старт',
-        price: 8990,
-        price_year: 89900,
-        currency: 'RUB',
-        interval: 'month',
-        credits_per_month: 1,
-        extra_mailing_price: 5000,
-        features: [
-          '1 рассылка/мес (экономия 28%)',
-          'Скидка 5% на питчинг',
-          'Скидка 5% на маркетинг',
-          'Скидка 5% на баннеры',
-          'Комиссия 7% на донаты',
-          '+5% бонусных коинов',
-        ],
-        popular: false,
-        color: 'green',
-      },
-      {
-        id: 'pro',
-        name: 'Про',
-        price: 39990,
-        price_year: 399900,
-        currency: 'RUB',
-        interval: 'month',
-        credits_per_month: 3,
-        extra_mailing_price: 4000,
-        features: [
-          '3 рассылки/мес (экономия 43%)',
-          'Скидка 10% на питчинг',
-          'Скидка 15% на маркетинг',
-          'Скидка 10% на тест трека',
-          'Скидка 10% на баннеры',
-          'Комиссия 5% на донаты',
-          '+15% бонусных коинов',
-          'Приоритетная поддержка',
-        ],
-        popular: true,
-        color: 'purple',
-      },
-      {
-        id: 'elite',
-        name: 'Бизнес',
-        price: 149990,
-        price_year: 1499900,
-        currency: 'RUB',
-        interval: 'month',
-        credits_per_month: 10,
-        extra_mailing_price: 3000,
-        features: [
-          '10 рассылок/мес (экономия 57%)',
-          'Скидка 15% на питчинг',
-          'Скидка 25% на маркетинг',
-          'Скидка 20% на тест трека',
-          'Скидка 15% на баннеры',
-          'Комиссия 3% на донаты',
-          '+25% бонусных коинов',
-          'Персональный менеджер',
-        ],
-        popular: false,
-        color: 'yellow',
-      },
-    ];
-    
-    return c.json({
-      success: true,
-      plans
-    });
-  } catch (error) {
-    console.error('Error loading plans:', error);
-    return c.json({ 
-      success: false, 
-      error: 'Failed to load plans' 
-    }, 500);
-  }
-});
 
-/**
- * POST /subscriptions/:userId/change-plan
- * Изменить план подписки
- */
 subscriptions.post('/:userId/change-plan', requireAuth, async (c) => {
   const userId = c.req.param('userId');
   const authUserId = c.get('userId');

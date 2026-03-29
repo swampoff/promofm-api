@@ -143,16 +143,20 @@ function sanitizeUpdates(updates: Record<string, unknown>): Partial<ArtistProfil
 app.get('/profile/:artistId', async (c) => {
   const artistId = c.req.param('artistId');
   console.log(`[ArtistProfile] GET ${artistId}`);
+  const isUuidParam = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artistId);
 
   try {
-    // 1. KV/VPS cache
-    const kvProfile = await loadFromKv(artistId);
-    if (kvProfile) {
-      return c.json({ success: true, source: 'kv', data: kvProfile });
+    // 1. KV/VPS cache (only for UUIDs — slug keys are not stored in KV)
+    if (isUuidParam) {
+      const kvProfile = await loadFromKv(artistId);
+      if (kvProfile) {
+        return c.json({ success: true, source: 'kv', data: kvProfile });
+      }
     }
 
     // 2. Try auth-created profile (stored at profile:${artistId} by signup route)
     try {
+      if (!isUuidParam) throw new Error('skip');
       const authProfile = await vpsGetProfile(artistId);
       if (authProfile && typeof authProfile === 'object') {
         const ap = authProfile as Record<string, unknown>;
@@ -175,20 +179,27 @@ app.get('/profile/:artistId', async (c) => {
       const { getDbClient } = await import('./db-client.tsx');
       const dbClient = getDbClient();
       
-      // Try by user_id first, then by id
-      let { data: apRow } = await dbClient
-        .from('artist_profiles')
-        .select('*')
-        .eq('user_id', artistId)
-        .maybeSingle();
-      
-      if (!apRow) {
-        const { data: apRow2 } = await dbClient
+      // Check if artistId is a valid UUID before UUID-based queries
+      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artistId);
+      let apRow: any = null;
+
+      if (isUUID) {
+        // Try by user_id first, then by id
+        const { data: r1 } = await dbClient
           .from('artist_profiles')
           .select('*')
-          .eq('id', artistId)
+          .eq('user_id', artistId)
           .maybeSingle();
-        apRow = apRow2;
+        apRow = r1;
+
+        if (!apRow) {
+          const { data: r2 } = await dbClient
+            .from('artist_profiles')
+            .select('*')
+            .eq('id', artistId)
+            .maybeSingle();
+          apRow = r2;
+        }
       }
 
       // 3c. Try by slug (e.g., /profile/feduk)

@@ -216,9 +216,43 @@ async function fetchPageText(url: string): Promise<string | null> {
   // SSRF protection: validate URL before fetching
   const urlCheck = await isUrlSafe(url);
   if (!urlCheck.safe) {
-    console.warn(`[SSRF blocked] ${url}: ${urlCheck.reason}`);
+    console.warn('[SSRF blocked] ' + url + ': ' + urlCheck.reason);
     return null;
   }
+
+  // Try Firecrawl first (handles JS-rendered pages like radio charts)
+  const firecrawlKey = process.env.FIRECRAWL_API_KEY;
+  if (firecrawlKey) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000);
+
+      const resp = await fetch('https://api.firecrawl.dev/v1/scrape', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + firecrawlKey,
+        },
+        body: JSON.stringify({ url, formats: ['markdown'], waitFor: 5000 }),
+      });
+      clearTimeout(timeout);
+
+      if (resp.ok) {
+        const data: any = await resp.json();
+        if (data.success && data.data?.markdown) {
+          const md = data.data.markdown;
+          console.log('[charts] Firecrawl got ' + md.length + ' chars for ' + url);
+          return md.slice(0, 12000);
+        }
+      }
+      console.log('[charts] Firecrawl failed for ' + url + ', falling back to plain fetch');
+    } catch (err) {
+      console.log('[charts] Firecrawl error for ' + url + ': ' + err);
+    }
+  }
+
+  // Fallback: plain fetch
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -235,7 +269,7 @@ async function fetchPageText(url: string): Promise<string | null> {
     clearTimeout(timeout);
 
     if (!response.ok) {
-      console.log(`Chart fetch failed for ${url}: HTTP ${response.status}`);
+      console.log('Chart fetch failed for ' + url + ': HTTP ' + response.status);
       return null;
     }
 
@@ -259,10 +293,9 @@ async function fetchPageText(url: string): Promise<string | null> {
       .replace(/\s+/g, ' ')
       .trim();
 
-    // Limit to ~8000 chars to fit in Mistral context
     return cleanText.slice(0, 8000);
   } catch (error) {
-    console.log(`Chart fetch error for ${url}: ${error}`);
+    console.log('Chart fetch error for ' + url + ': ' + error);
     return null;
   }
 }
@@ -273,11 +306,12 @@ async function extractChartWithMistral(
   sourceConfig: ChartSourceConfig,
   pageText: string,
 ): Promise<ChartTrackEntry[] | null> {
-  const mistralKey = process.env.MISTRAL_API_KEY;
-  if (!mistralKey) {
-    console.log('MISTRAL_API_KEY not set, skipping chart extraction');
+  const llmKey = process.env.OPENROUTER_API_KEY || process.env.MISTRAL_API_KEY;
+  if (!llmKey) {
+    console.log('No LLM API key set (OPENROUTER or MISTRAL), skipping chart extraction');
     return null;
   }
+  const useOpenRouter = !!process.env.OPENROUTER_API_KEY;
 
   const systemPrompt = `Ты - парсер музыкальных чартов. Из текста HTML-страницы извлеки список треков чарта.
 ${sourceConfig.parsingHint}
@@ -292,14 +326,15 @@ ${sourceConfig.parsingHint}
 - Если трек содержит feat., оставь feat. в title`;
 
   try {
-    const resp = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    const apiUrl2 = useOpenRouter ? 'https://openrouter.ai/api/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
+    const resp = await fetch(apiUrl2, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${mistralKey}`,
+        'Authorization': 'Bearer ' + llmKey,
       },
       body: JSON.stringify({
-        model: 'mistral-large-latest',
+        model: useOpenRouter ? 'google/gemini-2.0-flash-001' : 'mistral-large-latest',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `Вот текст страницы чарта "${sourceConfig.name}" (${sourceConfig.url}):\n\n${pageText}` },
