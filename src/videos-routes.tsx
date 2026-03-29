@@ -301,7 +301,8 @@ videosRoutes.post('/build-clips', async (c) => {
     return a.rank - b.rank;
   });
 
-  const finalClips = clips.slice(0, 20);
+  // Filter out entries without valid videoId or thumbnail
+  const finalClips = clips.filter(c => c.videoId && c.thumbnail).slice(0, 20);
 
   await platformStatsStore.set('videos:new_clips', {
     clips: finalClips,
@@ -315,6 +316,43 @@ videosRoutes.post('/build-clips', async (c) => {
   results.durationMs = Date.now() - startTime;
 
   return c.json({ success: true, ...results });
+});
+
+// ─── Download thumbnails (YouTube blocked in Russia) ─────────────────
+videosRoutes.post('/download-thumbnails', async (c) => {
+  const internalKey = c.req.header('x-internal-key');
+  if (internalKey !== process.env.VPS_INTERNAL_KEY) {
+    return c.json({ success: false, error: 'Unauthorized' }, 401);
+  }
+
+  try {
+    const body = await c.req.json();
+    const thumbnails: Array<{ videoId: string; url: string }> = body.thumbnails || [];
+    if (thumbnails.length === 0) {
+      return c.json({ success: false, error: 'No thumbnails provided' }, 400);
+    }
+
+    let downloaded = 0;
+    const errors: string[] = [];
+
+    for (const t of thumbnails) {
+      try {
+        const resp = await fetch(t.url, { signal: AbortSignal.timeout(10000) });
+        if (!resp.ok) { errors.push(t.videoId + ': HTTP ' + resp.status); continue; }
+        const buffer = Buffer.from(await resp.arrayBuffer());
+        const fs = await import('node:fs');
+        const path = '/var/www/promofm/html/thumbnails/thumb_' + t.videoId + '.jpg';
+        fs.writeFileSync(path, buffer);
+        downloaded++;
+      } catch (e: any) {
+        errors.push(t.videoId + ': ' + e.message);
+      }
+    }
+
+    return c.json({ success: true, downloaded, total: thumbnails.length, errors });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
 });
 
 // ─── Authenticated routes ─────────────────
