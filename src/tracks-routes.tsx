@@ -70,27 +70,44 @@ tracksRoutes.post('/', requireAuth, async (c) => {
   }
 });
 
-// PUT /:id — Update track
+// PUT /:id — Update track (ownership check: only track owner can edit)
 tracksRoutes.put('/:id', requireAuth, async (c) => {
   try {
     const trackId = c.req.param('id');
+    const userId = c.get('userId');
     const body = await c.req.json();
 
-    const track = await typed.updateTrack(trackId, body);
-    if (!track) {
+    // Ownership check
+    const existing = await typed.getTrackById(trackId);
+    if (!existing) {
       return c.json({ success: false, error: 'Track not found' }, 404);
     }
+    if (existing.user_id && existing.user_id !== userId) {
+      return c.json({ success: false, error: 'Not authorized to edit this track' }, 403);
+    }
 
+    const track = await typed.updateTrack(trackId, body);
     return c.json({ success: true, data: track });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
-// DELETE /:id — Delete track
+// DELETE /:id — Delete track (ownership check: only track owner can delete)
 tracksRoutes.delete('/:id', requireAuth, async (c) => {
   try {
     const trackId = c.req.param('id');
+    const userId = c.get('userId');
+
+    // Ownership check
+    const existing = await typed.getTrackById(trackId);
+    if (!existing) {
+      return c.json({ success: false, error: 'Track not found' }, 404);
+    }
+    if (existing.user_id && existing.user_id !== userId) {
+      return c.json({ success: false, error: 'Not authorized to delete this track' }, 403);
+    }
+
     await typed.deleteTrack(trackId);
     return c.json({ success: true, message: 'Track deleted' });
   } catch (error) {

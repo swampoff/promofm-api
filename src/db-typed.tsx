@@ -464,8 +464,8 @@ export async function awardCoins(userId: string, amount: number, description: st
     .eq('user_id', userId)
     .maybeSingle();
 
-  const currentBalance = existing?.balance || 0;
-  const newBalance = currentBalance + amount;
+  const currentBalance = Number(existing?.balance) || 0;
+  const newBalance = currentBalance + Number(amount);
 
   await dbClient
     .from('coin_balances')
@@ -504,12 +504,12 @@ export async function deductCoins(userId: string, amount: number, description: s
     .eq('user_id', userId)
     .maybeSingle();
 
-  const currentBalance = existing?.balance || 0;
-  if (currentBalance < amount) {
+  const currentBalance = Number(existing?.balance) || 0;
+  if (currentBalance < Number(amount)) {
     return { error: 'Insufficient balance', balance: currentBalance };
   }
 
-  const newBalance = currentBalance - amount;
+  const newBalance = currentBalance - Number(amount);
 
   await dbClient
     .from('coin_balances')

@@ -169,7 +169,7 @@ app.post('/seed', requireAuth, async (c) => {
 
 // ═══════ GET /djs — List all DJs (public) ═══════
 
-app.get('/djs', requireAuth, async (c) => {
+app.get('/djs', async (c) => {
   try {
     // Get index
     let index = await djMarketplaceIndexStore.get('singleton') as string[] | null;
@@ -248,7 +248,7 @@ app.get('/djs', requireAuth, async (c) => {
 
 // ═══════ GET /djs/:id — Single DJ profile (public) ═══════
 
-app.get('/djs/:id', requireAuth, async (c) => {
+app.get('/djs/:id', async (c) => {
   try {
     const id = c.req.param('id');
     const profile = await getDjProfile(id);
@@ -264,7 +264,7 @@ app.get('/djs/:id', requireAuth, async (c) => {
 
 // ═══════ GET /djs/:id/mixes — DJ mixes (public) ═══════
 
-app.get('/djs/:id/mixes', requireAuth, async (c) => {
+app.get('/djs/:id/mixes', async (c) => {
   try {
     const id = c.req.param('id');
     const mixes = await djMixesStore.get(id) || [];
@@ -277,7 +277,7 @@ app.get('/djs/:id/mixes', requireAuth, async (c) => {
 
 // ═══════ GET /djs/:id/reviews — DJ reviews (public) ═══════
 
-app.get('/djs/:id/reviews', requireAuth, async (c) => {
+app.get('/djs/:id/reviews', async (c) => {
   try {
     const id = c.req.param('id');
     const reviews = await djReviewsStore.get(id) || [];
@@ -290,7 +290,7 @@ app.get('/djs/:id/reviews', requireAuth, async (c) => {
 
 // ═══════ GET /djs/:id/calendar — DJ availability (public) ═══════
 
-app.get('/djs/:id/calendar', requireAuth, async (c) => {
+app.get('/djs/:id/calendar', async (c) => {
   try {
     const id = c.req.param('id');
     // Check for stored calendar, or generate default

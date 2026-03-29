@@ -262,7 +262,7 @@ app.post('/batchModeration', requireAuth, requireAdmin, async (c) => {
 });
 
 // GET /genres
-app.get('/genres', requireAuth, requireAdmin, async (c) => {
+app.get('/genres', async (c) => {
   return c.json({ genres: GENRES });
 });
 
@@ -293,7 +293,7 @@ app.get('/stats', requireAuth, requireAdmin, async (c) => {
 
 
 // ─── Public: New Releases with YouTube playback ─────────────
-app.get('/newReleases', requireAuth, requireAdmin, async (c) => {
+app.get('/newReleases', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '25');
     const { platformStatsStore } = await import('./db.tsx');

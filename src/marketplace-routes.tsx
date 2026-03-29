@@ -381,13 +381,13 @@ app.put('/beats/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
-    const { producerId } = body;
+    const userId = c.get('userId'); // IDOR fix: from JWT
 
     const raw = await getBeat(id);
     if (!raw) return c.json({ success: false, error: 'Beat not found' }, 404);
     const beat = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
-    if (producerId && beat.producerId !== producerId) {
+    if (beat.producerId !== userId) {
       return c.json({ success: false, error: 'Not authorized to edit this beat' }, 403);
     }
 
@@ -414,13 +414,13 @@ app.put('/beats/:id', requireAuth, async (c) => {
 app.delete('/beats/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
-    const producerId = c.req.query('producerId');
+    const userId = c.get('userId'); // IDOR fix: from JWT
 
     const raw = await getBeat(id);
     if (!raw) return c.json({ success: false, error: 'Beat not found' }, 404);
     const beat = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
-    if (producerId && beat.producerId !== producerId) {
+    if (beat.producerId !== userId) {
       return c.json({ success: false, error: 'Not authorized to delete this beat' }, 403);
     }
 
@@ -452,10 +452,11 @@ app.post('/beats/:id/purchase', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
-    const { buyerId, buyerName, licenseType } = body;
+    const buyerId = c.get('userId'); // IDOR fix: from JWT, not body
+    const { buyerName, licenseType } = body;
 
     if (!buyerId || !licenseType) {
-      return c.json({ success: false, error: 'buyerId and licenseType required' }, 400);
+      return c.json({ success: false, error: 'licenseType required' }, 400);
     }
 
     const raw = await getBeat(id);
@@ -567,10 +568,9 @@ app.post('/beats/:id/purchase', requireAuth, async (c) => {
 app.post('/beats/:id/favorite', requireAuth, async (c) => {
   try {
     const beatId = c.req.param('id');
-    const body = await c.req.json();
-    const { userId } = body;
+    const userId = c.get('userId'); // IDOR fix: from JWT, not body
 
-    if (!userId) return c.json({ success: false, error: 'userId required' }, 400);
+    if (!userId) return c.json({ success: false, error: 'Authorization required' }, 401);
 
     const raw = await beatFavoritesStore.get(userId);
     const favs: string[] = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
@@ -668,10 +668,11 @@ app.post('/beats/:id/review', requireAuth, async (c) => {
   try {
     const beatId = c.req.param('id');
     const body = await c.req.json();
-    const { userId, userName, rating, title, text, licenseType } = body;
+    const userId = c.get('userId'); // IDOR fix: from JWT
+    const { userName, rating, title, text, licenseType } = body;
 
     if (!userId || !rating || !text) {
-      return c.json({ success: false, error: 'userId, rating and text required' }, 400);
+      return c.json({ success: false, error: 'rating and text required' }, 400);
     }
 
     if (rating < 1 || rating > 5) {
@@ -792,10 +793,9 @@ app.post('/beats/:id/reviews/:reviewId/helpful', requireAuth, async (c) => {
   try {
     const beatId = c.req.param('id');
     const reviewId = c.req.param('reviewId');
-    const body = await c.req.json();
-    const { userId } = body;
+    const userId = c.get('userId'); // IDOR fix: from JWT
 
-    if (!userId) return c.json({ success: false, error: 'userId required' }, 400);
+    if (!userId) return c.json({ success: false, error: 'Authorization required' }, 401);
 
     const raw = await getBeatReview(beatId, reviewId);
     if (!raw) return c.json({ success: false, error: 'Review not found' }, 404);
@@ -941,10 +941,11 @@ app.post('/services/:id/order', requireAuth, async (c) => {
   try {
     const serviceId = c.req.param('id');
     const body = await c.req.json();
-    const { clientId, clientName, message, details, urgency } = body;
+    const clientId = c.get('userId'); // IDOR fix: from JWT
+    const { clientName, message, details, urgency } = body;
 
     if (!clientId) {
-      return c.json({ success: false, error: 'clientId required' }, 400);
+      return c.json({ success: false, error: 'Authorization required' }, 401);
     }
 
     const raw = await producerServicesStore.get(serviceId);
@@ -1062,14 +1063,15 @@ app.put('/orders/:id/status', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
     const body = await c.req.json();
-    const { producerId, status, progress, message } = body;
+    const userId = c.get('userId'); // IDOR fix: from JWT
+    const { status, progress, message } = body;
 
     const raw = await serviceOrdersStore.get(orderId);
     if (!raw) return c.json({ success: false, error: 'Order not found' }, 404);
     const order = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
-    // Проверка владельца (продюсер)
-    if (producerId && order.producerId !== producerId) {
+    // Проверка владельца (продюсер или клиент)
+    if (order.producerId !== userId && order.clientId !== userId) {
       return c.json({ success: false, error: 'Not authorized' }, 403);
     }
 
@@ -1267,10 +1269,11 @@ app.put('/contracts/:id/milestones/:mid', requireAuth, async (c) => {
     const orderId = c.req.param('id');
     const mid = c.req.param('mid');
     const body = await c.req.json();
-    const { action, userId } = body;
+    const userId = c.get('userId'); // IDOR fix: from JWT
+    const { action } = body;
 
     if (!action || !userId) {
-      return c.json({ success: false, error: 'action and userId required' }, 400);
+      return c.json({ success: false, error: 'action required' }, 400);
     }
 
     const raw = await contractsStore.get(orderId);
@@ -1541,9 +1544,10 @@ app.post('/digital-goods/:id/purchase', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
-    const { buyerId, buyerName } = body;
+    const buyerId = c.get('userId'); // IDOR fix: from JWT
+    const { buyerName } = body;
 
-    if (!buyerId) return c.json({ success: false, error: 'buyerId required' }, 400);
+    if (!buyerId) return c.json({ success: false, error: 'Authorization required' }, 401);
 
     const raw = await digitalGoodsStore.get(id);
     if (!raw) return c.json({ success: false, error: 'Digital good not found' }, 404);

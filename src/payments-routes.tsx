@@ -1,6 +1,6 @@
 /**
  * PAYMENTS ROUTES - API роуты для системы платежей
- * Все данные хранятся в Supabase через typed stores (db.tsx)
+ * Все данные хранятся в PostgreSQL через typed stores (db.tsx)
  */
 
 import { Hono } from 'hono';
@@ -46,8 +46,10 @@ async function createTransaction(userId: string, type: string, category: string,
   const balRaw = await getPaymentBalance(userId);
   const bal = balRaw || { userId, available: 0, pending: 0, total: 0 };
   if (!bal.userId) bal.userId = userId;
-  if (type === 'income' || type === 'donation') bal.available += amount;
-  else if (type === 'expense' || type === 'withdrawal') bal.available -= amount;
+  bal.available = Number(bal.available) || 0;
+  bal.pending = Number(bal.pending) || 0;
+  if (type === 'income' || type === 'donation') bal.available += Number(amount);
+  else if (type === 'expense' || type === 'withdrawal') bal.available -= Number(amount);
   bal.total = bal.available + bal.pending;
   await upsertPaymentBalance(userId, bal);
   return id;

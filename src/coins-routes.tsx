@@ -46,8 +46,8 @@ coinsRoutes.post('/transactions', requireAuth, async (c) => {
 
     // Update balance
     const current = await db.getCoinBalance(userId);
-    const currentBalance = current?.balance || 0;
-    const newBalance = currentBalance + (transaction.amount || 0);
+    const currentBalance = Number(current?.balance) || 0;
+    const newBalance = currentBalance + Number(transaction.amount || 0);
     await db.setCoinBalance(userId, newBalance);
 
     // Save transaction
