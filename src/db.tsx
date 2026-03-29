@@ -1370,3 +1370,14 @@ export async function upsertPaymentBalance(userId: string, balance: { available?
     }, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertPaymentBalance:', error);
 }
+
+// ── Audio Branding stores ──
+export const audioBrandingOrdersStore = jsonbStore('audio_branding_orders');
+export const audioBrandingByStatusStore = jsonbStore('audio_branding_by_status');
+export const audioBrandingByVenueStore = jsonbStore('audio_branding_by_venue');
+export const audioBrandingByArtistStore = jsonbStore('audio_branding_by_artist');
+
+// ── Production 360 stores ──
+export const production360OrdersStore = jsonbStore('production_360_orders');
+export const production360ByStatusStore = jsonbStore('production_360_by_status');
+export const production360ByArtistStore = jsonbStore('production_360_by_artist');

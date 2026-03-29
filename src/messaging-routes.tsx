@@ -380,7 +380,7 @@ app.get('/rules', (c) => {
 
 
 // ── POST /presence - Online presence heartbeat ──
-app.post('/presence', async (c) => {
+app.post('/presence', requireAuth, async (c) => {
   return c.json({ success: true });
 });
 

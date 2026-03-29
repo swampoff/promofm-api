@@ -20,7 +20,7 @@
  *   GET    /production360/stats                  — Статистика (admin)
  */
 
-import { Hono } from 'npm:hono@4';
+import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
 import {
   production360OrdersStore,
@@ -35,7 +35,7 @@ import {
   PRODUCTION_360_SERVICE_PRICES,
   PRODUCTION_360_ADDON_PRICES,
   calculateProduction360Price,
-} from '../../src/constants/financial.ts';
+} from './financial-constants.tsx';
 
 const app = new Hono();
 
@@ -300,7 +300,7 @@ app.post('/orders', requireAuth, async (c) => {
 // CALCULATE PRICE
 // =====================================================
 
-app.post('/calculate-price', requireAuth, async (c) => {
+app.post('/calculate-price', async (c) => {
   try {
     const body = await c.req.json();
     const { serviceType, addons = [], subscription = 'none' } = body;

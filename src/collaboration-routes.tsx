@@ -160,7 +160,7 @@ app.get('/offers/producer/:id', requireAuth, async (c) => {
 
 // ── PUT /offers/:id/respond ──
 
-app.put('/offers/:id/respond', async (c) => {
+app.put('/offers/:id/respond', requireAuth, async (c) => {
   const offerId = c.req.param('id');
   try {
     const { artistId, status, comment } = await c.req.json();
@@ -230,7 +230,7 @@ app.get('/chat/:offerId', requireAuth, async (c) => {
 
 // ── POST /chat/:offerId ──
 
-app.post('/chat/:offerId', async (c) => {
+app.post('/chat/:offerId', requireAuth, async (c) => {
   const offerId = c.req.param('offerId');
   try {
     const { senderId, senderName, senderRole, text, attachment } = await c.req.json();

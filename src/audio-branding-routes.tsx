@@ -19,7 +19,7 @@
  *   POST   /audio-branding/calculate-price     — Рассчитать цену
  */
 
-import { Hono } from 'npm:hono@4';
+import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
 import {
   audioBrandingOrdersStore,
@@ -38,7 +38,7 @@ import {
   AUDIO_BRANDING_VOICE_MULTIPLIERS,
   AUDIO_BRANDING_DISCOUNTS,
   calculateAudioBrandingPrice,
-} from '../../src/constants/financial.ts';
+} from './financial-constants.tsx';
 
 const app = new Hono();
 

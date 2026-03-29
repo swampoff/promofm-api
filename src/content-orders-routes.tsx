@@ -304,7 +304,7 @@ app.put("/orders/:id", requireAuth, async (c) => {
 // DELETE ORDER
 // =====================================================
 
-app.delete("/orders/:id", async (c) => {
+app.delete("/orders/:id", requireAuth, async (c) => {
   try {
     const orderId = c.req.param("id");
     const order = await contentOrdersStore.get(orderId) as ContentOrder;

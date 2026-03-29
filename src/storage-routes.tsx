@@ -29,7 +29,7 @@ let storageInitialized = false;
 
 async function ensureStorageInitialized() {
   if (!storageInitialized) {
-    console.log('Initializing Supabase Storage...');
+    console.log('Initializing Local Storage...');
     const result = await initializeStorage();
     
     if (result.success) {
