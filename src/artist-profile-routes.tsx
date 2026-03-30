@@ -547,7 +547,7 @@ app.get('/search', async (c) => {
     const { rows } = await pool.query(
       `SELECT user_id, artist_name, genre, city, avatar_url, is_verified
        FROM artist_profiles
-       WHERE LOWER(artist_name) LIKE 
+       WHERE LOWER(artist_name) LIKE $1 
        ORDER BY total_plays DESC NULLS LAST
        LIMIT 10`,
       [`%${q}%`]
