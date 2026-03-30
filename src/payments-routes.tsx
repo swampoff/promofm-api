@@ -79,6 +79,20 @@ async function addPaymentMethod(userId: string, methodData: any): Promise<any> {
 }
 
 async function createWithdrawRequest(userId: string, amount: number, paymentMethodId: string): Promise<string> {
+  if (amount <= 0) throw new Error('Amount must be positive');
+  // Check balance
+  const balRaw = await getPaymentBalance(userId);
+  const bal = balRaw || { available: 0, pending: 0, total: 0, userId };
+  const available = Number(bal.available) || 0;
+  if (available < amount) {
+    throw new Error(`Insufficient balance: ${available} RUB available, requested ${amount} RUB`);
+  }
+  // Deduct from available, add to pending
+  bal.available = available - amount;
+  bal.pending = (Number(bal.pending) || 0) + amount;
+  bal.total = bal.available + bal.pending;
+  await upsertPaymentBalance(userId, bal);
+
   const id = `wd-${Date.now()}`;
   const req = { id, userId, amount, paymentMethodId, status: 'pending', createdAt: new Date().toISOString() };
   const raw = await paymentWithdrawalsStore.get(userId);
@@ -173,9 +187,17 @@ paymentsRoutes.post('/transactions', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const userId = c.get('userId');
+    const userRole = c.get('userRole');
     const { type, category, amount, description, metadata } = body;
     if (!type || !category || !amount || !description) {
       return c.json({ error: 'Missing required fields: type, category, amount, description' }, 400);
+    }
+    // Security: only admins can create income/donation transactions
+    if ((type === 'income' || type === 'donation' || type === 'commission') && userRole !== 'admin') {
+      return c.json({ error: 'Only expense and withdrawal transactions can be created by users' }, 403);
+    }
+    if (Number(amount) <= 0) {
+      return c.json({ error: 'Amount must be positive' }, 400);
     }
     const transactionId = await createTransaction(userId, type, category, amount, description, metadata);
     return c.json({ success: true, data: { transaction_id: transactionId } });
@@ -322,16 +344,7 @@ paymentsRoutes.post('/sync/subscription', requireAuth, async (c) => {
 // WEBHOOK
 // ========================================
 
-paymentsRoutes.post('/webhook', requireAuth, async (c) => {
-  try {
-    const body = await c.req.json();
-    console.log('Received payment webhook:', body);
-    return c.json({ success: true, message: 'Webhook received' });
-  } catch (error: any) {
-    console.error('Error in POST /payments/webhook:', error);
-    return c.json({ error: safeErrorMessage(error) }, 500);
-  }
-});
+// Webhook endpoint removed — real webhooks are in checkout-routes.tsx (no auth required)
 
 // ========================================
 // ADMIN ENDPOINTS

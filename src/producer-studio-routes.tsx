@@ -25,7 +25,9 @@ import {
   producerProfileEditStore,
   producerSessionsStore,
   producerSettingsStore,
+  producerServicesStore,
 } from './db.tsx';
+import { getPaymentBalance, upsertPaymentBalance } from './db.tsx';
 import { getDbClient } from "./db-client.tsx";
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -101,7 +103,7 @@ app.get('/conversations/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
   // IDOR fix: verify ownership
-  if (producerId !== c.get(userId) && c.get(userRole) !== admin) {
+  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const convs: ConversationMeta[] = await producerConvsStore.get(producerId) || [];
@@ -116,7 +118,7 @@ app.get('/conversations/:producerId', requireAuth, async (c) => {
 app.post('/conversations/create', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const producerId = c.get(userId); // IDOR fix
+    const producerId = c.get('userId'); // IDOR fix
     const { clientName, orderTitle, orderId } = body;
 
     if (!producerId || !clientName) {
@@ -133,7 +135,7 @@ app.post('/conversations/create', requireAuth, async (c) => {
       lastMessage: '',
       lastTime: timeHHmm(),
       unread: 0,
-      online: Math.random() > 0.4,
+      online: false,
       createdAt: nowIso(),
     };
 
@@ -223,46 +225,7 @@ app.post('/messages/send', requireAuth, async (c) => {
       }
     }
 
-    // Simulate client auto-reply after 3-8 seconds (only for producer messages)
-    if (sender === 'producer') {
-      setTimeout(async () => {
-        try {
-          const autoReplies = [
-            'Отлично, спасибо!',
-            'Понял, жду результат.',
-            'Супер, мне нравится направление!',
-            'Хорошо, договорились.',
-            'Можно ещё уточнить один момент?',
-            'Звучит здорово!',
-            'Ок, буду на связи.',
-          ];
-          const reply: Message = {
-            id: genId('msg'),
-            text: autoReplies[Math.floor(Math.random() * autoReplies.length)],
-            sender: 'client',
-            timestamp: nowIso(),
-            read: false,
-          };
-          const currentMsgs: Message[] = await producerMessagesStore.get(conversationId) || [];
-          currentMsgs.push(reply);
-          await producerMessagesStore.set(conversationId, currentMsgs);
 
-          // Update conversation meta
-          if (producerId) {
-            const currentConvs: ConversationMeta[] = await producerConvsStore.get(producerId) || [];
-            const convIdx = currentConvs.findIndex(c => c.id === conversationId);
-            if (convIdx >= 0) {
-              currentConvs[convIdx].lastMessage = reply.text;
-              currentConvs[convIdx].lastTime = timeHHmm();
-              currentConvs[convIdx].unread = (currentConvs[convIdx].unread || 0) + 1;
-              await producerConvsStore.set(producerId, currentConvs);
-            }
-          }
-        } catch (e) {
-          console.log(`Auto-reply error: ${e}`);
-        }
-      }, 3000 + Math.random() * 5000);
-    }
 
     return c.json({ success: true, data: msg });
   } catch (error) {
@@ -452,7 +415,7 @@ app.get('/settings/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
   // IDOR fix: verify ownership
-  if (producerId !== c.get(userId) && c.get(userRole) !== admin) {
+  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const settings = await producerSettingsStore.get(producerId);
@@ -468,7 +431,7 @@ app.post('/settings/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
   // IDOR fix: verify ownership
-  if (producerId !== c.get(userId) && c.get(userRole) !== admin) {
+  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const body = await c.req.json();
@@ -484,6 +447,41 @@ app.post('/settings/:producerId', requireAuth, async (c) => {
   }
 });
 
+
+// ════════════════════════════════════════
+// BRIDGE: sync custom services → marketplace producerServicesStore
+// ════════════════════════════════════════
+async function syncServiceToMarketplace(svc: CustomService, producerName?: string) {
+  if (svc.status !== 'active') {
+    // Remove from marketplace if paused/deleted
+    try { await producerServicesStore.set(svc.id, null as any); } catch {}
+    return;
+  }
+  const marketplaceSvc = {
+    id: svc.id,
+    producerId: svc.producerId,
+    producerName: producerName || svc.producerId,
+    title: svc.title,
+    type: svc.type,
+    price: svc.basePrice,
+    basePrice: svc.basePrice,
+    description: svc.description,
+    deliveryDays: svc.deliveryDays,
+    revisions: svc.revisions,
+    includes: svc.includes,
+    status: 'active',
+    orders: svc.orders || 0,
+    rating: svc.rating || 5.0,
+    createdAt: svc.createdAt,
+    updatedAt: nowIso(),
+  };
+  await producerServicesStore.set(svc.id, JSON.stringify(marketplaceSvc));
+}
+
+async function removeServiceFromMarketplace(serviceId: string) {
+  try { await producerServicesStore.set(serviceId, null as any); } catch {}
+}
+
 // ════════════════════════════════════════
 // SERVICES CRUD
 // ════════════════════════════════════════
@@ -498,13 +496,15 @@ interface CustomService {
 app.post('/services/create', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const producerId = c.get(userId); // IDOR fix
+    const producerId = c.get('userId'); // IDOR fix
     const { title, type, basePrice, description, deliveryDays, revisions, includes } = body;
     if (!producerId || !title || !basePrice) return c.json({ success: false, error: 'producerId, title, basePrice required' }, 400);
     const svc: CustomService = { id: genId('svc'), producerId, title, type: type || 'mixing', basePrice: Number(basePrice), description: description || '', deliveryDays: Number(deliveryDays) || 5, revisions: Number(revisions) || 2, includes: includes || [], status: 'active', orders: 0, rating: 5.0, createdAt: nowIso() };
     const list: CustomService[] = await producerCustomServicesStore.get(producerId) || [];
     list.push(svc);
     await producerCustomServicesStore.set(producerId, list);
+    // Bridge: sync to marketplace so service appears in public catalog
+    await syncServiceToMarketplace(svc);
     return c.json({ success: true, data: svc });
   } catch (error) { console.log(`Error creating service: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -513,13 +513,15 @@ app.put('/services/update/:serviceId', requireAuth, async (c) => {
   try {
     const serviceId = c.req.param('serviceId');
     const body = await c.req.json();
-    const { producerId } = body;
-    if (!producerId) return c.json({ success: false, error: 'producerId required' }, 400);
+    const producerId = c.get('userId'); // IDOR fix: use JWT userId
+    if (!producerId) return c.json({ success: false, error: 'Auth required' }, 401);
     const list: CustomService[] = await producerCustomServicesStore.get(producerId) || [];
     const idx = list.findIndex(s => s.id === serviceId);
     if (idx < 0) return c.json({ success: false, error: 'Service not found' }, 404);
     for (const f of ['title','type','basePrice','description','deliveryDays','revisions','includes','status']) { if (body[f] !== undefined) (list[idx] as any)[f] = body[f]; }
     await producerCustomServicesStore.set(producerId, list);
+    // Bridge: sync to marketplace
+    await syncServiceToMarketplace(list[idx]);
     return c.json({ success: true, data: list[idx] });
   } catch (error) { console.log(`Error updating service: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -527,12 +529,14 @@ app.put('/services/update/:serviceId', requireAuth, async (c) => {
 app.delete('/services/delete/:serviceId', requireAuth, async (c) => {
   try {
     const serviceId = c.req.param('serviceId');
-    const producerId = c.req.query('producerId');
-    if (!producerId) return c.json({ success: false, error: 'producerId required' }, 400);
+    const producerId = c.get('userId'); // IDOR fix: use JWT userId
+    if (!producerId) return c.json({ success: false, error: 'Auth required' }, 401);
     const list: CustomService[] = await producerCustomServicesStore.get(producerId) || [];
     const filtered = list.filter(s => s.id !== serviceId);
     if (filtered.length === list.length) return c.json({ success: false, error: 'Not found' }, 404);
     await producerCustomServicesStore.set(producerId, filtered);
+    // Bridge: remove from marketplace
+    await removeServiceFromMarketplace(serviceId);
     return c.json({ success: true });
   } catch (error) { console.log(`Error deleting service: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -541,7 +545,7 @@ app.get('/services/custom/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
   // IDOR fix: verify ownership
-  if (producerId !== c.get(userId) && c.get(userRole) !== admin) {
+  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const list: CustomService[] = await producerCustomServicesStore.get(producerId) || [];
@@ -556,7 +560,7 @@ app.get('/services/custom/:producerId', requireAuth, async (c) => {
 app.post('/portfolio/create', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const producerId = c.get(userId); // IDOR fix
+    const producerId = c.get('userId'); // IDOR fix
     const { title, artist, type, description } = body;
     if (!producerId || !title || !artist) return c.json({ success: false, error: 'producerId, title, artist required' }, 400);
     const entry = { id: genId('pf'), producerId, title, artist, type: type || 'Сведение', year: new Date().getFullYear(), description: description || '', createdAt: nowIso() };
@@ -570,8 +574,8 @@ app.post('/portfolio/create', requireAuth, async (c) => {
 app.delete('/portfolio/delete/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
-    const producerId = c.req.query('producerId');
-    if (!producerId) return c.json({ success: false, error: 'producerId required' }, 400);
+    const producerId = c.get('userId'); // IDOR fix: use JWT userId
+    if (!producerId) return c.json({ success: false, error: 'Auth required' }, 401);
     const list = await producerCustomPortfolioStore.get(producerId) || [];
     const filtered = (list as any[]).filter(p => p.id !== id);
     if (filtered.length === (list as any[]).length) return c.json({ success: false, error: 'Not found' }, 404);
@@ -588,7 +592,7 @@ app.put('/profile/update/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
   // IDOR fix: verify ownership
-  if (producerId !== c.get(userId) && c.get(userRole) !== admin) {
+  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const body = await c.req.json();
@@ -603,7 +607,7 @@ app.get('/profile/edits/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
   // IDOR fix: verify ownership
-  if (producerId !== c.get(userId) && c.get(userRole) !== admin) {
+  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const edits = await producerProfileEditStore.get(producerId);
@@ -618,10 +622,24 @@ app.get('/profile/edits/:producerId', requireAuth, async (c) => {
 app.post('/wallet/withdraw', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const producerId = c.get(userId); // IDOR fix: cannot withdraw from other wallets
+    const producerId = c.get('userId'); // IDOR fix: cannot withdraw from other wallets
     const { amount, method, methodLabel } = body;
     if (!producerId || !amount || !method) return c.json({ success: false, error: 'producerId, amount, method required' }, 400);
-    const wd = { id: genId('wd'), producerId, amount: Number(amount), method, methodLabel: methodLabel || method, status: 'pending', createdAt: nowIso() };
+    const numAmount = Number(amount);
+    if (numAmount <= 0) return c.json({ success: false, error: 'Amount must be positive' }, 400);
+    // Check balance before withdrawal
+    const balance = await getPaymentBalance(producerId);
+    const available = Number(balance?.available || 0);
+    if (available < numAmount) {
+      return c.json({ success: false, error: `Insufficient balance: ${available} RUB available, requested ${numAmount} RUB` }, 400);
+    }
+    // Deduct from balance
+    const bal = balance || { available: 0, pending: 0, total: 0, userId: producerId };
+    bal.available = Number(bal.available) - numAmount;
+    bal.pending = Number(bal.pending || 0) + numAmount;
+    bal.total = bal.available + bal.pending;
+    await upsertPaymentBalance(producerId, bal);
+    const wd = { id: genId('wd'), producerId, amount: numAmount, method, methodLabel: methodLabel || method, status: 'pending', createdAt: nowIso() };
     const list = await paymentWithdrawalsStore.get(producerId) || [];
     (list as any[]).unshift(wd);
     await paymentWithdrawalsStore.set(producerId, list);
@@ -633,7 +651,7 @@ app.get('/wallet/withdrawals/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
   // IDOR fix: verify ownership
-  if (producerId !== c.get(userId) && c.get(userRole) !== admin) {
+  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const list = await paymentWithdrawalsStore.get(producerId) || [];
@@ -648,7 +666,7 @@ app.get('/wallet/withdrawals/:producerId', requireAuth, async (c) => {
 app.post('/ai/analyze', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const producerId = c.get(userId); // IDOR fix
+    const producerId = c.get('userId'); // IDOR fix
     const { context, question } = body;
     if (!producerId) return c.json({ success: false, error: 'producerId required' }, 400);
 
@@ -699,7 +717,7 @@ app.get('/ai/history/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
   // IDOR fix: verify ownership
-  if (producerId !== c.get(userId) && c.get(userRole) !== admin) {
+  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const last = await producerAiLastStore.get(producerId);
@@ -726,7 +744,7 @@ app.get('/calendar/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
   // IDOR fix: verify ownership
-  if (producerId !== c.get(userId) && c.get(userRole) !== admin) {
+  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const sessions: CalendarSession[] = await producerSessionsStore.get(producerId) || [];
@@ -742,7 +760,7 @@ app.get('/calendar/:producerId/month', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
   // IDOR fix: verify ownership
-  if (producerId !== c.get(userId) && c.get(userRole) !== admin) {
+  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const year = parseInt(c.req.query('year') || '2026');
@@ -767,7 +785,7 @@ app.get('/calendar/:producerId/month', requireAuth, async (c) => {
 app.post('/calendar/create', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const producerId = c.get(userId); // IDOR fix
+    const producerId = c.get('userId'); // IDOR fix
     const { title, clientName, date, startTime, endTime, type, notes, orderId } = body;
 
     if (!producerId || !title || !date || !startTime || !endTime) {
@@ -814,10 +832,10 @@ app.put('/calendar/update/:sessionId', requireAuth, async (c) => {
   try {
     const sessionId = c.req.param('sessionId');
     const body = await c.req.json();
-    const { producerId } = body;
+    const producerId = c.get('userId'); // IDOR fix: use JWT userId
 
     if (!producerId) {
-      return c.json({ success: false, error: 'producerId required' }, 400);
+      return c.json({ success: false, error: 'Auth required' }, 401);
     }
 
     const sessions: CalendarSession[] = await producerSessionsStore.get(producerId) || [];
@@ -847,10 +865,10 @@ app.put('/calendar/update/:sessionId', requireAuth, async (c) => {
 app.delete('/calendar/delete/:sessionId', requireAuth, async (c) => {
   try {
     const sessionId = c.req.param('sessionId');
-    const producerId = c.req.query('producerId');
+    const producerId = c.get('userId'); // IDOR fix: use JWT userId
 
     if (!producerId) {
-      return c.json({ success: false, error: 'producerId query param required' }, 400);
+      return c.json({ success: false, error: 'Auth required' }, 401);
     }
 
     const sessions: CalendarSession[] = await producerSessionsStore.get(producerId) || [];

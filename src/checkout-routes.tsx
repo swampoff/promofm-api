@@ -222,7 +222,31 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           } catch {}
         }
       }
-    } catch (err) {
+    
+      if (itemType === 'content_order' && session.metadata.contentOrderId) {
+        const { contentOrdersStore, contentOrdersByStatusStore } = await import('./db.tsx');
+        const coid = session.metadata.contentOrderId;
+        const order = await contentOrdersStore.get(coid);
+        if (order) {
+          order.status = 'pending';
+          order.updatedAt = now;
+          order.paidAt = now;
+          order.paymentOrderId = session.orderId;
+          order.paymentGateway = session.gateway;
+          await contentOrdersStore.set(coid, order);
+
+          // Move from pending_payment to pending index
+          const ppList = await contentOrdersByStatusStore.get('pending_payment') || [];
+          await contentOrdersByStatusStore.set('pending_payment', ppList.filter((id: string) => id !== coid));
+          const pendList = await contentOrdersByStatusStore.get('pending') || [];
+          pendList.push(coid);
+          await contentOrdersByStatusStore.set('pending', pendList);
+
+          log.info({ contentOrderId: coid, amount: session.amount }, 'content_order_paid');
+        }
+      }
+
+} catch (err) {
       log.error({ err }, 'marketplace_fulfillment_error');
     }
   }
@@ -402,6 +426,12 @@ checkoutRoutes.delete('/methods/:id', requireAuth, async (c) => {
   try {
     const methodId = c.req.param('id');
     const userId = c.get('userId');
+    // Ownership check: verify method belongs to this user
+    const methods = await getPaymentMethods(userId);
+    const ownsMethod = (methods || []).some((m: any) => m.id === methodId);
+    if (!ownsMethod) {
+      return c.json({ success: false, error: 'Payment method not found' }, 404);
+    }
     await deletePaymentMethod(methodId);
     return c.json({ success: true, message: 'Способ оплаты удалён' });
   } catch (error: any) {
@@ -561,48 +591,41 @@ checkoutRoutes.post('/webhook/stripe', async (c) => {
 // ── GET /plans — subscription plans ──
 
 checkoutRoutes.get('/plans', async (c) => {
+  // Plans aligned with PLANS constant used in processPaymentSuccess
   return c.json({
     success: true,
     data: [
       {
-        id: 'artist-basic',
-        name: 'Артист Базовый',
-        price: 299,
+        id: 'spark',
+        name: 'Тест-драйв',
+        price: 0,
         currency: 'RUB',
         interval: 'month',
-        features: ['Загрузка до 10 треков', 'Базовая аналитика', 'Профиль артиста'],
+        features: ['Базовый профиль', 'Загрузка до 3 треков', 'Публичная страница артиста'],
       },
       {
-        id: 'artist-pro',
-        name: 'Артист PRO',
-        price: 799,
+        id: 'start',
+        name: 'Старт',
+        price: 8990,
         currency: 'RUB',
         interval: 'month',
-        features: ['Безлимитные треки', 'Расширенная аналитика', 'Приоритетная модерация', 'Промо-инструменты'],
+        features: ['1 кредит рассылки в месяц', 'Скидка 5% на питчинг и маркетинг', 'Сниженная комиссия донатов (7%)', 'Бонус монет +5%'],
       },
       {
-        id: 'producer-basic',
-        name: 'Продюсер',
-        price: 499,
+        id: 'pro',
+        name: 'Про',
+        price: 39990,
         currency: 'RUB',
         interval: 'month',
-        features: ['Витрина битов', 'Портфолио', 'Маркетплейс услуг'],
+        features: ['3 кредита рассылки в месяц', 'Скидка 10-15% на питчинг и маркетинг', 'Скидка 10% на тест треков и баннеры', 'Комиссия донатов 5%', 'Бонус монет +15%'],
       },
       {
-        id: 'radio-station',
-        name: 'Радиостанция',
-        price: 1499,
+        id: 'elite',
+        name: 'Бизнес',
+        price: 149990,
         currency: 'RUB',
         interval: 'month',
-        features: ['Управление эфиром', 'Рекламные слоты', 'Аналитика слушателей', 'Каталог артистов'],
-      },
-      {
-        id: 'venue',
-        name: 'Заведение',
-        price: 999,
-        currency: 'RUB',
-        interval: 'month',
-        features: ['Бронирования', 'Р��дио-кампании', 'Плейлисты', 'Статистика'],
+        features: ['10 кредитов рассылки в месяц', 'Скидка 15-25% на все услуги', 'Скидка 20% на тест треков', 'Комиссия донатов 3%', 'Бонус монет +25%', 'Приоритетная поддержка'],
       },
     ],
   });
