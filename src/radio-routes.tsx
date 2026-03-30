@@ -920,4 +920,39 @@ app.get('/analytics', requireAuth, async (c) => {
   }
 });
 
+
+// -- Venue Player Registration (Promo.Air web player) --
+app.post('/register-player', requireAuth, async (c) => {
+  try {
+    const userId = await getRadioUserId(c);
+    const { venue_id, player_type, device_id } = await c.req.json();
+    const playerId = `player-${venue_id}-${Date.now()}`;
+    const authToken = `tok-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return c.json({
+      success: true,
+      player_id: playerId,
+      auth_token: authToken,
+      stream_url: null,
+      registered_at: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// -- Venue Player Heartbeat / Status Update --
+app.post('/player-status', requireAuth, async (c) => {
+  try {
+    const { player_id, status } = await c.req.json();
+    return c.json({
+      success: true,
+      player_id,
+      acknowledged: true,
+      server_time: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
 export default app;
