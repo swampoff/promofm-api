@@ -19,6 +19,7 @@ import { Hono } from 'hono';
 import { notificationCampaignsStore, getNotificationCampaignsByUser, upsertNotificationCampaign } from './db.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const marketing = new Hono();
@@ -290,6 +291,146 @@ marketing.post('/campaigns/:campaignId/launch', requireAuth, requireAdmin, async
     return c.json({ success: true, data: campaign });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ═══════════════════════════════════════
+// MARKETING ANALYTICS ENDPOINTS
+// ═══════════════════════════════════════
+
+// GET /analytics/performance/:artistId
+marketing.get('/analytics/performance/:artistId', requireAuth, async (c) => {
+  try {
+    const artistId = c.req.param('artistId');
+    const range = c.req.query('range') || '30d';
+    const days = range === '7d' ? 7 : range === '30d' ? 30 : range === '90d' ? 90 : 30;
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+
+    const { rows } = await pool.query(
+      `SELECT id, campaign_name, campaign_type, status, metrics, roi, started_at, ended_at, created_at
+       FROM marketing_campaigns
+       WHERE artist_id = $1 AND created_at >= $2
+       ORDER BY created_at DESC`,
+      [artistId, since]
+    );
+
+    // Aggregate metrics
+    let totalImpressions = 0, totalClicks = 0, totalConversions = 0, totalSpent = 0;
+    for (const row of rows) {
+      const m = row.metrics || {};
+      totalImpressions += m.impressions || 0;
+      totalClicks += m.clicks || 0;
+      totalConversions += m.conversions || 0;
+      totalSpent += m.spent || row.budget || 0;
+    }
+
+    return c.json({
+      success: true,
+      data: {
+        campaigns: rows.length,
+        impressions: totalImpressions,
+        clicks: totalClicks,
+        conversions: totalConversions,
+        spent: totalSpent,
+        ctr: totalImpressions > 0 ? ((totalClicks / totalImpressions) * 100).toFixed(2) : '0.00',
+        conversionRate: totalClicks > 0 ? ((totalConversions / totalClicks) * 100).toFixed(2) : '0.00',
+        timeline: rows.map(r => ({
+          id: r.id,
+          name: r.campaign_name,
+          type: r.campaign_type,
+          status: r.status,
+          metrics: r.metrics,
+          roi: r.roi,
+          startedAt: r.started_at,
+          createdAt: r.created_at,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('Error in GET /analytics/performance:', error);
+    return c.json({ success: true, data: { campaigns: 0, impressions: 0, clicks: 0, conversions: 0, spent: 0, ctr: '0.00', conversionRate: '0.00', timeline: [] } });
+  }
+});
+
+// GET /analytics/channels/:artistId
+marketing.get('/analytics/channels/:artistId', requireAuth, async (c) => {
+  try {
+    const artistId = c.req.param('artistId');
+    const range = c.req.query('range') || '30d';
+    const days = range === '7d' ? 7 : range === '30d' ? 30 : range === '90d' ? 90 : 30;
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+
+    const { rows } = await pool.query(
+      `SELECT platforms, metrics, budget FROM marketing_campaigns WHERE artist_id = $1 AND created_at >= $2`,
+      [artistId, since]
+    );
+
+    // Aggregate by platform/channel
+    const channels: Record<string, { impressions: number; clicks: number; spent: number; campaigns: number }> = {};
+    for (const row of rows) {
+      const platforms = Array.isArray(row.platforms) ? row.platforms : [];
+      const m = row.metrics || {};
+      for (const platform of platforms) {
+        if (!channels[platform]) channels[platform] = { impressions: 0, clicks: 0, spent: 0, campaigns: 0 };
+        channels[platform].impressions += Math.round((m.impressions || 0) / (platforms.length || 1));
+        channels[platform].clicks += Math.round((m.clicks || 0) / (platforms.length || 1));
+        channels[platform].spent += Math.round((m.spent || row.budget || 0) / (platforms.length || 1));
+        channels[platform].campaigns += 1;
+      }
+      if (platforms.length === 0) {
+        if (!channels['other']) channels['other'] = { impressions: 0, clicks: 0, spent: 0, campaigns: 0 };
+        channels['other'].impressions += m.impressions || 0;
+        channels['other'].clicks += m.clicks || 0;
+        channels['other'].spent += m.spent || row.budget || 0;
+        channels['other'].campaigns += 1;
+      }
+    }
+
+    return c.json({
+      success: true,
+      data: Object.entries(channels).map(([name, stats]) => ({
+        channel: name,
+        ...stats,
+        ctr: stats.impressions > 0 ? ((stats.clicks / stats.impressions) * 100).toFixed(2) : '0.00',
+      })),
+    });
+  } catch (error) {
+    console.error('Error in GET /analytics/channels:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+// GET /analytics/summary/:artistId
+marketing.get('/analytics/summary/:artistId', requireAuth, async (c) => {
+  try {
+    const artistId = c.req.param('artistId');
+    const range = c.req.query('range') || '30d';
+    const days = range === '7d' ? 7 : range === '30d' ? 30 : range === '90d' ? 90 : 30;
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+
+    const { rows } = await pool.query(
+      `SELECT status, COUNT(*) as cnt, SUM(budget) as total_budget, AVG(roi) as avg_roi
+       FROM marketing_campaigns
+       WHERE artist_id = $1 AND created_at >= $2
+       GROUP BY status`,
+      [artistId, since]
+    );
+
+    const summary: Record<string, any> = { total: 0, active: 0, completed: 0, draft: 0, pending: 0, totalBudget: 0, avgRoi: 0 };
+    let totalRoi = 0, roiCount = 0;
+    for (const row of rows) {
+      const cnt = parseInt(row.cnt);
+      summary.total += cnt;
+      summary[row.status] = (summary[row.status] || 0) + cnt;
+      summary.totalBudget += parseInt(row.total_budget || '0');
+      if (row.avg_roi) { totalRoi += parseFloat(row.avg_roi) * cnt; roiCount += cnt; }
+    }
+    summary.avgRoi = roiCount > 0 ? (totalRoi / roiCount).toFixed(2) : '0.00';
+
+    return c.json({ success: true, data: summary });
+  } catch (error) {
+    console.error('Error in GET /analytics/summary:', error);
+    return c.json({ success: true, data: { total: 0, active: 0, completed: 0, draft: 0, pending: 0, totalBudget: 0, avgRoi: '0.00' } });
   }
 });
 
