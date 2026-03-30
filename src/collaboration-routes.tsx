@@ -254,19 +254,16 @@ app.post('/chat/:offerId', requireAuth, async (c) => {
     messages.push(message);
     await collabMessagesStore.set(offerId, messages);
 
-    // Определяем получателя и отправляем SSE
-    // Нужно найти offer чтобы узнать кому отправлять
-    // Ищем в обоих списках
-    const allKeys = await collabOffersByArtistStore.getAll();
+    // Определяем получателя — ищем оффер в обоих KV по senderId
     let recipientId = '';
-    for (const entry of allKeys) {
-      if (Array.isArray(entry)) {
-        const offer = entry.find((o: any) => o.id === offerId);
-        if (offer) {
-          recipientId = senderRole === 'producer' ? offer.artistId : offer.producerId;
-          break;
-        }
-      }
+    // Если отправитель — продюсер, оффер лежит в его producer-store
+    // Если артист — в его artist-store
+    const senderOffers = senderRole === 'producer'
+      ? ((await collabOffersByProducerStore.get(senderId)) || [])
+      : ((await collabOffersByArtistStore.get(senderId)) || []);
+    const matchedOffer = senderOffers.find((o: any) => o.id === offerId);
+    if (matchedOffer) {
+      recipientId = senderRole === 'producer' ? matchedOffer.artistId : matchedOffer.producerId;
     }
 
     if (recipientId) {

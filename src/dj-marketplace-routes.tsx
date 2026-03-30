@@ -86,6 +86,69 @@ const SEED_PROFILES = [
     bio: 'Медитативный деп-хаус и органика. Продюсер лейбла Siberian Grooves. 100K+ прослушиваний на Mixcloud.',
     tags: ['Клубы', 'Yoga Party', 'Корпоративы'],
   },
+  {
+    id: 'dj-9', name: 'Sonya Dark',
+    photo: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400&h=400&fit=crop&crop=face',
+    city: 'Москва', genres: ['Melodic Techno', 'Progressive House', 'Afro House'],
+    rating: 4.8, reviewsCount: 34, priceFrom: 30000, experience: '8 лет',
+    verified: true, available: true, topGenre: 'Melodic Techno', completedGigs: 112,
+    bio: 'Восемь лет за вертушками. Резидент Pravda и Gipsy. Играла разогрев для Artbat и Stephan Bodzin на Sonar Off.',
+    tags: ['Клубы', 'Фестивали', 'Private'],
+  },
+  {
+    id: 'dj-10', name: 'Vlad Cosmos',
+    photo: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=400&h=400&fit=crop&crop=face',
+    city: 'Нижний Новгород', genres: ['Open Format', 'Pop', 'Dance'],
+    rating: 4.4, reviewsCount: 22, priceFrom: 12000, experience: '3 года',
+    verified: false, available: true, topGenre: 'Open Format', completedGigs: 54,
+    bio: 'Свадьбы, корпоративы, дни рождения. Читаю зал и подстраиваюсь под любую аудиторию. Свой звук и свет.',
+    tags: ['Свадьбы', 'Корпоративы', 'Частные'],
+  },
+  {
+    id: 'dj-11', name: 'Eva Pulse',
+    photo: 'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400&h=400&fit=crop&crop=face',
+    city: 'Санкт-Петербург', genres: ['Acid House', 'Breaks', 'Electro'],
+    rating: 4.7, reviewsCount: 29, priceFrom: 24000, experience: '6 лет',
+    verified: true, available: false, topGenre: 'Acid House', completedGigs: 78,
+    bio: 'Кислотный звук и ломаные ритмы. Организатор рейвов PULSE в заброшенных цехах. Два эфира на Rinse FM.',
+    tags: ['Рейвы', 'Underground', 'Вареhouses'],
+  },
+  {
+    id: 'dj-12', name: 'Timur Flow',
+    photo: 'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?w=400&h=400&fit=crop&crop=face',
+    city: 'Казань', genres: ['Hip-Hop', 'Trap', 'Grime'],
+    rating: 4.6, reviewsCount: 18, priceFrom: 16000, experience: '4 года',
+    verified: false, available: true, topGenre: 'Hip-Hop', completedGigs: 41,
+    bio: 'Работал с Miyagi, Скриптонит и Баста на туровых шоу. Скрэтч на уровне, комплект Pioneer DJ XDJ-RX3.',
+    tags: ['Концерты', 'Баттлы', 'Клубы'],
+  },
+  {
+    id: 'dj-13', name: 'Lera Sunset',
+    photo: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400&h=400&fit=crop&crop=face',
+    city: 'Сочи', genres: ['Tropical House', 'Balearic', 'Chillout'],
+    rating: 4.9, reviewsCount: 36, priceFrom: 28000, experience: '7 лет',
+    verified: true, available: true, topGenre: 'Tropical House', completedGigs: 94,
+    bio: 'Семь сезонов на террасах Красной Поляны и Имеретинской набережной. Резидент Bosco Bar, гости Ibiza.',
+    tags: ['Beach Party', 'Рестораны', 'Лаунж'],
+  },
+  {
+    id: 'dj-14', name: 'Igor Rave',
+    photo: 'https://images.unsplash.com/photo-1504257432389-52343af06ae3?w=400&h=400&fit=crop&crop=face',
+    city: 'Екатеринбург', genres: ['Hard Techno', 'Gabber', 'Industrial'],
+    rating: 4.5, reviewsCount: 15, priceFrom: 14000, experience: '3 года',
+    verified: false, available: true, topGenre: 'Hard Techno', completedGigs: 32,
+    bio: 'Жесткий звук из подвалов Урала. Организатор URAL RAVE на заводе. BPM от 145 до бесконечности.',
+    tags: ['Рейвы', 'Underground', 'Фестивали'],
+  },
+  {
+    id: 'dj-15', name: 'Polina Deep',
+    photo: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=400&h=400&fit=crop&crop=face',
+    city: 'Краснодар', genres: ['Deep House', 'Tech House', 'Minimal'],
+    rating: 4.7, reviewsCount: 24, priceFrom: 20000, experience: '5 лет',
+    verified: true, available: true, topGenre: 'Deep House', completedGigs: 65,
+    bio: 'Пять лет в клубной сцене юга. Резидент Mods и Alibi. Микширую тепло, без агрессии, с душой.',
+    tags: ['Клубы', 'Бары', 'Open Air'],
+  },
 ];
 
 const SEED_MIXES: Record<string, any[]> = {
@@ -108,6 +171,21 @@ const SEED_MIXES: Record<string, any[]> = {
     { id: 'm8-1', title: 'Siberian Grooves Vol. 12', genre: 'Deep House', duration: '1:10:00', plays: 4500, likes: 312 },
     { id: 'm8-2', title: 'Organic Morning — Yoga Festival Set', genre: 'Downtempo', duration: '55:00', plays: 2800, likes: 198 },
   ],
+
+  'dj-9': [
+    { id: 'm9-1', title: 'Sonar Off Warmup Live', genre: 'Melodic Techno', duration: '1:30:00', plays: 6300, likes: 445 },
+    { id: 'm9-2', title: 'Afterlife Tribute Mix', genre: 'Progressive', duration: '1:15:00', plays: 5100, likes: 378 },
+  ],
+  'dj-11': [
+    { id: 'm11-1', title: 'PULSE #24 — Acid Warehouse', genre: 'Acid House', duration: '1:45:00', plays: 4200, likes: 301 },
+  ],
+  'dj-13': [
+    { id: 'm13-1', title: 'Sunset Terrace — Bosco Bar Live', genre: 'Tropical House', duration: '1:10:00', plays: 3400, likes: 228 },
+    { id: 'm13-2', title: 'Balearic Morning — Chill Selection', genre: 'Chillout', duration: '58:00', plays: 2900, likes: 195 },
+  ],
+  'dj-15': [
+    { id: 'm15-1', title: 'Mods Residency — Friday Night', genre: 'Deep House', duration: '1:20:00', plays: 3700, likes: 264 },
+  ],
 };
 
 const SEED_REVIEWS: Record<string, any[]> = {
@@ -122,6 +200,16 @@ const SEED_REVIEWS: Record<string, any[]> = {
   ],
   'dj-6': [
     { id: 'r6', author: 'Саша Р.', date: '18 фев 2026', rating: 5, text: 'Надя — королева индустриального звука. После её сета на Mutabor все остальное кажется пресным.', eventType: 'Клуб' },
+  ],
+
+  'dj-9': [
+    { id: 'r7', author: 'Максим К.', date: '10 мар 2026', rating: 5, text: 'Соня отыграла разогрев перед Artbat на 2000 человек. К основному акту зал уже был раскачан. Идеальная подготовка.', eventType: 'Фестиваль' },
+  ],
+  'dj-11': [
+    { id: 'r8', author: 'Юлия С.', date: '28 фев 2026', rating: 5, text: 'Ева устроила рейв в заброшенном цехе. 300 человек, звук гремел до 6 утра. Атмосфера нереальная.', eventType: 'Рейв' },
+  ],
+  'dj-13': [
+    { id: 'r9', author: 'Андрей Б.', date: '15 мар 2026', rating: 5, text: 'Лера играла на нашей свадьбе в Сочи. Закат, терраса, идеальная музыка. Все гости спрашивали кто диджей.', eventType: 'Свадьба' },
   ],
 };
 

@@ -531,4 +531,42 @@ app.get('/profile/:artistId/similar', async (c) => {
   }
 });
 
+
+// ═══════ GET /search — Artist search by name (for collaboration) ═══════
+app.get('/search', async (c) => {
+  const q = (c.req.query('q') || '').trim().toLowerCase();
+  if (!q || q.length < 2) {
+    return c.json({ success: true, data: [] });
+  }
+
+  try {
+    const { getDbClient } = await import('./db-client.tsx');
+    const dbClient = getDbClient();
+    const { pool } = await import('./db-client.tsx');
+
+    const { rows } = await pool.query(
+      `SELECT user_id, artist_name, genre, city, avatar_url, is_verified
+       FROM artist_profiles
+       WHERE LOWER(artist_name) LIKE 
+       ORDER BY total_plays DESC NULLS LAST
+       LIMIT 10`,
+      [`%${q}%`]
+    );
+
+    const results = rows.map((r: any) => ({
+      id: r.user_id,
+      name: r.artist_name,
+      genre: r.genre || '',
+      city: r.city || '',
+      avatarUrl: r.avatar_url || '',
+      isVerified: r.is_verified || false,
+    }));
+
+    return c.json({ success: true, data: results });
+  } catch (error) {
+    console.error('[ArtistProfile] Search error:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
 export default app;

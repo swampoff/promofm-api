@@ -281,6 +281,7 @@ auth.post("/signin", async (c) => {
       },
     });
   } catch (error) {
+    if (error instanceof SyntaxError) return c.json({ success: false, error: "Некорректный JSON" }, 400);
     log.error({ err: error }, "signin_error");
     return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
   }
