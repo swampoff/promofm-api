@@ -807,12 +807,17 @@ export async function upsertDjProfile(djId: string, profile: Record<string, any>
     bio: profile.bio || null,
     avatar_url: profile.avatarUrl || profile.avatar_url || null,
     location: profile.city || profile.location || null,
-    hourly_rate: profile.hourlyRate || profile.hourly_rate || 0,
+    hourly_rate: profile.hourlyRate || profile.hourly_rate || profile.ratePerHour || 0,
     experience_years: profile.experienceYears || profile.experience_years || 0,
     equipment: profile.equipment || null,
-    is_available: profile.isAvailable !== undefined ? profile.isAvailable : true,
+    is_available: profile.isAvailable !== undefined ? profile.isAvailable : (profile.openForBookings !== undefined ? profile.openForBookings : true),
     rating: profile.rating || 0,
     total_reviews: profile.totalReviews || profile.total_reviews || 0,
+    is_verified: profile.verified || profile.is_verified || false,
+    completed_gigs: profile.completedGigs || profile.completed_gigs || 0,
+    tags: profile.tags || profile.specializations || [],
+    price_from: profile.priceFrom || profile.price_from || profile.ratePerHour || profile.ratePerEvent || 0,
+    photo_url: profile.photo || profile.photo_url || profile.avatarUrl || null,
     data: profile,
     updated_at: new Date().toISOString(),
   };
@@ -1381,3 +1386,8 @@ export const audioBrandingByArtistStore = jsonbStore('audio_branding_by_artist')
 export const production360OrdersStore = jsonbStore('production_360_orders');
 export const production360ByStatusStore = jsonbStore('production_360_by_status');
 export const production360ByArtistStore = jsonbStore('production_360_by_artist');
+
+// ── Promo.Air AI DJ stores ──
+export const promoAirDjScriptsStore = jsonbStore('promo_air_dj_scripts');
+export const promoAirDjSettingsStore = jsonbStore('promo_air_dj_settings');
+export const promoAirDjQueueStore = jsonbStore('promo_air_dj_queue');

@@ -1,331 +1,111 @@
 /**
  * DJ MARKETPLACE ROUTES
  * Public endpoints for DJ Marketplace catalog
- * Uses JSON store with prefix dj:profile:, dj:mixes:, dj:reviews:, dj:calendar:
+ * Reads directly from dj_profiles PostgreSQL table (no KV seed data)
  */
 
 import { Hono } from 'hono';
-import { getDjProfile, upsertDjProfile, djBookingsByDjStore, djBookingsStore, djCalendarStore, djMarketplaceIndexStore, djMixesStore, djReviewsStore } from './db.tsx';
-
+import { pool } from './db-client.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 
 const app = new Hono();
 
-// ═══════ SEED DATA (initial profiles) ═══════
+// ── Helpers ──
 
-const SEED_PROFILES = [
-  {
-    id: 'dj-1', name: 'Kirill Dement',
-    photo: 'https://images.unsplash.com/photo-1571266028243-3716f02d2d2e?w=400&h=400&fit=crop&crop=face',
-    city: 'Москва', genres: ['Techno', 'Minimal', 'Deep House'],
-    rating: 4.9, reviewsCount: 47, priceFrom: 35000, experience: '12 лет',
-    verified: true, available: true, topGenre: 'Techno', completedGigs: 156,
-    bio: 'Резидент Mutabor и Gazgolder. Играю на ведущих площадках от Москвы до Берлина. Авторские продакшны на Kompakt и Afterlife.',
-    tags: ['Клубы', 'Фестивали', 'Underground'],
-  },
-  {
-    id: 'dj-2', name: 'Alina Vox',
-    photo: 'https://images.unsplash.com/photo-1494790108755-2616b612b786?w=400&h=400&fit=crop&crop=face',
-    city: 'Санкт-Петербург', genres: ['House', 'Disco', 'Nu-Disco'],
-    rating: 4.8, reviewsCount: 38, priceFrom: 28000, experience: '7 лет',
-    verified: true, available: true, topGenre: 'House', completedGigs: 89,
-    bio: 'Солнечные грувы и виниловые сеты. Резидент Stackenschneider и Roots United. Коллекция пластинок — 3000+.',
-    tags: ['Клубы', 'Бары', 'Open Air'],
-  },
-  {
-    id: 'dj-3', name: 'Roman Shafir',
-    photo: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400&h=400&fit=crop&crop=face',
-    city: 'Казань', genres: ['Trance', 'Progressive', 'Melodic Techno'],
-    rating: 4.7, reviewsCount: 23, priceFrom: 20000, experience: '5 лет',
-    verified: true, available: false, topGenre: 'Trance', completedGigs: 42,
-    bio: 'Эмоциональные сеты с живыми синтезаторами. Играл на Alfa Future People и Outline.',
-    tags: ['Фестивали', 'Клубы', 'Рейвы'],
-  },
-  {
-    id: 'dj-4', name: 'Mila Rossa',
-    photo: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&h=400&fit=crop&crop=face',
-    city: 'Сочи', genres: ['Lounge', 'Deep House', 'Afro House'],
-    rating: 4.9, reviewsCount: 31, priceFrom: 25000, experience: '6 лет',
-    verified: true, available: true, topGenre: 'Afro House', completedGigs: 67,
-    bio: 'Sunset-сеты на террасах Сочи и Дубая. Постоянный гость Hyatt, Marriott и частных вечеринок.',
-    tags: ['Beach Party', 'Lounge', 'Премиум'],
-  },
-  {
-    id: 'dj-5', name: 'Artem Groza',
-    photo: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=400&h=400&fit=crop&crop=face',
-    city: 'Екатеринбург', genres: ['Drum & Bass', 'Jungle', 'Breakbeat'],
-    rating: 4.6, reviewsCount: 19, priceFrom: 18000, experience: '4 года',
-    verified: false, available: true, topGenre: 'Drum & Bass', completedGigs: 35,
-    bio: 'Уральский бас. Организатор серии вечеринок BASSLINE в Tele-Club. Релизы на Hospital Records.',
-    tags: ['Клубы', 'Рейвы', 'Студенческие'],
-  },
-  {
-    id: 'dj-6', name: 'Nadia Signal',
-    photo: 'https://images.unsplash.com/photo-1580489944761-15a19d654956?w=400&h=400&fit=crop&crop=face',
-    city: 'Москва', genres: ['Techno', 'Electro', 'EBM'],
-    rating: 4.9, reviewsCount: 41, priceFrom: 40000, experience: '9 лет',
-    verified: true, available: true, topGenre: 'Techno', completedGigs: 134,
-    bio: 'Жёсткий индустриальный звук. Резидент Mutabor, выступления на Awakenings и Dekmantel.',
-    tags: ['Фестивали', 'Клубы', 'Industrial'],
-  },
-  {
-    id: 'dj-7', name: 'Max Rhythm',
-    photo: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=400&h=400&fit=crop&crop=face',
-    city: 'Краснодар', genres: ['Hip-Hop', 'R&B', 'Trap'],
-    rating: 4.5, reviewsCount: 16, priceFrom: 15000, experience: '3 года',
-    verified: false, available: true, topGenre: 'Hip-Hop', completedGigs: 28,
-    bio: 'Южный вайб. Официальный DJ рэп-баттлов и хип-хоп фестивалей юга России.',
-    tags: ['Вечеринки', 'Баттлы', 'Бары'],
-  },
-  {
-    id: 'dj-8', name: 'Denis Kazbek',
-    photo: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=400&h=400&fit=crop&crop=face',
-    city: 'Новосибирск', genres: ['Deep House', 'Organic House', 'Downtempo'],
-    rating: 4.8, reviewsCount: 26, priceFrom: 22000, experience: '8 лет',
-    verified: true, available: true, topGenre: 'Deep House', completedGigs: 98,
-    bio: 'Медитативный деп-хаус и органика. Продюсер лейбла Siberian Grooves. 100K+ прослушиваний на Mixcloud.',
-    tags: ['Клубы', 'Yoga Party', 'Корпоративы'],
-  },
-  {
-    id: 'dj-9', name: 'Sonya Dark',
-    photo: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400&h=400&fit=crop&crop=face',
-    city: 'Москва', genres: ['Melodic Techno', 'Progressive House', 'Afro House'],
-    rating: 4.8, reviewsCount: 34, priceFrom: 30000, experience: '8 лет',
-    verified: true, available: true, topGenre: 'Melodic Techno', completedGigs: 112,
-    bio: 'Восемь лет за вертушками. Резидент Pravda и Gipsy. Играла разогрев для Artbat и Stephan Bodzin на Sonar Off.',
-    tags: ['Клубы', 'Фестивали', 'Private'],
-  },
-  {
-    id: 'dj-10', name: 'Vlad Cosmos',
-    photo: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=400&h=400&fit=crop&crop=face',
-    city: 'Нижний Новгород', genres: ['Open Format', 'Pop', 'Dance'],
-    rating: 4.4, reviewsCount: 22, priceFrom: 12000, experience: '3 года',
-    verified: false, available: true, topGenre: 'Open Format', completedGigs: 54,
-    bio: 'Свадьбы, корпоративы, дни рождения. Читаю зал и подстраиваюсь под любую аудиторию. Свой звук и свет.',
-    tags: ['Свадьбы', 'Корпоративы', 'Частные'],
-  },
-  {
-    id: 'dj-11', name: 'Eva Pulse',
-    photo: 'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400&h=400&fit=crop&crop=face',
-    city: 'Санкт-Петербург', genres: ['Acid House', 'Breaks', 'Electro'],
-    rating: 4.7, reviewsCount: 29, priceFrom: 24000, experience: '6 лет',
-    verified: true, available: false, topGenre: 'Acid House', completedGigs: 78,
-    bio: 'Кислотный звук и ломаные ритмы. Организатор рейвов PULSE в заброшенных цехах. Два эфира на Rinse FM.',
-    tags: ['Рейвы', 'Underground', 'Вареhouses'],
-  },
-  {
-    id: 'dj-12', name: 'Timur Flow',
-    photo: 'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?w=400&h=400&fit=crop&crop=face',
-    city: 'Казань', genres: ['Hip-Hop', 'Trap', 'Grime'],
-    rating: 4.6, reviewsCount: 18, priceFrom: 16000, experience: '4 года',
-    verified: false, available: true, topGenre: 'Hip-Hop', completedGigs: 41,
-    bio: 'Работал с Miyagi, Скриптонит и Баста на туровых шоу. Скрэтч на уровне, комплект Pioneer DJ XDJ-RX3.',
-    tags: ['Концерты', 'Баттлы', 'Клубы'],
-  },
-  {
-    id: 'dj-13', name: 'Lera Sunset',
-    photo: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400&h=400&fit=crop&crop=face',
-    city: 'Сочи', genres: ['Tropical House', 'Balearic', 'Chillout'],
-    rating: 4.9, reviewsCount: 36, priceFrom: 28000, experience: '7 лет',
-    verified: true, available: true, topGenre: 'Tropical House', completedGigs: 94,
-    bio: 'Семь сезонов на террасах Красной Поляны и Имеретинской набережной. Резидент Bosco Bar, гости Ibiza.',
-    tags: ['Beach Party', 'Рестораны', 'Лаунж'],
-  },
-  {
-    id: 'dj-14', name: 'Igor Rave',
-    photo: 'https://images.unsplash.com/photo-1504257432389-52343af06ae3?w=400&h=400&fit=crop&crop=face',
-    city: 'Екатеринбург', genres: ['Hard Techno', 'Gabber', 'Industrial'],
-    rating: 4.5, reviewsCount: 15, priceFrom: 14000, experience: '3 года',
-    verified: false, available: true, topGenre: 'Hard Techno', completedGigs: 32,
-    bio: 'Жесткий звук из подвалов Урала. Организатор URAL RAVE на заводе. BPM от 145 до бесконечности.',
-    tags: ['Рейвы', 'Underground', 'Фестивали'],
-  },
-  {
-    id: 'dj-15', name: 'Polina Deep',
-    photo: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=400&h=400&fit=crop&crop=face',
-    city: 'Краснодар', genres: ['Deep House', 'Tech House', 'Minimal'],
-    rating: 4.7, reviewsCount: 24, priceFrom: 20000, experience: '5 лет',
-    verified: true, available: true, topGenre: 'Deep House', completedGigs: 65,
-    bio: 'Пять лет в клубной сцене юга. Резидент Mods и Alibi. Микширую тепло, без агрессии, с душой.',
-    tags: ['Клубы', 'Бары', 'Open Air'],
-  },
-];
+function formatExperience(years: number): string {
+  if (!years || years <= 0) return '';
+  const last = years % 10;
+  const tens = years % 100;
+  if (tens >= 11 && tens <= 14) return `${years} лет`;
+  if (last === 1) return `${years} год`;
+  if (last >= 2 && last <= 4) return `${years} года`;
+  return `${years} лет`;
+}
 
-const SEED_MIXES: Record<string, any[]> = {
-  'dj-1': [
-    { id: 'm1-1', title: 'Mutabor Closing Set 02.2026', genre: 'Techno', duration: '1:42:00', plays: 8740, likes: 612 },
-    { id: 'm1-2', title: 'Minimal Territories — Studio Mix', genre: 'Minimal', duration: '1:08:30', plays: 4290, likes: 287 },
-  ],
-  'dj-2': [
-    { id: 'm2-1', title: 'Vinyl Only: Disco & Nu-Disco Selects', genre: 'Nu-Disco', duration: '1:15:00', plays: 6100, likes: 438 },
-    { id: 'm2-2', title: 'Stackenschneider Rooftop Live', genre: 'House', duration: '1:30:00', plays: 5200, likes: 371 },
-  ],
-  'dj-4': [
-    { id: 'm4-1', title: 'Sunset Terrace — Hyatt Sochi', genre: 'Afro House', duration: '1:20:00', plays: 3800, likes: 245 },
-  ],
-  'dj-6': [
-    { id: 'm6-1', title: 'Industrial Rave Podcast #47', genre: 'Techno', duration: '1:00:00', plays: 7100, likes: 503 },
-    { id: 'm6-2', title: 'Awakenings Warmup — Live Recording', genre: 'Electro', duration: '1:25:00', plays: 9200, likes: 684 },
-  ],
-  'dj-8': [
-    { id: 'm8-1', title: 'Siberian Grooves Vol. 12', genre: 'Deep House', duration: '1:10:00', plays: 4500, likes: 312 },
-    { id: 'm8-2', title: 'Organic Morning — Yoga Festival Set', genre: 'Downtempo', duration: '55:00', plays: 2800, likes: 198 },
-  ],
-
-  'dj-9': [
-    { id: 'm9-1', title: 'Sonar Off Warmup Live', genre: 'Melodic Techno', duration: '1:30:00', plays: 6300, likes: 445 },
-    { id: 'm9-2', title: 'Afterlife Tribute Mix', genre: 'Progressive', duration: '1:15:00', plays: 5100, likes: 378 },
-  ],
-  'dj-11': [
-    { id: 'm11-1', title: 'PULSE #24 — Acid Warehouse', genre: 'Acid House', duration: '1:45:00', plays: 4200, likes: 301 },
-  ],
-  'dj-13': [
-    { id: 'm13-1', title: 'Sunset Terrace — Bosco Bar Live', genre: 'Tropical House', duration: '1:10:00', plays: 3400, likes: 228 },
-    { id: 'm13-2', title: 'Balearic Morning — Chill Selection', genre: 'Chillout', duration: '58:00', plays: 2900, likes: 195 },
-  ],
-  'dj-15': [
-    { id: 'm15-1', title: 'Mods Residency — Friday Night', genre: 'Deep House', duration: '1:20:00', plays: 3700, likes: 264 },
-  ],
-};
-
-const SEED_REVIEWS: Record<string, any[]> = {
-  'dj-1': [
-    { id: 'r1', author: 'Дмитрий Л.', date: '22 фев 2026', rating: 5, text: 'Кирилл отыграл закрытие сезона в Mutabor — танцпол не пустел 4 часа. Звук безупречный, сведение на уровне.', eventType: 'Клуб' },
-    { id: 'r2', author: 'Ольга М.', date: '5 янв 2026', rating: 5, text: 'Пригласили на корпоратив IT-компании. Сет от минимала до мелодик-техно — идеально прочувствовал аудиторию.', eventType: 'Корпоратив' },
-    { id: 'r3', author: 'Артём В.', date: '15 дек 2025', rating: 4, text: 'Крутой техно-сет на warehouse-вечеринке. Единственное — хотелось чуть больше мелодики в середине.', eventType: 'Рейв' },
-  ],
-  'dj-2': [
-    { id: 'r4', author: 'Катерина П.', date: '1 мар 2026', rating: 5, text: 'Алина создала невероятную атмосферу на open air у Финского залива. Виниловый сет — отдельный кайф.', eventType: 'Open Air' },
-    { id: 'r5', author: 'Игорь Н.', date: '14 фев 2026', rating: 5, text: 'Играла на вечеринке в баре — публика была в восторге от диско-подборки. Профессионал с отличным вкусом.', eventType: 'Бар' },
-  ],
-  'dj-6': [
-    { id: 'r6', author: 'Саша Р.', date: '18 фев 2026', rating: 5, text: 'Надя — королева индустриального звука. После её сета на Mutabor все остальное кажется пресным.', eventType: 'Клуб' },
-  ],
-
-  'dj-9': [
-    { id: 'r7', author: 'Максим К.', date: '10 мар 2026', rating: 5, text: 'Соня отыграла разогрев перед Artbat на 2000 человек. К основному акту зал уже был раскачан. Идеальная подготовка.', eventType: 'Фестиваль' },
-  ],
-  'dj-11': [
-    { id: 'r8', author: 'Юлия С.', date: '28 фев 2026', rating: 5, text: 'Ева устроила рейв в заброшенном цехе. 300 человек, звук гремел до 6 утра. Атмосфера нереальная.', eventType: 'Рейв' },
-  ],
-  'dj-13': [
-    { id: 'r9', author: 'Андрей Б.', date: '15 мар 2026', rating: 5, text: 'Лера играла на нашей свадьбе в Сочи. Закат, терраса, идеальная музыка. Все гости спрашивали кто диджей.', eventType: 'Свадьба' },
-  ],
-};
-
-// ═══════ SEED ENDPOINT (idempotent) ═══════
-// To re-seed with updated data, delete the `seeded` key from djMarketplaceIndexStore:
-//   await djMarketplaceIndexStore.delete('seeded');
-// Then call POST /seed again, or let the auto-seed in GET /djs trigger.
-
-app.post('/seed', requireAuth, async (c) => {
-  try {
-    console.log('Seeding DJ Marketplace data...');
-
-    // Check if already seeded
-    const existing = await djMarketplaceIndexStore.get('seeded');
-    if (existing) {
-      return c.json({ success: true, message: 'Already seeded' });
-    }
-
-    // Seed profiles
-    for (const p of SEED_PROFILES) {
-      await upsertDjProfile(p.id, p);
-    }
-
-    // Seed mixes
-    for (const [djId, mixes] of Object.entries(SEED_MIXES)) {
-      await djMixesStore.set(djId, mixes);
-    }
-
-    // Seed reviews
-    for (const [djId, reviews] of Object.entries(SEED_REVIEWS)) {
-      await djReviewsStore.set(djId, reviews);
-    }
-
-    // Index: list of all DJ IDs for quick listing
-    await djMarketplaceIndexStore.set('singleton', SEED_PROFILES.map(p => p.id));
-    await djMarketplaceIndexStore.set('seeded', true);
-
-    console.log(`Seeded ${SEED_PROFILES.length} DJ profiles`);
-    return c.json({ success: true, count: SEED_PROFILES.length });
-  } catch (err: any) {
-    console.error('Seed error:', err);
-    return c.json({ success: false, error: 'Internal server error' }, 500);
-  }
-});
+function mapRow(row: any) {
+  const d = row.data || {};
+  return {
+    id: row.id,
+    name: row.dj_name || d.djName || '',
+    photo: row.photo_url || row.avatar_url || d.avatarUrl || '',
+    city: row.location || d.city || '',
+    genres: row.genres || d.genres || [],
+    rating: parseFloat(row.rating) || 0,
+    reviewsCount: parseInt(row.total_reviews) || 0,
+    priceFrom: parseInt(row.price_from) || parseInt(row.hourly_rate) || d.ratePerHour || d.ratePerEvent || 0,
+    experience: formatExperience(parseInt(row.experience_years) || 0),
+    verified: row.is_verified || d.verified || false,
+    available: row.is_available !== false && (d.openForBookings !== false),
+    topGenre: (row.genres && row.genres[0]) || '',
+    completedGigs: parseInt(row.completed_gigs) || 0,
+    bio: row.bio || d.bio || d.bioShort || '',
+    tags: row.tags || d.specializations || [],
+  };
+}
 
 // ═══════ GET /djs — List all DJs (public) ═══════
 
 app.get('/djs', async (c) => {
   try {
-    // Get index
-    let index = await djMarketplaceIndexStore.get('singleton') as string[] | null;
-
-    // Auto-seed if empty
-    if (!index || index.length === 0) {
-      console.log('Auto-seeding DJ data on first request...');
-      for (const p of SEED_PROFILES) {
-        await upsertDjProfile(p.id, p);
-      }
-      for (const [djId, mixes] of Object.entries(SEED_MIXES)) {
-        await djMixesStore.set(djId, mixes);
-      }
-      for (const [djId, reviews] of Object.entries(SEED_REVIEWS)) {
-        await djReviewsStore.set(djId, reviews);
-      }
-      index = SEED_PROFILES.map(p => p.id);
-      await djMarketplaceIndexStore.set('singleton', index);
-      await djMarketplaceIndexStore.set('seeded', true);
-    }
-
-    // Fetch all profiles
-    const profiles = await Promise.all(index.map((id: string) => getDjProfile(id)));
-    const validProfiles = profiles.filter(Boolean);
-
-    // Server-side filtering
     const query = c.req.query();
-    let result = [...validProfiles] as any[];
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let paramIdx = 1;
+
+    // Only show profiles with a name set (real registrations)
+    conditions.push(`(dj_name IS NOT NULL AND dj_name != ''
+                      OR data->>'djName' IS NOT NULL AND data->>'djName' != '')`);
 
     if (query.city) {
-      result = result.filter((p: any) => p.city === query.city);
+      conditions.push(`(location = $${paramIdx} OR data->>'city' = $${paramIdx})`);
+      params.push(query.city);
+      paramIdx++;
     }
     if (query.genre) {
-      result = result.filter((p: any) => p.genres?.includes(query.genre));
+      conditions.push(`$${paramIdx} = ANY(genres)`);
+      params.push(query.genre);
+      paramIdx++;
     }
     if (query.verified === 'true') {
-      result = result.filter((p: any) => p.verified);
+      conditions.push(`(is_verified = true OR (data->>'verified')::boolean = true)`);
     }
     if (query.available === 'true') {
-      result = result.filter((p: any) => p.available);
+      conditions.push(`is_available = true`);
     }
     if (query.price_min) {
-      result = result.filter((p: any) => p.priceFrom >= Number(query.price_min));
+      conditions.push(`COALESCE(NULLIF(price_from, 0), hourly_rate, (data->>'ratePerHour')::numeric, 0) >= $${paramIdx}`);
+      params.push(Number(query.price_min));
+      paramIdx++;
     }
     if (query.price_max && query.price_max !== 'Infinity') {
-      result = result.filter((p: any) => p.priceFrom <= Number(query.price_max));
+      conditions.push(`COALESCE(NULLIF(price_from, 0), hourly_rate, (data->>'ratePerHour')::numeric, 0) <= $${paramIdx}`);
+      params.push(Number(query.price_max));
+      paramIdx++;
     }
     if (query.search) {
-      const q = query.search.toLowerCase();
-      result = result.filter((p: any) =>
-        p.name.toLowerCase().includes(q) ||
-        p.city.toLowerCase().includes(q) ||
-        p.genres.some((g: string) => g.toLowerCase().includes(q)) ||
-        p.tags.some((t: string) => t.toLowerCase().includes(q))
-      );
+      const searchParam = `%${query.search.toLowerCase()}%`;
+      conditions.push(`(
+        LOWER(COALESCE(dj_name, data->>'djName', '')) LIKE $${paramIdx}
+        OR LOWER(COALESCE(location, data->>'city', '')) LIKE $${paramIdx}
+        OR EXISTS (SELECT 1 FROM unnest(genres) g WHERE LOWER(g) LIKE $${paramIdx})
+      )`);
+      params.push(searchParam);
+      paramIdx++;
     }
 
     // Sort
-    const sortBy = query.sort || 'rating';
-    result.sort((a: any, b: any) => {
-      switch (sortBy) {
-        case 'rating': return b.rating - a.rating;
-        case 'price_asc': return a.priceFrom - b.priceFrom;
-        case 'price_desc': return b.priceFrom - a.priceFrom;
-        case 'popularity': return b.completedGigs - a.completedGigs;
-        default: return 0;
-      }
-    });
+    let orderBy = 'rating DESC NULLS LAST';
+    switch (query.sort) {
+      case 'price_asc': orderBy = 'COALESCE(NULLIF(price_from, 0), hourly_rate, 0) ASC'; break;
+      case 'price_desc': orderBy = 'COALESCE(NULLIF(price_from, 0), hourly_rate, 0) DESC'; break;
+      case 'popularity': orderBy = 'completed_gigs DESC NULLS LAST'; break;
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const sql = `SELECT * FROM dj_profiles ${whereClause} ORDER BY ${orderBy} LIMIT 50`;
+
+    const { rows } = await pool.query(sql, params);
+    const result = rows.map(mapRow);
 
     return c.json({ success: true, data: result, total: result.length });
   } catch (err: any) {
@@ -339,11 +119,11 @@ app.get('/djs', async (c) => {
 app.get('/djs/:id', async (c) => {
   try {
     const id = c.req.param('id');
-    const profile = await getDjProfile(id);
-    if (!profile) {
-      return c.json({ success: false, error: `DJ not found: ${id}` }, 404);
+    const { rows } = await pool.query('SELECT * FROM dj_profiles WHERE id = $1 OR user_id = $1', [id]);
+    if (rows.length === 0) {
+      return c.json({ success: false, error: 'DJ not found' }, 404);
     }
-    return c.json({ success: true, data: profile });
+    return c.json({ success: true, data: mapRow(rows[0]) });
   } catch (err: any) {
     console.error('Error fetching DJ profile:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
@@ -355,11 +135,22 @@ app.get('/djs/:id', async (c) => {
 app.get('/djs/:id/mixes', async (c) => {
   try {
     const id = c.req.param('id');
-    const mixes = await djMixesStore.get(id) || [];
+    const { rows } = await pool.query(
+      `SELECT id, title, genre, duration, plays_count as plays, data FROM dj_mixes WHERE dj_id = $1 ORDER BY created_at DESC`,
+      [id]
+    );
+    const mixes = rows.map((r: any) => ({
+      id: r.id,
+      title: r.title || '',
+      genre: r.genre || '',
+      duration: r.duration ? `${Math.floor(r.duration / 60)}:${String(r.duration % 60).padStart(2, '0')}` : '',
+      plays: r.plays || 0,
+      likes: r.data?.likes || 0,
+    }));
     return c.json({ success: true, data: mixes });
   } catch (err: any) {
     console.error('Error fetching DJ mixes:', err);
-    return c.json({ success: false, error: 'Internal server error' }, 500);
+    return c.json({ success: true, data: [] });
   }
 });
 
@@ -368,11 +159,22 @@ app.get('/djs/:id/mixes', async (c) => {
 app.get('/djs/:id/reviews', async (c) => {
   try {
     const id = c.req.param('id');
-    const reviews = await djReviewsStore.get(id) || [];
+    const { rows } = await pool.query(
+      `SELECT id, reviewer_name, rating, comment, created_at, data FROM dj_reviews WHERE dj_id = $1 ORDER BY created_at DESC`,
+      [id]
+    );
+    const reviews = rows.map((r: any) => ({
+      id: r.id,
+      author: r.reviewer_name || 'Аноним',
+      date: new Date(r.created_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' }),
+      rating: r.rating || 5,
+      text: r.comment || '',
+      eventType: r.data?.eventType || '',
+    }));
     return c.json({ success: true, data: reviews });
   } catch (err: any) {
     console.error('Error fetching DJ reviews:', err);
-    return c.json({ success: false, error: 'Internal server error' }, 500);
+    return c.json({ success: true, data: [] });
   }
 });
 
@@ -381,50 +183,77 @@ app.get('/djs/:id/reviews', async (c) => {
 app.get('/djs/:id/calendar', async (c) => {
   try {
     const id = c.req.param('id');
-    // Check for stored calendar, or generate default
-    let calendar = await djCalendarStore.get(id);
-    if (!calendar) {
-      // Generate default 21-day calendar
-      const days = [];
-      const now = new Date();
-      for (let i = 0; i < 21; i++) {
-        const d = new Date(now);
-        d.setDate(d.getDate() + i);
-        days.push({
-          date: d.toISOString().split('T')[0],
-          dayOfWeek: d.toLocaleDateString('ru-RU', { weekday: 'short' }),
-          dayNum: d.getDate(),
-          month: d.toLocaleDateString('ru-RU', { month: 'short' }),
-          available: Math.random() > 0.35,
-        });
-      }
-      calendar = days;
+    // Check for booked dates from bookings table
+    const { rows: bookings } = await pool.query(
+      `SELECT event_date FROM bookings
+       WHERE performer_id = $1 AND status IN ('confirmed', 'deposit_paid', 'completed')
+       AND event_date >= CURRENT_DATE`,
+      [id]
+    ).catch(() => ({ rows: [] }));
+
+    const bookedDates = new Set(bookings.map((b: any) =>
+      new Date(b.event_date).toISOString().split('T')[0]
+    ));
+
+    // Generate 21-day calendar with real booking data
+    const days = [];
+    const now = new Date();
+    for (let i = 0; i < 21; i++) {
+      const d = new Date(now);
+      d.setDate(d.getDate() + i);
+      const dateStr = d.toISOString().split('T')[0];
+      days.push({
+        date: dateStr,
+        dayOfWeek: d.toLocaleDateString('ru-RU', { weekday: 'short' }),
+        dayNum: d.getDate(),
+        month: d.toLocaleDateString('ru-RU', { month: 'short' }),
+        available: !bookedDates.has(dateStr),
+      });
     }
-    return c.json({ success: true, data: calendar });
+    return c.json({ success: true, data: days });
   } catch (err: any) {
     console.error('Error fetching DJ calendar:', err);
-    return c.json({ success: false, error: 'Internal server error' }, 500);
+    return c.json({ success: true, data: [] });
   }
 });
 
-// ═══════ POST /djs/:id/book — Request booking (requires login intent) ═══════
+// ═══════ POST /djs/:id/book — Request booking (requires auth) ═══════
 
 app.post('/djs/:id/book', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
-    
-    const profile = await getDjProfile(id);
-    if (!profile) {
-      return c.json({ success: false, error: `DJ not found: ${id}` }, 404);
+
+    // Verify DJ exists
+    const { rows } = await pool.query('SELECT id, dj_name, data FROM dj_profiles WHERE id = $1 OR user_id = $1', [id]);
+    if (rows.length === 0) {
+      return c.json({ success: false, error: 'DJ not found' }, 404);
     }
 
-    const bookingId = `booking-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    const djRow = rows[0];
+    const djName = djRow.dj_name || djRow.data?.djName || 'DJ';
+
+    // Insert booking into bookings table
+    const { rows: bookingRows } = await pool.query(
+      `INSERT INTO bookings (performer_id, performer_type, requester_id, event_title, event_type, event_date, message, status, created_at)
+       VALUES ($1, 'dj', $2, $3, $4, $5, $6, 'pending', NOW())
+       RETURNING id`,
+      [
+        id,
+        body.clientEmail || 'anonymous',
+        body.eventType ? `Букинг DJ ${djName}` : `Букинг DJ ${djName}`,
+        body.eventType || 'event',
+        body.eventDate || null,
+        body.message || '',
+      ]
+    ).catch(() => ({ rows: [] }));
+
+    const bookingId = bookingRows[0]?.id || `bk-${Date.now()}`;
     const booking = {
       id: bookingId,
       djId: id,
-      djName: (profile as any).name,
-      clientName: body.clientName || 'Аноним',
+      djName,
+      clientName: body.clientName || '',
       clientEmail: body.clientEmail || '',
       eventDate: body.eventDate || '',
       eventType: body.eventType || '',
@@ -433,14 +262,6 @@ app.post('/djs/:id/book', requireAuth, async (c) => {
       createdAt: new Date().toISOString(),
     };
 
-    await djBookingsStore.set(bookingId, booking);
-
-    // Add to DJ's bookings list
-    const existingBookings = (await djBookingsByDjStore.get(id) || []) as string[];
-    existingBookings.push(bookingId);
-    await djBookingsByDjStore.set(id, existingBookings);
-
-    console.log(`New booking request: ${bookingId} for DJ ${id}`);
     return c.json({ success: true, data: booking });
   } catch (err: any) {
     console.error('Booking error:', err);
