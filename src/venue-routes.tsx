@@ -26,7 +26,7 @@
  */
 
 import { Hono } from 'hono';
-import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, venueAdCampaignsStore, venueAnalyticsStore, venuePlaylists, venueRadioBrandStore } from './db.tsx';
+import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, venueAdCampaignsStore, venueAnalyticsStore, venuePlaylists, venueRadioBrandStore, radioVenueRequestsStore, radioNotificationsStore } from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { notifyVenueRequest } from './email-helper.tsx';
@@ -617,13 +617,60 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
     campaigns.push(campaign);
     await venueAdCampaignsStore.set(profile.id, campaigns);
 
+    // Push venue request to radio side so radio station sees it in orders
+    if (campaign.stationId) {
+      const venueRequest = {
+        id: campaign.id,
+        venueId: profile.id,
+        venueName: profile.name || 'Unknown',
+        venueCity: profile.city || '',
+        packageType: campaign.packageType,
+        audioUrl: campaign.audioUrl,
+        startDate: campaign.startDate,
+        endDate: campaign.endDate,
+        targetPlays: campaign.targetPlays,
+        playsPerDay: Math.ceil((campaign.targetPlays || 0) / Math.max(1, Math.ceil(((new Date(campaign.endDate || Date.now()).getTime()) - (new Date(campaign.startDate || Date.now()).getTime())) / 86400000))),
+        durationDays: Math.ceil(((new Date(campaign.endDate || Date.now()).getTime()) - (new Date(campaign.startDate || Date.now()).getTime())) / 86400000) || 1,
+        totalPrice: campaign.budget,
+        platformFee: Math.round((campaign.budget || 0) * 0.15),
+        stationPayout: Math.round((campaign.budget || 0) * 0.85),
+        timeSlots: campaign.timeSlots,
+        status: 'pending',
+        submittedAt: new Date().toISOString(),
+      };
+
+      try {
+        const existingRaw = await radioVenueRequestsStore.get(campaign.stationId);
+        const existing = Array.isArray(existingRaw) ? existingRaw : [];
+        existing.push(venueRequest);
+        await radioVenueRequestsStore.set(campaign.stationId, existing);
+
+        // Push notification to radio station
+        const notifRaw = await radioNotificationsStore.get(campaign.stationId);
+        const notifs = Array.isArray(notifRaw) ? notifRaw : [];
+        notifs.unshift({
+          id: `notif-${Date.now()}`,
+          type: 'venue_request',
+          title: 'New ad campaign request',
+          message: `${profile.name || 'A venue'} wants to run ads (${campaign.budget} RUB)`,
+          priority: 'high',
+          read: false,
+          relatedId: campaign.id,
+          createdAt: new Date().toISOString(),
+        });
+        await radioNotificationsStore.set(campaign.stationId, notifs);
+      } catch (e) {
+        console.error('Error pushing venue request to radio:', e);
+      }
+    }
+
     // Email notification to admin
     notifyVenueRequest({
-      venueName: campaign.venueName || profile?.name || 'Unknown',
-      venueCity: campaign.venueCity || profile?.city || '',
-      packageType: campaign.packageType || campaign.type || '',
-      totalPrice: campaign.budget || campaign.totalPrice || 0,
-      stationId: campaign.stationId || campaign.radioId || '',
+      venueName: profile?.name || 'Unknown',
+      venueCity: profile?.city || '',
+      packageType: campaign.packageType || '',
+      totalPrice: campaign.budget || 0,
+      stationId: campaign.stationId || '',
     }).catch(() => {});
 
     return c.json({ success: true, campaign });

@@ -462,6 +462,218 @@ app.put('/venue-requests/:id/complete', requireAuth, async (c) => {
 });
 
 // =====================================================
+// ORDERS ENDPOINTS (venue-requests mapped to order format)
+// =====================================================
+
+// Helper: map venue-request status to AdvertisementOrder status
+function mapRequestStatusToOrderStatus(status: string): string {
+  const mapping: Record<string, string> = {
+    pending: 'in_review',
+    approved: 'approved_by_radio',
+    rejected: 'rejected_by_radio',
+    in_progress: 'approved_by_radio',
+    completed: 'fulfilled',
+    cancelled: 'cancelled',
+    paused: 'paused',
+  };
+  return mapping[status] || status;
+}
+
+// GET /orders
+app.get('/orders', requireAuth, async (c) => {
+  try {
+    const userId = await getRadioUserId(c);
+    const station = await getStation(userId);
+    if (!station) {
+      return c.json({ error: 'Radio station not found' }, 404);
+    }
+
+    const requestsData = await radioVenueRequestsStore.get(station.id);
+    const requests = Array.isArray(requestsData) ? requestsData : [];
+
+    const orders = requests.map((req: any) => ({
+      id: req.id,
+      packageId: req.packageId || '',
+      sellerRadioId: station.id,
+      buyerUserId: req.venueId || '',
+      buyerUserEmail: '',
+      buyerUserName: req.venueName || '',
+      buyerVenueName: req.venueName || '',
+      broadcastSlotIds: [],
+      totalSlots: (req.playsPerDay || 0) * (req.durationDays || 0),
+      adCreativeFileUrl: req.audioUrl || '',
+      adCreativeType: req.audioUrl ? 'audio_file' : 'text_to_speech',
+      status: mapRequestStatusToOrderStatus(req.status),
+      baseAmount: req.totalPrice || 0,
+      discountAmount: 0,
+      demandSurcharge: 0,
+      paymentAmount: req.totalPrice || 0,
+      commissionAmount: req.platformFee || Math.round((req.totalPrice || 0) * 0.15),
+      netAmountToRadio: req.stationPayout || Math.round((req.totalPrice || 0) * 0.85),
+      commissionStatus: req.status === 'completed' ? 'collected' : 'pending',
+      pricingDetails: {
+        basePricePerSlot: (req.totalPrice || 0) / Math.max((req.playsPerDay || 1) * (req.durationDays || 1), 1),
+        totalSlots: (req.playsPerDay || 0) * (req.durationDays || 0),
+        occupancyPercent: 0,
+        demandMultiplierApplied: false,
+        bulkDiscountApplied: false,
+        discountPercent: 0,
+      },
+      playReport: {
+        totalPlays: req.completedPlays || 0,
+        playDates: [],
+        detailedSchedule: [],
+        completionPercent: req.targetPlays > 0
+          ? Math.round(((req.completedPlays || 0) / req.targetPlays) * 100)
+          : 0,
+      },
+      reviewedAt: req.reviewedAt,
+      rejectionReason: req.rejectionReason,
+      fulfilledAt: req.completedAt,
+      paidAt: req.submittedAt,
+      createdAt: req.submittedAt || new Date().toISOString(),
+      updatedAt: req.reviewedAt || req.submittedAt || new Date().toISOString(),
+    }));
+
+    return c.json({ success: true, orders });
+  } catch (error: any) {
+    console.error('Error fetching orders:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// PUT /orders/:id/approve
+app.put('/orders/:id/approve', requireAuth, async (c) => {
+  try {
+    const userId = await getRadioUserId(c);
+    const station = await getStation(userId);
+    if (!station) {
+      return c.json({ error: 'Radio station not found' }, 404);
+    }
+
+    const orderId = c.req.param('id');
+    const body = await c.req.json().catch(() => ({}));
+    const requestsData = await radioVenueRequestsStore.get(station.id);
+    const requests = Array.isArray(requestsData) ? requestsData : [];
+
+    const idx = requests.findIndex((r: any) => r.id === orderId);
+    if (idx === -1) {
+      return c.json({ error: 'Order not found' }, 404);
+    }
+    if (requests[idx].status !== 'pending') {
+      return c.json({ error: 'Only pending orders can be approved' }, 400);
+    }
+
+    requests[idx].status = 'approved';
+    requests[idx].reviewedAt = new Date().toISOString();
+    requests[idx].approvedAt = new Date().toISOString();
+    requests[idx].reviewNotes = body.notes || '';
+    await radioVenueRequestsStore.set(station.id, requests);
+
+    return c.json({ success: true, data: requests[idx] });
+  } catch (error: any) {
+    console.error('Error approving order:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// PUT /orders/:id/reject
+app.put('/orders/:id/reject', requireAuth, async (c) => {
+  try {
+    const userId = await getRadioUserId(c);
+    const station = await getStation(userId);
+    if (!station) {
+      return c.json({ error: 'Radio station not found' }, 404);
+    }
+
+    const orderId = c.req.param('id');
+    const body = await c.req.json().catch(() => ({}));
+    const requestsData = await radioVenueRequestsStore.get(station.id);
+    const requests = Array.isArray(requestsData) ? requestsData : [];
+
+    const idx = requests.findIndex((r: any) => r.id === orderId);
+    if (idx === -1) {
+      return c.json({ error: 'Order not found' }, 404);
+    }
+    if (!['pending', 'approved'].includes(requests[idx].status)) {
+      return c.json({ error: 'Only pending or approved orders can be rejected' }, 400);
+    }
+
+    requests[idx].status = 'rejected';
+    requests[idx].rejectionReason = body.reason || '';
+    requests[idx].reviewedAt = new Date().toISOString();
+    await radioVenueRequestsStore.set(station.id, requests);
+
+    return c.json({ success: true, data: requests[idx] });
+  } catch (error: any) {
+    console.error('Error rejecting order:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// PUT /orders/:id/fulfill
+app.put('/orders/:id/fulfill', requireAuth, async (c) => {
+  try {
+    const userId = await getRadioUserId(c);
+    const station = await getStation(userId);
+    if (!station) {
+      return c.json({ error: 'Radio station not found' }, 404);
+    }
+
+    const orderId = c.req.param('id');
+    const requestsData = await radioVenueRequestsStore.get(station.id);
+    const requests = Array.isArray(requestsData) ? requestsData : [];
+
+    const idx = requests.findIndex((r: any) => r.id === orderId);
+    if (idx === -1) {
+      return c.json({ error: 'Order not found' }, 404);
+    }
+    if (!['approved', 'in_progress'].includes(requests[idx].status)) {
+      return c.json({ error: 'Only approved or in-progress orders can be fulfilled' }, 400);
+    }
+
+    const req = requests[idx];
+    req.status = 'completed';
+    req.completedAt = new Date().toISOString();
+    req.completedPlays = req.targetPlays || req.completedPlays || 0;
+    await radioVenueRequestsStore.set(station.id, requests);
+
+    // Platform revenue: 15% commission
+    const totalPrice = req.totalPrice || 0;
+    const platformFee = Math.round(totalPrice * 0.15);
+    const stationPayout = totalPrice - platformFee;
+
+    if (totalPrice > 0) {
+      await recordRevenue({
+        channel: 'radio_venue',
+        description: `Ad campaign: ${req.venueName} on ${station.name || 'station'}`,
+        grossAmount: totalPrice,
+        platformRevenue: platformFee,
+        payoutAmount: stationPayout,
+        commissionRate: 0.15,
+        payerId: req.venueId || 'venue',
+        payerName: req.venueName || 'Venue',
+        payeeId: station.id,
+        payeeName: station.name || 'Radio',
+        metadata: {
+          orderId: req.id,
+          stationId: station.id,
+          venueCity: req.venueCity,
+          durationDays: req.durationDays,
+          totalPlays: req.completedPlays,
+        },
+      });
+    }
+
+    return c.json({ success: true, data: req });
+  } catch (error: any) {
+    console.error('Error fulfilling order:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+
+// =====================================================
 // FINANCE ENDPOINTS
 // =====================================================
 
