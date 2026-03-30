@@ -757,6 +757,58 @@ app.put('/radio-brand', requireAuth, async (c) => {
 // BOOKINGS LIST (for Venue cabinet)
 // =====================================================
 
+
+// -- Campaign Status (combined venue + radio side) --
+app.get('/radio-campaigns/:id/status', requireAuth, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const profile = await getVenueProfile(userId);
+    if (!profile) return c.json({ success: false, error: 'Venue profile not found' }, 404);
+    const campaignId = c.req.param('id');
+    const campaignsRaw = await venueAdCampaignsStore.get(profile.id);
+    const campaigns = Array.isArray(campaignsRaw) ? campaignsRaw : (campaignsRaw?.data || []);
+    const campaign = campaigns.find((cam: any) => cam.id === campaignId);
+    if (!campaign) return c.json({ success: false, error: 'Campaign not found' }, 404);
+
+    let radioStatus = null;
+    let pricing = null;
+    try {
+      const radioRequests = await radioVenueRequestsStore.get(campaign.stationId);
+      const requests = Array.isArray(radioRequests) ? radioRequests : (radioRequests?.data || []);
+      const radioReq = requests.find((r: any) => r.campaignId === campaignId || r.id === campaignId);
+      if (radioReq) {
+        radioStatus = {
+          status: radioReq.status || 'pending',
+          reviewedAt: radioReq.reviewedAt || null,
+          approvedAt: radioReq.approvedAt || null,
+          completedAt: radioReq.completedAt || null,
+          totalPlays: radioReq.totalPlays || 0,
+          completedPlays: radioReq.completedPlays || 0,
+          impressions: radioReq.impressions || 0,
+          rejectionReason: radioReq.rejectionReason || null,
+        };
+        const commissionRate = 0.15;
+        const baseAmount = radioReq.totalPrice || campaign.budget || 0;
+        const discountAmount = radioReq.discountAmount || 0;
+        const paymentAmount = baseAmount - discountAmount;
+        const commissionAmount = Math.round(paymentAmount * commissionRate);
+        const netAmountToRadio = paymentAmount - commissionAmount;
+        pricing = { baseAmount, discountAmount, paymentAmount, commissionAmount, netAmountToRadio, commissionRate };
+      }
+    } catch (_) { /* radio side may not exist yet */ }
+
+    return c.json({
+      success: true,
+      campaignId,
+      venueStatus: campaign.status || 'active',
+      radioStatus,
+      pricing,
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
 app.get('/bookings', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);

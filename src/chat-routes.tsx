@@ -110,6 +110,35 @@ app.post('/messages/:orderId', requireAuth, async (c) => {
 });
 
 // GET /unread/:userId
+
+// -- Mark chat messages as read --
+app.put('/messages/:orderId/read', requireAuth, async (c) => {
+  try {
+    const orderId = c.req.param('orderId');
+    const userId = c.get('userId');
+    const messages: any[] = (await publishChatsStore.get(orderId)) || [];
+    let updated = 0;
+    for (const msg of messages) {
+      if (msg.senderId !== userId && !msg.read) {
+        msg.read = true;
+        msg.readAt = new Date().toISOString();
+        updated++;
+      }
+    }
+    if (updated > 0) {
+      await publishChatsStore.set(orderId, messages);
+    }
+    return c.json({ success: true, updated });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// -- Typing indicator (fire-and-forget) --
+app.post('/typing/:orderId', requireAuth, async (c) => {
+  return c.json({ success: true });
+});
+
 app.get('/unread/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
   const authUserId = c.get('userId');

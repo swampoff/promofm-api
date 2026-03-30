@@ -369,6 +369,71 @@ app.get('/unread/:userId', requireAuth, async (c) => {
 
 // ── GET /rules - Communication rules (for UI) ──
 
+
+// -- Edit message --
+app.put('/messages/:messageId/edit', requireAuth, async (c) => {
+  try {
+    const messageId = c.req.param('messageId');
+    const { conversationId, text } = await c.req.json();
+    const userId = c.get('userId');
+    if (!conversationId || !text) return c.json({ success: false, error: 'conversationId and text required' }, 400);
+
+    const messages: any[] = (await dmMessagesStore.get(conversationId)) || [];
+    const msg = messages.find((m: any) => m.id === messageId);
+    if (!msg) return c.json({ success: false, error: 'Message not found' }, 404);
+    if (msg.senderId !== userId) return c.json({ success: false, error: 'Not your message' }, 403);
+
+    msg.text = text;
+    msg.editedAt = new Date().toISOString();
+    await dmMessagesStore.set(conversationId, messages);
+    return c.json({ success: true, message: msg });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// -- Delete message (soft) --
+app.delete('/messages/:conversationId/:messageId', requireAuth, async (c) => {
+  try {
+    const conversationId = c.req.param('conversationId');
+    const messageId = c.req.param('messageId');
+    const userId = c.get('userId');
+
+    const messages: any[] = (await dmMessagesStore.get(conversationId)) || [];
+    const msg = messages.find((m: any) => m.id === messageId);
+    if (!msg) return c.json({ success: false, error: 'Message not found' }, 404);
+    if (msg.senderId !== userId) return c.json({ success: false, error: 'Not your message' }, 403);
+
+    msg.deleted = true;
+    msg.text = '';
+    await dmMessagesStore.set(conversationId, messages);
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// -- Typing indicator (ephemeral) --
+app.post('/typing/:conversationId', requireAuth, async (c) => {
+  return c.json({ success: true });
+});
+
+// -- Presence check for specific user --
+app.get('/presence/:userId', requireAuth, async (c) => {
+  try {
+    const targetUserId = c.req.param('userId');
+    // Simple presence: check last heartbeat from POST /presence
+    // For now return offline with no lastSeen (heartbeat is fire-and-forget)
+    return c.json({
+      success: true,
+      status: 'offline',
+      lastSeen: null,
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
 app.get('/rules', (c) => {
   return c.json({
     success: true,
