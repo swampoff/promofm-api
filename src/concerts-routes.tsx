@@ -1,12 +1,11 @@
 /**
- * CONCERTS ROUTES v2 — Uses typed `concerts` table
- * Artist CRUD + public endpoints for published concerts
+ * CONCERTS ROUTES v2 — Uses typed concerts table + performance_history
  */
 
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { safeErrorMessage } from './security.tsx';
-
+import { pool } from './db-client.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 
 const app = new Hono();
@@ -39,6 +38,89 @@ app.get('/promoted', async (c) => {
 });
 
 // ═══════════════════════════════════════
+// PERFORMANCE HISTORY
+// ═══════════════════════════════════════
+
+// GET /performance-history
+app.get('/performance-history', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const { rows } = await pool.query(
+      'SELECT * FROM performance_history WHERE user_id = $1 ORDER BY event_date DESC',
+      [userId]
+    );
+    return c.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('Error in GET /performance-history:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+// POST /performance-history
+app.post('/performance-history', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const body = await c.req.json();
+    const { rows } = await pool.query(
+      `INSERT INTO performance_history (user_id, venue_name, city, country, event_date, event_type, setlist, notes, audience_count, was_headliner)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING *`,
+      [userId, body.venue_name, body.city || null, body.country || 'Россия', body.event_date, body.event_type || 'live', body.setlist || null, body.notes || null, body.audience_count || null, body.was_headliner || false]
+    );
+    return c.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('Error in POST /performance-history:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// PUT /performance-history/:id
+app.put('/performance-history/:id', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const allowed = ['venue_name','city','country','event_date','event_type','setlist','notes','audience_count','was_headliner'];
+    const fields: string[] = [];
+    const values: any[] = [];
+    let i = 1;
+    for (const [key, val] of Object.entries(body)) {
+      if (allowed.includes(key)) {
+        fields.push(`${key} = $${i++}`);
+        values.push(val);
+      }
+    }
+    if (fields.length === 0) return c.json({ success: false, error: 'No fields to update' }, 400);
+    fields.push('updated_at = NOW()');
+    values.push(id, userId);
+    const { rows } = await pool.query(
+      `UPDATE performance_history SET ${fields.join(', ')} WHERE id = $${i++} AND user_id = $${i} RETURNING *`,
+      values
+    );
+    if (rows.length === 0) return c.json({ success: false, error: 'Not found' }, 404);
+    return c.json({ success: true, data: rows });
+  } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// DELETE /performance-history/:id
+app.delete('/performance-history/:id', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const id = c.req.param('id');
+    const { rowCount } = await pool.query(
+      'DELETE FROM performance_history WHERE id = $1 AND user_id = $2',
+      [id, userId]
+    );
+    if (rowCount === 0) return c.json({ success: false, error: 'Not found' }, 404);
+    return c.json({ success: true, message: 'Deleted' });
+  } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ═══════════════════════════════════════
 // ARTIST endpoints (auth required)
 // ═══════════════════════════════════════
 
@@ -58,8 +140,7 @@ app.get('/', requireAuth, async (c) => {
 app.get('/:id', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
-    // Skip if it matches a known sub-route
-    if (['public', 'promoted', 'moderation'].includes(concertId)) return c.notFound();
+    if (['public', 'promoted', 'moderation', 'performance-history'].includes(concertId)) return c.notFound();
     const concert = await typed.getConcertById(concertId);
     if (!concert) {
       return c.json({ success: false, error: 'Concert not found' }, 404);
@@ -146,19 +227,16 @@ app.post('/:id/promote', requireAuth, async (c) => {
     const body = await c.req.json();
     const cost = body.cost || 100;
 
-    // Check concert exists and belongs to user
     const concert = await typed.getConcertById(concertId);
     if (!concert) {
       return c.json({ success: false, error: 'Concert not found' }, 404);
     }
 
-    // Deduct coins
     const result = await typed.deductCoins(userId, cost, `Промо концерта "${concert.title}"`);
     if (result && 'error' in result) {
       return c.json({ success: false, error: result.error, balance: result.balance }, 400);
     }
 
-    // Set promoted
     const now = new Date();
     const endDate = new Date(now.getTime() + (body.days || 7) * 86400000);
     await typed.updateConcert(concertId, {
