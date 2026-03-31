@@ -216,7 +216,7 @@ app.post('/orders', requireAuth, async (c) => {
       subscription as 'none' | 'spark' | 'start' | 'pro' | 'elite',
     );
 
-    const orderId = `p360_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const orderId = `p360_${crypto.randomUUID()}`;
     const now = new Date().toISOString();
 
     const defaultServices = {

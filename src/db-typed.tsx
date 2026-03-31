@@ -472,7 +472,7 @@ export async function awardCoins(userId: string, amount: number, description: st
     .upsert({ user_id: userId, balance: newBalance, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
 
   // 2. Record transaction
-  const txId = `cointx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const txId = `cointx-${crypto.randomUUID()}`;
   await dbClient
     .from('coin_transactions')
     .upsert({
@@ -515,7 +515,7 @@ export async function deductCoins(userId: string, amount: number, description: s
     .from('coin_balances')
     .upsert({ user_id: userId, balance: newBalance, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
 
-  const txId = `cointx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const txId = `cointx-${crypto.randomUUID()}`;
   await dbClient
     .from('coin_transactions')
     .upsert({

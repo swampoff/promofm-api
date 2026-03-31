@@ -19,10 +19,10 @@ donationsRoutes.post('/', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
     const body = await c.req.json();
-    const donationId = `donation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const donationId = `donation-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
     const donation = {
-      id: donationId, status: 'completed',
+      id: donationId, status: 'pending',
       ...body,
       artistId: body.artistId || userId,
       createdAt: now,

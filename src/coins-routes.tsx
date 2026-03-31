@@ -32,14 +32,14 @@ coinsRoutes.post('/transactions', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
     const body = await c.req.json();
-    const txId = `cointx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const txId = `cointx-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
 
     const transaction = {
       id: txId,
       userId,
       amount: body.amount || 0,
-      type: body.type || 'reward',
+      type: (body.type === 'expense' || body.type === 'refund') ? body.type : 'expense', // Users cannot create 'reward' transactions
       description: body.description || '',
       createdAt: now,
     };
@@ -47,7 +47,9 @@ coinsRoutes.post('/transactions', requireAuth, async (c) => {
     // Update balance
     const current = await db.getCoinBalance(userId);
     const currentBalance = Number(current?.balance) || 0;
-    const newBalance = currentBalance + Number(transaction.amount || 0);
+    // Users can only subtract coins (expense); positive additions require admin/webhook
+    const safeAmount = transaction.type === 'expense' ? -Math.abs(Number(transaction.amount || 0)) : Number(transaction.amount || 0);
+    const newBalance = currentBalance + safeAmount;
     await db.setCoinBalance(userId, newBalance);
 
     // Save transaction

@@ -36,7 +36,7 @@ async function getTransactions(userId: string, filters: any = {}): Promise<any[]
 }
 
 async function createTransaction(userId: string, type: string, category: string, amount: number, description: string, metadata?: any): Promise<string> {
-  const id = `tx-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const id = `tx-${crypto.randomUUID()}`;
   const tx = { id, userId, type, category, amount, description, metadata, status: 'completed', createdAt: new Date().toISOString() };
   const raw = await paymentTransactionsStore.get(userId);
   const txs: any[] = raw || [];

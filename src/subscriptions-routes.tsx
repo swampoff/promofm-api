@@ -329,7 +329,7 @@ subscriptions.post('/subscribe', requireAuth, async (c) => {
 
     // 1. Записываем платёжную транзакцию пользователя
     if (subscription.price > 0) {
-      const txId = `tx-sub-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const txId = `tx-sub-${crypto.randomUUID()}`;
       const tx = {
         id: txId,
         userId: user_id,
@@ -703,7 +703,7 @@ subscriptions.post('/:userId/change-plan', requireAuth, async (c) => {
 
     if (price > 0) {
       // Транзакция
-      const txId = `tx-sub-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const txId = `tx-sub-${crypto.randomUUID()}`;
       const tx = {
         id: txId, userId, type: 'expense', category: 'subscription',
         amount: price, description: `Смена тарифа на «${plan.name}» (${interval === 'year' ? 'год' : 'мес'})`,
@@ -902,7 +902,7 @@ subscriptions.post('/charge-recurring', async (c) => {
         results.push({ userId, action: 'charged', amount, gateway: savedMethod.gateway, orderId, newExpiry: newExpiry.toISOString() });
 
         // Record transaction
-        const txId = `tx-recur-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const txId = `tx-recur-${crypto.randomUUID()}`;
         const txs: any[] = (await paymentTransactionsStore.get(userId)) || [];
         txs.push({
           id: txId, userId, type: 'expense', category: 'subscription',

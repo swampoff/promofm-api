@@ -72,7 +72,7 @@ async function sendNotification(params: {
   data?: any;
 }) {
   try {
-    const notifId = `notif-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    const notifId = `notif-${crypto.randomUUID()}`;
     const notification = {
       id: notifId,
       userId: params.userId,
@@ -214,7 +214,7 @@ app.post('/create', requireAuth, async (c) => {
     const venueProfile = venueProfileData || null;
 
     // Создать букинг
-    const bookingId = `booking-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    const bookingId = `booking-${crypto.randomUUID()}`;
     const booking = {
       id: bookingId,
       requesterId: user.id,

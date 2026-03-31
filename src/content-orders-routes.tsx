@@ -77,7 +77,7 @@ app.post("/orders", requireAuth, async (c) => {
       }, 400);
     }
 
-    const orderId = `order_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const orderId = `order_${crypto.randomUUID()}`;
     const timestamp = new Date().toISOString();
 
     const order: ContentOrder = {
@@ -373,33 +373,6 @@ app.get("/stats", async (c) => {
       success: false, 
       error: safeErrorMessage(error) 
     }, 500);
-  }
-});
-
-
-// -- Demo order for admin testing --
-app.post('/demo', requireAuth, async (c) => {
-  try {
-    const userId = c.get("userId");
-    const orderId = `demo-${Date.now()}`;
-    const demoOrder = {
-      id: orderId,
-      venueId: userId,
-      venueName: 'Demo Venue',
-      contentType: 'jingles',
-      text: 'Welcome to our venue! Enjoy the music and great atmosphere.',
-      style: 'professional',
-      duration: 15,
-      voiceType: 'female',
-      price: 3000,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    await contentOrdersStore.set(orderId, demoOrder);
-    return c.json({ success: true, order: demoOrder });
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
   }
 });
 

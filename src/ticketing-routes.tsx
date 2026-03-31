@@ -150,7 +150,7 @@ ticketing.post('/sales', requireAuth, async (c) => {
     const body = await c.req.json();
     
     const sale: TicketSale = {
-      id: `sale_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      id: `sale_${crypto.randomUUID()}`,
       concertId: body.concertId,
       artistId: body.artistId,
       provider: body.provider || 'manual',

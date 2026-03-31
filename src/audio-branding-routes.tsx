@@ -155,7 +155,7 @@ app.post('/orders', requireAuth, async (c) => {
       subscription as 'none' | 'spark' | 'start' | 'pro' | 'elite',
     );
 
-    const orderId = `ab_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const orderId = `ab_${crypto.randomUUID()}`;
     const now = new Date().toISOString();
 
     const order: AudioBrandingOrder = {
