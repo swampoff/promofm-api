@@ -114,6 +114,7 @@ auth.post("/signup", async (c) => {
   try {
     const { email, password, name, role, consentPersonalData, consentNewsletter } = await c.req.json();
     if (!email || !password) return c.json({ success: false, error: "Email и пароль обязательны" }, 400);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ success: false, error: "Некорректный формат email" }, 400);
     const pwErr = validatePassword(password);
     if (pwErr) return c.json({ success: false, error: pwErr }, 400);
     if (!consentPersonalData) return c.json({ success: false, error: "Необходимо согласие на обработку персональных данных" }, 400);
