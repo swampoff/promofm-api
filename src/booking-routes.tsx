@@ -514,7 +514,7 @@ app.post('/:id/pay-deposit', requireAuth, async (c) => {
       currency: 'RUB',
       paymentType: 'deposit',
       status: 'completed',
-      gateway: 'mock',
+      gateway: 'internal',
       gatewayPaymentId: paymentIntentId,
       processedAt: new Date().toISOString(),
     });
@@ -599,7 +599,7 @@ app.post('/:id/pay-final', requireAuth, async (c) => {
       currency: 'RUB',
       paymentType: 'final',
       status: 'completed',
-      gateway: 'mock',
+      gateway: 'internal',
       gatewayPaymentId: paymentIntentId,
       processedAt: new Date().toISOString(),
     });

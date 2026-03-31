@@ -24,7 +24,6 @@ import * as db from './db.tsx';
 import { platformStatsStore, systemConfigStore } from './db.tsx';
 
 import { initializeStorage } from './storage-setup.tsx';
-import { seedDemoData } from './demo-seed.tsx';
 
 import authRoutes from './auth-routes.tsx';
 import concertsRoutes from './concerts-routes.tsx';
@@ -145,26 +144,6 @@ initializeStorage().then(result => {
   log.warn({ err: error?.message }, 'storage_init_deferred');
 });
 
-// Seed demo data with retry
-const seedWithRetry = async (attempt = 1, maxAttempts = 3): Promise<void> => {
-  try {
-    const result = await seedDemoData();
-    if (result.seeded) {
-      log.info({ message: result.message }, 'seed_result');
-    } else {
-      log.info({ message: result.message }, 'seed_result');
-    }
-  } catch (error: any) {
-    if (attempt < maxAttempts) {
-      const delay = 2000 * attempt;
-      log.warn({ attempt, maxAttempts, delay }, 'seed_retry');
-      await new Promise(r => setTimeout(r, delay));
-      return seedWithRetry(attempt + 1, maxAttempts);
-    }
-    log.warn({ err: error?.message }, 'seed_deferred');
-  }
-};
-setTimeout(() => { seedWithRetry(); }, 2000);
 
 // Start Security Warden (FIM, process monitor, beacon detection, kill chain correlation)
 startSecurityWarden();
@@ -272,6 +251,17 @@ app.get('/server/uploads/covers/*', async (c) => {
     c.header('Access-Control-Allow-Origin', '*');
     return c.body(file);
   } catch { return c.text('Not found', 404); }
+});
+
+app.get('/server/uploads/venue-content/*', async (c) => {
+  const filename = decodeURIComponent(c.req.path.replace('/server/uploads/venue-content/', ''));
+  const filePath = '/opt/promofm-api/uploads/venue-content/' + filename;
+  const fs = await import('node:fs');
+  if (!fs.existsSync(filePath)) return c.json({ error: 'not found' }, 404);
+  const data = fs.readFileSync(filePath);
+  const ext = filename.split('.').pop()?.toLowerCase() || 'mp3';
+  const types: Record<string, string> = { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4' };
+  return new Response(data, { headers: { 'Content-Type': types[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' } });
 });
 
 app.route('/server/auth', authRoutes);
