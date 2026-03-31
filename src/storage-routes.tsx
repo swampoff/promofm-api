@@ -109,7 +109,7 @@ storage.get('/stats', requireAuth, async (c) => {
 });
 
 // List available buckets
-storage.get('/buckets', (c) => {
+storage.get('/buckets', requireAuth, (c) => {
   return c.json({
     success: true,
     buckets: BUCKET_NAMES,

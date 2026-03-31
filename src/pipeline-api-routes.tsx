@@ -28,6 +28,17 @@ import {
   PRODUCTION_360_TRANSITIONS,
 } from './pipeline-engine.tsx';
 import type { PipelineType } from './pipeline-engine.tsx';
+const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+
+async function requireAdminOrKey(c: any, next: any) {
+  const internalKey = c.req.header('X-Internal-Key');
+  if (internalKey && ADMIN_INTERNAL_KEY && internalKey === ADMIN_INTERNAL_KEY) {
+    return next();
+  }
+  const { requireAuth, requireAdmin } = await import('./auth-middleware.tsx');
+  return requireAuth(c, () => requireAdmin(c, next));
+}
+
 
 const pipelineApi = new Hono();
 
@@ -50,7 +61,7 @@ const pipelineApi = new Hono();
  *   limit — кол-во записей (default 50)
  *   offset — смещение
  */
-pipelineApi.get('/audit', (c) => {
+pipelineApi.get('/audit', requireAdminOrKey, (c) => {
   const filters = {
     pipeline_type: c.req.query('pipeline_type') as PipelineType | undefined,
     content_type: c.req.query('content_type'),
@@ -77,7 +88,7 @@ pipelineApi.get('/audit', (c) => {
  * GET /pipeline/audit/:itemId
  * Получить аудит-лог для конкретного элемента (трек, клип, заявка)
  */
-pipelineApi.get('/audit/:itemId', (c) => {
+pipelineApi.get('/audit/:itemId', requireAdminOrKey, (c) => {
   const itemId = c.req.param('itemId');
   const entries = getAuditForItem(itemId);
 
@@ -93,7 +104,7 @@ pipelineApi.get('/audit/:itemId', (c) => {
  * GET /pipeline/timeline/:itemId
  * Хронология переходов элемента с длительностью каждого шага
  */
-pipelineApi.get('/timeline/:itemId', (c) => {
+pipelineApi.get('/timeline/:itemId', requireAdminOrKey, (c) => {
   const itemId = c.req.param('itemId');
   const timeline = getItemTimeline(itemId);
 
@@ -112,7 +123,7 @@ pipelineApi.get('/timeline/:itemId', (c) => {
  * GET /pipeline/analytics
  * Аналитика пайплайна для всех типов контента
  */
-pipelineApi.get('/analytics', (c) => {
+pipelineApi.get('/analytics', requireAdminOrKey, (c) => {
   const contentType = c.req.query('content_type');
 
   if (contentType) {
@@ -140,7 +151,7 @@ pipelineApi.get('/analytics', (c) => {
  * GET /pipeline/stats
  * Общая статистика по всем пайплайнам (быстрый endpoint для дашборда)
  */
-pipelineApi.get('/stats', (c) => {
+pipelineApi.get('/stats', requireAdminOrKey, (c) => {
   return c.json({ success: true, ...computeGlobalStats() });
 });
 
@@ -152,7 +163,7 @@ pipelineApi.get('/stats', (c) => {
  * GET /pipeline/transitions
  * Вернуть карту допустимых переходов для всех пайплайнов
  */
-pipelineApi.get('/transitions', (c) => {
+pipelineApi.get('/transitions', requireAdminOrKey, (c) => {
   return c.json({
     success: true,
     transitions: {
@@ -170,7 +181,7 @@ pipelineApi.get('/transitions', (c) => {
  * GET /pipeline/map/:pipelineType
  * Полная карта пайплайна с метаданными (labels, SLA, roles)
  */
-pipelineApi.get('/map/:pipelineType', (c) => {
+pipelineApi.get('/map/:pipelineType', requireAdminOrKey, (c) => {
   const pipelineType = c.req.param('pipelineType') as PipelineType;
   const map = getPipelineMap(pipelineType);
 
@@ -185,7 +196,7 @@ pipelineApi.get('/map/:pipelineType', (c) => {
  * GET /pipeline/transitions/:pipelineType/:currentStatus
  * Следующие допустимые статусы
  */
-pipelineApi.get('/transitions/:pipelineType/:currentStatus', (c) => {
+pipelineApi.get('/transitions/:pipelineType/:currentStatus', requireAdminOrKey, (c) => {
   const pipelineType = c.req.param('pipelineType') as PipelineType;
   const currentStatus = c.req.param('currentStatus');
 
@@ -211,7 +222,7 @@ pipelineApi.get('/transitions/:pipelineType/:currentStatus', (c) => {
  *
  * Body: { items: [{ pipeline_type, item_id, current_status, status_entered_at }] }
  */
-pipelineApi.post('/sla/check', async (c) => {
+pipelineApi.post('/sla/check', requireAdminOrKey, async (c) => {
   try {
     const body = await c.req.json();
     const { items } = body;

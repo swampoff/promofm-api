@@ -204,7 +204,7 @@ auth.post("/signin", async (c) => {
       logAuthEvent('signin_fail', {
         description: `Неверный email или пароль: ${email}`, error: 'user_not_found', ip, userAgent: ua,
       });
-      return c.json({ success: false, error: "Ошибка входа: Invalid login credentials" }, 401);
+      return c.json({ success: false, error: "Неверный email или пароль" }, 401);
     }
 
     const user = result.rows[0];
@@ -224,7 +224,7 @@ auth.post("/signin", async (c) => {
         success: false,
         error: remaining > 0
           ? `Неверный email или пароль. Осталось попыток: ${remaining}`
-          : "Ошибка входа: Invalid login credentials"
+          : "Неверный email или пароль"
       }, 401);
     }
 

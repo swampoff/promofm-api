@@ -20,7 +20,7 @@
  */
 
 import { Hono } from 'hono';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import {
   audioBrandingOrdersStore,
   audioBrandingByStatusStore,
@@ -654,7 +654,7 @@ app.delete('/orders/:id', requireAuth, async (c) => {
 // STATS (Admin Dashboard)
 // =====================================================
 
-app.get('/stats', requireAuth, async (c) => {
+app.get('/stats', requireAuth, requireAdmin, async (c) => {
   try {
     const allStatuses = [
       'draft', 'pending_payment', 'paid', 'pending_review', 'rejected',

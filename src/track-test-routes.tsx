@@ -250,7 +250,7 @@ app.post('/payment', requireAuth, async (c) => {
 // 3. МОДЕРАЦИЯ (администратор)
 // =====================================================
 
-app.post('/moderate', requireAdmin, async (c) => {
+app.post('/moderate', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { request_id, action, notes } = body;
@@ -325,7 +325,7 @@ app.post('/moderate', requireAdmin, async (c) => {
 // 4. НАЗНАЧЕНИЕ ЭКСПЕРТОВ (администратор)
 // =====================================================
 
-app.post('/assign-experts', requireAdmin, async (c) => {
+app.post('/assign-experts', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { request_id, expert_emails, required_count } = body;
@@ -754,7 +754,7 @@ function templateConsolidatedRecommendations(reviews: ExpertReview[]): string {
 // 7. ФИНАЛИЗАЦИЯ И ОТПРАВКА РЕЗУЛЬТАТОВ (админстратор)
 // =====================================================
 
-app.post('/finalize', requireAdmin, async (c) => {
+app.post('/finalize', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const { request_id, action, rejection_reason } = body;
@@ -815,7 +815,7 @@ app.post('/finalize', requireAdmin, async (c) => {
 // 7a. ОТПРАВКА ОТЧЁТА АРТИСТУ (sendFeedbackToArtist)
 // =====================================================
 
-app.post('/send-feedback', requireAdmin, async (c) => {
+app.post('/send-feedback', requireAuth, requireAdmin, async (c) => {
   try {
     const { request_id } = await c.req.json();
 
@@ -936,7 +936,7 @@ app.get('/requests/:id', requireAuth, async (c) => {
 });
 
 // Получить все заявки (для администратора)
-app.get('/admin/requests', requireAdmin, async (c) => {
+app.get('/admin/requests', requireAuth, requireAdmin, async (c) => {
   try {
     const status = c.req.query('status');
     const allRequestIds = await trackTestAllRequestsStore.get('singleton') || [];

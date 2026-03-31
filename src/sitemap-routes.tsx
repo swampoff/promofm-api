@@ -1,6 +1,17 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { newsPublicStore } from './db.tsx';
+const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+
+async function requireAdminOrKey(c: any, next: any) {
+  const internalKey = c.req.header('X-Internal-Key');
+  if (internalKey && ADMIN_INTERNAL_KEY && internalKey === ADMIN_INTERNAL_KEY) {
+    return next();
+  }
+  const { requireAuth, requireAdmin } = await import('./auth-middleware.tsx');
+  return requireAuth(c, () => requireAdmin(c, next));
+}
+
 
 const sitemapRoutes = new Hono();
 const DOMAIN = 'https://promo-music.ru';
@@ -186,7 +197,7 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
 const INDEXNOW_KEY = 'be3b1945c60d606211ccb819caebe3fb';
 
 // POST /sitemap/ping — ping search engines (Yandex ping + IndexNow for Bing/Yandex)
-sitemapRoutes.post('/sitemap/ping', async (c) => {
+sitemapRoutes.post('/sitemap/ping', requireAdminOrKey, async (c) => {
   const sitemapUrl = `${DOMAIN}/sitemap.xml`;
   const results: Record<string, string> = {};
 
@@ -228,7 +239,7 @@ sitemapRoutes.post('/sitemap/ping', async (c) => {
 });
 
 // POST /sitemap/indexnow — submit specific URL to IndexNow
-sitemapRoutes.post('/sitemap/indexnow', async (c) => {
+sitemapRoutes.post('/sitemap/indexnow', requireAdminOrKey, async (c) => {
   const body = await c.req.json();
   const urls = body.urls || [body.url].filter(Boolean);
   if (!urls.length) return c.json({ success: false, error: 'No URLs provided' }, 400);

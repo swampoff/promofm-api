@@ -281,7 +281,7 @@ app.get('/likes/check', requireAuth, async (c) => {
 // ═══════════════════════════════════════════
 // POST / — Create new weekly release (admin only)
 // ═══════════════════════════════════════════
-app.post('/', requireAdmin, async (c) => {
+app.post('/', requireAuth, requireAdmin, async (c) => {
   try {
     const pool = await getPool();
     const body = await c.req.json();
@@ -355,7 +355,7 @@ app.get('/artist/:slug', async (c) => {
 // POST /:id/add-track — Add track to release (admin)
 // Body: { trackId: string }
 // ═══════════════════════════════════════════
-app.post('/:id/add-track', requireAdmin, async (c) => {
+app.post('/:id/add-track', requireAuth, requireAdmin, async (c) => {
   try {
     const pool = await getPool();
     const releaseId = c.req.param('id');
@@ -392,7 +392,7 @@ app.post('/:id/add-track', requireAdmin, async (c) => {
 // POST /:id/remove-track — Remove track from release (admin)
 // Body: { trackId: string }
 // ═══════════════════════════════════════════
-app.post('/:id/remove-track', requireAdmin, async (c) => {
+app.post('/:id/remove-track', requireAuth, requireAdmin, async (c) => {
   try {
     const pool = await getPool();
     const releaseId = c.req.param('id');
@@ -423,7 +423,7 @@ app.post('/:id/remove-track', requireAdmin, async (c) => {
 // POST /tracks/create — Create a new track (admin)
 // Body: { title, artist_name, genre?, duration?, audio_url?, cover_url?, artist_id? }
 // ═══════════════════════════════════════════
-app.post('/tracks/create', requireAdmin, async (c) => {
+app.post('/tracks/create', requireAuth, requireAdmin, async (c) => {
   try {
     const pool = await getPool();
     const body = await c.req.json();
@@ -463,7 +463,7 @@ app.post('/tracks/create', requireAdmin, async (c) => {
 // POST /tracks/create-with-artist — Create track + artist profile (admin)
 // Body: { title, artist_name, genre?, duration?, audio_url?, cover_url?, artist_bio?, artist_city?, artist_country? }
 // ═══════════════════════════════════════════
-app.post('/tracks/create-with-artist', requireAdmin, async (c) => {
+app.post('/tracks/create-with-artist', requireAuth, requireAdmin, async (c) => {
   try {
     const pool = await getPool();
     const body = await c.req.json();
