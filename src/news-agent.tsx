@@ -324,9 +324,10 @@ async function extractNewsWithLLM(
   pageText: string,
   poster: typeof POSTERS[number],
 ): Promise<ParsedNewsItem[]> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.OPENROUTER_API_KEY;
+  const useGeminiDirect = !!process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.log('[news-agent] OPENROUTER_API_KEY not set');
+    console.log('[news-agent] GEMINI_API_KEY / OPENROUTER_API_KEY not set');
     return [];
   }
 
@@ -384,32 +385,61 @@ SEO-ПРАВИЛА:
 - Если не удалось извлечь новости, верни {"news": []}`;
 
   try {
-    const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        'HTTP-Referer': 'https://promo-music.ru',
-        'X-Title': 'PromoFM News Agent',
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-3-flash-preview',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}` },
-        ],
-        temperature: 0.3,
-        max_tokens: 4000,
-      }),
-    });
+    let llmContent: string | undefined;
 
-    if (!resp.ok) {
-      console.log(`[news-agent] LLM error for ${source.id}: ${await resp.text()}`);
-      return [];
+    if (useGeminiDirect) {
+      // Google Gemini API via proxy (Hostinger VPS, bypasses Russia geo-restriction)
+      const geminiModel = 'gemini-2.5-flash';
+      const proxyUrl = process.env.GEMINI_PROXY_URL;
+      const proxyKey = process.env.GEMINI_PROXY_KEY || '';
+      const geminiUrl = proxyUrl
+        ? `${proxyUrl}/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`
+        : `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`;
+      const resp = await fetch(geminiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(proxyKey ? { 'x-proxy-key': proxyKey } : {}) },
+        body: JSON.stringify({
+          contents: [
+            { role: 'user', parts: [{ text: systemPrompt + '\n\n---\n\n' + `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}` }] },
+          ],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 8000 },
+        }),
+      });
+      if (!resp.ok) {
+        console.log(`[news-agent] Gemini API error for ${source.id}: ${await resp.text()}`);
+        return [];
+      }
+      const data = await resp.json();
+      llmContent = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    } else {
+      // OpenRouter fallback
+      const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': 'https://promo-music.ru',
+          'X-Title': 'PromoFM News Agent',
+        },
+        body: JSON.stringify({
+          model: 'google/gemini-3-flash-preview',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}` },
+          ],
+          temperature: 0.3,
+          max_tokens: 4000,
+        }),
+      });
+      if (!resp.ok) {
+        console.log(`[news-agent] LLM error for ${source.id}: ${await resp.text()}`);
+        return [];
+      }
+      const data = await resp.json();
+      llmContent = data.choices?.[0]?.message?.content;
     }
 
-    const data = await resp.json();
-    const content = data.choices?.[0]?.message?.content;
+    const content = llmContent;
     if (!content) return [];
 
     let parsed: any;
