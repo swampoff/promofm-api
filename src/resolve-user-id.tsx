@@ -10,7 +10,7 @@ import jwt from 'jsonwebtoken';
  * Returns null if no valid authentication found.
  * Callers MUST handle null (return 401) on write endpoints.
  */
-export async function resolveUserId(c: any, demoFallback?: string): Promise<string | null> {
+export async function resolveUserId(c: any): Promise<string | null> {
   // 1. JWT token (primary auth)
   const authHeader = c.req.header('Authorization');
   if (authHeader) {
@@ -32,8 +32,6 @@ export async function resolveUserId(c: any, demoFallback?: string): Promise<stri
     if (headerUserId) return headerUserId;
   }
 
-  // 4. Read-only fallback (only if explicitly provided AND route allows it)
-  if (demoFallback) return demoFallback;
 
   return null;
 }

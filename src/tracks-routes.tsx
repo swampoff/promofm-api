@@ -10,7 +10,7 @@ import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 
 const tracksRoutes = new Hono();
-const FALLBACK_USER = 'anonymous';
+// No demo fallback — all endpoints require auth
 
 // GET / — Get all tracks for current user
 tracksRoutes.get('/', requireAuth, async (c) => {
@@ -120,7 +120,8 @@ export default tracksRoutes;
 // GET /radio-stats — Radio pickup stats for user's tracks (station count + city count)
 tracksRoutes.get('/radio-stats/all', async (c) => {
   try {
-    const userId = await resolveUserId(c, FALLBACK_USER);
+    const userId = await resolveUserId(c);
+    if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
     const { pool } = await import('./db-client.tsx');
     
     // Get radio stats — try by user_id first, fallback to all tracks with pickups

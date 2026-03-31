@@ -287,58 +287,8 @@ ticketing.get('/funnel/:concertId', requireAuth, async (c) => {
   }
 });
 
-// Генерация тестовых продаж (для демонстрации)
-ticketing.post('/generate-test-sales/:concertId', requireAuth, async (c) => {
-  try {
-    const concertId = c.req.param('concertId');
-    const body = await c.req.json();
-    const artistId = body.artistId;
-    const count = body.count || 10;
-    
-    const sales: TicketSale[] = [];
-    const providers = ['kassir', 'ticketland', 'afisha'];
-    
-    for (let i = 0; i < count; i++) {
-      const provider = providers[Math.floor(Math.random() * providers.length)];
-      const providerData = TICKET_PROVIDERS.find(p => p.id === provider)!;
-      const price = Math.floor(Math.random() * 3000) + 500; // 500-3500₽
-      const quantity = Math.floor(Math.random() * 3) + 1; // 1-3 билета
-      const totalAmount = price * quantity;
-      const commission = totalAmount * (providerData.commission / 100);
-      
-      const sale: TicketSale = {
-        id: `sale_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 9)}`,
-        concertId,
-        artistId,
-        provider,
-        quantity,
-        price,
-        totalAmount,
-        commission,
-        netAmount: totalAmount - commission,
-        buyerEmail: `user${i}@example.com`,
-        status: 'confirmed',
-        purchasedAt: new Date(Date.now() - Math.random() * 30 * 24 * 60 * 60 * 1000).toISOString(),
-        metadata: { test: true },
-      };
-      
-      await upsertTicketSale(concertId, sale.id, sale);
-      sales.push(sale);
-    }
-    
-    return c.json({ 
-      success: true, 
-      data: sales,
-      message: `Создано ${count} тестовых продаж`
-    });
-  } catch (error) {
-    console.error('Error generating test sales:', error);
-    return c.json({ 
-      success: false, 
-      error: error instanceof Error ? error.message : 'Failed to generate sales' 
-    }, 500);
-  }
-});
+// Test sales generator removed — only real ticket sales allowed
+
 
 // Отменить продажу
 ticketing.put('/sales/:saleId/cancel', requireAuth, async (c) => {

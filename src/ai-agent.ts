@@ -77,50 +77,10 @@ async function getStats() {
   };
 }
 
-// ── Simulated news collection ──
-
-const SIMULATED_ARTICLES = [
-  {
-    title: 'Стриминговые платформы увеличили выплаты артистам на 15%',
-    tag: 'Индустрия',
-    excerpt: 'Крупнейшие музыкальные сервисы объявили о пересмотре модели роялти в пользу независимых артистов.',
-    content: 'Крупнейшие музыкальные стриминговые сервисы объявили о совместном решении увеличить выплаты артистам на 15% начиная с нового квартала. Изменения коснутся прежде всего независимых музыкантов, чьи доходы от стриминга значительно возрастут.',
-    source: 'Звук Медиа',
-  },
-  {
-    title: 'Новый тренд: нейросети помогают в создании аранжировок',
-    tag: 'Технологии',
-    excerpt: 'Продюсеры всё чаще используют нейросетевые инструменты для ускорения работы над аранжировками.',
-    content: 'По данным опроса среди 500 продюсеров, более 40% регулярно используют инструменты на базе нейросетей для создания демо-аранжировок. При этом финальную обработку по-прежнему выполняют вручную.',
-    source: 'The Flow',
-  },
-  {
-    title: 'Фестиваль «Дикая Мята» объявил первых хедлайнеров',
-    tag: 'События',
-    excerpt: 'Организаторы раскрыли имена первых артистов, которые выступят на главной сцене фестиваля.',
-    content: 'Фестиваль «Дикая Мята» представил первую волну хедлайнеров. В числе подтверждённых артистов - несколько резидентов платформы ПРОМО.МУЗЫКА, что подтверждает эффективность продвижения через экосистему.',
-    source: 'Sadwave',
-  },
-  {
-    title: 'Рынок виниловых пластинок в России вырос на 30%',
-    tag: 'Индустрия',
-    excerpt: 'Аналитики фиксируют рекордный рост продаж винила среди молодой аудитории.',
-    content: 'По итогам года продажи виниловых пластинок в России выросли на 30%. Основную долю покупателей составляет аудитория 18-35 лет, что свидетельствует о ретро-тренде в потреблении музыки.',
-    source: 'Billboard Russia',
-  },
-  {
-    title: 'Продюсерские лейблы переходят на модель ревеню-шеринга',
-    tag: 'Бизнес',
-    excerpt: 'Всё больше лейблов предлагают артистам партнёрство вместо традиционных контрактов.',
-    content: 'Тренд на справедливое распределение доходов набирает обороты. Продюсерские лейблы предлагают модель 50/50 или даже 70/30 в пользу артиста, что привлекает талантливых исполнителей.',
-    source: 'Рэп.ру',
-  },
-];
+// ── News collection (real pipeline only) ──
 
 async function collectNews(sourceId?: string) {
   const sources = await ensureSources();
-  const pending = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
-
   const targetSources = sourceId
     ? sources.filter((s: any) => s.id === sourceId && s.enabled)
     : sources.filter((s: any) => s.enabled);
@@ -129,18 +89,9 @@ async function collectNews(sourceId?: string) {
     return { collected: 0, message: 'Нет активных источников' };
   }
 
-  // Simulate collecting 1-3 articles
-  const count = Math.min(Math.floor(Math.random() * 3) + 1, SIMULATED_ARTICLES.length);
-  const shuffled = [...SIMULATED_ARTICLES].sort(() => Math.random() - 0.5);
-  const newArticles = shuffled.slice(0, count).map((a, i) => ({
-    id: `art_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
-    ...a,
-    coverImage: `https://picsum.photos/seed/${Date.now() + i}/800/400`,
-    processedAt: new Date().toISOString(),
-    status: 'pending',
-  }));
-
-  // Update source statuses
+  // Real news collection happens via news-cron.sh + OpenRouter AI pipeline
+  // This endpoint only updates source fetch timestamps
+    // Update source statuses
   for (const src of targetSources) {
     src.status.lastFetchAt = new Date().toISOString();
     src.status.lastFetchStatus = 'success';

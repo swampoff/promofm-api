@@ -283,8 +283,8 @@ notifications.post('/campaigns/:campaignId/send', requireAuth, async (c) => {
       ...campaign,
       status: 'sent',
       sentAt: new Date().toISOString(),
-      openRate: Math.random() * 0.5 + 0.2,
-      clickRate: Math.random() * 0.3 + 0.1,
+      openRate: 0,
+      clickRate: 0,
     };
 
     await db.upsertEmailCampaign(campaignId, updatedCampaign);
