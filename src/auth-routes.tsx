@@ -113,11 +113,6 @@ async function logAuthEvent(action: string, details: Record<string, any>, status
 auth.post("/signup", async (c) => {
   try {
     const body = await c.req.json();
-    // reCAPTCHA v3 check (skipped when RECAPTCHA_SECRET_KEY not configured)
-    const captchaResult = await verifyCaptcha(body.captchaToken, 'signup');
-    if (!captchaResult.ok) {
-      return c.json({ success: false, error: captchaResult.error || 'CAPTCHA verification failed' }, 403);
-    }
     const { email, password, name, role, consentPersonalData, consentNewsletter, captchaToken } = body;
     // H6: reCAPTCHA v3 verification (skipped if not configured)
     const captchaResult = await verifyCaptcha(captchaToken, 'signup');
@@ -194,10 +189,6 @@ auth.post("/signup", async (c) => {
 auth.post("/signin", async (c) => {
   try {
     const body = await c.req.json();
-    const captchaResult = await verifyCaptcha(body.captchaToken, 'signin');
-    if (!captchaResult.ok) {
-      return c.json({ success: false, error: captchaResult.error || 'CAPTCHA verification failed' }, 403);
-    }
     const { email, password, captchaToken } = body;
     // H6: reCAPTCHA v3 verification (skipped if not configured)
     const captchaResult = await verifyCaptcha(captchaToken, 'signin');
@@ -384,9 +375,12 @@ auth.post("/vk-callback", async (c) => {
       if (profile) { profile.lastLoginAt = new Date().toISOString(); await vpsSaveProfile(eu.id, profile); }
 
       const accessToken = signToken({ id: eu.id, email: eu.email, role });
+      const ip = c.req.header("x-forwarded-for") || c.req.header("x-real-ip") || "unknown";
+      const ua = c.req.header("user-agent") || "unknown";
+      const refreshData = await createRefreshToken(eu.id, ip, ua);
       return c.json({
         success: true, newUser: false,
-        data: { user: { id: eu.id, email: eu.email, name: profile?.name || eu.full_name || vkName, role }, accessToken },
+        data: { user: { id: eu.id, email: eu.email, name: profile?.name || eu.full_name || vkName, role }, accessToken, refreshToken: refreshData.token, refreshExpiresAt: Math.floor(refreshData.expiresAt.getTime() / 1000) },
       });
     }
 
@@ -428,11 +422,14 @@ auth.post("/vk-callback", async (c) => {
     notifyNewUser({ email: userEmail, name: vkName, role: vkRole, via: "vk_oauth" }).catch(() => {});
 
     const accessToken = signToken({ id: userId, email: userEmail, role: vkRole });
+    const ip2 = c.req.header("x-forwarded-for") || c.req.header("x-real-ip") || "unknown";
+    const ua2 = c.req.header("user-agent") || "unknown";
+    const refreshData2 = await createRefreshToken(userId, ip2, ua2);
     log.info({ email: userEmail, userId }, 'vk_user_created');
 
     return c.json({
       success: true, newUser: true,
-      data: { user: { id: userId, email: userEmail, name: vkName, avatar: vkAvatar, role: vkRole }, accessToken },
+      data: { user: { id: userId, email: userEmail, name: vkName, avatar: vkAvatar, role: vkRole }, accessToken, refreshToken: refreshData2.token, refreshExpiresAt: Math.floor(refreshData2.expiresAt.getTime() / 1000) },
     });
   } catch (error) {
     log.error({ err: error }, "vk_callback_error");
