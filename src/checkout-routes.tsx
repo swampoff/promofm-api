@@ -11,7 +11,7 @@
  */
 
 import { Hono } from 'hono';
-import { createCoinTransactionKv, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, paymentTransactionsStore, paymentWebhookLogsStore } from './db.tsx';
+import { createCoinTransactionKv, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx, paymentWebhookLogsStore } from './db.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import {
@@ -53,12 +53,12 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   }
   await upsertPaymentSession(session.orderId, session);
 
-  // Record transaction
-  const transaction = {
+  // Record transaction in PostgreSQL
+  await insertPaymentTx({
     id: `tx-${session.orderId}`,
     userId: session.userId,
     orderId: session.orderId,
-    type: 'income' as const,
+    type: 'income',
     category: session.type,
     amount: session.amount,
     currency: session.currency,
@@ -67,12 +67,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     metadata: session.metadata,
     status: 'completed',
     createdAt: now,
-  };
-
-  // Save to user transactions
-  const existing = (await paymentTransactionsStore.get(session.userId)) || [];
-  existing.unshift(transaction);
-  await paymentTransactionsStore.set(session.userId, existing);
+  });
 
   // Update user balance for donations/topups
   if (session.type === 'donation' || session.type === 'topup') {
@@ -317,6 +312,55 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       }
     } catch (err) {
       log.error({ err }, 'track_test_fulfillment_error');
+    }
+  }
+
+
+  // ─── Fulfill donation ───
+  if (session.type === 'donation' && session.metadata?.donationId) {
+    try {
+      const { getDonation, createDonation } = await import('./db.tsx');
+      const donationId = session.metadata.donationId;
+      const artistId = session.metadata.artistId;
+      if (artistId && donationId) {
+        // Try to load existing donation record
+        let donation: any = null;
+        try {
+          const allDonations = await getDonation(artistId) as any;
+          if (Array.isArray(allDonations)) {
+            donation = allDonations.find((d: any) => d.id === donationId);
+          }
+        } catch {}
+
+        if (donation) {
+          // Update existing donation to completed
+          donation.status = 'completed';
+          donation.paidAt = now;
+          donation.paymentOrderId = session.orderId;
+          donation.paymentGateway = session.gateway;
+          await createDonation(artistId, donationId, donation);
+        } else {
+          // Create donation record from webhook data
+          const newDonation = {
+            id: donationId,
+            artistId,
+            donorId: session.userId,
+            donorName: session.metadata.donorName || 'Anonymous',
+            amount: session.amount,
+            currency: session.currency || 'RUB',
+            isAnonymous: session.metadata.isAnonymous === 'true',
+            status: 'completed',
+            paidAt: now,
+            paymentOrderId: session.orderId,
+            paymentGateway: session.gateway,
+            createdAt: now,
+          };
+          await createDonation(artistId, donationId, newDonation);
+        }
+        log.info({ donationId, artistId, amount: session.amount }, 'donation_fulfilled');
+      }
+    } catch (err) {
+      log.error({ err }, 'donation_fulfillment_error');
     }
   }
 

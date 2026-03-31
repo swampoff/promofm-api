@@ -6,8 +6,9 @@
 import { Hono } from 'hono';
 import {
   getPaymentBalance, upsertPaymentBalance, accountingStore,
-  paymentTransactionsStore, paymentWithdrawalsStore, paymentBalancesStore,
+  paymentWithdrawalsStore, paymentBalancesStore,
   getPaymentMethods as dbGetPaymentMethods, upsertPaymentMethod,
+  insertPaymentTx, getPaymentTxsByUser, getAllPaymentTxs, getPaymentTxStats, getPaymentTxUserSummaries,
 } from './db.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
@@ -20,28 +21,19 @@ const paymentsRoutes = new Hono();
 // ========================================
 
 async function getTransactions(userId: string, filters: any = {}): Promise<any[]> {
-  const raw = await paymentTransactionsStore.get(userId);
-  let txs: any[] = raw || [];
-  if (filters.type) txs = txs.filter((t: any) => t.type === filters.type);
-  if (filters.category) txs = txs.filter((t: any) => t.category === filters.category);
-  if (filters.status) txs = txs.filter((t: any) => t.status === filters.status);
-  if (filters.search) {
-    const s = filters.search.toLowerCase();
-    txs = txs.filter((t: any) => t.description?.toLowerCase().includes(s));
-  }
-  txs.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  const offset = filters.offset || 0;
-  const limit = filters.limit || 50;
-  return txs.slice(offset, offset + limit);
+  return getPaymentTxsByUser(userId, {
+    type: filters.type,
+    category: filters.category,
+    status: filters.status,
+    search: filters.search,
+    limit: filters.limit || 50,
+    offset: filters.offset || 0,
+  });
 }
 
 async function createTransaction(userId: string, type: string, category: string, amount: number, description: string, metadata?: any): Promise<string> {
   const id = `tx-${crypto.randomUUID()}`;
-  const tx = { id, userId, type, category, amount, description, metadata, status: 'completed', createdAt: new Date().toISOString() };
-  const raw = await paymentTransactionsStore.get(userId);
-  const txs: any[] = raw || [];
-  txs.push(tx);
-  await paymentTransactionsStore.set(userId, txs);
+  await insertPaymentTx({ id, userId, type, category, amount, description, metadata, status: 'completed', createdAt: new Date().toISOString() });
   // Update balance
   const balRaw = await getPaymentBalance(userId);
   const bal = balRaw || { userId, available: 0, pending: 0, total: 0 };
@@ -61,8 +53,7 @@ async function getUserBalance(userId: string): Promise<any> {
 }
 
 async function getUserStats(userId: string): Promise<any> {
-  const raw = await paymentTransactionsStore.get(userId);
-  const txs: any[] = raw || [];
+  const txs: any[] = await getPaymentTxsByUser(userId);
   const totalIncome = txs.filter((t: any) => t.type === 'income' || t.type === 'donation').reduce((s: number, t: any) => s + t.amount, 0);
   const totalExpense = txs.filter((t: any) => t.type === 'expense' || t.type === 'withdrawal').reduce((s: number, t: any) => s + t.amount, 0);
   return { totalIncome, totalExpense, transactionCount: txs.length, netBalance: totalIncome - totalExpense };
@@ -110,8 +101,7 @@ async function getWithdrawRequests(userId: string, status?: string): Promise<any
 }
 
 async function getCategoryStats(userId: string, type: string, period: string): Promise<any[]> {
-  const raw = await paymentTransactionsStore.get(userId);
-  const txs: any[] = raw || [];
+  const txs: any[] = await getPaymentTxsByUser(userId, { type });
   const filtered = txs.filter((t: any) => t.type === type);
   const cats = new Map<string, number>();
   for (const t of filtered) {
@@ -353,38 +343,25 @@ paymentsRoutes.post('/sync/subscription', requireAuth, async (c) => {
 /**
  * GET /admin/transactions - Все транзакции всех пользователей (для админки)
  */
+// ========================================
+// ADMIN ROUTES (SQL-based, no KV stores)
+// ========================================
+
+/**
+ * GET /admin/transactions - All transactions (platform-wide, SQL-based)
+ */
 paymentsRoutes.get('/admin/transactions', requireAuth, requireAdmin, async (c) => {
   try {
     const filters = {
-      type: c.req.query('type') as any,
-      category: c.req.query('category') as any,
-      status: c.req.query('status') as any,
-      search: c.req.query('search'),
-      limit: c.req.query('limit') ? parseInt(c.req.query('limit')!) : 100,
-      offset: c.req.query('offset') ? parseInt(c.req.query('offset')!) : 0,
+      type: c.req.query('type') || undefined,
+      category: c.req.query('category') || undefined,
+      status: c.req.query('status') || undefined,
+      search: c.req.query('search') || undefined,
+      limit: parseInt(c.req.query('limit') || '100'),
+      offset: parseInt(c.req.query('offset') || '0'),
     };
-    // Собираем транзакции всех пользователей
-    const allTxItems = await paymentTransactionsStore.getAll();
-    let allTxs: any[] = [];
-    for (const item of allTxItems) {
-      try {
-        if (Array.isArray(item)) {
-          allTxs.push(...item);
-        }
-      } catch { /* skip */ }
-    }
-    // Фильтрация
-    if (filters.type) allTxs = allTxs.filter((t: any) => t.type === filters.type);
-    if (filters.category) allTxs = allTxs.filter((t: any) => t.category === filters.category);
-    if (filters.status) allTxs = allTxs.filter((t: any) => t.status === filters.status);
-    if (filters.search) {
-      const s = filters.search.toLowerCase();
-      allTxs = allTxs.filter((t: any) => t.description?.toLowerCase().includes(s) || t.userId?.toLowerCase().includes(s));
-    }
-    allTxs.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    const total = allTxs.length;
-    const data = allTxs.slice(filters.offset, filters.offset + filters.limit);
-    return c.json({ success: true, data, total });
+    const { txs, total } = await getAllPaymentTxs(filters);
+    return c.json({ success: true, data: txs, total });
   } catch (error: any) {
     console.error('Error in GET /payments/admin/transactions:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -392,35 +369,12 @@ paymentsRoutes.get('/admin/transactions', requireAuth, requireAdmin, async (c) =
 });
 
 /**
- * GET /admin/users - Все пользователи с балансами (для админки)
+ * GET /admin/users - All users with balances (SQL-based)
  */
 paymentsRoutes.get('/admin/users', requireAuth, requireAdmin, async (c) => {
   try {
-    // Get all balance records
-    const allBalances = await paymentBalancesStore.getAll();
-    const users: any[] = [];
-    for (const balance of allBalances) {
-      if (!balance || typeof balance !== 'object') continue;
-      const userId = balance.userId;
-      if (!userId) continue;
-      // Получить транзакции для подсчёта статистики
-      const txs: any[] = (await paymentTransactionsStore.get(userId)) || [];
-      const totalEarned = txs.filter((t: any) => t.type === 'income' || t.type === 'donation' || t.type === 'commission').reduce((s: number, t: any) => s + t.amount, 0);
-      const totalSpent = txs.filter((t: any) => t.type === 'expense' || t.type === 'withdrawal').reduce((s: number, t: any) => s + t.amount, 0);
-      const lastTx = txs.length > 0 ? txs.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] : null;
-      users.push({
-        id: userId,
-        name: lastTx?.userName || userId,
-        email: `${userId}@promo.music`,
-        balance: balance.available || 0,
-        totalSpent,
-        totalEarned,
-        transactionsCount: txs.length,
-        lastTransaction: lastTx?.createdAt || null,
-        status: 'active',
-      });
-    }
-    return c.json({ success: true, data: users });
+    const summaries = await getPaymentTxUserSummaries();
+    return c.json({ success: true, data: summaries });
   } catch (error: any) {
     console.error('Error in GET /payments/admin/users:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -428,54 +382,12 @@ paymentsRoutes.get('/admin/users', requireAuth, requireAdmin, async (c) => {
 });
 
 /**
- * GET /admin/stats - Общая финансовая статистика платформы
+ * GET /admin/stats - Platform financial stats (SQL-based)
  */
 paymentsRoutes.get('/admin/stats', requireAuth, requireAdmin, async (c) => {
   try {
-    const allTxItems = await paymentTransactionsStore.getAll();
-    let allTxs: any[] = [];
-    for (const item of allTxItems) {
-      try {
-        if (Array.isArray(item)) allTxs.push(...item);
-      } catch { /* skip */ }
-    }
-    const totalIncome = allTxs.filter((t: any) => t.type === 'income' || t.type === 'commission' || t.type === 'donation').reduce((s: number, t: any) => s + t.amount, 0);
-    const totalExpense = allTxs.filter((t: any) => t.type === 'expense' || t.type === 'withdrawal').reduce((s: number, t: any) => s + t.amount, 0);
-    const totalRefund = allTxs.filter((t: any) => t.type === 'refund').reduce((s: number, t: any) => s + t.amount, 0);
-    const pendingCount = allTxs.filter((t: any) => t.status === 'pending').length;
-    
-    // category breakdown
-    const catMap = new Map<string, number>();
-    for (const t of allTxs) {
-      catMap.set(t.category, (catMap.get(t.category) || 0) + t.amount);
-    }
-    const categoryBreakdown = Array.from(catMap.entries()).map(([category, total]) => ({ category, total }));
-    
-    // monthly trend (last 6 months)
-    const monthlyTrend: any[] = [];
-    const now = new Date();
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const monthStr = d.toISOString().slice(0, 7);
-      const monthTxs = allTxs.filter((t: any) => t.createdAt?.startsWith(monthStr));
-      const income = monthTxs.filter((t: any) => t.type === 'income' || t.type === 'commission').reduce((s: number, t: any) => s + t.amount, 0);
-      const expense = monthTxs.filter((t: any) => t.type === 'expense' || t.type === 'withdrawal').reduce((s: number, t: any) => s + t.amount, 0);
-      monthlyTrend.push({ month: monthStr, income, expense, net: income - expense });
-    }
-    
-    return c.json({
-      success: true,
-      data: {
-        totalIncome,
-        totalExpense,
-        totalRefund,
-        netBalance: totalIncome - totalExpense - totalRefund,
-        transactionCount: allTxs.length,
-        pendingCount,
-        categoryBreakdown,
-        monthlyTrend,
-      }
-    });
+    const stats = await getPaymentTxStats();
+    return c.json({ success: true, data: stats });
   } catch (error: any) {
     console.error('Error in GET /payments/admin/stats:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);

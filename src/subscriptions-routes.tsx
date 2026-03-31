@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { getSubscription, upsertSubscription, getAllSubscriptions, getPaymentBalance, getPaymentMethods, upsertPaymentBalance, upsertPaymentSession, paymentTransactionsStore } from './db.tsx';
+import { getSubscription, upsertSubscription, getAllSubscriptions, getPaymentBalance, getPaymentMethods, upsertPaymentBalance, upsertPaymentSession, insertPaymentTx } from './db.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
@@ -385,13 +385,11 @@ subscriptions.post('/subscribe', requireAuth, async (c) => {
         category: 'subscription',
         amount: subscription.price,
         description: `Подписка «${plan.name}» (${interval === 'year' ? 'год' : 'мес'})`,
-        metadata: { tier, interval, expiresAt },
+        metadata: { tier, interval },
         status: 'pending',
         createdAt: new Date().toISOString(),
       };
-      const existingTxs: any[] = (await paymentTransactionsStore.get(user_id)) || [];
-      existingTxs.push(tx);
-      await paymentTransactionsStore.set(user_id, existingTxs);
+      await insertPaymentTx(tx);
 
       // Обновляем баланс
       const bal: any = (await getPaymentBalance(user_id)) || { userId: user_id, available: 0, pending: 0, total: 0 };
@@ -757,9 +755,7 @@ subscriptions.post('/:userId/change-plan', requireAuth, async (c) => {
         amount: price, description: `Смена тарифа на «${plan.name}» (${interval === 'year' ? 'год' : 'мес'})`,
         metadata: { planId, interval }, status: 'pending', createdAt: new Date().toISOString(),
       };
-      const txs: any[] = (await paymentTransactionsStore.get(userId)) || [];
-      txs.push(tx);
-      await paymentTransactionsStore.set(userId, txs);
+      await insertPaymentTx(tx);
 
       try {
         await recordRevenue({

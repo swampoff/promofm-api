@@ -39,7 +39,7 @@ coinsRoutes.post('/transactions', requireAuth, async (c) => {
       id: txId,
       userId,
       amount: body.amount || 0,
-      type: (body.type === 'expense' || body.type === 'refund') ? body.type : 'expense', // Users cannot create 'reward' transactions
+      type: 'expense', // Users can only create expense transactions; topups/rewards via webhook only
       description: body.description || '',
       createdAt: now,
     };

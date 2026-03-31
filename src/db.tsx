@@ -1064,6 +1064,143 @@ export async function deletePaymentMethod(methodId: string) {
 // Uses 'data' JSONB column for storage. Tables must have: pk, data JSONB, created_at, updated_at.
 // get()/getAll() return the data field or the full row if no data column.
 
+
+// ─── Payment Transactions (SQL-based, replaces KV store) ───
+
+export async function insertPaymentTx(tx: {
+  id: string; userId: string; orderId?: string; type: string; category: string;
+  amount: number; currency?: string; gateway?: string; description?: string;
+  metadata?: any; status?: string; createdAt?: string;
+}) {
+  const { error } = await db().from('payment_txns').upsert({
+    id: tx.id,
+    user_id: tx.userId,
+    order_id: tx.orderId || null,
+    type: tx.type,
+    category: tx.category,
+    amount: tx.amount,
+    currency: tx.currency || 'RUB',
+    gateway: tx.gateway || null,
+    description: tx.description || null,
+    metadata: tx.metadata ? JSON.stringify(tx.metadata) : '{}',
+    status: tx.status || 'completed',
+    created_at: tx.createdAt || new Date().toISOString(),
+  }, { onConflict: 'id' });
+  if (error) console.error('[db] insertPaymentTx:', error);
+}
+
+export async function getPaymentTxsByUser(userId: string, filters?: {
+  type?: string; category?: string; status?: string; search?: string;
+  limit?: number; offset?: number;
+}): Promise<any[]> {
+  let q = db().from('payment_txns').select('*').eq('user_id', userId);
+  if (filters?.type) q = q.eq('type', filters.type);
+  if (filters?.category) q = q.eq('category', filters.category);
+  if (filters?.status) q = q.eq('status', filters.status);
+  if (filters?.search) q = q.ilike('description', '%' + filters.search + '%');
+  q = q.order('created_at', { ascending: false });
+  if (filters?.limit) q = q.limit(filters.limit);
+  if (filters?.offset) q = q.range(filters.offset, (filters.offset || 0) + (filters.limit || 50) - 1);
+  const { data, error } = await q;
+  if (error) console.error('[db] getPaymentTxsByUser:', error);
+  return (data || []).map((r: any) => ({
+    id: r.id, userId: r.user_id, orderId: r.order_id, type: r.type,
+    category: r.category, amount: Number(r.amount), currency: r.currency,
+    gateway: r.gateway, description: r.description,
+    metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {}),
+    status: r.status, createdAt: r.created_at,
+  }));
+}
+
+export async function getAllPaymentTxs(filters?: {
+  type?: string; category?: string; status?: string; search?: string;
+  limit?: number; offset?: number;
+}): Promise<{ txs: any[]; total: number }> {
+  // Count
+  let countQ = db().from('payment_txns').select('id', { count: 'exact', head: true });
+  if (filters?.type) countQ = countQ.eq('type', filters.type);
+  if (filters?.category) countQ = countQ.eq('category', filters.category);
+  if (filters?.status) countQ = countQ.eq('status', filters.status);
+  if (filters?.search) countQ = countQ.ilike('description', '%' + filters.search + '%');
+  const { count } = await countQ;
+
+  // Data
+  let q = db().from('payment_txns').select('*');
+  if (filters?.type) q = q.eq('type', filters.type);
+  if (filters?.category) q = q.eq('category', filters.category);
+  if (filters?.status) q = q.eq('status', filters.status);
+  if (filters?.search) q = q.ilike('description', '%' + filters.search + '%');
+  q = q.order('created_at', { ascending: false });
+  const lim = filters?.limit || 100;
+  const off = filters?.offset || 0;
+  q = q.range(off, off + lim - 1);
+  const { data, error } = await q;
+  if (error) console.error('[db] getAllPaymentTxs:', error);
+  const txs = (data || []).map((r: any) => ({
+    id: r.id, userId: r.user_id, orderId: r.order_id, type: r.type,
+    category: r.category, amount: Number(r.amount), currency: r.currency,
+    gateway: r.gateway, description: r.description,
+    metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {}),
+    status: r.status, createdAt: r.created_at,
+  }));
+  return { txs, total: count || 0 };
+}
+
+export async function getPaymentTxStats(): Promise<{
+  totalIncome: number; totalExpense: number; totalRefund: number; netBalance: number;
+  transactionCount: number; pendingCount: number;
+  categoryBreakdown: { category: string; total: number }[];
+  monthlyTrend: { month: string; income: number; expense: number; net: number }[];
+}> {
+  const { data: all, error } = await db().from('payment_txns').select('type, category, amount, status, created_at');
+  if (error) console.error('[db] getPaymentTxStats:', error);
+  const txs = all || [];
+  const totalIncome = txs.filter((t: any) => t.type === 'income' || t.type === 'donation').reduce((s: number, t: any) => s + Number(t.amount), 0);
+  const totalExpense = txs.filter((t: any) => t.type === 'expense' || t.type === 'withdrawal').reduce((s: number, t: any) => s + Number(t.amount), 0);
+  const totalRefund = txs.filter((t: any) => t.type === 'refund').reduce((s: number, t: any) => s + Number(t.amount), 0);
+  const pendingCount = txs.filter((t: any) => t.status === 'pending').length;
+  const catMap = new Map<string, number>();
+  for (const t of txs) catMap.set(t.category, (catMap.get(t.category) || 0) + Number(t.amount));
+  const categoryBreakdown = Array.from(catMap.entries()).map(([category, total]) => ({ category, total }));
+  const now = new Date();
+  const monthlyTrend: { month: string; income: number; expense: number; net: number }[] = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const label = d.toISOString().slice(0, 7);
+    const nextMonth = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+    const monthTxs = txs.filter((t: any) => {
+      const td = new Date(t.created_at);
+      return td >= d && td < nextMonth;
+    });
+    const income = monthTxs.filter((t: any) => t.type === 'income' || t.type === 'donation').reduce((s: number, t: any) => s + Number(t.amount), 0);
+    const expense = monthTxs.filter((t: any) => t.type === 'expense' || t.type === 'withdrawal').reduce((s: number, t: any) => s + Number(t.amount), 0);
+    monthlyTrend.push({ month: label, income, expense, net: income - expense });
+  }
+  return { totalIncome, totalExpense, totalRefund, netBalance: totalIncome - totalExpense - totalRefund, transactionCount: txs.length, pendingCount, categoryBreakdown, monthlyTrend };
+}
+
+export async function getPaymentTxUserSummaries(): Promise<any[]> {
+  const { data, error } = await db().from('payment_txns').select('user_id, type, amount, created_at');
+  if (error) console.error('[db] getPaymentTxUserSummaries:', error);
+  const txs = data || [];
+  const users = new Map<string, { totalSpent: number; totalEarned: number; count: number; lastTx: string | null }>();
+  for (const t of txs) {
+    const uid = t.user_id;
+    if (!users.has(uid)) users.set(uid, { totalSpent: 0, totalEarned: 0, count: 0, lastTx: null });
+    const u = users.get(uid)!;
+    u.count++;
+    if (t.type === 'income' || t.type === 'donation') u.totalEarned += Number(t.amount);
+    else u.totalSpent += Number(t.amount);
+    if (!u.lastTx || t.created_at > u.lastTx) u.lastTx = t.created_at;
+  }
+  return Array.from(users.entries()).map(([userId, s]) => ({
+    id: userId, name: userId, email: '', balance: s.totalEarned - s.totalSpent,
+    totalSpent: s.totalSpent, totalEarned: s.totalEarned, transactionsCount: s.count,
+    lastTransaction: s.lastTx, status: 'active',
+  }));
+}
+
+
 function jsonbStore(table: string, pk = 'id') {
   return {
     async get(id: string) {
