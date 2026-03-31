@@ -62,7 +62,7 @@ newsAgent.post('/fetch/:sourceId', requireAdminOrKey, async (c) => {
 /**
  * GET /sources — список источников
  */
-newsAgent.get('/sources', async (c) => {
+newsAgent.get('/sources', requireAdminOrKey, async (c) => {
   return c.json({
     success: true,
     data: NEWS_SOURCES.map(s => ({
@@ -77,7 +77,7 @@ newsAgent.get('/sources', async (c) => {
 /**
  * GET /status — статистика агента
  */
-newsAgent.get('/status', async (c) => {
+newsAgent.get('/status', requireAdminOrKey, async (c) => {
   try {
     const allNews = await newsPublicStore.getAll();
     const published = allNews.filter((n: any) => n.status === 'published');

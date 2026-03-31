@@ -51,14 +51,14 @@ releaseAgent.post('/fetch/:sourceId', requireAdminOrKey, async (c) => {
   }
 });
 
-releaseAgent.get('/sources', async (c) => {
+releaseAgent.get('/sources', requireAdminOrKey, async (c) => {
   return c.json({
     success: true,
     data: RELEASE_SOURCES.map(s => ({ id: s.id, name: s.name, url: s.url })),
   });
 });
 
-releaseAgent.get('/status', async (c) => {
+releaseAgent.get('/status', requireAdminOrKey, async (c) => {
   try {
     const all = await typed.getAllUpcomingReleases();
     const today = new Date().toISOString().split('T')[0];

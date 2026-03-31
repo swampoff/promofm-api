@@ -19,6 +19,19 @@ import { newsPipelineStore } from './db.tsx';
 import { quickLLM } from './llm-router.tsx';
 import { safeErrorMessage } from './security.tsx';
 
+const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+
+async function requireAdminOrKey(c: any, next: any) {
+  const internalKey = c.req.header('X-Internal-Key');
+  if (internalKey && ADMIN_INTERNAL_KEY && internalKey === ADMIN_INTERNAL_KEY) {
+    return next();
+  }
+  // Fall back to requireAuth + requireAdmin
+  const { requireAuth, requireAdmin } = await import('./auth-middleware.tsx');
+  return requireAuth(c, () => requireAdmin(c, next));
+}
+
+
 // ── Helpers ──
 
 async function callClaude(prompt: string, systemPrompt: string, maxTokens = 2000): Promise<string | null> {
@@ -112,7 +125,7 @@ async function collectNews(sourceId?: string) {
 const app = new Hono();
 
 // GET /sources
-app.get('/sources', async (c) => {
+app.get('/sources', requireAdminOrKey, async (c) => {
   try {
     const sources = await ensureSources();
     return c.json({ success: true, data: sources });
@@ -123,7 +136,7 @@ app.get('/sources', async (c) => {
 });
 
 // GET /stats
-app.get('/stats', async (c) => {
+app.get('/stats', requireAdminOrKey, async (c) => {
   try {
     const stats = await getStats();
     return c.json({ success: true, data: stats });
@@ -134,7 +147,7 @@ app.get('/stats', async (c) => {
 });
 
 // GET /pending
-app.get('/pending', async (c) => {
+app.get('/pending', requireAdminOrKey, async (c) => {
   try {
     const articles = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
     return c.json({ success: true, data: articles });
@@ -144,7 +157,7 @@ app.get('/pending', async (c) => {
 });
 
 // GET /published
-app.get('/published', async (c) => {
+app.get('/published', requireAdminOrKey, async (c) => {
   try {
     const limit = Number(c.req.query('limit') || 50);
     const articles = (await newsPipelineStore.get('news:articles:published') || []) as any[];
@@ -155,7 +168,7 @@ app.get('/published', async (c) => {
 });
 
 // GET /rejected
-app.get('/rejected', async (c) => {
+app.get('/rejected', requireAdminOrKey, async (c) => {
   try {
     const articles = (await newsPipelineStore.get('news:articles:rejected') || []) as any[];
     return c.json({ success: true, data: articles });
@@ -165,7 +178,7 @@ app.get('/rejected', async (c) => {
 });
 
 // POST /collect
-app.post('/collect', async (c) => {
+app.post('/collect', requireAdminOrKey, async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
     const result = await collectNews(body.sourceId);
@@ -177,7 +190,7 @@ app.post('/collect', async (c) => {
 });
 
 // POST /:id/approve
-app.post('/:id/approve', async (c) => {
+app.post('/:id/approve', requireAdminOrKey, async (c) => {
   try {
     const id = c.req.param('id');
     const pending = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
@@ -200,7 +213,7 @@ app.post('/:id/approve', async (c) => {
 });
 
 // POST /:id/reject
-app.post('/:id/reject', async (c) => {
+app.post('/:id/reject', requireAdminOrKey, async (c) => {
   try {
     const id = c.req.param('id');
     const pending = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
@@ -223,7 +236,7 @@ app.post('/:id/reject', async (c) => {
 });
 
 // DELETE /:id
-app.delete('/:id', async (c) => {
+app.delete('/:id', requireAdminOrKey, async (c) => {
   try {
     const id = c.req.param('id');
 
@@ -244,7 +257,7 @@ app.delete('/:id', async (c) => {
 });
 
 // POST /approve-all
-app.post('/approve-all', async (c) => {
+app.post('/approve-all', requireAdminOrKey, async (c) => {
   try {
     const pending = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
     if (pending.length === 0) {

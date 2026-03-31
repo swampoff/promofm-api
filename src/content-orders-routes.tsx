@@ -129,7 +129,7 @@ app.post("/orders", requireAuth, async (c) => {
 // GET ALL ORDERS (Admin/Venue)
 // =====================================================
 
-app.get("/orders", async (c) => {
+app.get("/orders", requireAuth, async (c) => {
   try {
     const venueId = c.req.query("venueId");
     const status = c.req.query("status") as OrderStatus | undefined;
@@ -348,7 +348,7 @@ app.delete("/orders/:id", requireAuth, async (c) => {
 // GET STATS (Admin Dashboard)
 // =====================================================
 
-app.get("/stats", async (c) => {
+app.get("/stats", requireAuth, async (c) => {
   try {
     const statuses: OrderStatus[] = ['pending', 'processing', 'review', 'ready', 'approved', 'revision', 'completed', 'cancelled'];
     

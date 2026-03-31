@@ -75,6 +75,53 @@ async function pingIndexNow(newsId: string) {
   console.log(`[news-agent] IndexNow pinged for ${newsId}`);
 }
 
+// --- Telegram Channel Posting ---
+async function postToTelegram(article: { id: string; title: string; excerpt: string; authorName: string; source: string; tags?: string[]; category?: string }) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const channelId = process.env.TELEGRAM_NEWS_CHANNEL_ID;
+  if (!botToken || !channelId) return;
+
+  const link = `https://promo-music.ru/news/${article.id}`;
+  const tags = (article.tags || [])
+    .slice(0, 4)
+    .map((t: string) => '#' + t.replace(/[^\wа-яёА-ЯЁ]/g, '').slice(0, 20))
+    .filter((t: string) => t.length > 1)
+    .join(' ');
+
+  const text = [
+    `<b>${escapeHtml(article.title)}</b>`,
+    '',
+    escapeHtml((article.excerpt || '').replace(/<[^>]*>/g, '')),
+    '',
+    `\u270d\ufe0f ${escapeHtml(article.authorName)} | ${escapeHtml(article.source)}`,
+    '',
+    `\ud83d\udc49 <a href="${link}">\u0427\u0438\u0442\u0430\u0442\u044c \u043d\u0430 \u041f\u0420\u041e\u041c\u041e.\u041c\u0423\u0417\u042b\u041a\u0410</a>`,
+    '',
+    tags,
+  ].filter(Boolean).join('\n');
+
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: channelId,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: false,
+      }),
+    });
+    console.log(`[news-agent] Posted to Telegram: ${article.title.slice(0, 50)}...`);
+  } catch (err) {
+    console.log(`[news-agent] Telegram post failed: ${err}`);
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+
 // ─── Source Configuration ───────────────────────────────
 
 export interface NewsSource {
@@ -346,7 +393,7 @@ SEO-ПРАВИЛА:
         'X-Title': 'PromoFM News Agent',
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-001',
+        model: 'google/gemini-2.5-flash-preview',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}` },
@@ -500,6 +547,7 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
 
     await newsPublicStore.set(id, newsRecord);
     pingIndexNow(id).catch(() => {});
+    postToTelegram({ id, title: item.title, excerpt: item.excerpt, authorName: poster.name, source: source.name, tags: item.tags, category: item.category }).catch(() => {});
     existingTitles.push(item.title);
     added++;
 

@@ -21,7 +21,7 @@ async function query<T = Record<string, unknown>>(
 
 // ─── Stats for a single track ─────────────────────────────────────────────────
 
-app.get("/stats/:trackId", async (c) => {
+app.get("/stats/:trackId", requireAuth, async (c) => {
   const { trackId } = c.req.param();
   const days = Number(c.req.query("days") || "30");
 
@@ -72,7 +72,7 @@ app.get("/stats/:trackId", async (c) => {
 
 // ─── All tracks for an artist ─────────────────────────────────────────────────
 
-app.get("/artist/:artistId", async (c) => {
+app.get("/artist/:artistId", requireAuth, async (c) => {
   const { artistId } = c.req.param();
   const days = Number(c.req.query("days") || "30");
 
@@ -110,7 +110,7 @@ app.get("/artist/:artistId", async (c) => {
 
 // ─── Recent detections feed ───────────────────────────────────────────────────
 
-app.get("/detections", async (c) => {
+app.get("/detections", requireAuth, async (c) => {
   const limit = Math.min(Number(c.req.query("limit") || "20"), 100);
   const trackId = c.req.query("track_id");
   const artistId = c.req.query("artist_id");
@@ -140,7 +140,7 @@ app.get("/detections", async (c) => {
 
 // ─── Station monitoring status ────────────────────────────────────────────────
 
-app.get("/stations", async (c) => {
+app.get("/stations", requireAuth, async (c) => {
   const result = await query(
     `SELECT m.station_name, m.stream_url, m.active,
             m.last_scanned_at, m.error_count, m.last_error,
@@ -200,7 +200,7 @@ app.post("/process/:trackId", requireAuth, async (c) => {
 
 // ─── Dashboard summary ────────────────────────────────────────────────────────
 
-app.get("/dashboard", async (c) => {
+app.get("/dashboard", requireAuth, async (c) => {
   const [totals, topTracks, topStations] = await Promise.all([
     query<{ total: string; confirmed: string; tracks_monitored: string }>(
       `SELECT

@@ -1,6 +1,19 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 
+const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+
+async function requireAdminOrKey(c: any, next: any) {
+  const internalKey = c.req.header('X-Internal-Key');
+  if (internalKey && ADMIN_INTERNAL_KEY && internalKey === ADMIN_INTERNAL_KEY) {
+    return next();
+  }
+  // Fall back to requireAuth + requireAdmin
+  const { requireAuth, requireAdmin } = await import('./auth-middleware.tsx');
+  return requireAuth(c, () => requireAdmin(c, next));
+}
+
+
 const app = new Hono();
 
 const BOT_RE = /bot|crawl|spider|slurp|bingbot|googlebot|yandex|baidu|facebook|twitter|telegram|whatsapp|semrush|ahrefs|gptbot|claudebot|bytespider|petalbot/i;
@@ -70,7 +83,7 @@ app.post('/pv', async (c) => {
 });
 
 // GET /live — live stats (last 24h)
-app.get('/live', async (c) => {
+app.get('/live', requireAdminOrKey, async (c) => {
   try {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 

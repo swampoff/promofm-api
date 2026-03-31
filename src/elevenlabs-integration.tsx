@@ -13,6 +13,19 @@ import * as db from './db.tsx';
 import { contentOrdersStore } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 
+const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+
+async function requireAdminOrKey(c: any, next: any) {
+  const internalKey = c.req.header('X-Internal-Key');
+  if (internalKey && ADMIN_INTERNAL_KEY && internalKey === ADMIN_INTERNAL_KEY) {
+    return next();
+  }
+  // Fall back to requireAuth + requireAdmin
+  const { requireAuth, requireAdmin } = await import('./auth-middleware.tsx');
+  return requireAuth(c, () => requireAdmin(c, next));
+}
+
+
 const app = new Hono();
 
 // ElevenLabs API configuration
@@ -59,7 +72,7 @@ const STYLE_SETTINGS = {
  * POST /generate
  * Генерирует аудио через ElevenLabs и сохраняет в Storage
  */
-app.post('/generate', async (c) => {
+app.post('/generate', requireAdminOrKey, async (c) => {
   try {
     const { orderId, customText } = await c.req.json();
 
@@ -215,7 +228,7 @@ app.post('/generate', async (c) => {
  * GET /voices
  * Получает список доступных голосов
  */
-app.get('/voices', async (c) => {
+app.get('/voices', requireAdminOrKey, async (c) => {
   try {
     const apiKey = process.env.ELEVENLABS_API_KEY;
     if (!apiKey) {

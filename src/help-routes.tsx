@@ -4,6 +4,7 @@
  */
 
 import { Hono } from 'hono';
+import { requireAuth } from './auth-middleware.tsx';
 
 const help = new Hono();
 
@@ -145,7 +146,7 @@ async function callGemini(prompt: string): Promise<string> {
 }
 
 // ── Main endpoint ──
-help.post('/ask', async (c) => {
+help.post('/ask', requireAuth, async (c) => {
   const ip = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || 'unknown';
   if (!checkRate(ip)) {
     return c.json({ error: 'Слишком много запросов. Подождите минуту.' }, 429);

@@ -202,7 +202,7 @@ auth.post("/signin", async (c) => {
     if (result.rows.length === 0) {
       await recordLoginAttempt(email, ip, ua, false);
       logAuthEvent('signin_fail', {
-        description: `Пользователь не найден: ${email}`, error: 'user_not_found', ip, userAgent: ua,
+        description: `Неверный email или пароль: ${email}`, error: 'user_not_found', ip, userAgent: ua,
       });
       return c.json({ success: false, error: "Ошибка входа: Invalid login credentials" }, 401);
     }
@@ -223,7 +223,7 @@ auth.post("/signin", async (c) => {
       return c.json({
         success: false,
         error: remaining > 0
-          ? `Неверный пароль. Осталось попыток: ${remaining}`
+          ? `Неверный email или пароль. Осталось попыток: ${remaining}`
           : "Ошибка входа: Invalid login credentials"
       }, 401);
     }
@@ -440,7 +440,7 @@ auth.post("/set-role", requireAuth, requireAdmin, async (c) => {
     // Get target user's current role
     const targetUser = await sql('SELECT role::text, email FROM users WHERE id = $1', [userId]);
     if (targetUser.rows.length === 0) {
-      return c.json({ success: false, error: "Пользователь не найден" }, 404);
+      return c.json({ success: false, error: "Неверный email или пароль" }, 404);
     }
     const targetCurrentRole = targetUser.rows[0].role;
     const targetEmail = targetUser.rows[0].email;

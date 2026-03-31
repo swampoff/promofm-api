@@ -80,7 +80,7 @@ curatorRoutes.post('/run/:roleId', requireAdminOrKey, async (c) => {
 /**
  * GET /status — статус всех кураторов (последние отчёты)
  */
-curatorRoutes.get('/status', async (c) => {
+curatorRoutes.get('/status', requireAdminOrKey, async (c) => {
   try {
     const latest = await getLatestReports();
     const summary: Record<string, any> = {};
@@ -109,7 +109,7 @@ curatorRoutes.get('/status', async (c) => {
 /**
  * GET /report/:roleId — детальный отчёт по роли
  */
-curatorRoutes.get('/report/:roleId', async (c) => {
+curatorRoutes.get('/report/:roleId', requireAdminOrKey, async (c) => {
   try {
     const roleId = c.req.param('roleId');
     const report = await curatorReportsStore.get(`latest:${roleId}`);
@@ -125,7 +125,7 @@ curatorRoutes.get('/report/:roleId', async (c) => {
 /**
  * GET /roles — список ролей
  */
-curatorRoutes.get('/roles', async (c) => {
+curatorRoutes.get('/roles', requireAdminOrKey, async (c) => {
   return c.json({
     success: true,
     data: CURATOR_ROLES.map(r => ({
@@ -139,7 +139,7 @@ curatorRoutes.get('/roles', async (c) => {
 /**
  * GET /history — все отчёты (последние 50)
  */
-curatorRoutes.get('/history', async (c) => {
+curatorRoutes.get('/history', requireAdminOrKey, async (c) => {
   try {
     const all = await curatorReportsStore.getAll();
     const reports = all

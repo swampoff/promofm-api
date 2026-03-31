@@ -55,7 +55,7 @@ export function emitSSE(userId: string, event: { type: string; data: any }) {
 }
 
 // SSE Stream endpoint
-app.get('/stream/:userId', (c) => {
+app.get('/stream/:userId', requireAuth, (c) => {
   const userId = c.req.param('userId');
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let controllerRef: ReadableStreamDefaultController | null = null;

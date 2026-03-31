@@ -767,7 +767,7 @@ app.delete('/orders/:id', requireAuth, async (c) => {
 // STATS (Admin Dashboard)
 // =====================================================
 
-app.get('/stats', async (c) => {
+app.get('/stats', requireAuth, async (c) => {
   try {
     const allStatuses = [
       'draft', 'pending_payment', 'paid', 'pending_review', 'rejected', 'approved',

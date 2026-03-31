@@ -68,7 +68,7 @@ concertAgent.post('/fetch/:sourceId', requireAdminOrKey, async (c) => {
 /**
  * GET /concerts — публичный список концертов
  */
-concertAgent.get('/concerts', async (c) => {
+concertAgent.get('/concerts', requireAdminOrKey, async (c) => {
   try {
     const city = c.req.query('city');
     const limit = parseInt(c.req.query('limit') || '50');
@@ -86,7 +86,7 @@ concertAgent.get('/concerts', async (c) => {
 /**
  * GET /sources — список источников
  */
-concertAgent.get('/sources', async (c) => {
+concertAgent.get('/sources', requireAdminOrKey, async (c) => {
   return c.json({
     success: true,
     data: CONCERT_SOURCES.map(s => ({
@@ -102,7 +102,7 @@ concertAgent.get('/sources', async (c) => {
 /**
  * GET /status — статистика агента
  */
-concertAgent.get('/status', async (c) => {
+concertAgent.get('/status', requireAdminOrKey, async (c) => {
   try {
     const all = await concertAgentStore.getAll();
     const published = all.filter((c: any) => c.status === 'published');
