@@ -150,7 +150,7 @@ app.post('/send', requireAuth, requireAdmin, async (c) => {
       }, 400);
     }
 
-    const emailId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const emailId = `${crypto.randomUUID()}`;
 
     const emailData = {
       id: emailId,

@@ -10,7 +10,7 @@ consentRoutes.post("/", async (c) => {
     const body = await c.req.json();
     const { analytics, marketing, functional, userId } = body;
 
-    const effectiveUserId = userId || "anonymous-" + Date.now().toString(36);
+    const effectiveUserId = userId || "anonymous-" + crypto.randomUUID();
     const ipRaw = c.req.header("x-forwarded-for") || c.req.header("x-real-ip") || "unknown";
     const ipHash = crypto.createHash("sha256").update(ipRaw).digest("hex").slice(0, 16);
     const ua = (c.req.header("user-agent") || "").slice(0, 200);

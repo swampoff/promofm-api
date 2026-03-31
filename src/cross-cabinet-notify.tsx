@@ -77,7 +77,7 @@ interface NotifyParams {
  * 3) Возвращает созданное уведомление
  */
 export async function notifyCrossCabinet(params: NotifyParams): Promise<CrossCabinetNotification> {
-  const id = `ccn_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const id = `ccn-${crypto.randomUUID()}`;
 
   const notification: CrossCabinetNotification = {
     id,

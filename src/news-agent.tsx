@@ -486,7 +486,7 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
     const isDuplicate = existingTitles.some((t: string) => titleSimilarity(t, item.title) > 0.6);
     if (isDuplicate) continue;
 
-    const id = `news-${source.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = `news-${source.id}-${crypto.randomUUID()}`;
     const newsRecord = {
       id,
       ...item,

@@ -654,7 +654,7 @@ landing.get('/news/:id', async (c) => {
     const id = c.req.param('id');
     const raw = await newsPublicStore.get(id);
     if (!raw) {
-      return c.json({ success: false, error: 'News not found' }, 404);
+      return c.json({ success: false, error: 'Новость не найдена' }, 404);
     }
     return c.json({ success: true, data: normalizeNews(raw) });
   } catch (error) {
@@ -1256,7 +1256,7 @@ landing.post("/investor-inquiry", async (c) => {
       return c.json({ success: false, error: 'Имя и email обязательны' }, 400);
     }
 
-    const id = `investor-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = `investor-${crypto.randomUUID()}`;
     await investorInquiriesStore.set(id, {
       id, name, email,
       company: company || '',
@@ -1444,7 +1444,7 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
 landing.post('/admin/news', requireAdminOrKey, async (c) => {
   try {
     const body = await c.req.json();
-    const id = body.id || `news-manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = body.id || `news-manual-${crypto.randomUUID()}`;
     const newsItem = {
       id, title: body.title || '', excerpt: body.excerpt || '',
       content: body.content || '', category: body.category || 'industry',

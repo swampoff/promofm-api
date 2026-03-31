@@ -73,7 +73,7 @@ async function getPaymentMethodsList(userId: string): Promise<any[]> {
 }
 
 async function addPaymentMethod(userId: string, methodData: any): Promise<any> {
-  const method = { id: `pm-${Date.now()}`, ...methodData, createdAt: new Date().toISOString() };
+  const method = { id: `pm-${crypto.randomUUID()}`, ...methodData, createdAt: new Date().toISOString() };
   await upsertPaymentMethod(method.id, userId, method);
   return method;
 }
@@ -93,7 +93,7 @@ async function createWithdrawRequest(userId: string, amount: number, paymentMeth
   bal.total = bal.available + bal.pending;
   await upsertPaymentBalance(userId, bal);
 
-  const id = `wd-${Date.now()}`;
+  const id = `wd-${crypto.randomUUID()}`;
   const req = { id, userId, amount, paymentMethodId, status: 'pending', createdAt: new Date().toISOString() };
   const raw = await paymentWithdrawalsStore.get(userId);
   const reqs: any[] = raw || [];
@@ -514,7 +514,7 @@ paymentsRoutes.get('/admin/accounting/reports', requireAuth, requireAdmin, async
 paymentsRoutes.post('/admin/accounting/reports', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
-    const id = Date.now();
+    const id = crypto.randomUUID();
     const report = {
       id,
       ...body,
@@ -601,7 +601,7 @@ paymentsRoutes.get('/admin/accounting/documents', requireAuth, requireAdmin, asy
 paymentsRoutes.post('/admin/accounting/documents', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
-    const id = Date.now();
+    const id = crypto.randomUUID();
     const doc = { id, ...body, status: body.status || 'draft', date: body.date || new Date().toISOString().split('T')[0] };
     const raw = await accountingStore.get('accounting:documents');
     const docs: any[] = raw || [];
@@ -656,7 +656,7 @@ paymentsRoutes.get('/admin/accounting/ledger', requireAuth, requireAdmin, async 
 paymentsRoutes.post('/admin/accounting/ledger', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
-    const id = Date.now();
+    const id = crypto.randomUUID();
     const entry = { id, ...body, date: body.date || new Date().toISOString().split('T')[0] };
     const raw = await accountingStore.get('accounting:ledger');
     const entries: any[] = raw || [];
@@ -698,7 +698,7 @@ paymentsRoutes.get('/admin/accounting/counterparties', requireAuth, requireAdmin
 paymentsRoutes.post('/admin/accounting/counterparties', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
-    const id = Date.now();
+    const id = crypto.randomUUID();
     const cp = { id, ...body, status: body.status || 'active', lastActivityDate: new Date().toISOString().split('T')[0] };
     const raw = await accountingStore.get('accounting:counterparties');
     const cps: any[] = raw || [];
@@ -752,7 +752,7 @@ paymentsRoutes.get('/admin/accounting/calendar', requireAuth, requireAdmin, asyn
 paymentsRoutes.post('/admin/accounting/calendar', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
-    const id = Date.now();
+    const id = crypto.randomUUID();
     const event = { id, ...body, completed: body.completed || false };
     const raw = await accountingStore.get('accounting:calendar');
     const events: any[] = raw || [];

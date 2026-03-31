@@ -338,7 +338,7 @@ subscriptions.post('/subscribe', requireAuth, async (c) => {
         amount: subscription.price,
         description: `Подписка «${plan.name}» (${interval === 'year' ? 'год' : 'мес'})`,
         metadata: { tier, interval, expiresAt },
-        status: 'completed',
+        status: 'pending',
         createdAt: new Date().toISOString(),
       };
       const existingTxs: any[] = (await paymentTransactionsStore.get(user_id)) || [];
@@ -678,7 +678,7 @@ subscriptions.post('/:userId/change-plan', requireAuth, async (c) => {
     nextBillingDate.setMonth(nextBillingDate.getMonth() + (interval === 'year' ? 12 : 1));
     
     const newSubscription = {
-      id: `sub_${Date.now()}`,
+      id: `sub-${crypto.randomUUID()}`,
       planId,
       planName: plan.name,
       status: 'active',
@@ -707,7 +707,7 @@ subscriptions.post('/:userId/change-plan', requireAuth, async (c) => {
       const tx = {
         id: txId, userId, type: 'expense', category: 'subscription',
         amount: price, description: `Смена тарифа на «${plan.name}» (${interval === 'year' ? 'год' : 'мес'})`,
-        metadata: { planId, interval }, status: 'completed', createdAt: new Date().toISOString(),
+        metadata: { planId, interval }, status: 'pending', createdAt: new Date().toISOString(),
       };
       const txs: any[] = (await paymentTransactionsStore.get(userId)) || [];
       txs.push(tx);
@@ -908,7 +908,7 @@ subscriptions.post('/charge-recurring', async (c) => {
           id: txId, userId, type: 'expense', category: 'subscription',
           amount, description: `Автопродление «${plan.name}» (${interval === 'year' ? 'год' : 'мес'})`,
           metadata: { tier, interval, recurring: true, orderId },
-          status: 'completed', createdAt: now.toISOString(),
+          status: 'pending', createdAt: now.toISOString(),
         });
         await paymentTransactionsStore.set(userId, txs);
 

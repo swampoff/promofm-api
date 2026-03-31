@@ -136,7 +136,7 @@ notifications.post('/reminder', requireAuth, async (c) => {
     const body = await c.req.json();
 
     const notification: Notification = {
-      id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      id: `notif-${crypto.randomUUID()}`,
       userId: body.userId,
       concertId: body.concertId,
       type: 'reminder',
@@ -182,7 +182,7 @@ notifications.post('/auto-reminders/:concertId', requireAuth, async (c) => {
 
       if (reminderDate > new Date()) {
         const notification: Notification = {
-          id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          id: `notif-${crypto.randomUUID()}`,
           userId: artistId,
           concertId,
           type: 'reminder',
@@ -241,7 +241,7 @@ notifications.post('/campaigns', requireAuth, async (c) => {
     const body = await c.req.json();
 
     const campaign: EmailCampaign = {
-      id: `campaign_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      id: `campaign-${crypto.randomUUID()}`,
       artistId: body.artistId,
       concertId: body.concertId,
       subject: body.subject,

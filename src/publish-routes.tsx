@@ -110,7 +110,7 @@ const PRICING = {
 };
 
 function generateId(): string {
-  return `pub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return `pub-${crypto.randomUUID()}`;
 }
 
 // ── Notification helper ─────────────────────────────────
@@ -133,7 +133,7 @@ async function createArtistNotification(
 ) {
   try {
     const statusLabel = STATUS_LABELS_RU[newStatus] || newStatus;
-    const notifId = `pn_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const notifId = `pn-${crypto.randomUUID()}`;
     const notification = {
       id: notifId,
       type: 'publish_status_change',
@@ -774,7 +774,7 @@ async function sendCriticalEmailNotification(
     ].filter(Boolean).join('\n');
 
     const emailRecord = {
-      id: `em_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: `em-${crypto.randomUUID()}`,
       userId,
       toEmail: toEmail || `user-${userId}@promo.fm`,
       orderId,

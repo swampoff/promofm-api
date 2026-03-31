@@ -70,7 +70,7 @@ app.post('/send', requireAuth, async (c) => {
       }, 400);
     }
 
-    const notificationId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const notificationId = `${crypto.randomUUID()}`;
 
     const notification = {
       id: notificationId,
@@ -316,7 +316,7 @@ app.post('/conversation/create', requireAuth, async (c) => {
       }, 400);
     }
 
-    const conversationId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const conversationId = `${crypto.randomUUID()}`;
 
     const conversation = {
       id: conversationId,
@@ -401,7 +401,7 @@ app.post('/send', requireAuth, async (c) => {
       }, 400);
     }
 
-    const messageId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const messageId = `${crypto.randomUUID()}`;
 
     const messageData = {
       id: messageId,
@@ -437,7 +437,7 @@ app.post('/send', requireAuth, async (c) => {
       const recipients = conversation.participants.filter((id: string) => id !== from_user_id);
 
       for (const recipientId of recipients) {
-        const notificationId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const notificationId = `${crypto.randomUUID()}`;
 
         // Получаем имя отправителя (если есть в metadata)
         const senderName = metadata?.sender_name || 'Новое сообщение';

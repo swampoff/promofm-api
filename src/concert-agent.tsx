@@ -456,7 +456,7 @@ export async function fetchConcertsFromSource(sourceId: string): Promise<{ added
     const key = concertKey(concert);
     if (existingKeys.has(key)) continue;
 
-    const id = `concert-${sourceId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = `concert-${sourceId}-${crypto.randomUUID()}`;
     const record = {
       id,
       ...concert,

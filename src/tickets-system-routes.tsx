@@ -114,10 +114,10 @@ app.post('/create', requireAuth, async (c) => {
       }, 400);
     }
 
-    const ticketId = `TKT-${Date.now()}`;
+    const ticketId = `TKT-${crypto.randomUUID()}`;
 
     // Создаём первое сообщение (описание проблемы)
-    const firstMessageId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const firstMessageId = `msg-${crypto.randomUUID()}`;
 
     const firstMessage = {
       id: firstMessageId,
@@ -367,7 +367,7 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
       }, 404);
     }
 
-    const messageId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const messageId = `msg-${crypto.randomUUID()}`;
 
     const messageData = {
       id: messageId,

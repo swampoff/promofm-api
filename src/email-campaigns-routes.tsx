@@ -452,7 +452,7 @@ app.post('/campaigns', requireAuth, requireAdmin, async (c) => {
       return c.json({ success: false, error: 'name and subject required' }, 400);
     }
 
-    const id = `camp_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const id = `camp-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
 
     const campaign: Campaign = {

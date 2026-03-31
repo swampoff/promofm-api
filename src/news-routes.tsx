@@ -73,7 +73,7 @@ newsRoutes.post('/', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
     const body = await c.req.json();
-    const newsId = body.id || `news-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const newsId = body.id || `news-${crypto.randomUUID()}`;
     await db.upsertNews(userId, newsId, {
       ...body,
       status: body.status || 'draft',

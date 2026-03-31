@@ -83,7 +83,7 @@ interface CalendarSession {
 // ════════════════════════════════════════
 
 function genId(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  return `${prefix}-${crypto.randomUUID()}`;
 }
 
 function nowIso(): string {
@@ -314,7 +314,7 @@ app.post('/upload/audio', requireAuth, async (c) => {
 
     // Generate unique path
     const timestamp = Date.now();
-    const random = Math.random().toString(36).slice(2, 7);
+    const random = crypto.randomUUID().slice(0, 7);
     const ext = fileName.split('.').pop() || 'webm';
     const sanitized = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
     const storagePath = `producer-chat/${timestamp}_${random}_${sanitized}`;

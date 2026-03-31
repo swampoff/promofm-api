@@ -471,7 +471,7 @@ app.post('/playlists', requireAuth, async (c) => {
     const body = await c.req.json();
     const now = new Date().toISOString();
     const playlist = {
-      id: `pl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `pl-${crypto.randomUUID()}`,
       venueId: profile.id,
       ownerId: userId,
       title: body.title || 'Новый плейлист',
@@ -594,7 +594,7 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
 
     const body = await c.req.json();
     const campaign = {
-      id: `camp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `camp-${crypto.randomUUID()}`,
       stationId: body.stationId,
       stationName: body.stationName || '',
       packageType: body.packageType || 'slot_15sec',

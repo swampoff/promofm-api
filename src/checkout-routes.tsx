@@ -152,7 +152,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         const beat = await getBeat(session.metadata.beatId);
         if (beat) {
           const purchase = {
-            id: `bp_${Date.now()}`,
+            id: `bp-${crypto.randomUUID()}`,
             beatId: session.metadata.beatId,
             beatTitle: beat.title || session.metadata.beatTitle || 'Beat',
             buyerId: session.userId,
@@ -181,7 +181,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         // Fulfill digital good purchase
         const { digitalPurchasesStore } = await import('./db.tsx');
         const purchase = {
-          id: `bp_${Date.now()}`,
+          id: `bp-${crypto.randomUUID()}`,
           goodId: session.metadata.goodId,
           goodTitle: session.metadata.goodTitle || 'Digital Good',
           buyerId: session.userId,
@@ -199,7 +199,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         // Create radio campaign after payment
         const { venueAdCampaignsStore } = await import('./db.tsx');
         const campaign = {
-          id: `bp_${Date.now()}`,
+          id: `bp-${crypto.randomUUID()}`,
           stationId: session.metadata.stationId,
           stationName: session.metadata.stationName || '',
           advertiserId: session.userId,

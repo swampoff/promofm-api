@@ -177,7 +177,7 @@ app.post('/generate-script', requireAuth, async (c) => {
     });
 
     const script = {
-      id: `dj-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: `dj-${crypto.randomUUID()}`,
       venueId,
       segmentType,
       text: llmResponse.text.trim(),
@@ -377,7 +377,7 @@ app.post('/generate-full', requireAuth, async (c) => {
 
     // 3. Сохраняем
     const script = {
-      id: `dj-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: `dj-${crypto.randomUUID()}`,
       venueId,
       segmentType,
       text: scriptText,

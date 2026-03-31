@@ -26,7 +26,7 @@ const app = new Hono();
 
 function generateId(): string {
   const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 10);
+  const rand = crypto.randomUUID().slice(0, 8);
   return `eco_${ts}_${rand}`;
 }
 

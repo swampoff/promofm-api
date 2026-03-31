@@ -141,7 +141,7 @@ agentsRoutes.post('/discuss', requireAuth, async (c) => {
 
     const result = await callAI([{ role: 'user', content: fullTask }]);
 
-    const id = `s_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const id = `s-${crypto.randomUUID()}`;
     const title = task.slice(0, 80) + (task.length > 80 ? '...' : '');
     const now = new Date().toISOString();
 
@@ -256,7 +256,7 @@ agentsRoutes.post('/queue', requireAuth, async (c) => {
     const body = await c.req.json();
     const queue: QueueItem[] = (await agentQueueStore.get('singleton') as any) || [];
     const item: QueueItem = {
-      id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      id: `q-${crypto.randomUUID()}`,
       task: body.task?.trim(),
       priority: body.priority || 'normal',
       addedAt: new Date().toISOString(),
@@ -295,7 +295,7 @@ agentsRoutes.post('/queue/process', requireAuth, requireAdmin, async (c) => {
         const fullTask = devlabContext ? `${item.task}\n\n[DevLab context:\n${devlabContext}]` : item.task;
         const result = await callAI([{ role: 'user', content: fullTask }]);
 
-        const id = `s_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const id = `s-${crypto.randomUUID()}`;
         const now = new Date().toISOString();
         const session: Session = {
           id, title: item.task.slice(0, 80),

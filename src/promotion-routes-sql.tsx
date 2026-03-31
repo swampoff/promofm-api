@@ -157,7 +157,7 @@ promotion.post('/pitching', requireAuth, async (c) => {
     }
 
     const dbClient = getDbClient();
-    const requestId = `pitch-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const requestId = `pitch-${crypto.randomUUID()}`;
     const userId = c.get('userId');
 
     const requestData = {
@@ -261,7 +261,7 @@ promotion.post('/pitching/submit', requireAuth, async (c) => {
     const sanitizedMessage = message ? sanitizeString(message, 2000) : '';
 
     // 7. Создаём заявку в БД
-    const requestId = `pitch-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const requestId = `pitch-${crypto.randomUUID()}`;
     
     const { data, error } = await dbClient
       .from('pitching_requests')
@@ -398,7 +398,7 @@ promotion.post('/pitching/:requestId/response', requireAuth, async (c) => {
     const dbClient = getDbClient();
 
     // 1. Создаём ответ редактора
-    const responseId = `resp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const responseId = `resp-${crypto.randomUUID()}`;
     
     const { error: insertError } = await dbClient
       .from('editor_responses')
@@ -535,7 +535,7 @@ promotion.post('/production360/submit', requireAuth, async (c) => {
     }
 
     const dbClient = getDbClient();
-    const requestId = `prod-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const requestId = `prod-${crypto.randomUUID()}`;
 
     const { data, error } = await dbClient
       .from('production_360_requests')
@@ -635,7 +635,7 @@ promotion.post('/marketing/submit', requireAuth, async (c) => {
     }
 
     const dbClient = getDbClient();
-    const campaignId = `mkt-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const campaignId = `mkt-${crypto.randomUUID()}`;
 
     const { data, error } = await dbClient
       .from('marketing_campaigns')
@@ -714,7 +714,7 @@ promotion.post('/media/submit', requireAuth, async (c) => {
     }
 
     const dbClient = getDbClient();
-    const requestId = `media-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const requestId = `media-${crypto.randomUUID()}`;
 
     const { data, error } = await dbClient
       .from('media_outreach_requests')
@@ -791,7 +791,7 @@ promotion.post('/event/submit', requireAuth, async (c) => {
     }
 
     const dbClient = getDbClient();
-    const eventId = `event-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const eventId = `event-${crypto.randomUUID()}`;
 
     const { data, error } = await dbClient
       .from('event_requests')
@@ -870,7 +870,7 @@ promotion.post('/promolab/submit', requireAuth, async (c) => {
     }
 
     const dbClient = getDbClient();
-    const experimentId = `lab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const experimentId = `lab-${crypto.randomUUID()}`;
 
     const { data, error } = await dbClient
       .from('promo_lab_experiments')

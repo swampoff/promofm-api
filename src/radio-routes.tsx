@@ -74,7 +74,7 @@ app.post('/ad-slots/create', requireAuth, async (c) => {
     const body = await c.req.json();
     const { slotType, timeSlot, price, duration, maxPerHour, description } = body;
 
-    const slotId = `slot-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    const slotId = `slot-${crypto.randomUUID()}`;
     const adSlot = {
       id: slotId,
       stationId: station.id,
@@ -927,7 +927,7 @@ app.post('/register-player', requireAuth, async (c) => {
     const userId = await getRadioUserId(c);
     const { venue_id, player_type, device_id } = await c.req.json();
     const playerId = `player-${venue_id}-${Date.now()}`;
-    const authToken = `tok-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const authToken = `tok-${crypto.randomUUID()}`;
     return c.json({
       success: true,
       player_id: playerId,

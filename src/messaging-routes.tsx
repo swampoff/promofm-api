@@ -88,7 +88,7 @@ function canCommunicate(roleA: CabinetRole, roleB: CabinetRole): boolean {
 // ── Helpers ──
 
 function genId(): string {
-  return `dm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  return `dm-${crypto.randomUUID()}`;
 }
 
 function makeConvId(userA: string, userB: string): string {

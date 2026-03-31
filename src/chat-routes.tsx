@@ -41,7 +41,7 @@ interface ChatMessage {
 }
 
 function genId(): string {
-  return `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  return `chat-${crypto.randomUUID()}`;
 }
 
 // GET /messages/:orderId

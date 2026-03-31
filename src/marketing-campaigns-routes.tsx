@@ -93,7 +93,7 @@ marketing.post('/campaigns', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Обязательные поля: campaign_name, user_id' }, 400);
     }
 
-    const campaignId = `campaign_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const campaignId = `campaign-${crypto.randomUUID()}`;
 
     const campaign = {
       id: campaignId,

@@ -480,7 +480,7 @@ async function getAuditDbStore() {
 export function logAudit(entry: Omit<AuditEntry, 'id' | 'timestamp'>): AuditEntry {
   const full: AuditEntry = {
     ...entry,
-    id: `audit-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+    id: `audit-${crypto.randomUUID()}`,
     timestamp: new Date().toISOString(),
   };
   auditLog.push(full);
