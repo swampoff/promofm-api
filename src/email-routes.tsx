@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import { publishEmailPrefsStore, emailHistoryStore, emailTemplatesStore } from './db.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { smtpSendEmail } from './smtp-sender.tsx';
 
 const app = new Hono();
 
@@ -166,13 +167,27 @@ app.post('/send', requireAuth, requireAdmin, async (c) => {
       metadata: metadata || {},
     };
 
+    // Отправляем через SMTP
+    try {
+      const sendResult = await smtpSendEmail({
+        to: to_email,
+        subject,
+        html: content,
+      });
+      emailData.status = sendResult.ok ? 'sent' : 'failed';
+      if (!sendResult.ok) {
+        emailData.metadata = { ...emailData.metadata, sendError: sendResult.error };
+      }
+    } catch (sendErr) {
+      console.error('[Email] SMTP send error:', sendErr);
+      emailData.status = 'failed';
+      emailData.metadata = { ...emailData.metadata, sendError: String(sendErr) };
+    }
+
     await emailHistoryStore.set(emailId, emailData, { user_id });
 
-    // В production здесь должна быть реальная отправка email
-    // через Sendgrid, Mailgun, AWS SES и т.д.
-
     return c.json({ 
-      success: true, 
+      success: emailData.status === 'sent', 
       data: emailData 
     });
   } catch (error) {

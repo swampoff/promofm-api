@@ -265,46 +265,16 @@ notifications.post('/campaigns', requireAuth, async (c) => {
 });
 
 // Отправить email-кампанию
+// Отправка кампаний — только через /api/email-campaigns/campaigns/:id/send (admin)
 notifications.post('/campaigns/:campaignId/send', requireAuth, async (c) => {
-  try {
-    const campaignId = c.req.param('campaignId');
-    const body = await c.req.json();
-    const artistId = body.artistId;
-
-    // Look up campaign from email_campaigns table
-    const campaigns = await db.getEmailCampaigns(artistId);
-    const campaign = campaigns.find((c: any) => c.id === campaignId) as EmailCampaign;
-
-    if (!campaign) {
-      return c.json({ success: false, error: 'Campaign not found' }, 404);
-    }
-
-    const updatedCampaign: EmailCampaign = {
-      ...campaign,
-      status: 'sent',
-      sentAt: new Date().toISOString(),
-      openRate: 0,
-      clickRate: 0,
-    };
-
-    await db.upsertEmailCampaign(campaignId, updatedCampaign);
-
-    return c.json({
-      success: true,
-      data: updatedCampaign,
-      message: 'Кампания успешно отправлена!'
-    });
-  } catch (error) {
-    console.error('Error sending campaign:', error);
-    return c.json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Failed to send campaign'
-    }, 500);
-  }
+  return c.json({
+    success: false,
+    error: 'Отправка кампаний доступна через панель администратора'
+  }, 400);
 });
 
 // Удалить уведомление
-notifications.delete('/:userId/:notificationId', async (c) => {
+notifications.delete('/:userId/:notificationId', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
     const notificationId = c.req.param('notificationId');
@@ -322,7 +292,7 @@ notifications.delete('/:userId/:notificationId', async (c) => {
 });
 
 // Отметить уведомление как прочитанное
-notifications.put('/:userId/:notificationId/read', async (c) => {
+notifications.put('/:userId/:notificationId/read', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
     const notificationId = c.req.param('notificationId');
@@ -346,7 +316,7 @@ notifications.put('/:userId/:notificationId/read', async (c) => {
 });
 
 // Получить статистику уведомлений
-notifications.get('/stats/:userId', async (c) => {
+notifications.get('/stats/:userId', requireAuth, async (c) => {
   try {
     const userId = c.req.param('userId');
     const allNotifications = await db.getNotificationsByUser(userId);
