@@ -246,6 +246,36 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         }
       }
 
+
+      if (itemType === 'booking_payment' && session.metadata.bookingId) {
+        const { getBooking, upsertBooking, bookingPaymentsStore } = await import('./db.tsx');
+        const bid = session.metadata.bookingId;
+        const payType = session.metadata.paymentType || 'deposit';
+        const booking = await getBooking(bid);
+        if (booking) {
+          const newStatus = payType === 'deposit' ? 'deposit_paid' : 'confirmed';
+          booking.status = newStatus;
+          booking.updatedAt = now;
+          if (payType === 'deposit') {
+            booking.depositPaidAt = now;
+          } else {
+            booking.finalPaidAt = now;
+          }
+          await upsertBooking(bid, booking);
+
+          await bookingPaymentsStore.set(`${bid}_${payType}_${now}`, {
+            bookingId: bid,
+            paymentType: payType,
+            amount: session.amount,
+            gateway: session.gateway,
+            orderId: session.orderId,
+            paidAt: now,
+          });
+
+          log.info({ bookingId: bid, paymentType: payType, amount: session.amount }, 'booking_payment_paid');
+        }
+      }
+
 } catch (err) {
       log.error({ err }, 'marketplace_fulfillment_error');
     }

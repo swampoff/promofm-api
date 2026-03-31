@@ -18,7 +18,8 @@ const app = new Hono();
 
 // Статусы заказа
 export type OrderStatus = 
-  | 'pending'      // Ожидает обработки админом
+  | 'pending_payment' // Ожидает оплаты
+  | 'pending'      // Оплачен, ожидает обработки админом
   | 'processing'   // В работе (отправлено в ElevenLabs)
   | 'review'       // На проверке у админа
   | 'ready'        // Готов к прослушиванию клиентом
@@ -89,7 +90,7 @@ app.post("/orders", requireAuth, async (c) => {
       duration,
       voiceType,
       price,
-      status: 'pending',
+      status: 'pending_payment',
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -103,9 +104,9 @@ app.post("/orders", requireAuth, async (c) => {
     await venueOrdersIndexStore.set(venueId, venueOrders);
 
     // Add to pending orders list (for admin)
-    const pendingOrders = await contentOrdersByStatusStore.get('pending') || [];
-    pendingOrders.push(orderId);
-    await contentOrdersByStatusStore.set('pending', pendingOrders);
+    const ppOrders = await contentOrdersByStatusStore.get('pending_payment') || [];
+    ppOrders.push(orderId);
+    await contentOrdersByStatusStore.set('pending_payment', ppOrders);
 
     console.log(`Content order created: ${orderId} (${contentType})`);
 
@@ -399,6 +400,67 @@ app.post('/demo', requireAuth, async (c) => {
     return c.json({ success: true, order: demoOrder });
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+
+// POST /upload - Загрузка аудиофайла venue (base64)
+app.post('/upload', requireAuth, async (c) => {
+  try {
+    const body = await c.req.json();
+    const { audioBase64, fileName, contentType, title } = body;
+
+    if (!audioBase64 || !fileName) {
+      return c.json({ success: false, error: 'audioBase64 and fileName required' }, 400);
+    }
+
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+
+    const buffer = Buffer.from(audioBase64, 'base64');
+    
+    if (buffer.length > 50 * 1024 * 1024) {
+      return c.json({ success: false, error: 'File too large (max 50MB)' }, 400);
+    }
+
+    const timestamp = Date.now();
+    const sanitized = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storageName = `${timestamp}_${sanitized}`;
+    const uploadDir = '/opt/promofm-api/uploads/venue-content';
+    const filePath = path.default.join(uploadDir, storageName);
+
+    await fs.writeFile(filePath, buffer);
+
+    let duration = 0;
+    try {
+      const { exec } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const execAsync = promisify(exec);
+      const { stdout } = await execAsync(
+        `ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${filePath}"`
+      );
+      duration = Math.round(parseFloat(stdout.trim()) || 0);
+    } catch {
+      // ffprobe not available
+    }
+
+    const fileUrl = `/server/uploads/venue-content/${storageName}`;
+
+    return c.json({
+      success: true,
+      file: {
+        url: fileUrl,
+        fileName: storageName,
+        originalName: fileName,
+        size: buffer.length,
+        duration,
+        title: title || fileName,
+        contentType: contentType || 'jingles',
+      }
+    });
+  } catch (err: any) {
+    console.error('Content upload error:', err);
+    return c.json({ success: false, error: err.message }, 500);
   }
 });
 
