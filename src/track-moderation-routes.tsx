@@ -63,7 +63,7 @@ async function triggerAiAnalysis(trackId: string, audioUrl: string) {
 }
 
 // POST /submitTrack — Submit track for moderation
-app.post('/submitTrack', requireAuth, requireAdmin, async (c) => {
+app.post('/submitTrack', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
 

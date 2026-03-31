@@ -281,6 +281,35 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill track_test payment ───
+  if (session.metadata?.type === 'track_test' && session.metadata?.requestId) {
+    try {
+      const { trackTestRequestsStore } = await import('./db.tsx');
+      const reqId = session.metadata.requestId;
+      const testReq = await trackTestRequestsStore.get(reqId);
+      if (testReq && testReq.payment_status !== 'completed') {
+        testReq.payment_status = 'completed';
+        testReq.status = 'payment_succeeded';
+        testReq.payment_transaction_id = session.orderId;
+        testReq.updated_at = now;
+        await trackTestRequestsStore.set(reqId, testReq);
+        log.info({ requestId: reqId, amount: session.amount }, 'track_test_payment_fulfilled');
+
+        // Notify admin about new paid track test
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE('admin', 'track_test_paid', {
+            requestId: reqId,
+            trackTitle: session.metadata.trackTitle || testReq.track_title,
+            amount: session.amount,
+          });
+        } catch {}
+      }
+    } catch (err) {
+      log.error({ err }, 'track_test_fulfillment_error');
+    }
+  }
+
   // Save payment method if requested
   if (session.savePaymentMethod && webhook.paymentMethodId) {
     const method: SavedPaymentMethod = {

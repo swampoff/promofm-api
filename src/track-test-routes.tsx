@@ -28,7 +28,7 @@ interface TrackTestRequest {
           'analysis_generated' | 'pending_admin_approval' | 'pending_admin_review' |
           'completed' | 'rejected';
   payment_status: 'pending' | 'completed' | 'refunded';
-  payment_amount: number; // 1000 RUB
+  payment_amount: number; // 3000 RUB
   payment_transaction_id?: string;
   required_expert_count: number; // до 10
   completed_reviews_count: number;
@@ -129,7 +129,7 @@ app.post('/submit', requireAuth, async (c) => {
       genre,
       status: 'pending_payment',
       payment_status: 'pending',
-      payment_amount: 1000,
+      payment_amount: 3000,
       required_expert_count: 5, // по умолчанию 5 экспертов
       completed_reviews_count: 0,
       assigned_experts: [],
@@ -158,7 +158,7 @@ app.post('/submit', requireAuth, async (c) => {
       success: true,
       request_id: requestId,
       status: 'pending_payment',
-      payment_amount: 1000,
+      payment_amount: 3000,
       message: 'Track test request created. Please proceed with payment.'
     });
 
@@ -175,24 +175,101 @@ app.post('/submit', requireAuth, async (c) => {
 app.post('/payment', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { request_id, payment_method, transaction_id } = body;
+    const { request_id, payment_method } = body;
 
     const request = await trackTestRequestsStore.get(request_id);
     if (!request) {
       return c.json({ error: 'Request not found' }, 404);
     }
 
-    // Симуляция успешной оплаты
-    // В production здесь будет интеграция с платежной системой
+    if (request.payment_status === 'completed') {
+      return c.json({ error: 'Payment already completed' }, 400);
+    }
 
+    // Create real checkout session via YooKassa
+    const { getGateway } = await import('./payment-gateway.tsx');
+    const { upsertPaymentSession } = await import('./db.tsx');
+
+    const gateway = getGateway('yookassa');
+    const orderId = crypto.randomUUID();
+    const returnUrl = `https://promo-music.ru/cabinet/tracks?payment=success&request_id=${request_id}`;
+
+    const result = await gateway.createPayment({
+      orderId,
+      amount: request.payment_amount,
+      currency: 'RUB',
+      description: `Тест трека: ${request.track_title} — ${request.artist_name}`,
+      returnUrl,
+      metadata: {
+        type: 'track_test',
+        requestId: request_id,
+        trackTitle: request.track_title,
+        artistName: request.artist_name,
+      },
+    });
+
+    // Save payment session for webhook processing
+    const session: any = {
+      orderId,
+      userId: request.user_id || 'guest',
+      amount: request.payment_amount,
+      currency: 'RUB',
+      type: 'purchase',
+      description: `Тест трека: ${request.track_title}`,
+      status: 'pending',
+      gateway: 'yookassa',
+      gatewayPaymentId: result.paymentId,
+      metadata: {
+        type: 'track_test',
+        requestId: request_id,
+        trackTitle: request.track_title,
+      },
+      createdAt: new Date().toISOString(),
+    };
+    await upsertPaymentSession(orderId, session);
+
+    // Link payment session to track test request
+    request.payment_transaction_id = orderId;
+    request.updated_at = new Date().toISOString();
+    await trackTestRequestsStore.set(request_id, request);
+
+    return c.json({
+      success: true,
+      orderId,
+      confirmationUrl: result.confirmationUrl,
+      status: 'pending',
+      message: 'Перенаправление на оплату...'
+    });
+
+  } catch (error) {
+    console.error('Error creating track test payment:', error);
+    return c.json({ error: 'Failed to create payment session' }, 500);
+  }
+});
+
+// POST /payment/confirm — Called by webhook or frontend after payment success
+app.post('/payment/confirm', requireAuth, async (c) => {
+  try {
+    const body = await c.req.json();
+    const { request_id } = body;
+
+    const request = await trackTestRequestsStore.get(request_id);
+    if (!request) {
+      return c.json({ error: 'Request not found' }, 404);
+    }
+
+    if (request.payment_status === 'completed') {
+      return c.json({ success: true, status: 'already_completed' });
+    }
+
+    // Mark as paid
     request.payment_status = 'completed';
-    request.payment_transaction_id = transaction_id || crypto.randomUUID();
     request.status = 'payment_succeeded';
     request.updated_at = new Date().toISOString();
 
     await trackTestRequestsStore.set(request_id, request);
 
-    // Создать транзакцию оплаты
+    // Record transaction
     const paymentTx = {
       id: crypto.randomUUID(),
       user_id: request.user_id,
