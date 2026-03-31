@@ -501,15 +501,10 @@ auth.post("/set-role", requireAuth, requireAdmin, async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 // GET /auth/me
 // ──────────────────────────────────────────────────────────────────────
-auth.get("/me", async (c) => {
+auth.get("/me", requireAuth, async (c) => {
   try {
-    const token = c.req.header("Authorization")?.split(" ")[1];
-    if (!token) return c.json({ success: false, error: "Authorization header required" }, 401);
-
-    const decoded = verifyToken(token);
-    if (!decoded) return c.json({ success: false, error: "Invalid or expired token" }, 401);
-
-    const result = await sql(`SELECT id, email, full_name, role::text, is_verified, is_email_verified, avatar_url FROM users WHERE id = $1`, [decoded.sub]);
+    const userId = c.get('userId');
+    const result = await sql(`SELECT id, email, full_name, role::text, is_verified, is_email_verified, avatar_url FROM users WHERE id = $1`, [userId]);
     if (result.rows.length === 0) return c.json({ success: false, error: "User not found" }, 404);
     const user = result.rows[0];
     let profile = await vpsGetProfile(user.id);

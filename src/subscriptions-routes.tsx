@@ -298,20 +298,68 @@ subscriptions.post('/subscribe', requireAuth, async (c) => {
     }
     
     const interval = requestedInterval === 'year' ? 'year' : 'month';
-    const daysToAdd = interval === 'year' ? 365 : 30;
-    
-    // Рассчитываем дату истечения
-    const expiresAt = tier === 'spark' 
-      ? null 
-      : new Date(Date.now() + daysToAdd * 24 * 60 * 60 * 1000).toISOString();
-    
+    const price = interval === 'year' ? plan.price_year : plan.price_month;
+
+    // Paid plans require real payment via YooKassa
+    if (price > 0) {
+      try {
+        const { getGateway } = await import('./payment-gateway.tsx');
+        const gateway = getGateway('yookassa');
+        const orderId = crypto.randomUUID();
+        const returnUrl = `https://promo-music.ru/cabinet/subscription?payment=success&tier=${tier}`;
+        const desc = `${plan.name} (${interval === 'year' ? 'year' : 'month'})`;
+
+        const result = await gateway.createPayment({
+          orderId,
+          amount: price,
+          currency: 'RUB',
+          description: desc,
+          returnUrl,
+          metadata: { type: 'subscription', planKey: tier, interval },
+        });
+
+        await upsertPaymentSession(orderId, {
+          orderId,
+          userId: user_id,
+          gateway: 'yookassa',
+          gatewayPaymentId: result.paymentId,
+          amount: price,
+          currency: 'RUB',
+          status: 'pending',
+          type: 'subscription',
+          description: desc,
+          metadata: { planKey: tier, interval },
+          savePaymentMethod: false,
+          confirmationUrl: result.confirmationUrl,
+          returnUrl,
+          createdAt: new Date().toISOString(),
+        });
+
+        return c.json({
+          success: true,
+          data: {
+            orderId,
+            confirmationUrl: result.confirmationUrl,
+            tier,
+            price,
+            interval,
+            status: 'pending_payment',
+          },
+        });
+      } catch (err) {
+        console.error('[subscriptions] Payment session error:', err);
+        return c.json({ success: false, error: 'Payment session creation failed' }, 500);
+      }
+    }
+
+    // Free plan (spark): activate immediately
     const subscription = {
       user_id,
       tier,
       tierName: plan.name,
-      price: interval === 'year' ? plan.price_year : plan.price_month,
+      price: 0,
       interval,
-      expires_at: expiresAt,
+      expires_at: null,
       status: 'active',
       credits_remaining: plan.credits_per_month,
       credits_per_month: plan.credits_per_month,
@@ -322,7 +370,7 @@ subscriptions.post('/subscribe', requireAuth, async (c) => {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
-    
+
     await upsertSubscription(user_id, subscription);
 
     // ── Шаг 4: E2E платёж + уведомления ──

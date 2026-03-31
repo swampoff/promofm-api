@@ -104,7 +104,7 @@ coinsRoutes.post('/topup', requireAuth, async (c) => {
       gateway,
       userId,
       orderId,
-      returnUrl: returnUrl || 'https://promo.music/payment/result',
+      returnUrl: returnUrl || 'https://promo-music.ru/cabinet/coins?payment=result',
       metadata: { coinAmount: String(coinAmount), type: 'topup' },
       savePaymentMethod: false,
       type: 'topup',
@@ -124,7 +124,7 @@ coinsRoutes.post('/topup', requireAuth, async (c) => {
       metadata: { coinAmount: String(coinAmount) },
       savePaymentMethod: false,
       confirmationUrl: result.confirmationUrl,
-      returnUrl: returnUrl || 'https://promo.music/payment/result',
+      returnUrl: returnUrl || 'https://promo-music.ru/cabinet/coins?payment=result',
       createdAt: new Date().toISOString(),
     });
 

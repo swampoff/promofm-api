@@ -35,6 +35,16 @@ const checkoutRoutes = new Hono();
 async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPayload) {
   const now = new Date().toISOString();
 
+  // Validate webhook amount matches session amount
+  if (webhook.amount !== undefined && webhook.amount !== null) {
+    const wAmt = Number(webhook.amount);
+    const sAmt = Number(session.amount);
+    if (Math.abs(wAmt - sAmt) > 0.01) {
+      log.error({ orderId: session.orderId, expected: sAmt, received: wAmt }, 'amount_mismatch');
+      throw new Error('Payment amount mismatch');
+    }
+  }
+
   // Update session
   session.status = 'succeeded';
   session.completedAt = now;
@@ -440,13 +450,18 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
 
 // ── GET /session/:orderId ──
 
-checkoutRoutes.get('/session/:orderId', async (c) => {
+checkoutRoutes.get('/session/:orderId', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('orderId');
     const session = await getPaymentSession(orderId);
 
     if (!session) {
-      return c.json({ success: false, error: 'Сессия не найдена' }, 404);
+      return c.json({ success: false, error: 'Session not found' }, 404);
+    }
+
+    const userId = c.get('userId');
+    if (session.userId !== userId) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
     }
 
     return c.json({

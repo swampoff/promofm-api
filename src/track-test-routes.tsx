@@ -249,6 +249,9 @@ app.post('/payment', requireAuth, async (c) => {
 
 // POST /payment/confirm — Called by webhook or frontend after payment success
 app.post('/payment/confirm', requireAuth, async (c) => {
+  // SECURITY: Payment confirmation is handled exclusively by the YooKassa webhook.
+  // Manual confirmation disabled to prevent payment bypass.
+  return c.json({ success: false, error: 'Payment confirmed via gateway webhook only' }, 403);
   try {
     const body = await c.req.json();
     const { request_id } = body;

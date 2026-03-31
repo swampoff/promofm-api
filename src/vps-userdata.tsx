@@ -195,11 +195,16 @@ export async function vpsGetToken(token: string): Promise<{ userId: string; type
       if (new Date() > new Date(kvData.expires_at)) {
         return null;
       }
+      // Reject already-used tokens
+      if (kvData.used_at) {
+        return null;
+      }
       return {
         userId: kvData.user_id,
         type: kvData.type,
         expiresAt: kvData.expires_at,
         createdAt: kvData.created_at,
+        usedAt: kvData.used_at,
       };
     }
   } catch (err) {

@@ -21,10 +21,19 @@ donationsRoutes.post('/', requireAuth, async (c) => {
     const body = await c.req.json();
     const donationId = `donation-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
+    if (!body.amount || body.amount <= 0) {
+      return c.json({ success: false, error: 'Amount must be > 0' }, 400);
+    }
+    if (!body.artistId) {
+      return c.json({ success: false, error: 'artistId required' }, 400);
+    }
+    const { status: _s, ...safeBody } = body;
     const donation = {
-      id: donationId, status: 'pending',
-      ...body,
-      artistId: body.artistId || userId,
+      id: donationId,
+      ...safeBody,
+      status: 'pending',
+      artistId: body.artistId,
+      donorId: userId,
       createdAt: now,
     };
     await db.createDonation(donation.artistId, donationId, donation);
