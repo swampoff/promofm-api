@@ -112,7 +112,16 @@ async function logAuthEvent(action: string, details: Record<string, any>, status
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/signup", async (c) => {
   try {
-    const { email, password, name, role, consentPersonalData, consentNewsletter } = await c.req.json();
+    const body = await c.req.json();
+    // reCAPTCHA v3 check (skipped when RECAPTCHA_SECRET_KEY not configured)
+    const captchaResult = await verifyCaptcha(body.captchaToken, 'signup');
+    if (!captchaResult.ok) {
+      return c.json({ success: false, error: captchaResult.error || 'CAPTCHA verification failed' }, 403);
+    }
+    const { email, password, name, role, consentPersonalData, consentNewsletter, captchaToken } = body;
+    // H6: reCAPTCHA v3 verification (skipped if not configured)
+    const captchaResult = await verifyCaptcha(captchaToken, 'signup');
+    if (!captchaResult.ok) return c.json({ success: false, error: captchaResult.error || 'Проверка CAPTCHA не пройдена' }, 403);
     if (!email || !password) return c.json({ success: false, error: "Email и пароль обязательны" }, 400);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ success: false, error: "Некорректный формат email" }, 400);
     const pwErr = validatePassword(password);
@@ -184,7 +193,15 @@ auth.post("/signup", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/signin", async (c) => {
   try {
-    const { email, password } = await c.req.json();
+    const body = await c.req.json();
+    const captchaResult = await verifyCaptcha(body.captchaToken, 'signin');
+    if (!captchaResult.ok) {
+      return c.json({ success: false, error: captchaResult.error || 'CAPTCHA verification failed' }, 403);
+    }
+    const { email, password, captchaToken } = body;
+    // H6: reCAPTCHA v3 verification (skipped if not configured)
+    const captchaResult = await verifyCaptcha(captchaToken, 'signin');
+    if (!captchaResult.ok) return c.json({ success: false, error: captchaResult.error || 'Проверка CAPTCHA не пройдена' }, 403);
     if (!email || !password) return c.json({ success: false, error: "Email и пароль обязательны" }, 400);
 
     const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || c.req.header('x-real-ip') || '';
@@ -653,24 +670,55 @@ auth.post("/resend-verification", async (c) => {
 // GET /auth/verify-email-page?token=...
 // ──────────────────────────────────────────────────────────────────────
 auth.get("/verify-email-page", async (c) => {
+  // Render an intermediate page that auto-submits via POST
+  // This avoids state mutation on GET (CSRF-safe)
   const token = c.req.query("token");
+  if (!token) return c.redirect("https://promo-music.ru/login?error=missing_token");
+
+  return c.html(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Email Verification</title>
+<style>body{display:flex;justify-content:center;align-items:center;height:100vh;background:#0a0a1a;color:#fff;font-family:sans-serif}
+.card{text-align:center;padding:40px;border-radius:16px;background:#1a1a2e}</style></head>
+<body><div class="card"><p>Confirming your email...</p>
+<form id="f" method="POST" action="/server/auth/verify-email-confirm">
+<input type="hidden" name="token" value="${token.replace(/"/g, '&quot;')}">
+</form><script>document.getElementById('f').submit()</script>
+</div></body></html>`);
+});
+
+// POST /auth/verify-email-confirm — actual verification (state mutation via POST)
+auth.post("/verify-email-confirm", async (c) => {
+  let token: string | undefined;
+  const ct = c.req.header("content-type") || "";
+  if (ct.includes("application/x-www-form-urlencoded") || ct.includes("multipart/form-data")) {
+    const body = await c.req.parseBody();
+    token = body.token as string;
+  } else {
+    const body = await c.req.json();
+    token = body.token;
+  }
   if (!token) return c.redirect("https://promo-music.ru/login?error=missing_token");
 
   const verifyData = await vpsGetToken(token);
   if (!verifyData || new Date() > new Date(verifyData.expiresAt)) return c.redirect("https://promo-music.ru/login?error=invalid_token");
+
+  // Check if already verified (idempotent — safe for GET)
+  const alreadyVerified = await sql(`SELECT is_email_verified FROM users WHERE id = $1`, [verifyData.userId]);
+  if (alreadyVerified.rows[0]?.is_email_verified) {
+    await vpsUseToken(token);
+    return c.redirect("https://promo-music.ru/login?verified=true");
+  }
 
   await sql(`UPDATE users SET is_email_verified = true, email_verified_at = NOW() WHERE id = $1`, [verifyData.userId]);
   const profile = await vpsGetProfile(verifyData.userId);
   if (profile) { profile.isEmailVerified = true; profile.emailVerifiedAt = new Date().toISOString(); await vpsSaveProfile(verifyData.userId, profile); }
   await vpsUseToken(token);
 
-  // Auto-login: get user data, generate JWT, redirect to cabinet
   const userResult = await sql(`SELECT id, email, role::text, full_name FROM users WHERE id = $1`, [verifyData.userId]);
   if (userResult.rows.length > 0) {
     const user = userResult.rows[0];
-    // Generate short-lived auto-login token (5 min) stored server-side
     const autoLoginToken = crypto.randomUUID();
-    await vpsStoreToken(user.id, autoLoginToken, "auto_login", 0.083); // 5 minutes
+    await vpsStoreToken(user.id, autoLoginToken, "auto_login", 0.083);
     return c.redirect(`https://promo-music.ru/login?verified=true&auto_login_token=${autoLoginToken}`);
   }
 
