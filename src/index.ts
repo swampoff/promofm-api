@@ -113,6 +113,7 @@ import { startSecurityWarden } from './security-warden.tsx';
 import { initSentry, sentryErrorHandler, captureError } from './sentry.tsx';
 import { metricsRegistry, metricsMiddleware } from './metrics.tsx';
 import weeklyReleasesRoutes from './weekly-releases-routes.tsx';
+import airRoutes from "./air-routes.tsx";
 
 // Global unhandled rejection handler (replaces Deno version)
 process.on('unhandledRejection', (reason) => {
@@ -342,6 +343,7 @@ app.route("/server/api/cabinet-ai", cabinetAiRoutes);
 app.route("/server/api/weekly-releases", weeklyReleasesRoutes);
 
 app.route("/server/api/docs", apiDocs);
+app.route("/server/api/air", airRoutes);
 // Prometheus metrics endpoint (internal only)
 app.get('/server/metrics', async (c) => {
   const internalKey = c.req.header('X-Internal-Key');

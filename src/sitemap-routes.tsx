@@ -69,6 +69,26 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   // Feed / discover (0.7)
   { loc: '/publish', changefreq: 'daily', priority: '0.7' },
   { loc: '/checkout', changefreq: 'monthly', priority: '0.4' },
+  // SEO Landing Pages
+  { loc: '/for-artists', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/for-djs', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/for-producers', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/for-engineers', changefreq: 'weekly', priority: '0.6' },
+  { loc: '/for-venues', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/for-tv', changefreq: 'monthly', priority: '0.6' },
+  { loc: '/for-labels', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/for-media', changefreq: 'monthly', priority: '0.6' },
+  { loc: '/for-bloggers', changefreq: 'monthly', priority: '0.6' },
+  { loc: '/music-for-restaurants', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/audiobranding', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/radio-advertising', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/for-business', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/djs', changefreq: 'daily', priority: '0.7' },
+  { loc: '/faq', changefreq: 'monthly', priority: '0.6' },
+  { loc: '/pricing', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/contact', changefreq: 'monthly', priority: '0.5' },
+  { loc: '/careers', changefreq: 'monthly', priority: '0.5' },
+  { loc: '/partners', changefreq: 'monthly', priority: '0.6' },
 ];
 
 function escapeXml(s: string): string {

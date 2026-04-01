@@ -21,7 +21,8 @@
  */
 
 import { Hono } from 'hono';
-import { dmConvListStore, dmConversationsStore, dmMessagesStore, dmUnreadCountsStore } from './db.tsx';
+import { dmConvListStore, dmConversationsStore, dmMessagesStore, dmUnreadCountsStore, getAllArtistProfiles, getAllProducerProfiles } from './db.tsx';
+import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 // ── Telegram forwarding for admin messages ──
@@ -458,6 +459,81 @@ app.get('/rules', (c) => {
 // ── POST /presence - Online presence heartbeat ──
 app.post('/presence', requireAuth, async (c) => {
   return c.json({ success: true });
+});
+
+
+// ── GET /search-contacts - Search users for new conversations ──
+app.get('/search-contacts', requireAuth, async (c) => {
+  try {
+    const query = c.req.query('q')?.toLowerCase();
+    const role = c.req.query('role'); // optional filter
+    if (!query || query.length < 2) {
+      return c.json({ success: true, data: [] });
+    }
+
+    const results: any[] = [];
+
+    // Search in profiles table (registered users with roles)
+    const profilesRes = await pool.query(
+      "SELECT id, COALESCE(display_name, full_name, username) as name, role, avatar_url FROM users WHERE status = 'active' AND LOWER(COALESCE(display_name, full_name, username, '')) LIKE $1 LIMIT 20",
+      ['%' + query + '%']
+    );
+    for (const p of profilesRes.rows) {
+      if (role && p.role !== role) continue;
+      results.push({
+        userId: p.id,
+        userName: p.name || 'Без имени',
+        role: p.role || 'artist',
+        city: '',
+        avatar: p.avatar_url || '',
+      });
+    }
+
+    // Search in artist profiles (KV store)
+    if (!role || role === 'artist') {
+      const allArtists = await getAllArtistProfiles();
+      const matchedArtists = allArtists.filter((a: any) =>
+        a && a.name && a.name.toLowerCase().includes(query)
+      ).slice(0, 10);
+      for (const a of matchedArtists) {
+        const exists = results.some(r => r.userId === a.userId || r.userName === a.name);
+        if (!exists) {
+          results.push({
+            userId: a.userId || a.id,
+            userName: a.name,
+            role: 'artist',
+            city: a.city || '',
+            avatar: a.avatar || a.profileImageUrl || '',
+          });
+        }
+      }
+    }
+
+    // Search in producer profiles (KV store)
+    if (!role || role === 'producer') {
+      const allProducers = await getAllProducerProfiles();
+      const matchedProducers = allProducers.filter((p: any) =>
+        p && p.name && p.name.toLowerCase().includes(query)
+      ).slice(0, 10);
+      for (const p of matchedProducers) {
+        const exists = results.some(r => r.userId === p.userId || r.userName === p.name);
+        if (!exists) {
+          results.push({
+            userId: p.userId || p.id,
+            userName: p.name,
+            role: 'producer',
+            city: '',
+            avatar: p.avatar || p.profileImageUrl || '',
+          });
+        }
+      }
+    }
+
+    return c.json({ success: true, data: results.slice(0, 20) });
+  } catch (error: any) {
+    console.error('[messaging] search-contacts error:', error);
+    return c.json({ success: false, error: error.message }, 500);
+  }
 });
 
 export default app;

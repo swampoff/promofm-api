@@ -90,17 +90,31 @@ async function postToTelegram(article: { id: string; title: string; excerpt: str
 
   const excerptClean = (article.excerpt || '').replace(/<[^>]*>/g, '').trim();
 
+  // Build caption ensuring the URL link is NEVER truncated by 1024 char limit
+  const titleLine = `<b>${escapeHtml(article.title)}</b>`;
+  const authorLine = `\u270d\ufe0f ${escapeHtml(article.authorName)} | ${escapeHtml(article.source)}`;
+  const linkLine = `\ud83d\udc49 <a href="${link}">\u0427\u0438\u0442\u0430\u0442\u044c \u043d\u0430 \u041f\u0420\u041e\u041c\u041e.\u041c\u0423\u0417\u042b\u041a\u0410</a>`;
+
+  // Calculate fixed parts length (title + author + link + tags + newlines)
+  const fixedParts = [titleLine, '', authorLine, '', linkLine, '', tags].filter(Boolean).join('\n');
+  const fixedLen = fixedParts.length;
+  // Reserve space for excerpt + 2 newlines around it
+  const maxExcerptLen = Math.max(0, 1024 - fixedLen - 4);
+  const truncatedExcerpt = excerptClean
+    ? escapeHtml(excerptClean.length > maxExcerptLen ? excerptClean.slice(0, maxExcerptLen - 1) + '\u2026' : excerptClean)
+    : '';
+
   const caption = [
-    `<b>${escapeHtml(article.title)}</b>`,
+    titleLine,
     '',
-    excerptClean ? escapeHtml(excerptClean) : '',
+    truncatedExcerpt || undefined,
+    truncatedExcerpt ? '' : undefined,
+    authorLine,
     '',
-    `\u270d\ufe0f ${escapeHtml(article.authorName)} | ${escapeHtml(article.source)}`,
-    '',
-    `\ud83d\udc49 <a href="${link}">\u0427\u0438\u0442\u0430\u0442\u044c \u043d\u0430 \u041f\u0420\u041e\u041c\u041e.\u041c\u0423\u0417\u042b\u041a\u0410</a>`,
+    linkLine,
     '',
     tags,
-  ].filter(Boolean).join('\n');
+  ].filter(x => x !== undefined && x !== false).join('\n');
 
   try {
     // If we have an image, send as photo with caption
@@ -111,7 +125,7 @@ async function postToTelegram(article: { id: string; title: string; excerpt: str
         body: JSON.stringify({
           chat_id: channelId,
           photo: article.imageUrl,
-          caption: caption.slice(0, 1024), // Telegram caption limit
+          caption: caption.slice(0, 1024), // safety net, caption already fits
           parse_mode: 'HTML',
         }),
       });
@@ -418,6 +432,23 @@ async function extractNewsWithLLM(
 Если новость смешивает музыку с политикой — НЕ БЕРИ ЕЁ. Мы — музыкальный и культурный портал.
 ${source.parsingHint}
 ${isInternational ? '\n⚠️ ИСТОЧНИК НА АНГЛИЙСКОМ. Ты ОБЯЗАН перевести ВСЁ на русский язык. Заголовок, excerpt, content — всё на русском. Названия артистов, альбомов и песен можно оставить на оригинальном языке.' : ''}
+
+АНТИПАТТЕРНЫ AI-ТЕКСТА — ЗАПРЕЩЕНО:
+1. Пафосные составные заголовки через двоеточие: "Культурный Ренессанс:", "Симфония Единства:", "Индустриальный Разум:", "Звуковая Революция:" — НЕЛЬЗЯ
+2. Эмодзи в заголовках — НЕЛЬЗЯ (только в тексте TG, не в title)
+3. Канцеляризмы и книжный стиль: "являет собой", "представляет интерес", "знаменует собой", "свидетельствует о"
+4. Конструкция "Не просто X, но и Y" / "Не только X, но и Y"
+5. Тройки через запятую: "мастерство, страсть и инновации"
+6. Причастные нагромождения: "открывающий новые горизонты"
+7. Слова-маркеры AI: "уникальный", "инновационный", "революционный", "знаковый", "грандиозный", "потрясающий", "беспрецедентный", "неповторимый"
+8. Избыточные метафоры: "мост между прошлым и будущим", "ткань звукового полотна"
+9. Дефисные неологизмы: "арт-революция", "звуко-пространство"
+
+КАК НАДО — пиши как живой журналист:
+- Заголовок = конкретный факт или событие, без пафоса: "Oxxxymiron выпустил новый альбом", "Фестиваль Alfa Future People перенесли на август"
+- Предложения короткие (12-20 слов), чередуй длинные с короткими
+- Начинай с факта, не с оценки. Мнение — в середине или конце
+- Используй разговорные обороты своего персонажа (${poster.name})
 
 ВАЖНО — СТРУКТУРА КАЖДОЙ СТАТЬИ:
 - Верни ТОЛЬКО валидный JSON с полем "news" — массив объектов
