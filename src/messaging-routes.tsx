@@ -81,9 +81,9 @@ interface DirectMessage {
 // ── Communication Rules ──
 
 const ALLOWED_CONTACTS: Record<CabinetRole, CabinetRole[]> = {
-  artist:   ['producer', 'dj', 'admin', 'venue'],
-  producer: ['artist', 'dj', 'admin', 'venue'],
-  dj:       ['artist', 'producer', 'admin', 'venue'],
+  artist:   ['artist', 'producer', 'dj', 'admin', 'venue'],
+  producer: ['artist', 'producer', 'dj', 'admin', 'venue'],
+  dj:       ['artist', 'producer', 'dj', 'admin', 'venue'],
   admin:    ['artist', 'producer', 'dj', 'radio', 'venue'],
   radio:    ['admin', 'venue'],
   venue:    ['artist', 'producer', 'dj', 'admin', 'radio'],
