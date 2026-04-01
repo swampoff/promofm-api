@@ -198,6 +198,10 @@ auth.post("/signup", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/signin  —  Вход через email/пароль
 // ──────────────────────────────────────────────────────────────────────
+// Alias: /login → /signin (frontend compat)
+auth.post("/login", async (c) => {
+  return c.redirect(c.req.url.replace("/login", "/signin"), 307);
+});
 auth.post("/signin", async (c) => {
   try {
     const parsed = await safeJsonParse(c);

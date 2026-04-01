@@ -265,6 +265,7 @@ app.get('/server/uploads/venue-content/*', async (c) => {
 });
 
 app.route('/server/auth', authRoutes);
+app.route("/server/api/auth", authRoutes);  // compat alias
 app.route('/server/api/concerts', concertsRoutes);
 app.route('/server/api/concert-moderation', concertModerationRoutes);
 app.route('/server/notifications', notificationsRoutes);

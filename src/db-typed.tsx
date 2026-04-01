@@ -48,7 +48,7 @@ export async function getTracksByStatus(status: string) {
   return data || [];
 }
 
-export async function getAllTracksForModeration(filters?: { status?: string; genre?: string; search?: string }) {
+export async function getAllTracksForModeration(filters?: { status?: string; genre?: string; search?: string; limit?: number }) {
   let q = db().from('tracks').select('*');
 
   if (filters?.status && filters.status !== 'all') {
@@ -61,7 +61,12 @@ export async function getAllTracksForModeration(filters?: { status?: string; gen
     q = q.or(`title.ilike.%${filters.search}%,artist_name.ilike.%${filters.search}%`);
   }
 
-  const { data, error } = await q.order('created_at', { ascending: false });
+  q = q.order('created_at', { ascending: false });
+  if (filters?.limit) {
+    q = q.limit(filters.limit);
+  }
+
+  const { data, error } = await q;
   if (error) console.error('[db-typed] getAllTracksForModeration:', error);
   return data || [];
 }

@@ -24,6 +24,12 @@ function mapArticle(r: any) {
 }
 
 // Public: return ALL published news
+// Alias: /public → same as /
+newsRoutes.get("/public", async (c) => {
+  const url = new URL(c.req.url);
+  url.pathname = url.pathname.replace("/public", "");
+  return c.redirect(url.pathname + url.search, 301);
+});
 newsRoutes.get('/', async (c) => {
   try {
     const category = c.req.query('category');

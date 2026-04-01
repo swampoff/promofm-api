@@ -119,11 +119,13 @@ app.get('/pendingTracks', requireAuth, requireAdmin, async (c) => {
     const status = c.req.query('status') || 'pending';
     const genre = c.req.query('genre');
     const search = c.req.query('search');
+    const limit = parseInt(c.req.query('limit') || '200');
 
     const tracks = await typed.getAllTracksForModeration({
       status: status === 'all' ? undefined : status,
       genre: genre || undefined,
       search: search || undefined,
+      limit: Math.min(limit, 500),
     });
 
     // Map to frontend-expected format

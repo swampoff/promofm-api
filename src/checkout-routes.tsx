@@ -427,7 +427,8 @@ async function processPaymentCanceled(session: PaymentSession) {
 checkoutRoutes.post('/create-session', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
-    const body = await c.req.json();
+    let body: any;
+    try { body = await c.req.json(); } catch { return c.json({ success: false, error: "Invalid request body" }, 400); }
 
     const { gateway, amount, type, description, returnUrl, savePaymentMethod, metadata } = body;
 
