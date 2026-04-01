@@ -201,3 +201,71 @@ export async function sendAccountRejectedEmail(email: string, name: string, reas
   `);
   return sendEmail({ to: email, subject: 'Заявка отклонена — ПРОМО.МУЗЫКА', html });
 }
+
+
+// ── Admin Notifications: uploads & payments ──
+
+export async function notifyTrackUpload(data: { title: string; artist: string; genre?: string; email?: string; userId?: string; }) {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #3B82F6;">Новый трек на модерации</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      <tr><td style="padding: 8px; color: #999;">Трек:</td><td style="padding: 8px;">${escapeHtml(data.title)}</td></tr>
+      <tr><td style="padding: 8px; color: #999;">Артист:</td><td style="padding: 8px;">${escapeHtml(data.artist)}</td></tr>
+      ${data.genre ? `<tr><td style="padding: 8px; color: #999;">Жанр:</td><td style="padding: 8px;">${escapeHtml(data.genre)}</td></tr>` : ''}
+      ${data.email ? `<tr><td style="padding: 8px; color: #999;">Email:</td><td style="padding: 8px;">${escapeHtml(data.email)}</td></tr>` : ''}
+    </table>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${SITE_URL}/admin/moderation" style="${buttonStyle}">Модерация</a>
+    </p>
+  `);
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Трек: ${escapeHtml(data.artist)} — ${escapeHtml(data.title)}`, html });
+}
+
+export async function notifyConcertCreated(data: { title: string; artist?: string; city?: string; date?: string; venue?: string; }) {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #10B981;">Новый концерт</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      <tr><td style="padding: 8px; color: #999;">Название:</td><td style="padding: 8px;">${escapeHtml(data.title)}</td></tr>
+      ${data.artist ? `<tr><td style="padding: 8px; color: #999;">Артист:</td><td style="padding: 8px;">${escapeHtml(data.artist)}</td></tr>` : ''}
+      ${data.city ? `<tr><td style="padding: 8px; color: #999;">Город:</td><td style="padding: 8px;">${escapeHtml(data.city)}</td></tr>` : ''}
+      ${data.venue ? `<tr><td style="padding: 8px; color: #999;">Площадка:</td><td style="padding: 8px;">${escapeHtml(data.venue)}</td></tr>` : ''}
+      ${data.date ? `<tr><td style="padding: 8px; color: #999;">Дата:</td><td style="padding: 8px;">${escapeHtml(data.date)}</td></tr>` : ''}
+    </table>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${SITE_URL}/admin/moderation" style="${buttonStyle}">Модерация</a>
+    </p>
+  `);
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Концерт: ${escapeHtml(data.title)}`, html });
+}
+
+export async function notifyBannerCreated(data: { title?: string; userId?: string; position?: string; }) {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #F59E0B;">Новый баннер на модерации</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      ${data.title ? `<tr><td style="padding: 8px; color: #999;">Название:</td><td style="padding: 8px;">${escapeHtml(data.title)}</td></tr>` : ''}
+      ${data.position ? `<tr><td style="padding: 8px; color: #999;">Позиция:</td><td style="padding: 8px;">${escapeHtml(data.position)}</td></tr>` : ''}
+    </table>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${SITE_URL}/admin/moderation" style="${buttonStyle}">Модерация</a>
+    </p>
+  `);
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Баннер: ${escapeHtml(data.title || 'без названия')}`, html });
+}
+
+export async function notifyPaymentReceived(data: { amount: number; currency?: string; type: string; description?: string; gateway?: string; userName?: string; userEmail?: string; orderId?: string; }) {
+  const typeLabels: Record<string, string> = { purchase: 'Покупка', donation: 'Донат', subscription: 'Подписка', track_test: 'Тестирование трека' };
+  const typeLabel = typeLabels[data.type] || data.type;
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #10B981;">Оплата получена</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      <tr><td style="padding: 8px; color: #999;">Сумма:</td><td style="padding: 8px; font-size: 20px; font-weight: 700; color: #10B981;">${data.amount} ${escapeHtml(data.currency || 'RUB')}</td></tr>
+      <tr><td style="padding: 8px; color: #999;">Тип:</td><td style="padding: 8px;">${escapeHtml(typeLabel)}</td></tr>
+      ${data.description ? `<tr><td style="padding: 8px; color: #999;">Описание:</td><td style="padding: 8px;">${escapeHtml(data.description)}</td></tr>` : ''}
+      ${data.userName ? `<tr><td style="padding: 8px; color: #999;">Плательщик:</td><td style="padding: 8px;">${escapeHtml(data.userName)}</td></tr>` : ''}
+      ${data.userEmail ? `<tr><td style="padding: 8px; color: #999;">Email:</td><td style="padding: 8px;">${escapeHtml(data.userEmail)}</td></tr>` : ''}
+      ${data.gateway ? `<tr><td style="padding: 8px; color: #999;">Шлюз:</td><td style="padding: 8px;">${escapeHtml(data.gateway)}</td></tr>` : ''}
+      ${data.orderId ? `<tr><td style="padding: 8px; color: #999;">Заказ:</td><td style="padding: 8px; font-family: monospace; font-size: 13px;">${escapeHtml(data.orderId)}</td></tr>` : ''}
+    </table>
+  `);
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Оплата ${data.amount} ${data.currency || 'RUB'} — ${escapeHtml(typeLabel)}`, html });
+}

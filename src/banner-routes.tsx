@@ -3,6 +3,7 @@
  * Artist CRUD + PUBLIC active banners endpoint + moderation
  */
 
+import { notifyBannerCreated } from './email-helper.tsx';
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -96,6 +97,13 @@ app.post('/', requireAuth, async (c) => {
     if (!banner) {
       return c.json({ success: false, error: 'Failed to create banner' }, 500);
     }
+
+    // Email notification to admin
+    notifyBannerCreated({
+      title: body.title || body.name || '',
+      userId,
+      position: body.position || '',
+    }).catch(err => console.error('[banners] Email notify failed:', err.message));
 
     return c.json({ success: true, data: banner }, 201);
   } catch (error) {

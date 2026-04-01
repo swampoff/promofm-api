@@ -2,6 +2,7 @@
  * CONCERTS ROUTES v2 — Uses typed concerts table + performance_history
  */
 
+import { notifyConcertCreated } from './email-helper.tsx';
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -167,6 +168,15 @@ app.post('/', requireAuth, async (c) => {
     if (!concert) {
       return c.json({ success: false, error: 'Failed to create concert' }, 500);
     }
+
+    // Email notification to admin
+    notifyConcertCreated({
+      title: body.title || body.name || '',
+      artist: body.artist || body.artist_name || '',
+      city: body.city,
+      venue: body.venue || body.venue_name || '',
+      date: body.date || body.event_date || '',
+    }).catch(err => console.error('[concerts] Email notify failed:', err.message));
 
     return c.json({ success: true, data: concert }, 201);
   } catch (error) {

@@ -4,6 +4,7 @@
  * One table, one row per track. No separate moderation store.
  */
 
+import { notifyTrackUpload } from './email-helper.tsx';
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as typed from './db-typed.tsx';
@@ -91,6 +92,15 @@ app.post('/submitTrack', requireAuth, async (c) => {
     if (audioUrl) {
       triggerAiAnalysis(track.id, audioUrl).catch(() => {});
     }
+
+    // Email notification to admin
+    notifyTrackUpload({
+      title: body.title || '',
+      artist: body.artist || '',
+      genre: body.genre,
+      email: body.uploaded_by_email,
+      userId: body.uploaded_by_user_id || body.user_id,
+    }).catch(err => console.error('[track-moderation] Email notify failed:', err.message));
 
     return c.json({
       success: true,

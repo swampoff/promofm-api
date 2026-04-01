@@ -24,6 +24,7 @@ import {
 } from './payment-gateway.tsx';
 
 import { createLogger } from "./logger.tsx";
+import { notifyPaymentReceived } from './email-helper.tsx';
 
 const log = createLogger("checkout");
 
@@ -398,6 +399,18 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   } catch (err) {
     log.warn({ err }, 'revenue_recording_skipped');
   }
+
+  // Email notification to admin
+  notifyPaymentReceived({
+    amount: session.amount,
+    currency: session.currency,
+    type: session.type,
+    description: session.description,
+    gateway: session.gateway,
+    userName: session.metadata.payerName || session.metadata.artistName || '',
+    userEmail: session.metadata.payerEmail || '',
+    orderId: session.orderId,
+  }).catch(err => log.warn({ err: err.message }, 'payment_email_notify_failed'));
 
   log.info({ orderId: session.orderId, gateway: session.gateway, amount: session.amount, currency: session.currency }, 'payment_completed');
 }
