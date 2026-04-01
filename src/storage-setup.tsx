@@ -4,7 +4,7 @@
  * Provides file upload/delete/list/stats operations.
  */
 import { mkdirSync, existsSync, writeFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve, extname, basename } from 'node:path';
+import { join, resolve, extname, basename, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { safeErrorMessage } from './security.tsx';
 
@@ -150,7 +150,7 @@ export async function uploadFile(
     if (!config) return { success: false, error: `Unknown bucket: ${bucketName}` };
 
     const filePath = join(UPLOADS_DIR, config.subdir, filename);
-    const dir = join(UPLOADS_DIR, config.subdir);
+    const dir = dirname(filePath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
     const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);

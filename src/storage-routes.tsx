@@ -157,8 +157,9 @@ storage.post('/upload', requireAuth, async (c) => {
     
     // Validate file content (magic bytes) — defense-in-depth
     const fileData = Buffer.from(await file.arrayBuffer());
-    const { fileTypeFromBuffer } = await import("file-type");
-    const detectedType = await fileTypeFromBuffer(fileData);
+    const fileType = await import("file-type");
+    const fromBuf = fileType.fileTypeFromBuffer || fileType.fromBuffer || fileType.default?.fromBuffer;
+    const detectedType = fromBuf ? await fromBuf(fileData) : null;
     if (detectedType && bucketConfig.allowedMimeTypes.length > 0 && !bucketConfig.allowedMimeTypes.includes('*')) {
       const allowedExts = bucketConfig.allowedMimeTypes.map((m: string) => m.split('/')[1]);
       const detectedExt = detectedType.ext;
