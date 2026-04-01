@@ -76,7 +76,7 @@ async function pingIndexNow(newsId: string) {
 }
 
 // --- Telegram Channel Posting ---
-async function postToTelegram(article: { id: string; title: string; excerpt: string; authorName: string; source: string; tags?: string[]; category?: string }) {
+async function postToTelegram(article: { id: string; title: string; excerpt: string; authorName: string; source: string; tags?: string[]; category?: string; imageUrl?: string }) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const channelId = process.env.TELEGRAM_NEWS_CHANNEL_ID;
   if (!botToken || !channelId) return;
@@ -88,10 +88,12 @@ async function postToTelegram(article: { id: string; title: string; excerpt: str
     .filter((t: string) => t.length > 1)
     .join(' ');
 
-  const text = [
+  const excerptClean = (article.excerpt || '').replace(/<[^>]*>/g, '').trim();
+
+  const caption = [
     `<b>${escapeHtml(article.title)}</b>`,
     '',
-    escapeHtml((article.excerpt || '').replace(/<[^>]*>/g, '')),
+    excerptClean ? escapeHtml(excerptClean) : '',
     '',
     `\u270d\ufe0f ${escapeHtml(article.authorName)} | ${escapeHtml(article.source)}`,
     '',
@@ -101,12 +103,34 @@ async function postToTelegram(article: { id: string; title: string; excerpt: str
   ].filter(Boolean).join('\n');
 
   try {
+    // If we have an image, send as photo with caption
+    if (article.imageUrl && article.imageUrl.startsWith('http')) {
+      const photoResp = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: channelId,
+          photo: article.imageUrl,
+          caption: caption.slice(0, 1024), // Telegram caption limit
+          parse_mode: 'HTML',
+        }),
+      });
+      const photoResult = await photoResp.json();
+      if (photoResult.ok) {
+        console.log(`[news-agent] Posted photo to Telegram: ${article.title.slice(0, 50)}...`);
+        return;
+      }
+      // Photo failed (URL might be invalid/blocked), fall back to text
+      console.log(`[news-agent] Photo send failed, falling back to text: ${JSON.stringify(photoResult.description || '')}`);
+    }
+
+    // Fallback: send as text message with link preview
     await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: channelId,
-        text,
+        text: caption,
         parse_mode: 'HTML',
         disable_web_page_preview: false,
       }),
@@ -253,7 +277,12 @@ export const NEWS_SOURCES: NewsSource[] = [
 
 // ─── HTML Fetching ──────────────────────────────────────
 
-async function fetchPageText(url: string): Promise<string | null> {
+interface FetchResult {
+  text: string;
+  images: string[];
+}
+
+async function fetchPageText(url: string): Promise<FetchResult | null> {
   // SSRF protection: validate URL before fetching
   const urlCheck = await isUrlSafe(url);
   if (!urlCheck.safe) {
@@ -282,6 +311,34 @@ async function fetchPageText(url: string): Promise<string | null> {
 
     const html = await response.text();
 
+    // Extract images BEFORE stripping HTML
+    const images: string[] = [];
+    // OG image (highest priority)
+    const ogMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+    if (ogMatch?.[1]) images.push(ogMatch[1]);
+    // Twitter card image
+    const twMatch = html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i)
+      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["']/i);
+    if (twMatch?.[1] && !images.includes(twMatch[1])) images.push(twMatch[1]);
+    // Article images (from <img> tags in main content, skip tiny icons)
+    const imgMatches = [...html.matchAll(/<img[^>]+src=["']([^"']+)["'][^>]*/gi)];
+    for (const m of imgMatches) {
+      const src = m[0];
+      const url = m[1];
+      if (!url || images.length >= 10) break;
+      // Skip tracking pixels, icons, ads, svgs
+      if (url.includes('1x1') || url.includes('pixel') || url.includes('.svg')
+        || url.includes('logo') || url.includes('icon') || url.includes('avatar')
+        || url.includes('ad-') || url.includes('banner') || url.length < 20) continue;
+      // Skip tiny images (width/height < 100)
+      const widthMatch = src.match(/width=["']?(\d+)/i);
+      const heightMatch = src.match(/height=["']?(\d+)/i);
+      if (widthMatch && parseInt(widthMatch[1]) < 100) continue;
+      if (heightMatch && parseInt(heightMatch[1]) < 100) continue;
+      if (!images.includes(url)) images.push(url);
+    }
+
     const cleanText = html
       .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
       .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
@@ -299,7 +356,20 @@ async function fetchPageText(url: string): Promise<string | null> {
       .replace(/\s+/g, ' ')
       .trim();
 
-    return cleanText.slice(0, 10000);
+    // Resolve relative image URLs to absolute
+    const baseUrl = new URL(url);
+    const resolvedImages = images.map(img => {
+      if (img.startsWith('http')) return img;
+      if (img.startsWith('//')) return baseUrl.protocol + img;
+      if (img.startsWith('/')) return baseUrl.origin + img;
+      return baseUrl.origin + '/' + img;
+    }).filter(img => {
+      // Filter out tiny theme icons and tracking pixels
+      if (img.includes('favicon') || img.includes('sprite')) return false;
+      // Must be a reasonable image URL
+      return img.match(/\.(jpg|jpeg|png|webp|gif)/i) || img.includes('image') || img.includes('photo') || img.includes('upload');
+    });
+    return { text: cleanText.slice(0, 10000), images: resolvedImages.slice(0, 5) };
   } catch (error) {
     console.log(`[news-agent] Fetch error for ${url}: ${error}`);
     return null;
@@ -323,6 +393,7 @@ async function extractNewsWithLLM(
   source: NewsSource,
   pageText: string,
   poster: typeof POSTERS[number],
+  pageImages: string[] = [],
 ): Promise<ParsedNewsItem[]> {
   const apiKey = process.env.GEMINI_API_KEY || process.env.OPENROUTER_API_KEY;
   const useGeminiDirect = !!process.env.GEMINI_API_KEY;
@@ -402,7 +473,7 @@ SEO-ПРАВИЛА:
           contents: [
             { role: 'user', parts: [{ text: systemPrompt + '\n\n---\n\n' + `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}` }] },
           ],
-          generationConfig: { temperature: 0.3, maxOutputTokens: 8000 },
+          generationConfig: { temperature: 0.3, maxOutputTokens: 16000 },
         }),
       });
       if (!resp.ok) {
@@ -428,7 +499,7 @@ SEO-ПРАВИЛА:
             { role: 'user', content: `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}` },
           ],
           temperature: 0.3,
-          max_tokens: 4000,
+          max_tokens: 8000,
         }),
       });
       if (!resp.ok) {
@@ -439,48 +510,72 @@ SEO-ПРАВИЛА:
       llmContent = data.choices?.[0]?.message?.content;
     }
 
-    const content = llmContent;
-    if (!content) return [];
+    const rawContent = llmContent;
+    if (!rawContent) return [];
 
     let parsed: any;
-    // Strip markdown code fences if present
-    let cleanContent = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    // Strip markdown code fences anywhere in text (not just start/end)
+    let cleanContent = rawContent.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
     // Fix trailing commas before } or ]
     cleanContent = cleanContent.replace(/,\s*([}\]])/g, '$1');
     try {
       parsed = JSON.parse(cleanContent);
     } catch {
-      // Try to extract the outermost JSON object
-      const match = cleanContent.match(/\{[\s\S]*\}/);
-      if (match) {
+      // Try to extract JSON between first { and last }
+      const firstBrace = cleanContent.indexOf('{');
+      const lastBrace = cleanContent.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        const jsonStr = cleanContent.slice(firstBrace, lastBrace + 1).replace(/,\s*([}\]])/g, '$1');
         try {
-          parsed = JSON.parse(match[0].replace(/,\s*([}\]])/g, '$1'));
+          parsed = JSON.parse(jsonStr);
         } catch {
-          console.log('[news-agent] JSON fallback also failed, extracting titles only');
-          const items = [...cleanContent.matchAll(/"title"\s*:\s*"([^"]+)"/g)];
-          if (items.length > 0) {
-            parsed = { news: items.map(m => ({ title: m[1], excerpt: '', content: '', category: 'industry', tags: [], sourceUrl: '', imageUrl: '', publishedAt: '' })) };
-          } else return [];
+          // Try to find a JSON array
+          const firstBracket = cleanContent.indexOf('[');
+          const lastBracket = cleanContent.lastIndexOf(']');
+          if (firstBracket !== -1 && lastBracket > firstBracket) {
+            try {
+              const arr = JSON.parse(cleanContent.slice(firstBracket, lastBracket + 1).replace(/,\s*([}\]])/g, '$1'));
+              parsed = { news: arr };
+            } catch {
+              console.log(`[news-agent] All JSON parse attempts failed for ${source.id}, raw length: ${rawContent.length}`);
+              console.log(`[news-agent] First 300 chars: ${rawContent.slice(0, 300)}`);
+              return [];
+            }
+          } else {
+            console.log(`[news-agent] No JSON structure found for ${source.id}`);
+            return [];
+          }
         }
-      } else return [];
+      } else {
+        console.log(`[news-agent] No braces found in LLM response for ${source.id}`);
+        return [];
+      }
     }
 
     const rawNews = Array.isArray(parsed) ? parsed : (parsed.news || parsed.articles || []);
     if (!Array.isArray(rawNews)) return [];
 
-    return rawNews
+    const results = rawNews
       .filter((n: any) => n.title && n.title.length > 5)
       .slice(0, 5)
-      .map((n: any) => ({
+      .map((n: any, idx: number) => ({
         title: String(n.title).trim(),
         excerpt: String(n.excerpt || '').trim(),
-        content: String(n.content || n.excerpt || '').trim(),
+        content: String(n.content || '').trim(),
         category: n.category || source.category,
         tags: Array.isArray(n.tags) ? n.tags : [],
         sourceUrl: n.sourceUrl || source.url,
-        imageUrl: n.imageUrl || '',
+        // Use LLM image, then fall back to page images (OG, article imgs)
+        imageUrl: (n.imageUrl && n.imageUrl.startsWith('http') ? n.imageUrl : '') || pageImages[idx] || pageImages[0] || '',
         publishedAt: n.publishedAt || new Date().toISOString(),
       }));
+
+    // Skip articles with empty content (title-only articles are useless)
+    const valid = results.filter(r => r.content.length >= 50);
+    if (valid.length < results.length) {
+      console.log(`[news-agent] Skipped ${results.length - valid.length} empty-content articles from ${source.id}`);
+    }
+    return valid;
   } catch (error) {
     console.log(`[news-agent] LLM extraction error for ${source.id}: ${error}`);
     return [];
@@ -510,9 +605,21 @@ const BLOCKED_KEYWORDS = [
   'Тайван', 'Сирия',
 ];
 
-function isBlockedContent(title: string, content: string): boolean {
+function isBlockedContent(title: string, content: string): string | false {
   const text = (title + ' ' + content).toLowerCase();
-  return BLOCKED_KEYWORDS.some(kw => text.includes(kw.toLowerCase()));
+  for (const kw of BLOCKED_KEYWORDS) {
+    const kwLow = kw.toLowerCase();
+    // Short keywords (<=4 chars) need word boundary to avoid false positives
+    // e.g. "СВО" must not match "своих", "своего" etc.
+    if (kwLow.length <= 4) {
+      const regex = new RegExp(`(?:^|[\\s.,!?;:()\\[\\]"'«»—-])${kwLow.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}(?:$|[\\s.,!?;:()\\[\\]"'«»—-])`, 'i');
+      if (regex.test(text)) return kw;
+    } else {
+      // Longer keywords (>=5 chars) are specific enough for substring match
+      if (text.includes(kwLow)) return kw;
+    }
+  }
+  return false;
 }
 
 // ─── Deduplication ──────────────────────────────────────
@@ -531,17 +638,17 @@ function titleSimilarity(a: string, b: string): number {
 export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: number; errors: string[] }> {
   const errors: string[] = [];
 
-  const pageText = await fetchPageText(source.url);
-  if (!pageText) {
+  const fetchResult = await fetchPageText(source.url);
+  if (!fetchResult) {
     errors.push(`Failed to fetch ${source.url}`);
     return { added: 0, errors };
   }
 
   // Pick the best-fit persona for this source
   const poster = bestPosterForSource(source.id);
-  console.log(`[news-agent] ${source.name} → автор: ${poster.name}`);
+  console.log(`[news-agent] ${source.name} → автор: ${poster.name} (${fetchResult.images.length} images found)`);
 
-  const newsItems = await extractNewsWithLLM(source, pageText, poster);
+  const newsItems = await extractNewsWithLLM(source, fetchResult.text, poster, fetchResult.images);
   if (newsItems.length === 0) {
     errors.push(`No news extracted from ${source.id}`);
     return { added: 0, errors };
@@ -554,8 +661,9 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
   let added = 0;
   for (const item of newsItems) {
     // Content policy filter
-    if (isBlockedContent(item.title, item.content || item.excerpt || '')) {
-      console.log(`[news-agent] BLOCKED: ${item.title} (content policy)`);
+    const blockedBy = isBlockedContent(item.title, item.content || item.excerpt || '');
+    if (blockedBy) {
+      console.log(`[news-agent] BLOCKED: ${item.title} (keyword: "${blockedBy}")`);
       continue;
     }
 
@@ -577,7 +685,7 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
 
     await newsPublicStore.set(id, newsRecord);
     pingIndexNow(id).catch(() => {});
-    postToTelegram({ id, title: item.title, excerpt: item.excerpt, authorName: poster.name, source: source.name, tags: item.tags, category: item.category }).catch(() => {});
+    postToTelegram({ id, title: item.title, excerpt: item.excerpt, authorName: poster.name, source: source.name, tags: item.tags, category: item.category, imageUrl: item.imageUrl }).catch(() => {});
     existingTitles.push(item.title);
     added++;
 
