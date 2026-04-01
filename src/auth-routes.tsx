@@ -84,6 +84,15 @@ async function safeJsonParse(c: any): Promise<{ ok: true; body: any } | { ok: fa
   }
 }
 
+async function _safeJsonParse_old(c: any): Promise<{ ok: true; body: any } | { ok: false; response: any }> {
+  try {
+    const body = await c.req.json();
+    return { ok: true, body };
+  } catch (e: any) {
+    return { ok: false, response: c.json({ success: false, error: 'Invalid request body' }, 400) };
+  }
+}
+
 const auth = new Hono();
 
 // ── Helper: создать профиль на VPS (152-ФЗ) ──

@@ -474,6 +474,7 @@ export function wafMiddleware() {
       const contentType = c.req.header('content-type') || '';
       if (contentType.includes('application/json')) {
         try {
+          // Hono caches body reads via #cachedBody — no stream consumption
           const body = await c.req.json();
 
           // Proto pollution check (critical — check before anything else)
