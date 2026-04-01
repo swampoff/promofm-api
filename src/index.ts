@@ -372,11 +372,35 @@ app.onError(async (err, c) => {
   return c.json({ success: false, error: safeErrorMessage(err) }, 500);
 });
 
-// Start server
+// Start server with graceful shutdown
 const port = parseInt(process.env.PORT || '3000');
 
-serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, (info) => {
+const server = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, (info) => {
   log.info({ port: info.port }, 'server_started');
 });
+
+// Graceful shutdown: finish in-flight requests before exit
+let shuttingDown = false;
+
+function gracefulShutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.info({ signal }, 'graceful_shutdown_start');
+
+  // Stop accepting new connections
+  server.close(() => {
+    log.info('graceful_shutdown_complete');
+    process.exit(0);
+  });
+
+  // Force exit after 10s if connections hang
+  setTimeout(() => {
+    log.warn('graceful_shutdown_timeout');
+    process.exit(1);
+  }, 10000).unref();
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 export default app;

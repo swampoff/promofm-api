@@ -381,10 +381,10 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
 });
 
 /**
- * POST /messenger/send
- * Отправить сообщение
+ * POST /messenger-send
+ * Отправить сообщение в мессенджер
  */
-app.post('/send', requireAuth, async (c) => {
+app.post('/messenger-send', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const {

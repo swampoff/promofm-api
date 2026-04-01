@@ -24,17 +24,25 @@ import { Hono } from 'hono';
 import { dmConvListStore, dmConversationsStore, dmMessagesStore, dmUnreadCountsStore } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { requireAuth } from './auth-middleware.tsx';
-import { getDbClient } from './db-client.tsx';
+// ── Telegram forwarding for admin messages ──
+const TG_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TG_LEAD_CHAT = process.env.TELEGRAM_LEAD_CHAT_ID || '';
 
-// ── Auth Helper ──
-
-async function getAuthUser(c: any) {
-  const authHeader = c.req.header('Authorization');
-  const token = authHeader?.replace('Bearer ', '');
-  if (!token) return null;
-  const { data: { user }, error } = await getDbClient().auth.getUser(token);
-  return error ? null : user;
+async function forwardToTelegramIfAdmin(recipientRole: string, senderName: string, text: string): Promise<void> {
+  if (recipientRole !== 'admin' || !TG_BOT_TOKEN || !TG_LEAD_CHAT) return;
+  const preview = text.length > 300 ? text.slice(0, 300) + '...' : text;
+  const msg = '\u2709\ufe0f promo-music.ru\n\n' + 'От: ' + senderName + '\n' + 'Сообщение: ' + preview;
+  try {
+    await fetch('https://api.telegram.org/bot' + TG_BOT_TOKEN + '/sendMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: TG_LEAD_CHAT, text: msg }),
+    });
+  } catch {}
 }
+
+
+// Auth: handled by requireAuth middleware (JWT)
 
 const app = new Hono();
 
@@ -300,6 +308,9 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
       const unreadMap: Record<string, number> = (await dmUnreadCountsStore.get(p.userId)) || {};
       unreadMap[conversationId] = (unreadMap[conversationId] || 0) + 1;
       await dmUnreadCountsStore.set(p.userId, unreadMap);
+
+      // Telegram: forward to admin if recipient is admin
+      forwardToTelegramIfAdmin(p.role, message.senderName, text).catch(() => {});
 
       // SSE notification to recipient
       emitSSE(p.userId, {
