@@ -2,7 +2,7 @@
  * TICKETS SYSTEM ROUTES
  * Система тикетов поддержки
  *
- * Uses support_tickets table via db.tsx functions + direct Supabase queries.
+ * Uses support_tickets table via db.tsx functions + PostgreSQL queries.
  * Messages are stored as an array inside ticket.data.messages.
  */
 

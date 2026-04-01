@@ -144,7 +144,7 @@ app.put('/profile', requireAuth, async (c) => {
 app.post('/profile/logo', requireAuth, async (c) => {
   try {
     return c.json({ 
-      message: 'Logo upload endpoint - to be implemented with Supabase Storage',
+      message: 'Logo upload endpoint - to be implemented with local storage',
     });
   } catch (error: any) {
     console.error('Error in POST /venue/profile/logo:', error);
@@ -156,7 +156,7 @@ app.post('/profile/logo', requireAuth, async (c) => {
 app.post('/profile/cover', requireAuth, async (c) => {
   try {
     return c.json({ 
-      message: 'Cover upload endpoint - to be implemented with Supabase Storage',
+      message: 'Cover upload endpoint - to be implemented with local storage',
     });
   } catch (error: any) {
     console.error('Error in POST /venue/profile/cover:', error);

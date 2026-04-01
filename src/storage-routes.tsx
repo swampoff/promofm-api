@@ -1,6 +1,6 @@
 /**
  * STORAGE API ROUTES
- * REST API для управления файлами в Supabase Storage
+ * REST API для управления файлами (local filesystem)
  */
 
 import { Hono } from 'hono';
