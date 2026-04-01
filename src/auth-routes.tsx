@@ -74,6 +74,16 @@ function validatePassword(password: string): string | null {
   return null;
 }
 
+// Safe JSON body parser — returns 400 instead of crashing with 500
+async function safeJsonParse(c: any): Promise<{ ok: true; body: any } | { ok: false; response: any }> {
+  try {
+    const body = await c.req.json();
+    return { ok: true, body };
+  } catch (e: any) {
+    return { ok: false, response: c.json({ success: false, error: 'Invalid request body' }, 400) };
+  }
+}
+
 const auth = new Hono();
 
 // ── Helper: создать профиль на VPS (152-ФЗ) ──
@@ -112,7 +122,9 @@ async function logAuthEvent(action: string, details: Record<string, any>, status
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/signup", async (c) => {
   try {
-    const body = await c.req.json();
+    const parsed = await safeJsonParse(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
     const { email, password, name, role, consentPersonalData, consentNewsletter, captchaToken } = body;
     // H6: reCAPTCHA v3 verification (skipped if not configured)
     const captchaResult = await verifyCaptcha(captchaToken, 'signup');
@@ -188,7 +200,9 @@ auth.post("/signup", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/signin", async (c) => {
   try {
-    const body = await c.req.json();
+    const parsed = await safeJsonParse(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
     const { email, password, captchaToken } = body;
     // H6: reCAPTCHA v3 verification (skipped if not configured)
     const captchaResult = await verifyCaptcha(captchaToken, 'signin');
@@ -301,7 +315,9 @@ auth.post("/signin", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/vk-callback", async (c) => {
   try {
-    const { code, redirect_uri, code_verifier, device_id, role: vkRequestedRole } = await c.req.json();
+    const vkParsed = await safeJsonParse(c);
+    if (!vkParsed.ok) return vkParsed.response;
+    const { code, redirect_uri, code_verifier, device_id, role: vkRequestedRole } = vkParsed.body;
 
     // Validate redirect_uri — prevent OAuth redirect manipulation
     const ALLOWED_REDIRECT_URIS = [
