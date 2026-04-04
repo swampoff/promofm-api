@@ -106,7 +106,7 @@ landing.get('/artists/:idOrSlug', async (c) => {
         .eq('user_id', param)
         .maybeSingle();
       if (byUserId) {
-        profile = byUserId.data || byUserId;
+        profile = byUserId;
         userId = byUserId.user_id || param;
       }
     }
@@ -119,7 +119,7 @@ landing.get('/artists/:idOrSlug', async (c) => {
         .eq('slug', param)
         .maybeSingle();
       if (bySlug) {
-        profile = bySlug.data || bySlug;
+        profile = bySlug;
         userId = bySlug.user_id || param;
       }
     }
@@ -150,12 +150,23 @@ landing.get('/artists/:idOrSlug', async (c) => {
       isVerified: profile.is_verified || false,
     };
 
-    // Get artist's published tracks by artist_id (FK from tracks table)
-    const { data: artistTracks } = await dbClient
+    // Get artist's published tracks by artist_id (FK = artist_profiles.id, NOT user_id)
+    const profileId = profile.id || '';
+    const { data: tracksByProfile } = await dbClient
       .from('tracks')
       .select('*')
-      .eq('artist_id', userId)
+      .eq('artist_id', profileId)
       .order('created_at', { ascending: false });
+    // Also try by user_id as fallback
+    let artistTracks = tracksByProfile || [];
+    if (artistTracks.length === 0 && userId !== profileId) {
+      const { data: tracksByUser } = await dbClient
+        .from('tracks')
+        .select('*')
+        .eq('artist_id', userId)
+        .order('created_at', { ascending: false });
+      artistTracks = tracksByUser || [];
+    }
 
     const publishedTracks = (artistTracks || [])
       .filter((t: any) => ['approved', 'published'].includes(t.moderation_status))
