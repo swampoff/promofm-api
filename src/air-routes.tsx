@@ -311,4 +311,95 @@ app.post("/schedules", requireAuth, requireAdmin, async (c) => {
   }
 });
 
+
+// ─── SYNC: Import platform tracks into radio library ───
+
+app.post("/library/sync", async (c) => {
+  const internalKey = c.req.header("X-Internal-Key");
+  if (internalKey !== process.env.VPS_INTERNAL_KEY) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+
+  try {
+    const { rows: platformTracks } = await pool.query(`
+      SELECT t.id, t.title, t.artist_name, t.audio_url, t.genre, t.duration, t.city
+      FROM tracks t
+      WHERE t.audio_url IS NOT NULL
+        AND t.audio_url != ''
+        AND t.moderation_status = 'approved'
+        AND t.is_hidden = false
+        AND (t.is_ai_generated IS NULL OR t.is_ai_generated = false)
+        AND NOT EXISTS (
+          SELECT 1 FROM radio_library rl 
+          WHERE rl.filename = regexp_replace(t.audio_url, '^.*/', '')
+        )
+    `);
+
+    if (platformTracks.length === 0) {
+      return c.json({ success: true, synced: 0, message: "All tracks already in radio library" });
+    }
+
+    const path = await import("path");
+    const fs = await import("fs");
+    const RADIO_TRACKS_DIR = "/mnt/data/promofm-music/tracks";
+    const UPLOADS_DIR = "/opt/promofm-api/uploads/tracks";
+    let synced = 0;
+    const errors: string[] = [];
+
+    for (const track of platformTracks) {
+      try {
+        let srcPath = "";
+        const audioUrl = track.audio_url as string;
+
+        if (audioUrl.startsWith("/server/uploads/tracks/")) {
+          const filename = decodeURIComponent(audioUrl.replace("/server/uploads/tracks/", ""));
+          srcPath = path.join(UPLOADS_DIR, filename);
+        } else if (audioUrl.startsWith("https://promo-music.ru/uploads/track-audio/")) {
+          const filename = decodeURIComponent(audioUrl.replace("https://promo-music.ru/uploads/track-audio/", ""));
+          srcPath = path.join("/opt/promofm-api/uploads/track-audio", filename);
+        } else {
+          errors.push("Unknown audio_url format: " + audioUrl);
+          continue;
+        }
+
+        if (!fs.existsSync(srcPath)) {
+          errors.push("File not found: " + srcPath);
+          continue;
+        }
+
+        const artist = (track.artist_name || "Unknown").replace(/[\/\\]/g, "-");
+        const title = (track.title || "Untitled").replace(/[\/\\]/g, "-");
+        const radioFilename = artist + " - " + title + ".mp3";
+        const destPath = path.join(RADIO_TRACKS_DIR, radioFilename);
+
+        if (!fs.existsSync(destPath)) {
+          fs.copyFileSync(srcPath, destPath);
+        }
+
+        await pool.query(
+          `INSERT INTO radio_library (filename, title, artist, genre, duration_seconds, region, is_vocal, file_path)
+           VALUES ($1, $2, $3, $4, $5, $6, true, $7)
+           ON CONFLICT (filename) DO NOTHING`,
+          [radioFilename, track.title, track.artist_name, track.genre, track.duration || 0, track.city || "Global", destPath]
+        );
+
+        synced++;
+        log.info({ track: radioFilename }, "synced_track_to_radio");
+      } catch (trackErr: any) {
+        errors.push(track.title + ": " + trackErr.message);
+      }
+    }
+
+    return c.json({
+      success: true,
+      synced,
+      total_platform: platformTracks.length,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (err: any) {
+    log.error({ err: err.message }, "sync_error");
+    return c.json({ error: err.message }, 500);
+  }
+});
+
 export default app;
