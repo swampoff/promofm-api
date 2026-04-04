@@ -484,7 +484,15 @@ SEO-ПРАВИЛА:
 
 - Максимум 5 новостей
 - НЕ добавляй markdown-обёртку (\`\`\`json)
-- Если не удалось извлечь новости, верни {"news": []}`;
+- Если не удалось извлечь новости, верни {"news": []}
+
+ИЗОБРАЖЕНИЯ — КРИТИЧЕСКИ ВАЖНО:
+- Для каждой новости ты ДОЛЖЕН указать в поле "imageUrl" правильный URL изображения
+- Выбирай фото из списка доступных изображений (ниже), которое СООТВЕТСТВУЕТ теме конкретной новости
+- Сопоставляй по артисту, событию, контексту — НЕ бери случайное фото
+- НЕ используй одно фото для разных новостей без необходимости
+- Если подходящего фото нет — оставь пустую строку ""
+` + (pageImages.length > 0 ? `\n\nДоступные изображения со страницы (выбери подходящее для каждой новости):\n` + pageImages.map((url: string, i: number) => `[${i+1}] ${url}`).join("\n") : "") + ``;
 
   try {
     let llmContent: string | undefined;
@@ -596,8 +604,8 @@ SEO-ПРАВИЛА:
         category: n.category || source.category,
         tags: Array.isArray(n.tags) ? n.tags : [],
         sourceUrl: n.sourceUrl || source.url,
-        // Use LLM image, then fall back to page images (OG, article imgs)
-        imageUrl: (n.imageUrl && n.imageUrl.startsWith('http') ? n.imageUrl : '') || pageImages[idx] || pageImages[0] || '',
+        // Use LLM-selected image (LLM picks correct image per article from prompt)
+        imageUrl: n.imageUrl && n.imageUrl.startsWith('http') ? n.imageUrl : '',
         publishedAt: n.publishedAt || new Date().toISOString(),
       }));
 
