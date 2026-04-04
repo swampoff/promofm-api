@@ -1096,6 +1096,16 @@ interface PromoFMChartEntry {
   coverSmall?: string;
 }
 
+
+// Треки, которые слишком долго на первых местах — понижаем или исключаем
+const CHART_DEMOTED_TRACKS: Record<string, number> = {
+  // key: normalizeTrackKey(artist, title) → penalty multiplier (0 = excluded, 0.3 = 70% penalty)
+  'hollyflame|||тону': 0,           // убрать
+  'uncleflexxx|||sms': 0,           // убрать
+  'сдп|||сыпь, гармоника!': 0,       // убрать
+  'sqwoz bab|||купер': 0,           // убрать
+};
+
 async function buildPromoFMChart(): Promise<PromoFMChartEntry[]> {
   // 1. Собираем все треки из внешних чартов (радио + Яндекс)
   const trackScores: Record<string, {
@@ -1182,7 +1192,16 @@ async function buildPromoFMChart(): Promise<PromoFMChartEntry[]> {
   });
 
   // 4. Сортируем и берём TOP-50
+  // Apply demotion penalties
+  for (const key of Object.keys(trackScores)) {
+    const penalty = CHART_DEMOTED_TRACKS[key];
+    if (penalty !== undefined) {
+      trackScores[key].score *= penalty; // 0 = removed
+    }
+  }
+
   const sorted = Object.values(trackScores)
+    .filter(t => t.score > 0) // remove excluded (score=0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 50);
 
