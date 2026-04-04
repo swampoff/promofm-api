@@ -403,13 +403,25 @@ export async function getUpcomingReleases(limit = 6) {
     .from("upcoming_releases")
     .select("*")
     .eq("is_archived", false)
-    .gte("release_date", today)
+    .gt("release_date", today)
     .order("release_date", { ascending: true })
     .limit(limit);
   if (error) console.error("[db-typed] getUpcomingReleases:", error);
   return data || [];
 }
 
+
+export async function archivePastReleases() {
+  const today = new Date().toISOString().split("T")[0];
+  const { data, error } = await db()
+    .from("upcoming_releases")
+    .update({ is_archived: true, updated_at: new Date().toISOString() })
+    .eq("is_archived", false)
+    .lte("release_date", today)
+    .select("id, artist_name, title, release_date");
+  if (error) console.error("[db-typed] archivePastReleases:", error);
+  return data || [];
+}
 export async function getAllUpcomingReleases() {
   const { data, error } = await db()
     .from("upcoming_releases")
@@ -442,17 +454,6 @@ export async function upsertUpcomingRelease(release: Record<string, any>) {
   return data;
 }
 
-export async function archivePastReleases() {
-  const today = new Date().toISOString().split("T")[0];
-  const { data, error } = await db()
-    .from("upcoming_releases")
-    .update({ is_archived: true, updated_at: new Date().toISOString() })
-    .lt("release_date", today)
-    .eq("is_archived", false)
-    .select();
-  if (error) console.error("[db-typed] archivePastReleases:", error);
-  return data || [];
-}
 
 // COINS — bridge functions for awarding coins on moderation
 // ═══════════════════════════════════════

@@ -502,6 +502,43 @@ landing.get('/tracks/trending', async (c) => {
 });
 
 /**
+ * GET /tracks/ai — AI-generated tracks
+ */
+landing.get('/tracks/ai', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '20');
+    const { rows } = await pool.query(
+      `SELECT id, title, artist_name, genre, duration, audio_url, cover_url,
+              plays_count, likes_count, user_id, artist_id, created_at
+       FROM tracks
+       WHERE is_ai_generated = true
+         AND moderation_status IN ('approved', 'published')
+       ORDER BY created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+    const mapped = rows.map((t: any) => ({
+      id: t.id,
+      title: t.title || '',
+      artist: t.artist_name || '',
+      genre: t.genre || '',
+      duration: t.duration || 0,
+      audioUrl: t.audio_url || '',
+      coverUrl: t.cover_url || '',
+      plays: t.plays_count || 0,
+      likes: t.likes_count || 0,
+      artistId: t.user_id || t.artist_id || '',
+      createdAt: t.created_at,
+      isAiGenerated: true,
+    }));
+    return c.json({ success: true, data: mapped });
+  } catch (error) {
+    console.error('Error fetching AI tracks:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+/**
  * GET /tracks/by-genre/:genre — Published tracks filtered by genre
  */
 landing.get('/tracks/by-genre/:genre', async (c) => {
@@ -557,6 +594,20 @@ landing.get("/releases/upcoming", async (c) => {
   }
 });
 
+
+// Auto-archive past upcoming releases (called by cron daily)
+landing.post("/releases/archive-past", async (c) => {
+  const key = c.req.header("x-internal-key");
+  if (key !== ADMIN_INTERNAL_KEY) return c.json({ error: "unauthorized" }, 401);
+  try {
+    const archived = await typed.archivePastReleases();
+    console.log(`[releases] Auto-archived ${archived.length} past releases`);
+    return c.json({ success: true, archived: archived.length, items: archived });
+  } catch (error) {
+    console.error("Error archiving past releases:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
 // NEWS (PUBLIC — KV, unchanged)
 // ============================================
 

@@ -20,7 +20,7 @@ const GENRES = [
   'Soul', 'Funk', 'Disco', 'Gospel', 'Latin', 'World'
 ];
 
-const COINS_ON_APPROVE = 50;
+const PUBLICATION_PRICE = 5000; // 5000 RUB for track publication
 const AI_DETECTOR_URL = 'http://127.0.0.1:8085';
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/var/www/promofm/uploads';
 
@@ -177,63 +177,73 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
     const now = new Date().toISOString();
 
     if (action === 'approve') {
-      // Update track status to published (visible on public pages!)
+      // Модерация одобрена -> статус approved (ожидает оплаты 5000 RUB)
+      // После оплаты -> upcoming (раздел Скоро) -> затем published
+      const aiWarning = (track.ai_score && track.ai_score > 60)
+        ? ` AI: ${track.ai_score}% (${track.ai_verdict})`
+        : '';
+
       await typed.updateTrack(pendingTrackId, {
-        moderation_status: 'published',
+        moderation_status: 'approved',
         moderation_comment: moderator_notes || 'Трек одобрен',
         moderated_at: now,
-        is_hidden: false,
-        data: { ...(track.data || {}), overall_score: overall_score || null },
+        is_hidden: true,
+        data: {
+          ...(track.data || {}),
+          overall_score: overall_score || null,
+          requires_payment: true,
+          payment_amount: PUBLICATION_PRICE,
+          ai_flagged: (track.ai_score && track.ai_score > 60) || false,
+        },
       });
 
-      // REAL coin award
-      let coinsAwarded = 0;
-      if (track.user_id) {
-        const newBalance = await typed.awardCoins(
-          track.user_id,
-          COINS_ON_APPROVE,
-          `Трек "${track.title}" одобрен модерацией`
-        );
-        coinsAwarded = COINS_ON_APPROVE;
-        console.log(`[moderation] Track ${pendingTrackId} approved. ${coinsAwarded} coins awarded to ${track.user_id}`);
-      }
+      console.log(`[moderation] Track ${pendingTrackId} approved. Awaiting payment ${PUBLICATION_PRICE} RUB.` + aiWarning);
 
       // Notify artist: email + in-app
       const artistEmail = track.uploaded_by_email;
       const artistName = track.artist_name || 'Артист';
+      const aiNote = (track.ai_score && track.ai_score > 60)
+        ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:4px;"><strong>AI-анализ:</strong> С вероятностью ' + track.ai_score + '% трек создан с помощью ИИ. Мы предлагаем размещение в специальном разделе <strong>ИИ-треки</strong>.</p>'
+        : '';
+
       if (artistEmail) {
-        sendEmail({
-          to: artistEmail,
-          subject: `Трек одобрен — ${track.title}`,
-          html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">
-            <h2 style="color:#10B981;margin:0 0 16px;">Трек одобрен!</h2>
-            <p>Здравствуйте, <strong>${artistName}</strong>!</p>
-            <p>Ваш трек <strong>«${track.title}»</strong> успешно прошёл модерацию и опубликован на платформе.</p>
-            ${coinsAwarded ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Начислено: <strong>+${coinsAwarded} монет</strong></p>` : ''}
-            ${moderator_notes ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ${moderator_notes}</p>` : ''}
-            <p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Перейти в кабинет</a></p>
-          </div>`
-        }).catch(err => console.error('[moderation] Email to artist failed:', err.message));
+        const emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">'
+          + '<h2 style="color:#10B981;margin:0 0 16px;">Трек одобрен!</h2>'
+          + '<p>Здравствуйте, <strong>' + artistName + '</strong>!</p>'
+          + '<p>Ваш трек <strong>' + track.title + '</strong> успешно прошёл модерацию.</p>'
+          + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽</strong></p>'
+          + '<p>После оплаты трек появится в разделе <strong>Скоро</strong>, а затем будет опубликован.</p>'
+          + aiNote
+          + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + moderator_notes + '</p>' : '')
+          + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
+          + '</div>';
+        sendEmail({ to: artistEmail, subject: 'Трек одобрен — ' + track.title, html: emailHtml })
+          .catch((err: any) => console.error('[moderation] Email to artist failed:', err.message));
       }
 
       if (track.user_id) {
+        const aiMsg = (track.ai_score && track.ai_score > 60)
+          ? ' AI: ' + track.ai_score + '% вероятность ИИ.'
+          : '';
         notifyCrossCabinet({
           targetUserId: track.user_id,
           targetRole: 'artist',
           sourceRole: 'admin',
           type: 'track_moderation',
           title: 'Трек одобрен!',
-          message: `Ваш трек «${track.title}» одобрен и опубликован. +${coinsAwarded} монет.`,
+          message: 'Трек «' + track.title + '» одобрен. Для публикации оплатите ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽.' + aiMsg,
           link: '/cabinet/tracks',
         }).catch(() => {});
       }
 
       return c.json({
         success: true,
-        message: 'Трек одобрен и опубликован',
+        message: 'Трек одобрен. Ожидает оплаты.',
         trackId: pendingTrackId,
-        coinsAwarded,
-        published: true,
+        paymentRequired: true,
+        paymentAmount: PUBLICATION_PRICE,
+        aiFlagged: (track.ai_score && track.ai_score > 60) || false,
+        aiScore: track.ai_score || null,
       });
 
     } else if (action === 'reject') {
