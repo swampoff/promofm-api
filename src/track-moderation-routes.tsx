@@ -218,6 +218,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
           + '</div>';
         sendEmail({ to: artistEmail, subject: 'Трек одобрен — ' + track.title, html: emailHtml })
+          .then(() => sendEmail({ to: 'info@promofm.ru', subject: '[КОПИЯ] Одобрен: ' + track.title + ' (' + artistEmail + ')', html: emailHtml }))
           .catch((err: any) => console.error('[moderation] Email to artist failed:', err.message));
       }
 
@@ -270,6 +271,14 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             <p>Вы можете исправить замечания и загрузить трек повторно.</p>
             <p>Вопросы? Пишите: <a href="mailto:info@promo-music.ru" style="color:#FF577F;">info@promo-music.ru</a></p>
           </div>`
+        }).then(() => {
+          const rejectCopyHtml = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">
+            <h2 style="color:#EF4444;">КОПИЯ: Трек отклонён</h2>
+            <p>Артист: <strong>${rejectName}</strong> (${rejectEmail})</p>
+            <p>Трек: <strong>«${track.title}»</strong></p>
+            <p style="padding:12px;background:#1a1a2e;border-left:3px solid #EF4444;border-radius:4px;"><strong>Причина:</strong> ${reason}</p>
+          </div>`;
+          return sendEmail({ to: 'info@promofm.ru', subject: `[КОПИЯ] Отклонён: ${track.title} (${rejectEmail})`, html: rejectCopyHtml });
         }).catch(err => console.error('[moderation] Reject email failed:', err.message));
       }
 
