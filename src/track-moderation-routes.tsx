@@ -4,7 +4,8 @@
  * One table, one row per track. No separate moderation store.
  */
 
-import { notifyTrackUpload } from './email-helper.tsx';
+import { notifyTrackUpload, sendEmail } from './email-helper.tsx';
+import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as typed from './db-typed.tsx';
@@ -197,6 +198,36 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         console.log(`[moderation] Track ${pendingTrackId} approved. ${coinsAwarded} coins awarded to ${track.user_id}`);
       }
 
+      // Notify artist: email + in-app
+      const artistEmail = track.uploaded_by_email;
+      const artistName = track.artist_name || 'Артист';
+      if (artistEmail) {
+        sendEmail({
+          to: artistEmail,
+          subject: `Трек одобрен — ${track.title}`,
+          html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">
+            <h2 style="color:#10B981;margin:0 0 16px;">Трек одобрен!</h2>
+            <p>Здравствуйте, <strong>${artistName}</strong>!</p>
+            <p>Ваш трек <strong>«${track.title}»</strong> успешно прошёл модерацию и опубликован на платформе.</p>
+            ${coinsAwarded ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Начислено: <strong>+${coinsAwarded} монет</strong></p>` : ''}
+            ${moderator_notes ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ${moderator_notes}</p>` : ''}
+            <p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Перейти в кабинет</a></p>
+          </div>`
+        }).catch(err => console.error('[moderation] Email to artist failed:', err.message));
+      }
+
+      if (track.user_id) {
+        notifyCrossCabinet({
+          targetUserId: track.user_id,
+          targetRole: 'artist',
+          sourceRole: 'admin',
+          type: 'track_moderation',
+          title: 'Трек одобрен!',
+          message: `Ваш трек «${track.title}» одобрен и опубликован. +${coinsAwarded} монет.`,
+          link: '/cabinet/tracks',
+        }).catch(() => {});
+      }
+
       return c.json({
         success: true,
         message: 'Трек одобрен и опубликован',
@@ -212,6 +243,37 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         moderation_comment: moderator_notes || null,
         moderated_at: now,
       });
+
+      // Notify artist: email + in-app
+      const rejectEmail = track.uploaded_by_email;
+      const rejectName = track.artist_name || 'Артист';
+      const reason = rejection_reason || moderator_notes || 'Не указана';
+      if (rejectEmail) {
+        sendEmail({
+          to: rejectEmail,
+          subject: `Трек отклонён — ${track.title}`,
+          html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">
+            <h2 style="color:#EF4444;margin:0 0 16px;">Трек отклонён</h2>
+            <p>Здравствуйте, <strong>${rejectName}</strong>!</p>
+            <p>К сожалению, ваш трек <strong>«${track.title}»</strong> не прошёл модерацию.</p>
+            <p style="padding:12px;background:#1a1a2e;border-left:3px solid #EF4444;border-radius:4px;"><strong>Причина:</strong> ${reason}</p>
+            <p>Вы можете исправить замечания и загрузить трек повторно.</p>
+            <p>Вопросы? Пишите: <a href="mailto:info@promo-music.ru" style="color:#FF577F;">info@promo-music.ru</a></p>
+          </div>`
+        }).catch(err => console.error('[moderation] Reject email failed:', err.message));
+      }
+
+      if (track.user_id) {
+        notifyCrossCabinet({
+          targetUserId: track.user_id,
+          targetRole: 'artist',
+          sourceRole: 'admin',
+          type: 'track_moderation',
+          title: 'Трек отклонён',
+          message: `Трек «${track.title}» отклонён. Причина: ${reason}`,
+          link: '/cabinet/tracks',
+        }).catch(() => {});
+      }
 
       return c.json({
         success: true,
