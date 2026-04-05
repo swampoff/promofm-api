@@ -1,17 +1,17 @@
 /**
- * NEWS VOICE ROUTES — живая озвучка новостей через Gemini 3.1 Flash Live
+ * NEWS VOICE ROUTES — стриминг озвучка через Gemini 3.1 Flash Live
  *
- * Голосовой помощник: каждый автор читает свои новости.
- * Play → LLM генерирует радио-скрипт → Gemini TTS → WAV стримится в браузер.
+ * Голосовой помощник: нажал play → аудио начинает играть через 1-2 сек.
+ * PCM чанки стримятся напрямую из Gemini в браузер.
  *
  * Endpoints:
- *   GET  /play/:newsId   — сгенерировать и отдать аудио (audio/wav)
- *   POST /preview        — озвучить произвольный текст
- *   POST /warmup/:newsId — прогреть кэш (вызывается автоматически при публикации)
- *   GET  /status         — статистика
+ *   GET  /stream/:newsId  — стрим аудио (audio/L16, chunked)
+ *   POST /preview-stream  — стрим произвольного текста
+ *   GET  /status           — статистика
  */
 
 import { Hono } from 'hono';
+import { stream } from 'hono/streaming';
 import { getDbClient } from './db-client.tsx';
 import { callLLM } from './llm-router.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -20,21 +20,24 @@ const app = new Hono();
 
 const GEMINI_PROXY_URL = process.env.GEMINI_PROXY_URL || 'http://187.77.85.42:8088';
 const GEMINI_PROXY_KEY = process.env.GEMINI_PROXY_KEY || 'promofm-gemini-2026';
+const SAMPLE_RATE = 24000;
 
-// Стили авторов для LLM-скрипта
+// LLM script cache (skip 3-4s LLM call on repeat plays)
+const scriptCache = new Map<string, { script: string; author: string; ts: number }>();
+const SCRIPT_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
 const AUTHOR_STYLES: Record<string, string> = {
-  'DJ Den': 'Энергичный ведущий клубной культуры. Говорит бодро, с инсайдерским знанием.',
-  'Сандра': 'Яркая ведущая поп-музыки. Говорит эмоционально, с акцентом на тренды.',
-  'Лиана': 'Аналитик индустрии. Говорит вдумчиво, с цифрами и контекстом.',
-  'Макс': 'Рок-ведущий. Говорит дерзко, с юмором.',
-  'Марк': 'Хип-хоп ведущий. Уличный стиль, знает культуру.',
-  'Пабло': 'Эксперт мировой музыки. С уважением к культурам.',
-  'Нико': 'Знаток классики и джаза. Говорит изысканно.',
-  'РадКат': 'Технофутурист. О технологиях в музыке.',
-  'Стелла': 'Вдохновляющая ведущая о женщинах в музыке.',
+  'DJ Den': 'Энергичный ведущий клубной культуры. Говорит бодро.',
+  'Сандра': 'Яркая ведущая поп-музыки. Говорит эмоционально.',
+  'Лиана': 'Аналитик индустрии. Говорит вдумчиво.',
+  'Макс': 'Рок-ведущий. Говорит дерзко.',
+  'Марк': 'Хип-хоп ведущий. Уличный стиль.',
+  'Пабло': 'Эксперт мировой музыки.',
+  'Нико': 'Знаток классики и джаза.',
+  'РадКат': 'Технофутурист.',
+  'Стелла': 'Вдохновляющая ведущая.',
 };
 
-/** Подготовить текст для чтения */
 function cleanText(raw: string): string {
   let t = raw.replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
   if (t.length > 800) {
@@ -44,17 +47,13 @@ function cleanText(raw: string): string {
   return t;
 }
 
-/** LLM перепишет текст как радио-подводку */
 async function makeScript(title: string, text: string, author: string): Promise<string> {
   const style = AUTHOR_STYLES[author] || '';
-  const sys = `Ты — ${author}, ведущий на радио ПРОМО FM. ${style}
-Перепиши текст как радио-подводку: 3-5 предложений, живо, без пафоса.
-Никаких «дорогие слушатели», смайликов, скобок — чистый текст для озвучки.
-Начни с сути, упоминай факты. Только текст для чтения вслух.`;
-
   try {
     const r = await callLLM({
-      system: sys,
+      system: `Ты — ${author}, ведущий на радио ПРОМО FM. ${style}
+Перепиши текст как радио-подводку: 3-5 предложений, живо, без пафоса.
+Никаких «дорогие слушатели», смайликов, скобок — чистый текст для озвучки.`,
       messages: [{ role: 'user', content: `Новость: «${title}»\n\n${text}\n\nРадио-подводка:` }],
       model: 'openai/gpt-4o-mini',
       maxTokens: 400,
@@ -67,118 +66,112 @@ async function makeScript(title: string, text: string, author: string): Promise<
   }
 }
 
-/** Вызов Gemini TTS прокси → WAV buffer (бинарный ответ) */
-async function tts(text: string, author: string): Promise<Buffer> {
-  const resp = await fetch(`${GEMINI_PROXY_URL}/tts`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
-    body: JSON.stringify({ text, author }),
-  });
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => '');
-    throw new Error(`TTS proxy ${resp.status}: ${errText.slice(0, 200)}`);
-  }
-  // Прокси возвращает бинарный WAV (audio/wav)
-  const arrayBuf = await resp.arrayBuffer();
-  return Buffer.from(arrayBuf);
-}
+// ─── GET /stream/:newsId — стрим озвучки новости ────────
 
-// In-memory LRU кэш (макс 50 записей, TTL 30 мин)
-const cache = new Map<string, { wav: Buffer; ts: number }>();
-const CACHE_TTL = 30 * 60 * 1000;
-const CACHE_MAX = 50;
-
-function cacheGet(key: string): Buffer | null {
-  const e = cache.get(key);
-  if (!e) return null;
-  if (Date.now() - e.ts > CACHE_TTL) { cache.delete(key); return null; }
-  return e.wav;
-}
-
-function cacheSet(key: string, wav: Buffer) {
-  if (cache.size >= CACHE_MAX) {
-    const oldest = [...cache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
-    if (oldest) cache.delete(oldest[0]);
-  }
-  cache.set(key, { wav, ts: Date.now() });
-}
-
-/** Загрузить новость и подготовить данные для TTS */
-async function loadNewsForTTS(newsId: string) {
-  const { data: row } = await getDbClient()
-    .from('news_public')
-    .select('*')
-    .eq('id', newsId)
-    .maybeSingle();
-  if (!row) return null;
-  const d = row.data ?? row;
-  return {
-    title: d.title || '',
-    content: d.content || '',
-    excerpt: d.excerpt || d.summary || '',
-    author: d.authorName || d.author_name || 'DJ Den',
-  };
-}
-
-/** Сгенерировать аудио для новости (с кэшем) */
-async function generateVoice(newsId: string): Promise<Buffer | null> {
-  const cached = cacheGet(newsId);
-  if (cached) return cached;
-
-  const news = await loadNewsForTTS(newsId);
-  if (!news) return null;
-
-  const rawText = cleanText(news.content || news.excerpt || news.title);
-  const script = await makeScript(news.title, rawText, news.author);
-  console.log(`[news-voice] Generating: "${news.title.slice(0, 40)}" by ${news.author}`);
-
-  const wav = await tts(script, news.author);
-  cacheSet(newsId, wav);
-  return wav;
-}
-
-// ─── GET /play/:newsId — живая озвучка новости ─────────
-
-app.get('/play/:newsId', async (c) => {
+app.get('/stream/:newsId', async (c) => {
   const newsId = c.req.param('newsId');
-  try {
-    const wav = await generateVoice(newsId);
-    if (!wav) return c.json({ error: 'News not found' }, 404);
 
-    c.header('Content-Type', 'audio/wav');
-    c.header('Content-Length', String(wav.length));
-    c.header('Cache-Control', 'public, max-age=1800');
+  try {
+    // Load news
+    const { data: row } = await getDbClient()
+      .from('news_public')
+      .select('*')
+      .eq('id', newsId)
+      .maybeSingle();
+
+    if (!row) return c.json({ error: 'News not found' }, 404);
+
+    const d = row.data ?? row;
+    const title = d.title || '';
+    const content = d.content || '';
+    const excerpt = d.excerpt || d.summary || '';
+    const author = d.authorName || d.author_name || 'DJ Den';
+
+    // Generate radio script via LLM (with cache)
+    let script: string;
+    const cached = scriptCache.get(newsId);
+    if (cached && Date.now() - cached.ts < SCRIPT_CACHE_TTL) {
+      script = cached.script;
+      console.log(`[news-voice] Script cache hit: ${newsId}`);
+    } else {
+      const rawText = cleanText(content || excerpt || title);
+      script = await makeScript(title, rawText, author);
+      scriptCache.set(newsId, { script, author, ts: Date.now() });
+    }
+
+    console.log(`[news-voice] Stream: "${title.slice(0, 40)}" by ${author}`);
+
+    // Stream from Gemini proxy
+    const proxyResp = await fetch(`${GEMINI_PROXY_URL}/tts-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
+      body: JSON.stringify({ text: script, author }),
+    });
+
+    if (!proxyResp.ok || !proxyResp.body) {
+      const errText = await proxyResp.text().catch(() => '');
+      return c.json({ error: `TTS proxy error: ${errText.slice(0, 200)}` }, 500);
+    }
+
+    // Pipe PCM stream to client
+    c.header('Content-Type', `audio/L16;rate=${SAMPLE_RATE};channels=1`);
+    c.header('Transfer-Encoding', 'chunked');
+    c.header('Cache-Control', 'no-cache');
     c.header('Access-Control-Allow-Origin', '*');
-    return c.body(wav);
+    c.header('X-Sample-Rate', String(SAMPLE_RATE));
+
+    return stream(c, async (s) => {
+      const reader = proxyResp.body!.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await s.write(value);
+        }
+      } catch (e) {
+        // Client disconnected or proxy error
+      } finally {
+        reader.releaseLock();
+      }
+    });
   } catch (err) {
-    console.error('[news-voice] play error:', err);
+    console.error('[news-voice] stream error:', err);
     return c.json({ error: safeErrorMessage(err) }, 500);
   }
 });
 
-// ─── POST /warmup/:newsId — прогреть кэш (авто при публикации) ───
+// ─── POST /preview-stream — стрим произвольного текста ───
 
-app.post('/warmup/:newsId', async (c) => {
-  const newsId = c.req.param('newsId');
-  // Генерируем в фоне, не блокируя ответ
-  generateVoice(newsId)
-    .then(() => console.log(`[news-voice] Warmup OK: ${newsId}`))
-    .catch((e) => console.error(`[news-voice] Warmup FAIL: ${newsId}`, e.message));
-  return c.json({ success: true, message: 'Voice warmup started' });
-});
-
-// ─── POST /preview — озвучить произвольный текст ────────
-
-app.post('/preview', async (c) => {
+app.post('/preview-stream', async (c) => {
   const { text, author } = await c.req.json().catch(() => ({ text: '', author: 'DJ Den' }));
   if (!text || text.length < 3) return c.json({ error: 'Text too short' }, 400);
 
   try {
-    const wav = await tts(text.slice(0, 2000), author || 'DJ Den');
-    c.header('Content-Type', 'audio/wav');
-    c.header('Content-Length', String(wav.length));
+    const proxyResp = await fetch(`${GEMINI_PROXY_URL}/tts-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
+      body: JSON.stringify({ text: text.slice(0, 2000), author: author || 'DJ Den' }),
+    });
+
+    if (!proxyResp.ok || !proxyResp.body) {
+      return c.json({ error: 'TTS proxy error' }, 500);
+    }
+
+    c.header('Content-Type', `audio/L16;rate=${SAMPLE_RATE};channels=1`);
+    c.header('Transfer-Encoding', 'chunked');
+    c.header('Cache-Control', 'no-cache');
     c.header('Access-Control-Allow-Origin', '*');
-    return c.body(wav);
+
+    return stream(c, async (s) => {
+      const reader = proxyResp.body!.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await s.write(value);
+        }
+      } catch {} finally { reader.releaseLock(); }
+    });
   } catch (err) {
     return c.json({ error: safeErrorMessage(err) }, 500);
   }
@@ -189,11 +182,9 @@ app.post('/preview', async (c) => {
 app.get('/status', async (c) => {
   return c.json({
     success: true,
-    mode: 'live',
+    mode: 'streaming',
     model: 'gemini-3.1-flash-live-preview',
-    cacheSize: cache.size,
-    cacheMaxSize: CACHE_MAX,
-    cacheTtlMin: CACHE_TTL / 60000,
+    sampleRate: SAMPLE_RATE,
     proxyUrl: GEMINI_PROXY_URL,
     voices: Object.keys(AUTHOR_STYLES),
   });
