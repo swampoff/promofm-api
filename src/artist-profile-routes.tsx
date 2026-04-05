@@ -211,6 +211,26 @@ app.get('/profile/:artistId', async (c) => {
           .maybeSingle();
         apRow = apRow3;
       }
+
+      // 3d. Fuzzy slug fallback (slug with hash suffix, e.g., bearwolf-6ac34de5)
+      if (!apRow) {
+        const { pool } = await import('./db-client.tsx');
+        const { rows: fuzzyRows } = await pool.query(
+          "SELECT * FROM artist_profiles WHERE slug LIKE  ORDER BY total_plays DESC NULLS LAST LIMIT 1",
+          [artistId.toLowerCase() + '-%']
+        );
+        if (fuzzyRows.length > 0) apRow = fuzzyRows[0];
+      }
+
+      // 3e. Try by LOWER(artist_name) (e.g., /profile/bearwolf → BEARWOLF)
+      if (!apRow) {
+        const { pool } = await import('./db-client.tsx');
+        const { rows: nameRows } = await pool.query(
+          "SELECT * FROM artist_profiles WHERE LOWER(artist_name) =  ORDER BY total_plays DESC NULLS LAST LIMIT 1",
+          [artistId.toLowerCase().replace(/-/g, ' ')]
+        );
+        if (nameRows.length > 0) apRow = nameRows[0];
+      }
       
       if (apRow) {
         const sqlProfile = makeProfile({
@@ -362,7 +382,7 @@ app.get('/popular', async (c) => {
     const dbClient = getDbClient();
     const { data: sqlProfiles } = await dbClient
       .from('artist_profiles')
-      .select('user_id, artist_name, genre, sub_genres, city, avatar_url, total_plays, total_followers, is_verified, data')
+      .select('user_id, slug, artist_name, genre, sub_genres, city, avatar_url, total_plays, total_followers, is_verified, data')
       .limit(2323);
 
     const allProfiles = (sqlProfiles || [])
@@ -371,6 +391,7 @@ app.get('/popular', async (c) => {
       .slice(0, 12)
       .map((p: any) => ({
         id: p.user_id,
+        slug: p.slug || '',
         name: p.artist_name,
         genre: p.genre || 'Music',
         genres: p.sub_genres || [],
@@ -545,7 +566,7 @@ app.get('/search', async (c) => {
     const { pool } = await import('./db-client.tsx');
 
     const { rows } = await pool.query(
-      `SELECT user_id, artist_name, genre, city, avatar_url, is_verified
+      `SELECT user_id, slug, artist_name, genre, city, avatar_url, is_verified
        FROM artist_profiles
        WHERE LOWER(artist_name) LIKE $1 
        ORDER BY total_plays DESC NULLS LAST
@@ -555,6 +576,7 @@ app.get('/search', async (c) => {
 
     const results = rows.map((r: any) => ({
       id: r.user_id,
+      slug: r.slug || '',
       name: r.artist_name,
       genre: r.genre || '',
       city: r.city || '',

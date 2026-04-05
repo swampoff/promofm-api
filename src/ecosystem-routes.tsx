@@ -20,6 +20,18 @@ import {
 } from "./ecosystem-modes.ts";
 import { requireAuth, requireAdmin } from "./auth-middleware.tsx";
 
+const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+
+/** Admin auth: either JWT admin or X-Internal-Key header */
+async function requireAdminOrKey(c: any, next: any) {
+  const internalKey = c.req.header('X-Internal-Key') || c.req.header('x-internal-key');
+  if (internalKey && ADMIN_INTERNAL_KEY && internalKey === ADMIN_INTERNAL_KEY) {
+    c.set('userId', 'system'); c.set('userEmail', 'system@promo-music.ru'); c.set('userRole', 'admin');
+    return next();
+  }
+  return requireAuth(c, async () => requireAdmin(c, next));
+}
+
 const app = new Hono();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -73,7 +85,7 @@ async function getSession(
 
 // ─── GET /manifest ────────────────────────────────────────────────────────────
 
-app.get("/manifest", requireAuth, requireAdmin, (c) => {
+app.get("/manifest", requireAdminOrKey, (c) => {
   const manifest = getManifest();
   return c.json(
     jsonOk(manifest, {
@@ -86,7 +98,7 @@ app.get("/manifest", requireAuth, requireAdmin, (c) => {
 
 // ─── POST /mode/:mode/run ─────────────────────────────────────────────────────
 
-app.post("/mode/:mode/run", requireAuth, requireAdmin, async (c) => {
+app.post("/mode/:mode/run", requireAdminOrKey, async (c) => {
   const modeName = c.req.param("mode");
 
   if (!MODES[modeName as ModeName]) {
@@ -173,7 +185,7 @@ ${report.dailyBrief.replace(/\n/g, "<br/>")}
 
 // ─── GET /mode/:mode/status ───────────────────────────────────────────────────
 
-app.get("/mode/:mode/status", requireAuth, requireAdmin, async (c) => {
+app.get("/mode/:mode/status", requireAdminOrKey, async (c) => {
   const modeName = c.req.param("mode");
 
   if (!MODES[modeName as ModeName]) {
@@ -230,7 +242,7 @@ app.get("/mode/:mode/status", requireAuth, requireAdmin, async (c) => {
 
 // ─── POST /agent/:name/run ────────────────────────────────────────────────────
 
-app.post("/agent/:name/run", requireAuth, requireAdmin, async (c) => {
+app.post("/agent/:name/run", requireAdminOrKey, async (c) => {
   const agentName = c.req.param("name");
   const agent = getAgent(agentName);
 
@@ -298,7 +310,7 @@ app.post("/agent/:name/run", requireAuth, requireAdmin, async (c) => {
 
 // ─── POST /chain ──────────────────────────────────────────────────────────────
 
-app.post("/chain", requireAuth, requireAdmin, async (c) => {
+app.post("/chain", requireAdminOrKey, async (c) => {
   let body: {
     task?: string;
     trackId?: string;
@@ -361,7 +373,7 @@ app.post("/chain", requireAuth, requireAdmin, async (c) => {
 
 // ─── GET /reports ─────────────────────────────────────────────────────────────
 
-app.get("/reports", requireAuth, requireAdmin, async (c) => {
+app.get("/reports", requireAdminOrKey, async (c) => {
   const limit = Math.min(parseInt(c.req.query("limit") || "20", 10), 100);
   const mode = c.req.query("mode");
   const type = c.req.query("type");
@@ -417,7 +429,7 @@ app.get("/reports", requireAuth, requireAdmin, async (c) => {
 
 // ─── GET /agents ──────────────────────────────────────────────────────────────
 
-app.get("/agents", requireAuth, requireAdmin, (c) => {
+app.get("/agents", requireAdminOrKey, (c) => {
   const mode = c.req.query("mode");
   const manifest = getManifest();
 
@@ -444,7 +456,7 @@ app.get("/agents", requireAuth, requireAdmin, (c) => {
 
 // ─── GET /health ──────────────────────────────────────────────────────────────
 
-app.get("/health", requireAuth, requireAdmin, async (c) => {
+app.get("/health", requireAdminOrKey, async (c) => {
   let dbOk = false;
   try {
     await pool.query("SELECT 1");
