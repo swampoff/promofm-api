@@ -165,7 +165,7 @@ auth.post("/signup", async (c) => {
           description: `Дубликат email: ${email}`, error: 'email_exists',
           ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
           userAgent: c.req.header('user-agent') || '',
-        });
+        }, 'fail');
         return c.json({ success: false, error: "Ошибка регистрации. Если у вас уже есть аккаунт, попробуйте войти или восстановить пароль." }, 409);
       } else {
         log.error({ err }, "db_insert_user_error");
@@ -199,7 +199,7 @@ auth.post("/signup", async (c) => {
       description: `Ошибка регистрации`, error: String(error),
       ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
       userAgent: c.req.header('user-agent') || '',
-    });
+    }, 'error');
     return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
   }
 });
@@ -239,7 +239,7 @@ auth.post("/signin", async (c) => {
       await recordLoginAttempt(email, ip, ua, false);
       logAuthEvent('signin_fail', {
         description: `Неверный email или пароль: ${email}`, error: 'user_not_found', ip, userAgent: ua,
-      });
+      }, 'fail');
       return c.json({ success: false, error: "Неверный email или пароль" }, 401);
     }
 
@@ -255,7 +255,7 @@ auth.post("/signin", async (c) => {
       const remaining = MAX_FAILED_ATTEMPTS - await getFailedAttemptsCount(email) - 1;
       logAuthEvent('signin_fail', {
         description: `Неверный пароль: ${email}`, error: 'wrong_password', ip, userAgent: ua,
-      });
+      }, 'fail');
       return c.json({
         success: false,
         error: remaining > 0
