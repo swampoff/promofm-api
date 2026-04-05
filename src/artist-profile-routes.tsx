@@ -233,6 +233,17 @@ app.get('/profile/:artistId', async (c) => {
       }
       
       if (apRow) {
+        // Count real tracks from DB
+        let realTrackCount = 0;
+        try {
+          const { pool } = await import('./db-client.tsx');
+          const { rows: countRows } = await pool.query(
+            'SELECT COUNT(*)::int as cnt FROM tracks WHERE artist_id = $1',
+            [apRow.id]
+          );
+          realTrackCount = countRows[0]?.cnt || 0;
+        } catch { /* keep 0 */ }
+
         const sqlProfile = makeProfile({
           id: apRow.user_id || apRow.id,
           email: apRow.data?.email || '',
@@ -244,7 +255,7 @@ app.get('/profile/:artistId', async (c) => {
           genres: apRow.sub_genres || (apRow.genre ? [apRow.genre] : []),
           totalPlays: apRow.total_plays || 0,
           totalFollowers: apRow.total_followers || 0,
-          totalTracks: apRow.data?.track_count || 0,
+          totalTracks: realTrackCount,
           isVerified: apRow.is_verified || false,
           website: apRow.website || '',
           socials: apRow.social_links || { ...EMPTY_SOCIALS },
