@@ -177,6 +177,36 @@ app.post('/preview-stream', async (c) => {
   }
 });
 
+// ─── POST /warmup/:newsId — pre-cache LLM script (no TTS) ──
+
+app.post("/warmup/:newsId", async (c) => {
+  const newsId = c.req.param("newsId");
+  try {
+    const cached = scriptCache.get(newsId);
+    if (cached && Date.now() - cached.ts < SCRIPT_CACHE_TTL) {
+      return c.json({ ok: true, cached: true });
+    }
+
+    const { data: row } = await getDbClient().from("news_public").select("*").eq("id", newsId)
+      .maybeSingle();
+    if (!row) return c.json({ error: "Not found" }, 404);
+
+    const d = row.data ?? row;
+    const title = d.title || "";
+    const content = d.content || "";
+    const excerpt = d.excerpt || d.summary || "";
+    const author = d.authorName || d.author_name || "DJ Den";
+    const rawText = cleanText(content || excerpt || title);
+    const script = await makeScript(title, rawText, author);
+    scriptCache.set(newsId, { script, author, ts: Date.now() });
+    console.log(`[news-voice] Warmup cached script for ${newsId}`);
+    return c.json({ ok: true, cached: false, scriptLen: script.length });
+  } catch (err) {
+    console.error("[news-voice] warmup error:", err);
+    return c.json({ error: safeErrorMessage(err) }, 500);
+  }
+});
+
 // ─── GET /status ────────────────────────────────────────
 
 app.get('/status', async (c) => {
