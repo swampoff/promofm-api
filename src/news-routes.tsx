@@ -24,6 +24,8 @@ function mapArticle(row: any) {
     read_time: Math.max(1, Math.ceil((r.content || '').split(/\s+/).length / 200)),
     tags: r.tags || [],
     featured: (r.tags || []).includes('featured'),
+    audio_url: r.audioUrl || null,
+    voice_duration: r.voiceDuration || 0,
     views: r.views_count || r.viewsCount || 0,
   };
 }

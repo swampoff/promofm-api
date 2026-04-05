@@ -469,12 +469,15 @@ ${isInternational ? '\n⚠️ ИСТОЧНИК НА АНГЛИЙСКОМ. Ты �
    - <a href="/radio-stations">радиостанции</a>
    - <a href="/concerts">афиша концертов</a>
    - <a href="/news">новости</a>
-5. В конце каждой статьи CTA-блок:
+5. ПЕРЕД CTA-блоком ОБЯЗАТЕЛЬНО укажи источник:
+   <p class="news-source">Источник: <a href="URL_ИСТОЧНИКА" target="_blank" rel="noopener">ИМЯ_ИСТОЧНИКА</a></p>
+   Где ИМЯ_ИСТОЧНИКА — название издания из поля "Источник" (например, Lenta.ru Музыка, Pitchfork, NME и т.д.), а URL_ИСТОЧНИКА — его URL.
+6. В конце каждой статьи CTA-блок:
    <h3>Следите за новостями музыкальной индустрии</h3>
    <p><a href="/register"><strong>Присоединяйтесь к ПРОМО.МУЗЫКА</strong></a> — платформе, где артисты, диджеи и продюсеры развивают карьеру вместе.</p>
-6. Выделяй <strong>ключевые слова</strong> (2-3 на статью)
-7. Перепиши каждую новость СВОИМИ СЛОВАМИ в стиле ${poster.name} — НЕ копируй дословно
-8. ОБЯЗАТЕЛЬНО пиши заголовок (title) и весь текст ТОЛЬКО НА РУССКОМ ЯЗЫКЕ
+7. Выделяй <strong>ключевые слова</strong> (2-3 на статью)
+8. Перепиши каждую новость СВОИМИ СЛОВАМИ в стиле ${poster.name} — НЕ копируй дословно
+9. ОБЯЗАТЕЛЬНО пиши заголовок (title) и весь текст ТОЛЬКО НА РУССКОМ ЯЗЫКЕ
 
 SEO-ПРАВИЛА:
 - title: ключевое слово в начало, год если уместно
@@ -607,7 +610,21 @@ SEO-ПРАВИЛА:
         // Use LLM-selected image (LLM picks correct image per article from prompt)
         imageUrl: n.imageUrl && n.imageUrl.startsWith('http') ? n.imageUrl : '',
         publishedAt: n.publishedAt || new Date().toISOString(),
-      }));
+      }))
+      .map((n: any) => {
+        // Guarantee source attribution in content (post-processing)
+        let c = n.content as string;
+        const srcLink = `<p class="news-source">\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a: <a href="${source.url}" target="_blank" rel="noopener">${source.name}</a></p>`;
+        if (!c.includes('class="news-source"') && !c.includes('\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a:')) {
+          const ctaIdx = c.indexOf('<h3>\u0421\u043b\u0435\u0434\u0438\u0442\u0435 \u0437\u0430 \u043d\u043e\u0432\u043e\u0441\u0442\u044f\u043c\u0438');
+          if (ctaIdx !== -1) {
+            c = c.slice(0, ctaIdx) + srcLink + '\n' + c.slice(ctaIdx);
+          } else {
+            c = c + '\n' + srcLink;
+          }
+        }
+        return { ...n, content: c };
+      });
 
     // Skip articles with empty content (title-only articles are useless)
     const valid = results.filter(r => r.content.length >= 50);
