@@ -102,11 +102,7 @@ async function broadcastNews(newsId: string): Promise<boolean> {
   console.log(`[broadcast] Starting: "${title.slice(0, 50)}" by ${author} -> ${listeners.size} listeners`);
   currentBroadcast = { newsId, title, author, startedAt: Date.now() };
 
-  if (listeners.size === 0) {
-    console.log(`[broadcast] No listeners, skipping TTS`);
-    currentBroadcast = null;
-    return true;
-  }
+  // Always broadcast — listeners may connect mid-stream
 
   // Generate radio script
   const rawText = cleanText(content || excerpt || title);
@@ -287,9 +283,7 @@ app.post("/text", async (c) => {
   const speakerAuthor = author || "DJ Den";
   console.log(`[broadcast] Text broadcast: "${text.slice(0, 50)}..." by ${speakerAuthor} -> ${listeners.size} listeners`);
 
-  if (listeners.size === 0) {
-    return c.json({ ok: true, listeners: 0, skipped: true, reason: "no listeners" });
-  }
+  // Always broadcast — listeners may connect mid-stream
 
   currentBroadcast = { newsId: "bot-text", title: text.slice(0, 60), author: speakerAuthor, startedAt: Date.now() };
 
@@ -355,9 +349,7 @@ app.post("/speak", async (c) => {
 
   console.log(`[broadcast] Speak: "${script.slice(0, 50)}..." by ${speakerAuthor} -> ${listeners.size} listeners`);
 
-  if (listeners.size === 0) {
-    return c.json({ ok: true, listeners: 0, skipped: true, reason: "no listeners", script: script.slice(0, 200) });
-  }
+  // Always broadcast — listeners may connect mid-stream
 
   currentBroadcast = { newsId: "bot-speak", title: text.slice(0, 60), author: speakerAuthor, startedAt: Date.now() };
 

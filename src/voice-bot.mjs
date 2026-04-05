@@ -155,10 +155,10 @@ async function handle(msg) {
 
     const dur = result.duration ? `${result.duration.toFixed(1)}s` : '';
     const lc = result.listeners || 0;
-    const skipped = result.skipped ? ' (нет слушателей)' : '';
+    
 
     if (mid) {
-      await edit(chatId, mid, `${author} в эфире ${dur}${skipped}\nСлушателей: ${lc}`);
+      await edit(chatId, mid, `${author} в эфире ${dur}\nСлушателей: ${lc}`);
     }
     console.log(`[voice-bot] Done: ${dur}, ${lc} listeners`);
 
