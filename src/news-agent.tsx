@@ -57,6 +57,16 @@ function bestPosterForSource(sourceId: string): typeof POSTERS[number] {
 }
 
 
+// ─── Voice warmup: прогрев кэша озвучки при публикации ───
+async function warmupNewsVoice(newsId: string) {
+  try {
+    await fetch("http://localhost:3000/server/api/news-voice/warmup/" + newsId, { method: "POST" });
+    console.log(`[news-agent] Voice warmup triggered for ${newsId}`);
+  } catch (e: any) {
+    console.warn(`[news-agent] Voice warmup failed: ${e.message}`);
+  }
+}
+
 // ─── IndexNow + Sitemap Ping ────────────────────────────
 async function pingIndexNow(newsId: string) {
   const DOMAIN = 'https://promo-music.ru';
@@ -742,6 +752,7 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
     await newsPublicStore.set(id, newsRecord);
     pingIndexNow(id).catch(() => {});
     postToTelegram({ id, title: item.title, excerpt: item.excerpt, authorName: poster.name, source: source.name, tags: item.tags, category: item.category, imageUrl: item.imageUrl }).catch(() => {});
+    warmupNewsVoice(id).catch(() => {});
     existingTitles.push(item.title);
     added++;
 
