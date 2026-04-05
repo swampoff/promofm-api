@@ -57,13 +57,18 @@ function bestPosterForSource(sourceId: string): typeof POSTERS[number] {
 }
 
 
-// ─── Voice warmup: прогрев кэша озвучки при публикации ───
-async function warmupNewsVoice(newsId: string) {
+// ─── Live Broadcast: автоозвучка в FM-эфир при публикации ───
+async function broadcastNewsLive(newsId: string) {
   try {
-    await fetch("http://localhost:3000/server/api/news-voice/warmup/" + newsId, { method: "POST" });
-    console.log(`[news-agent] Voice warmup triggered for ${newsId}`);
+    const key = process.env.VPS_INTERNAL_KEY || "";
+    const resp = await fetch("http://localhost:3000/server/api/broadcast/broadcast/" + newsId, {
+      method: "POST",
+      headers: { "X-Internal-Key": key },
+    });
+    const data = await resp.json();
+    console.log(`[news-agent] Broadcast queued: ${newsId}, listeners: ${data.listeners || 0}`);
   } catch (e: any) {
-    console.warn(`[news-agent] Voice warmup failed: ${e.message}`);
+    console.warn(`[news-agent] Broadcast failed: ${e.message}`);
   }
 }
 
@@ -752,7 +757,7 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
     await newsPublicStore.set(id, newsRecord);
     pingIndexNow(id).catch(() => {});
     postToTelegram({ id, title: item.title, excerpt: item.excerpt, authorName: poster.name, source: source.name, tags: item.tags, category: item.category, imageUrl: item.imageUrl }).catch(() => {});
-    warmupNewsVoice(id).catch(() => {});
+    broadcastNewsLive(id).catch(() => {});
     existingTitles.push(item.title);
     added++;
 
