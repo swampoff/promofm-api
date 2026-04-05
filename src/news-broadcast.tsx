@@ -1,17 +1,17 @@
 /**
- * NEWS BROADCAST — Лайв FM-эфир с дикторами
- * 
- * Когда публикуется новость -> LLM script -> Gemini TTS -> PCM стрим ->
- * все подключённые слушатели слышат диктора в реальном времени.
- * 
- * GET  /live          — подключиться к эфиру (audio/L16 chunked)
- * POST /broadcast/:id — поставить новость в очередь озвучки
- * GET  /queue         — текущая очередь (admin)
- * GET  /status        — статистика
+ * NEWS BROADCAST — Голос ведущих в лайв promo.fm эфире
+ *
+ * Новость/текст → LLM script → Gemini TTS → PCM → AutoDJ inject → promo.fm стрим
+ * Голос миксуется поверх музыки с ducking (как настоящее FM-радио).
+ *
+ * POST /speak           — текст → LLM скрипт → TTS → inject в эфир (бот)
+ * POST /text            — готовый текст → TTS → inject (без LLM)
+ * POST /broadcast/:id   — новость из БД → LLM → TTS → inject
+ * GET  /queue           — очередь (admin)
+ * GET  /status          — статистика
  */
 
 import { Hono } from 'hono';
-import { stream } from 'hono/streaming';
 import { getDbClient } from './db-client.tsx';
 import { callLLM } from './llm-router.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -20,18 +20,10 @@ const app = new Hono();
 
 const GEMINI_PROXY_URL = process.env.GEMINI_PROXY_URL || 'http://187.77.85.42:8088';
 const GEMINI_PROXY_KEY = process.env.GEMINI_PROXY_KEY || 'promofm-gemini-2026';
+const AUTODJ_URL = process.env.AUTODJ_URL || 'http://127.0.0.1:8087';
 const SAMPLE_RATE = 24000;
 const INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 
-// --- Broadcast Hub ---
-
-interface Listener {
-  id: string;
-  write: (chunk: Uint8Array) => Promise<void>;
-  connectedAt: number;
-}
-
-const listeners = new Map<string, Listener>();
 const broadcastQueue: { newsId: string; addedAt: number }[] = [];
 let isBroadcasting = false;
 let currentBroadcast: { newsId: string; title: string; author: string; startedAt: number } | null = null;
@@ -72,19 +64,149 @@ async function makeScript(title: string, text: string, author: string): Promise<
   return (result?.content || title).trim();
 }
 
-// Broadcast PCM chunk to all listeners
-function broadcastChunk(chunk: Uint8Array) {
-  const dead: string[] = [];
-  for (const [id, listener] of listeners) {
-    listener.write(chunk).catch(() => dead.push(id));
+// --- Core: TTS → collect PCM → inject into AutoDJ stream ---
+
+async function ttsAndInject(text: string, author: string): Promise<{ok: boolean; bytes: number; duration: number; error?: string}> {
+  // Step 1: Get PCM stream from Gemini TTS proxy
+  const proxyResp = await fetch(`${GEMINI_PROXY_URL}/tts-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
+    body: JSON.stringify({ text, author }),
+  });
+
+  if (!proxyResp.ok || !proxyResp.body) {
+    return { ok: false, bytes: 0, duration: 0, error: `TTS proxy error: ${proxyResp.status}` };
   }
-  for (const id of dead) {
-    listeners.delete(id);
-    console.log(`[broadcast] Listener disconnected: ${id} (${listeners.size} remaining)`);
+
+  // Step 2: Collect all PCM chunks
+  const reader = proxyResp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.length > 0) {
+      chunks.push(value);
+      totalBytes += value.length;
+    }
+  }
+
+  if (totalBytes < 1000) {
+    return { ok: false, bytes: totalBytes, duration: 0, error: 'TTS returned too little data' };
+  }
+
+  // Step 3: Combine chunks into single buffer
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  const duration = (totalBytes / 2) / SAMPLE_RATE;
+  console.log(`[broadcast] TTS collected: ${totalBytes} bytes (${duration.toFixed(1)}s), injecting into promo.fm...`);
+
+  // Step 4: POST raw PCM to AutoDJ /api/inject (converts mono 24kHz → stereo 44.1kHz, sets overlay)
+  try {
+    const injectResp = await fetch(`${AUTODJ_URL}/api/inject`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Internal-Key': INTERNAL_KEY,
+      },
+      body: combined,
+    });
+    const injectData = await injectResp.json();
+
+    if (!injectResp.ok) {
+      console.error(`[broadcast] AutoDJ inject error:`, injectData.error);
+      return { ok: false, bytes: totalBytes, duration, error: injectData.error };
+    }
+
+    console.log(`[broadcast] Injected into promo.fm: ${injectData.duration}s overlay pending`);
+    totalBroadcasts++;
+    return { ok: true, bytes: totalBytes, duration: injectData.duration || duration };
+
+  } catch (err: any) {
+    console.error(`[broadcast] AutoDJ inject failed:`, err.message);
+    return { ok: false, bytes: totalBytes, duration, error: err.message };
   }
 }
 
-// Process single news item
+// --- POST /speak --- текст → LLM скрипт → TTS → inject в эфир
+
+app.post("/speak", async (c) => {
+  const key = c.req.header("X-Internal-Key") || "";
+  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const { text, author } = await c.req.json().catch(() => ({ text: "", author: "DJ Den" }));
+  if (!text || text.length < 5) return c.json({ error: "Text too short" }, 400);
+
+  const speakerAuthor = author || "DJ Den";
+  const rawText = cleanText(text);
+
+  // LLM radio script
+  let script: string;
+  try {
+    script = await makeScript(rawText.slice(0, 100), rawText, speakerAuthor);
+  } catch (e) {
+    console.warn(`[broadcast] LLM failed, using raw text:`, e);
+    script = rawText;
+  }
+
+  console.log(`[broadcast] Speak: "${script.slice(0, 50)}..." by ${speakerAuthor}`);
+  currentBroadcast = { newsId: "bot-speak", title: text.slice(0, 60), author: speakerAuthor, startedAt: Date.now() };
+
+  try {
+    const result = await ttsAndInject(script, speakerAuthor);
+    currentBroadcast = null;
+
+    if (!result.ok) {
+      return c.json({ error: result.error || "Inject failed" }, 500);
+    }
+
+    return c.json({ ok: true, bytes: result.bytes, duration: result.duration, script: script.slice(0, 200) });
+  } catch (err) {
+    currentBroadcast = null;
+    return c.json({ error: safeErrorMessage(err) }, 500);
+  }
+});
+
+// --- POST /text --- готовый текст → TTS → inject (без LLM)
+
+app.post("/text", async (c) => {
+  const key = c.req.header("X-Internal-Key") || "";
+  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const { text, author } = await c.req.json().catch(() => ({ text: "", author: "DJ Den" }));
+  if (!text || text.length < 3) return c.json({ error: "Text too short" }, 400);
+
+  const speakerAuthor = author || "DJ Den";
+  console.log(`[broadcast] Text inject: "${text.slice(0, 50)}..." by ${speakerAuthor}`);
+  currentBroadcast = { newsId: "bot-text", title: text.slice(0, 60), author: speakerAuthor, startedAt: Date.now() };
+
+  try {
+    const result = await ttsAndInject(text.slice(0, 3000), speakerAuthor);
+    currentBroadcast = null;
+
+    if (!result.ok) {
+      return c.json({ error: result.error || "Inject failed" }, 500);
+    }
+
+    return c.json({ ok: true, bytes: result.bytes, duration: result.duration });
+  } catch (err) {
+    currentBroadcast = null;
+    return c.json({ error: safeErrorMessage(err) }, 500);
+  }
+});
+
+// --- Process single news from DB ---
+
 async function broadcastNews(newsId: string): Promise<boolean> {
   const db = getDbClient();
   const { data: row } = await db.from('news_public').select('*').eq('id', newsId).maybeSingle();
@@ -99,165 +221,55 @@ async function broadcastNews(newsId: string): Promise<boolean> {
   const excerpt = d.excerpt || d.summary || '';
   const author = d.authorName || d.author_name || 'DJ Den';
 
-  console.log(`[broadcast] Starting: "${title.slice(0, 50)}" by ${author} -> ${listeners.size} listeners`);
+  console.log(`[broadcast] News: "${title.slice(0, 50)}" by ${author}`);
   currentBroadcast = { newsId, title, author, startedAt: Date.now() };
 
-  // Always broadcast — listeners may connect mid-stream
-
-  // Generate radio script
   const rawText = cleanText(content || excerpt || title);
-  const script = await makeScript(title, rawText, author);
-  console.log(`[broadcast] Script (${script.length} chars): ${script.slice(0, 80)}...`);
-
-  // Stream TTS to all listeners
+  let script: string;
   try {
-    const proxyResp = await fetch(`${GEMINI_PROXY_URL}/tts-stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
-      body: JSON.stringify({ text: script, author }),
-    });
-
-    if (!proxyResp.ok || !proxyResp.body) {
-      console.error(`[broadcast] TTS proxy error: ${proxyResp.status}`);
-      currentBroadcast = null;
-      return false;
-    }
-
-    const reader = proxyResp.body.getReader();
-    let totalBytes = 0;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value && value.length > 0) {
-        broadcastChunk(value);
-        totalBytes += value.length;
-      }
-    }
-
-    const duration = ((totalBytes / 2) / SAMPLE_RATE).toFixed(1);
-    console.log(`[broadcast] Done: ${totalBytes} bytes (${duration}s audio) -> ${listeners.size} listeners`);
-    totalBroadcasts++;
-
-  } catch (err) {
-    console.error(`[broadcast] TTS stream error:`, err);
+    script = await makeScript(title, rawText, author);
+  } catch {
+    script = rawText;
   }
 
+  const result = await ttsAndInject(script, author);
   currentBroadcast = null;
-  return true;
+  return result.ok;
 }
 
-// Queue processor
-async function processQueue() {
-  if (isBroadcasting || broadcastQueue.length === 0) return;
-  isBroadcasting = true;
-
-  while (broadcastQueue.length > 0) {
-    const item = broadcastQueue.shift()!;
-    try {
-      await broadcastNews(item.newsId);
-    } catch (err) {
-      console.error(`[broadcast] Queue error:`, err);
-    }
-    // 2 sec silence gap between news items
-    if (broadcastQueue.length > 0) {
-      await new Promise(r => setTimeout(r, 2000));
-    }
-  }
-
-  isBroadcasting = false;
-}
-
-// --- GET /live --- подключиться к лайв-эфиру
-
-app.get('/live', async (c) => {
-  const listenerId = `l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-
-  c.header('Content-Type', `audio/L16;rate=${SAMPLE_RATE};channels=1`);
-  c.header('Transfer-Encoding', 'chunked');
-  c.header('Cache-Control', 'no-cache, no-store');
-  c.header('Connection', 'keep-alive');
-  c.header('Access-Control-Allow-Origin', '*');
-  c.header('X-Sample-Rate', String(SAMPLE_RATE));
-  c.header('X-Listener-Id', listenerId);
-
-  return stream(c, async (s) => {
-    const listener: Listener = {
-      id: listenerId,
-      write: async (chunk) => { await s.write(chunk); },
-      connectedAt: Date.now(),
-    };
-
-    listeners.set(listenerId, listener);
-    console.log(`[broadcast] Listener connected: ${listenerId} (${listeners.size} total)`);
-
-    // Keep alive -- send silence every 30s to prevent timeout
-    const keepAlive = setInterval(() => {
-      if (!listeners.has(listenerId)) {
-        clearInterval(keepAlive);
-        return;
-      }
-      // 480 bytes = 10ms of silence at 24kHz mono 16-bit
-      const silence = new Uint8Array(480);
-      s.write(silence).catch(() => {
-        clearInterval(keepAlive);
-        listeners.delete(listenerId);
-      });
-    }, 30000);
-
-    // Wait until client disconnects
-    await new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        if (!listeners.has(listenerId)) {
-          clearInterval(check);
-          resolve();
-        }
-      }, 5000);
-
-      c.req.raw.signal?.addEventListener('abort', () => {
-        clearInterval(check);
-        listeners.delete(listenerId);
-        resolve();
-      });
-    });
-
-    clearInterval(keepAlive);
-    listeners.delete(listenerId);
-    console.log(`[broadcast] Listener left: ${listenerId} (${listeners.size} remaining)`);
-  });
-});
-
-// --- POST /broadcast/:newsId --- поставить в очередь
+// --- POST /broadcast/:newsId --- поставить новость в очередь
 
 app.post('/broadcast/:newsId', async (c) => {
   const newsId = c.req.param('newsId');
-
-  // Auth: internal key
   const key = c.req.header('X-Internal-Key') || '';
   if (INTERNAL_KEY && key !== INTERNAL_KEY) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  // Check if already in queue
   if (broadcastQueue.some(q => q.newsId === newsId)) {
-    return c.json({ ok: true, already_queued: true, position: broadcastQueue.findIndex(q => q.newsId === newsId) + 1 });
+    return c.json({ ok: true, already_queued: true });
   }
 
   broadcastQueue.push({ newsId, addedAt: Date.now() });
   console.log(`[broadcast] Queued: ${newsId} (position ${broadcastQueue.length})`);
 
-  // Start processing
-  processQueue().catch(console.error);
+  // Process queue
+  if (!isBroadcasting) {
+    isBroadcasting = true;
+    (async () => {
+      while (broadcastQueue.length > 0) {
+        const item = broadcastQueue.shift()!;
+        try { await broadcastNews(item.newsId); } catch (err) { console.error(`[broadcast] Queue error:`, err); }
+        if (broadcastQueue.length > 0) await new Promise(r => setTimeout(r, 2000));
+      }
+      isBroadcasting = false;
+    })().catch(console.error);
+  }
 
-  return c.json({
-    ok: true,
-    queued: true,
-    position: broadcastQueue.length,
-    listeners: listeners.size,
-  });
+  return c.json({ ok: true, queued: true, position: broadcastQueue.length });
 });
 
-// --- GET /queue --- текущая очередь (admin)
+// --- GET /queue ---
 
 app.get('/queue', async (c) => {
   return c.json({
@@ -268,144 +280,29 @@ app.get('/queue', async (c) => {
   });
 });
 
-
-// --- POST /text --- озвучить произвольный текст в эфир (для бота)
-
-app.post("/text", async (c) => {
-  const key = c.req.header("X-Internal-Key") || "";
-  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-
-  const { text, author } = await c.req.json().catch(() => ({ text: "", author: "DJ Den" }));
-  if (!text || text.length < 3) return c.json({ error: "Text too short" }, 400);
-
-  const speakerAuthor = author || "DJ Den";
-  console.log(`[broadcast] Text broadcast: "${text.slice(0, 50)}..." by ${speakerAuthor} -> ${listeners.size} listeners`);
-
-  // Always broadcast — listeners may connect mid-stream
-
-  currentBroadcast = { newsId: "bot-text", title: text.slice(0, 60), author: speakerAuthor, startedAt: Date.now() };
-
-  try {
-    const proxyResp = await fetch(`${GEMINI_PROXY_URL}/tts-stream`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-proxy-key": GEMINI_PROXY_KEY },
-      body: JSON.stringify({ text: text.slice(0, 3000), author: speakerAuthor }),
-    });
-
-    if (!proxyResp.ok || !proxyResp.body) {
-      currentBroadcast = null;
-      return c.json({ error: "TTS proxy error" }, 500);
-    }
-
-    const reader = proxyResp.body.getReader();
-    let totalBytes = 0;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value && value.length > 0) {
-        broadcastChunk(value);
-        totalBytes += value.length;
-      }
-    }
-
-    const duration = (totalBytes / 2) / SAMPLE_RATE;
-    console.log(`[broadcast] Text done: ${totalBytes} bytes (${duration.toFixed(1)}s) -> ${listeners.size} listeners`);
-    totalBroadcasts++;
-    currentBroadcast = null;
-
-    return c.json({ ok: true, listeners: listeners.size, bytes: totalBytes, duration });
-
-  } catch (err) {
-    console.error("[broadcast] Text broadcast error:", err);
-    currentBroadcast = null;
-    return c.json({ error: safeErrorMessage(err) }, 500);
-  }
-});
-// --- POST /speak --- full pipeline: raw text → LLM script → TTS → broadcast
-
-app.post("/speak", async (c) => {
-  const key = c.req.header("X-Internal-Key") || "";
-  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-
-  const { text, author } = await c.req.json().catch(() => ({ text: "", author: "DJ Den" }));
-  if (!text || text.length < 5) return c.json({ error: "Text too short" }, 400);
-
-  const speakerAuthor = author || "DJ Den";
-
-  // Step 1: Generate radio script via LLM
-  const rawText = cleanText(text);
-  let script: string;
-  try {
-    script = await makeScript(rawText.slice(0, 100), rawText, speakerAuthor);
-  } catch (e) {
-    console.warn(`[broadcast] LLM failed, using raw text:`, e);
-    script = rawText;
-  }
-
-  console.log(`[broadcast] Speak: "${script.slice(0, 50)}..." by ${speakerAuthor} -> ${listeners.size} listeners`);
-
-  // Always broadcast — listeners may connect mid-stream
-
-  currentBroadcast = { newsId: "bot-speak", title: text.slice(0, 60), author: speakerAuthor, startedAt: Date.now() };
-
-  try {
-    const proxyResp = await fetch(`${GEMINI_PROXY_URL}/tts-stream`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-proxy-key": GEMINI_PROXY_KEY },
-      body: JSON.stringify({ text: script, author: speakerAuthor }),
-    });
-
-    if (!proxyResp.ok || !proxyResp.body) {
-      currentBroadcast = null;
-      return c.json({ error: "TTS proxy error" }, 500);
-    }
-
-    const reader = proxyResp.body.getReader();
-    let totalBytes = 0;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value && value.length > 0) {
-        broadcastChunk(value);
-        totalBytes += value.length;
-      }
-    }
-
-    const duration = (totalBytes / 2) / SAMPLE_RATE;
-    console.log(`[broadcast] Speak done: ${totalBytes} bytes (${duration.toFixed(1)}s) -> ${listeners.size} listeners`);
-    totalBroadcasts++;
-    currentBroadcast = null;
-
-    return c.json({ ok: true, listeners: listeners.size, bytes: totalBytes, duration, script: script.slice(0, 200) });
-
-  } catch (err) {
-    console.error("[broadcast] Speak error:", err);
-    currentBroadcast = null;
-    return c.json({ error: safeErrorMessage(err) }, 500);
-  }
-});
 // --- GET /status ---
 
 app.get('/status', async (c) => {
+  // Also fetch AutoDJ status for listener count
+  let autoDjStatus: any = null;
+  try {
+    const r = await fetch(`${AUTODJ_URL}/api/status`, { signal: AbortSignal.timeout(2000) });
+    if (r.ok) autoDjStatus = await r.json();
+  } catch { /* silent */ }
+
   return c.json({
     success: true,
-    mode: 'live-broadcast',
-    listeners: listeners.size,
-    listenerDetails: [...listeners.entries()].map(([id, l]) => ({
-      id, connectedAt: new Date(l.connectedAt).toISOString(),
-      uptime: Math.round((Date.now() - l.connectedAt) / 1000),
-    })),
+    mode: 'autodj-inject',
+    streamUrl: 'https://promo-music.ru/air/live/promo.fm',
+    autoDj: autoDjStatus ? {
+      status: autoDjStatus.status,
+      currentTrack: autoDjStatus.current_track,
+      listeners: autoDjStatus.listeners,
+    } : null,
     currentBroadcast,
     queueLength: broadcastQueue.length,
     totalBroadcasts,
     model: 'gemini-3.1-flash-live-preview',
-    sampleRate: SAMPLE_RATE,
   });
 });
 
