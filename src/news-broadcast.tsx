@@ -272,6 +272,132 @@ app.get('/queue', async (c) => {
   });
 });
 
+
+// --- POST /text --- озвучить произвольный текст в эфир (для бота)
+
+app.post("/text", async (c) => {
+  const key = c.req.header("X-Internal-Key") || "";
+  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const { text, author } = await c.req.json().catch(() => ({ text: "", author: "DJ Den" }));
+  if (!text || text.length < 3) return c.json({ error: "Text too short" }, 400);
+
+  const speakerAuthor = author || "DJ Den";
+  console.log(`[broadcast] Text broadcast: "${text.slice(0, 50)}..." by ${speakerAuthor} -> ${listeners.size} listeners`);
+
+  if (listeners.size === 0) {
+    return c.json({ ok: true, listeners: 0, skipped: true, reason: "no listeners" });
+  }
+
+  currentBroadcast = { newsId: "bot-text", title: text.slice(0, 60), author: speakerAuthor, startedAt: Date.now() };
+
+  try {
+    const proxyResp = await fetch(`${GEMINI_PROXY_URL}/tts-stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-proxy-key": GEMINI_PROXY_KEY },
+      body: JSON.stringify({ text: text.slice(0, 3000), author: speakerAuthor }),
+    });
+
+    if (!proxyResp.ok || !proxyResp.body) {
+      currentBroadcast = null;
+      return c.json({ error: "TTS proxy error" }, 500);
+    }
+
+    const reader = proxyResp.body.getReader();
+    let totalBytes = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length > 0) {
+        broadcastChunk(value);
+        totalBytes += value.length;
+      }
+    }
+
+    const duration = (totalBytes / 2) / SAMPLE_RATE;
+    console.log(`[broadcast] Text done: ${totalBytes} bytes (${duration.toFixed(1)}s) -> ${listeners.size} listeners`);
+    totalBroadcasts++;
+    currentBroadcast = null;
+
+    return c.json({ ok: true, listeners: listeners.size, bytes: totalBytes, duration });
+
+  } catch (err) {
+    console.error("[broadcast] Text broadcast error:", err);
+    currentBroadcast = null;
+    return c.json({ error: safeErrorMessage(err) }, 500);
+  }
+});
+// --- POST /speak --- full pipeline: raw text → LLM script → TTS → broadcast
+
+app.post("/speak", async (c) => {
+  const key = c.req.header("X-Internal-Key") || "";
+  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const { text, author } = await c.req.json().catch(() => ({ text: "", author: "DJ Den" }));
+  if (!text || text.length < 5) return c.json({ error: "Text too short" }, 400);
+
+  const speakerAuthor = author || "DJ Den";
+
+  // Step 1: Generate radio script via LLM
+  const rawText = cleanText(text);
+  let script: string;
+  try {
+    script = await makeScript(rawText.slice(0, 100), rawText, speakerAuthor);
+  } catch (e) {
+    console.warn(`[broadcast] LLM failed, using raw text:`, e);
+    script = rawText;
+  }
+
+  console.log(`[broadcast] Speak: "${script.slice(0, 50)}..." by ${speakerAuthor} -> ${listeners.size} listeners`);
+
+  if (listeners.size === 0) {
+    return c.json({ ok: true, listeners: 0, skipped: true, reason: "no listeners", script: script.slice(0, 200) });
+  }
+
+  currentBroadcast = { newsId: "bot-speak", title: text.slice(0, 60), author: speakerAuthor, startedAt: Date.now() };
+
+  try {
+    const proxyResp = await fetch(`${GEMINI_PROXY_URL}/tts-stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-proxy-key": GEMINI_PROXY_KEY },
+      body: JSON.stringify({ text: script, author: speakerAuthor }),
+    });
+
+    if (!proxyResp.ok || !proxyResp.body) {
+      currentBroadcast = null;
+      return c.json({ error: "TTS proxy error" }, 500);
+    }
+
+    const reader = proxyResp.body.getReader();
+    let totalBytes = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length > 0) {
+        broadcastChunk(value);
+        totalBytes += value.length;
+      }
+    }
+
+    const duration = (totalBytes / 2) / SAMPLE_RATE;
+    console.log(`[broadcast] Speak done: ${totalBytes} bytes (${duration.toFixed(1)}s) -> ${listeners.size} listeners`);
+    totalBroadcasts++;
+    currentBroadcast = null;
+
+    return c.json({ ok: true, listeners: listeners.size, bytes: totalBytes, duration, script: script.slice(0, 200) });
+
+  } catch (err) {
+    console.error("[broadcast] Speak error:", err);
+    currentBroadcast = null;
+    return c.json({ error: safeErrorMessage(err) }, 500);
+  }
+});
 // --- GET /status ---
 
 app.get('/status', async (c) => {
