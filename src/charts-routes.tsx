@@ -206,7 +206,7 @@ interface ExternalChartData {
   borderColor: string;
   tracks: ChartTrackEntry[];
   fetchedAt: string;
-  parsedBy: 'mistral' | 'fallback';
+  parsedBy: 'mistral' | 'fallback' | 'html_parser' | 'json_api';
   error?: string;
 }
 
@@ -306,12 +306,13 @@ async function extractChartWithMistral(
   sourceConfig: ChartSourceConfig,
   pageText: string,
 ): Promise<ChartTrackEntry[] | null> {
-  const llmKey = process.env.OPENROUTER_API_KEY || process.env.MISTRAL_API_KEY;
-  if (!llmKey) {
-    console.log('No LLM API key set (OPENROUTER or MISTRAL), skipping chart extraction');
+  const geminiKey = process.env.GEMINI_API_KEY;
+  const geminiProxyUrl = process.env.GEMINI_PROXY_URL;
+  const geminiProxyKey = process.env.GEMINI_PROXY_KEY || '';
+  if (!geminiKey) {
+    console.log('No GEMINI_API_KEY set, skipping chart extraction');
     return null;
   }
-  const useOpenRouter = !!process.env.OPENROUTER_API_KEY;
 
   const systemPrompt = `Ты - парсер музыкальных чартов. Из текста HTML-страницы извлеки список треков чарта.
 ${sourceConfig.parsingHint}
@@ -323,38 +324,39 @@ ${sourceConfig.parsingHint}
 - Максимум ${sourceConfig.maxTracks} треков
 - Если не удалось извлечь чарт, верни пустой массив []
 - НЕ добавляй markdown-обёртку, только чистый JSON
-- Если трек содержит feat., оставь feat. в title`;
+- Если трек содержит feat., оставь feat. в title
+- НЕ ПРИДУМЫВАЙ треки. Возвращай ТОЛЬКО то, что реально есть на странице.
+- Если нашёл меньше треков чем запрошено — верни только найденные, НЕ заполняй остальное плейсхолдерами`;
 
   try {
-    const apiUrl2 = useOpenRouter ? 'https://openrouter.ai/api/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
-    const resp = await fetch(apiUrl2, {
+    const geminiModel = 'gemini-2.0-flash';
+    const geminiUrl = geminiProxyUrl
+      ? `${geminiProxyUrl}/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`
+      : `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`;
+    const resp = await fetch(geminiUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + llmKey,
+        ...(geminiProxyKey ? { 'x-proxy-key': geminiProxyKey } : {}),
       },
       body: JSON.stringify({
-        model: useOpenRouter ? 'google/gemini-2.0-flash-001' : 'mistral-large-latest',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Вот текст страницы чарта "${sourceConfig.name}" (${sourceConfig.url}):\n\n${pageText}` },
+        contents: [
+          { role: 'user', parts: [{ text: systemPrompt + '\n\n---\n\nВот текст страницы чарта "' + sourceConfig.name + '" (' + sourceConfig.url + '):\n\n' + pageText }] },
         ],
-        temperature: 0.1,
-        max_tokens: 3000,
-        response_format: { type: 'json_object' },
+        generationConfig: { temperature: 0.1, maxOutputTokens: 4000 },
       }),
     });
 
     if (!resp.ok) {
-      console.log(`Mistral chart extraction error for ${sourceConfig.id}: ${await resp.text()}`);
+      console.log(`Gemini chart extraction error for ${sourceConfig.id}: ${await resp.text()}`);
       return null;
     }
 
     const data = await resp.json();
-    const content = data.choices?.[0]?.message?.content;
+    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || data.choices?.[0]?.message?.content;
 
     if (!content) {
-      console.log(`Mistral returned empty content for ${sourceConfig.id}`);
+      console.log(`Gemini returned empty content for ${sourceConfig.id}`);
       return null;
     }
 
@@ -369,7 +371,7 @@ ${sourceConfig.parsingHint}
       if (match) {
         parsed = JSON.parse(match[0]);
       } else {
-        console.log(`Failed to parse Mistral response for ${sourceConfig.id}: ${content.slice(0, 200)}`);
+        console.log(`Failed to parse Gemini response for ${sourceConfig.id}: ${content.slice(0, 200)}`);
         return null;
       }
     }
@@ -393,6 +395,17 @@ ${sourceConfig.parsingHint}
     // Map to our format with trend calculation
     const entries: ChartTrackEntry[] = rawTracks
       .filter((t: any) => t.title && t.artist)
+      .filter((t: any) => {
+        // Reject LLM-generated placeholder tracks
+        const title = String(t.title).trim();
+        const artist = String(t.artist).trim();
+        if (/^Название песни\s*\d+$/i.test(title)) return false;
+        if (/^Артист\s*\d+$/i.test(artist)) return false;
+        if (/^Track\s*\d+$/i.test(title)) return false;
+        if (/^Artist\s*\d+$/i.test(artist)) return false;
+        if (/^Song\s*\d+$/i.test(title)) return false;
+        return true;
+      })
       .slice(0, sourceConfig.maxTracks)
       .map((t: any, idx: number) => {
         const position = t.position || idx + 1;
@@ -426,12 +439,66 @@ ${sourceConfig.parsingHint}
         };
       });
 
-    console.log(`Extracted ${entries.length} tracks for ${sourceConfig.id} via Mistral`);
+    console.log(`Extracted tracks via Gemini`);
     return entries;
   } catch (error) {
-    console.log(`Mistral extraction error for ${sourceConfig.id}: ${error}`);
+    console.log(`Gemini extraction error for ${sourceConfig.id}: ${error}`);
     return null;
   }
+}
+
+
+// --- Direct HTML parser for Russian Radio (no LLM needed) ---
+async function parseRusskoeRadioHTML(html: string, prevTracks: ChartTrackEntry[]): Promise<ChartTrackEntry[]> {
+  const titleRegex = /<div class="rus-hit-title">(.*?)<\/div>/g;
+  const artistRegex = /<div class="rus-hit-artist">(.*?)<\/div>/g;
+
+  const titles: string[] = [];
+  const artists: string[] = [];
+  let match;
+
+  while ((match = titleRegex.exec(html)) !== null) {
+    titles.push(match[1].trim());
+  }
+  while ((match = artistRegex.exec(html)) !== null) {
+    artists.push(match[1].trim());
+  }
+
+  const prevPositionMap = new Map<string, number>();
+  prevTracks.forEach(t => {
+    prevPositionMap.set(`${t.artist}|||${t.title}`.toLowerCase(), t.position);
+  });
+
+  const entries: ChartTrackEntry[] = [];
+  const len = Math.min(titles.length, artists.length);
+
+  for (let i = 0; i < len; i++) {
+    const title = titles[i];
+    const artist = artists[i];
+
+    // Skip placeholder/fake tracks
+    if (/^\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u043f\u0435\u0441\u043d\u0438\s*\d+$/i.test(title)) continue;
+    if (/^\u0410\u0440\u0442\u0438\u0441\u0442\s*\d+$/i.test(artist)) continue;
+    if (!title || !artist) continue;
+
+    const position = entries.length + 1;
+    const key = `${artist}|||${title}`.toLowerCase();
+    const prevPos = prevPositionMap.get(key);
+
+    let trend: 'up' | 'down' | 'same' | 'new' = 'new';
+    let trendValue = 0;
+
+    if (prevPos !== undefined) {
+      const diff = prevPos - position;
+      if (diff > 0) { trend = 'up'; trendValue = diff; }
+      else if (diff < 0) { trend = 'down'; trendValue = Math.abs(diff); }
+      else { trend = 'same'; trendValue = 0; }
+    }
+
+    entries.push({ position, previousPosition: prevPos ?? 0, title, artist, trend, trendValue });
+  }
+
+  return entries;
 }
 
 // ─── Aggregation Logic ──────────────────────────────────────
@@ -464,8 +531,33 @@ async function aggregateSource(source: ChartSourceConfig): Promise<ExternalChart
     };
   }
 
-  // Step 2: Extract chart with Mistral
-  const tracks = await extractChartWithMistral(source, pageText);
+  // Step 2: Extract chart (direct HTML parser for russkoe, Gemini for others)
+  let tracks: ChartTrackEntry[] | null = null;
+  if (source.id === 'russkoe') {
+    // Fetch raw HTML (not stripped text) for direct parsing
+    try {
+      const rawResp = await fetch(source.url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Accept-Language': 'ru-RU,ru;q=0.9',
+        },
+      });
+      if (rawResp.ok) {
+        const rawHtml = await rawResp.text();
+        const prevData: any = await chartSourcesStore.get(source.id);
+        const prevTracks: ChartTrackEntry[] = prevData?.tracks || [];
+        tracks = await parseRusskoeRadioHTML(rawHtml, prevTracks);
+        if (tracks.length > 0) {
+          console.log(`Parsed ${tracks.length} real tracks for russkoe via direct HTML parser`);
+        }
+      }
+    } catch (e) {
+      console.log(`Direct HTML fetch failed for russkoe: ${e}`);
+    }
+  } else {
+    tracks = await extractChartWithMistral(source, pageText);
+  }
 
   if (!tracks || tracks.length === 0) {
     // Return cached data if available
