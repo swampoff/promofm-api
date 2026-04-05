@@ -129,10 +129,10 @@ async function fetchDeezerPreview(artist: string, title: string): Promise<string
 // Batch fetch previews for an array of tracks (max concurrency = 5)
 
 // iTunes Search API — stable preview URLs (no expiration)
-async function fetchITunesPreview(artist: string, title: string): Promise<{preview: string; cover: string}> {
+async function fetchITunesPreview(artist: string, title: string, countryCode: string = "us"): Promise<{preview: string; cover: string}> {
   try {
     const q = encodeURIComponent(`${artist} ${title}`);
-    const res = await fetch(`https://itunes.apple.com/search?term=${q}&media=music&limit=3&country=us`);
+    const res = await fetch(`https://itunes.apple.com/search?term=${q}&media=music&limit=3&country=${countryCode}`);
     if (!res.ok) return { preview: '', cover: '' };
     const data = await res.json() as any;
     const results = data.results || [];
@@ -1940,6 +1940,72 @@ async function getIntlChart(platform: string, countryCode: string) {
   return await chartSourcesStore.get(key) as any;
 }
 
+
+// ─── International Preview Enrichment ─────────────────────────
+// Enrich international chart entries with preview URLs from iTunes/Deezer
+// Same approach as enrichWithPreviews but for IntlChartEntry[]
+async function enrichIntlWithPreviews(entries: IntlChartEntry[], countryCode: string = "us"): Promise<void> {
+  // 1. Load cached preview map
+  const cachedMap: any = await platformStatsStore.get('itunes:intl_preview_cache') || {};
+  const previewMap = new Map<string, { preview: string; cover: string }>(
+    Object.entries(cachedMap.urls || {}).map(([k, v]: [string, any]) => [k, v])
+  );
+
+  // 2. Match from cache, collect unmatched
+  const unmatched: { entry: IntlChartEntry; key: string }[] = [];
+  for (const entry of entries) {
+    if (entry.previewUrl) continue; // already has preview (e.g. Deezer)
+    const key = (entry.title + '|' + entry.artist).toLowerCase().trim();
+    const cached = previewMap.get(key);
+    if (cached) {
+      entry.previewUrl = cached.preview;
+      if (!entry.coverUrl && cached.cover) entry.coverUrl = cached.cover;
+    } else {
+      unmatched.push({ entry, key });
+    }
+  }
+
+  if (unmatched.length === 0) return;
+
+  // 3. Fetch from iTunes + Deezer for unmatched (max 25 per batch, concurrency 5)
+  let newFound = 0;
+  const batchSize = 5;
+  const toFetch = unmatched.slice(0, 25); // limit API calls
+  for (let i = 0; i < toFetch.length; i += batchSize) {
+    const chunk = toFetch.slice(i, i + batchSize);
+    const results = await Promise.allSettled(
+      chunk.map(async ({ entry, key }) => {
+        // Try iTunes first (stable URLs)
+        const itunes = await fetchITunesPreview(entry.artist, entry.title, countryCode);
+        if (itunes.preview) {
+          entry.previewUrl = itunes.preview;
+          if (!entry.coverUrl && itunes.cover) entry.coverUrl = itunes.cover;
+          previewMap.set(key, { preview: itunes.preview, cover: itunes.cover });
+          newFound++;
+          return;
+        }
+        // Fallback to Deezer
+        const deezer = await fetchDeezerData(entry.artist, entry.title);
+        if (deezer.preview) {
+          entry.previewUrl = deezer.preview;
+          if (!entry.coverUrl && deezer.coverUrl) entry.coverUrl = deezer.coverUrl;
+          previewMap.set(key, { preview: deezer.preview, cover: deezer.coverUrl });
+          newFound++;
+        }
+      })
+    );
+  }
+
+  // 4. Save updated cache
+  if (newFound > 0) {
+    const urlsObj: Record<string, { preview: string; cover: string }> = {};
+    for (const [k, v] of previewMap) urlsObj[k] = v;
+    await platformStatsStore.set('itunes:intl_preview_cache', {
+      urls: urlsObj, updatedAt: new Date().toISOString(), count: previewMap.size,
+    });
+  }
+}
+
 // ─── International Endpoints ─────────────────────────────────
 
 // GET /regions — all regions with countries
@@ -1981,9 +2047,15 @@ charts.get('/country/:code', async (c) => {
     // Check cache
     const cached = await getIntlChart(platform, code);
     if (cached?.entries?.length) {
+      // Enrich cached entries that might be missing previews
+      const cachedEntries = cached.entries.slice(0, limit);
+      const missingPreviews = cachedEntries.some((e: any) => !e.previewUrl);
+      if (missingPreviews) {
+        await enrichIntlWithPreviews(cachedEntries, code);
+      }
       return c.json({ success: true, data: {
         ...cached,
-        entries: cached.entries.slice(0, limit),
+        entries: cachedEntries,
       }});
     }
 
@@ -2001,6 +2073,8 @@ charts.get('/country/:code', async (c) => {
     }
 
     if (entries.length) {
+      // Enrich with preview URLs from iTunes/Deezer before saving
+      await enrichIntlWithPreviews(entries, code);
       await saveIntlChart(platform, code, entries);
     }
 
@@ -2027,18 +2101,20 @@ charts.post('/fetch-international', requireAdminOrKey, async (c) => {
     }
     await delay(500);
 
-    // 2) Last.fm Global
+    // 2) Last.fm Global (with preview enrichment)
     const lastfm = await fetchLastFmChart(50);
     if (lastfm.length) {
+      await enrichIntlWithPreviews(lastfm);
       await saveIntlChart('lastfm', 'global', lastfm);
       results.push({ platform: 'lastfm', country: 'global', tracks: lastfm.length });
     }
     await delay(500);
 
-    // 3) Apple Music for all countries
+    // 3) Apple Music for all countries (with preview enrichment)
     for (const country of INTERNATIONAL_COUNTRIES) {
       const apple = await fetchAppleMusicChart(country.code, 25);
       if (apple.length) {
+        await enrichIntlWithPreviews(apple, country.code);
         await saveIntlChart('apple', country.code, apple);
         results.push({ platform: 'apple', country: country.code, tracks: apple.length });
       }
@@ -2050,6 +2126,7 @@ charts.post('/fetch-international', requireAdminOrKey, async (c) => {
     for (const country of shazamCountries.slice(0, 8)) {
       const shazam = await fetchShazamCountryChart(country.shazamSlug, 25);
       if (shazam.length) {
+        await enrichIntlWithPreviews(shazam, country.code);
         await saveIntlChart('shazam', country.code, shazam);
         results.push({ platform: 'shazam', country: country.code, tracks: shazam.length });
       }
