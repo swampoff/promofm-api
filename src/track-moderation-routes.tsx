@@ -79,8 +79,8 @@ app.post('/submitTrack', requireAuth, async (c) => {
       yandex_music_url: body.yandex_music_url || '',
       youtube_url: body.youtube_url || '',
       spotify_url: body.spotify_url || '',
-      uploaded_by_email: body.uploaded_by_email || body.contact_email || body.email || '',
-      user_id: body.uploaded_by_user_id || body.user_id || body.userId || null,
+      uploaded_by_email: c.get('userEmail') || body.uploaded_by_email || body.contact_email || body.email || '',
+      user_id: c.get('userId') || null,  // ALWAYS from JWT — requireAuth guarantees this
       moderation_status: 'pending',
     });
 
@@ -281,7 +281,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             type: 'track_moderation',
             title: 'Результат модерации',
             message: 'Композиция «' + track.title + '» определена как AI-трек. Предлагаем размещение в разделе AI-музыки за ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' руб.',
-            link: '/cabinet/tracks',
+            link: '/artist/tracks',
           }).catch(() => {});
         } else {
           notifyCrossCabinet({
@@ -291,7 +291,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             type: 'track_moderation',
             title: 'Трек одобрен!',
             message: 'Трек «' + track.title + '» одобрен. Для публикации оплатите ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽.',
-            link: '/cabinet/tracks',
+            link: '/artist/tracks',
           }).catch(() => {});
         }
       }
@@ -390,7 +390,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           type: 'track_moderation',
           title: 'Результат модерации',
           message: rejectMsg,
-          link: '/cabinet/tracks',
+          link: '/artist/tracks',
         }).catch(() => {});
       }
 
@@ -426,14 +426,15 @@ app.post('/batchModeration', requireAuth, requireAdmin, async (c) => {
 
       if (action === 'approve') {
         await typed.updateTrack(trackId, {
-          moderation_status: 'published',
+          moderation_status: 'approved',
           moderated_at: now,
-          is_hidden: false,
+          is_hidden: true,
+          data: {
+            ...(track.data || {}),
+            requires_payment: true,
+            payment_amount: PUBLICATION_PRICE,
+          },
         });
-        // Award coins
-        if (track.user_id) {
-          await typed.awardCoins(track.user_id, COINS_ON_APPROVE, `Трек "${track.title}" одобрен`);
-        }
       } else {
         await typed.updateTrack(trackId, {
           moderation_status: 'rejected',
