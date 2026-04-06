@@ -11,7 +11,7 @@
  * Команды: /start, /author, /authors, /listeners, /status
  */
 
-const BOT_TOKEN = process.env.VOICE_BOT_TOKEN || '';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.VOICE_BOT_TOKEN || '';
 const RAW_ALLOWED = process.env.VOICE_BOT_ALLOWED_CHATS || '';
 const ALLOWED_CHATS = RAW_ALLOWED === 'ALL' ? []
   : (RAW_ALLOWED || process.env.TELEGRAM_LEAD_CHAT_ID || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -228,6 +228,26 @@ async function handleChannelPost(post) {
 
 let offset = 0;
 
+// --- Broadcast queue (sequential, avoid rate limits) ---
+const _queue = [];
+let _processing = false;
+
+function enqueue(fn) {
+  _queue.push(fn);
+  if (!_processing) processQueue();
+}
+
+async function processQueue() {
+  _processing = true;
+  while (_queue.length > 0) {
+    const fn = _queue.shift();
+    try { await fn(); } catch (e) { console.error('[queue]', e); }
+    // 3s pause between broadcasts to avoid Gemini rate limits
+    if (_queue.length > 0) await new Promise(r => setTimeout(r, 3000));
+  }
+  _processing = false;
+}
+
 async function poll() {
   try {
     const r = await fetch(
@@ -238,8 +258,8 @@ async function poll() {
     if (d.ok && d.result?.length) {
       for (const u of d.result) {
         offset = u.update_id + 1;
-        if (u.message) handle(u.message).catch(e => console.error('[bot]', e));
-        if (u.channel_post) handleChannelPost(u.channel_post).catch(e => console.error('[channel]', e));
+        if (u.message) enqueue(() => handle(u.message).catch(e => console.error('[bot]', e)));
+        if (u.channel_post) enqueue(() => handleChannelPost(u.channel_post).catch(e => console.error('[channel]', e)));
       }
     }
   } catch (e) {
