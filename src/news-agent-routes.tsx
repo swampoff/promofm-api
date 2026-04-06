@@ -50,8 +50,27 @@ newsAgent.post('/fetch/:sourceId', requireAdminOrKey, async (c) => {
       return c.json({ success: false, error: `Unknown source: ${sourceId}` }, 404);
     }
 
-    console.log(`[news-agent] Fetching from ${source.name}...`);
-    const result = await fetchNewsFromSource(source);
+    // Accept host override from cron (single DJ per shift)
+    const body = await c.req.json().catch(() => ({}));
+    const hostName = body?.host;
+    let overridePoster: any = undefined;
+    if (hostName) {
+      const POSTERS_MAP: Record<string, { name: string; avatar: string }> = {
+        'DJ Den': { name: 'DJ Den', avatar: '/avatars/avatar_dj_den.png' },
+        'Сандра': { name: '��андра', avatar: '/avatars/avatar_sandra.png' },
+        'Ли��на': { name: 'Лиана', avatar: '/avatars/avatar_liana.png' },
+        'Макс': { name: 'Макс', avatar: '/avatars/avatar_max.png' },
+        'Марк': { name: 'Марк', avatar: '/avatars/avatar_mark.png' },
+        'Пабло': { name: 'Пабло', avatar: '/avatars/avatar_pablo.png' },
+        'Нико': { name: 'Нико', avatar: '/avatars/avatar_nico.png' },
+        'РадКат': { name: 'Рад��ат', avatar: '/avatars/avatar_radkat.png' },
+        'Стелла': { name: 'Стелла', avatar: '/avatars/avatar_stella.png' },
+      };
+      overridePoster = POSTERS_MAP[hostName];
+    }
+
+    console.log(`[news-agent] Fetching from ${source.name}${hostName ? ` (host: ${hostName})` : ''}...`);
+    const result = await fetchNewsFromSource(source, overridePoster);
     return c.json({ success: true, sourceId, ...result });
   } catch (error) {
     console.error('[news-agent] Fetch error:', error);

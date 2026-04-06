@@ -20,6 +20,7 @@ const POSTERS = [
   { name: 'РадКат', avatar: '/avatars/avatar_radkat.png', style: 'технологии в музыке, AI, стриминг, цифровая индустрия. Пишет технично и футуристично' },
   { name: 'Стелла', avatar: '/avatars/avatar_stella.png', style: 'женщины в музыке, эмпауэрмент, социальные темы. Пишет вдохновляюще и глубоко' },
 ];
+const MAX_BROADCAST_PER_CYCLE = 3; // max news voiced per source fetch
 let posterIndex = 0;
 function nextPoster() {
   const p = POSTERS[posterIndex % POSTERS.length];
@@ -729,7 +730,7 @@ function titleSimilarity(a: string, b: string): number {
 
 // ─── Public API ─────────────────────────────────────────
 
-export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: number; errors: string[] }> {
+export async function fetchNewsFromSource(source: NewsSource, overridePoster?: typeof POSTERS[number]): Promise<{ added: number; errors: string[] }> {
   const errors: string[] = [];
 
   const fetchResult = await fetchPageText(source.url);
@@ -738,8 +739,8 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
     return { added: 0, errors };
   }
 
-  // Pick the best-fit persona for this source
-  const poster = bestPosterForSource(source.id);
+  // Use override poster (single host per cron cycle) or pick best-fit
+  const poster = overridePoster || bestPosterForSource(source.id);
   console.log(`[news-agent] ${source.name} → автор: ${poster.name} (${fetchResult.images.length} images found)`);
 
   const newsItems = await extractNewsWithLLM(source, fetchResult.text, poster, fetchResult.images);
@@ -780,7 +781,14 @@ export async function fetchNewsFromSource(source: NewsSource): Promise<{ added: 
     await newsPublicStore.set(id, newsRecord);
     pingIndexNow(id).catch(() => {});
     postToTelegram({ id, title: item.title, excerpt: item.excerpt, authorName: poster.name, source: source.name, tags: item.tags, category: item.category, imageUrl: item.imageUrl }).catch(() => {});
-    broadcastNewsLive(id).catch(() => {});
+
+    // Broadcast limit: max 3 per fetch cycle, rest are text-only
+    if (added < MAX_BROADCAST_PER_CYCLE) {
+      broadcastNewsLive(id).catch(() => {});
+    } else {
+      console.log(`[news-agent] Broadcast limit reached, skipping voice for: ${item.title.slice(0, 40)}`);
+    }
+
     existingTitles.push(item.title);
     added++;
 
@@ -795,9 +803,13 @@ export async function fetchAllNews(): Promise<{ totalAdded: number; results: Rec
   const results: Record<string, { added: number; errors: string[] }> = {};
   let totalAdded = 0;
 
+  // Single host for entire cycle — like real radio, one DJ per shift
+  const cycleHost = POSTERS[Math.floor(Math.random() * POSTERS.length)];
+  console.log(`[news-agent] Cycle host: ${cycleHost.name} — ведёт весь выпуск`);
+
   for (const source of NEWS_SOURCES) {
     console.log(`[news-agent] Fetching from ${source.name}...`);
-    const result = await fetchNewsFromSource(source);
+    const result = await fetchNewsFromSource(source, cycleHost);
     results[source.id] = result;
     totalAdded += result.added;
 

@@ -260,7 +260,11 @@ app.post('/broadcast/:newsId', async (c) => {
       while (broadcastQueue.length > 0) {
         const item = broadcastQueue.shift()!;
         try { await broadcastNews(item.newsId); } catch (err) { console.error(`[broadcast] Queue error:`, err); }
-        if (broadcastQueue.length > 0) await new Promise(r => setTimeout(r, 2000));
+        // 5 minutes between broadcasts — like real radio, не перебивать друг друга
+        if (broadcastQueue.length > 0) {
+          console.log(`[broadcast] Next in queue: ${broadcastQueue.length} remaining, waiting 5 min...`);
+          await new Promise(r => setTimeout(r, 5 * 60 * 1000));
+        }
       }
       isBroadcasting = false;
     })().catch(console.error);

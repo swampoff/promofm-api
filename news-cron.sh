@@ -6,17 +6,22 @@ LOG=/var/log/promofm-news.log
 
 SOURCES=(intermedia theflow rollingstone-ru lenta-music afisha-daily pitchfork nme rollingstone-us consequence guardian-music djmag stereogum remezcla ok-africa cnews-ai)
 
-# Shuffle and pick 5
+# One host per cycle — like real radio, one DJ per shift
+HOSTS=("DJ Den" "Сандра" "Лиана" "Макс" "Марк" "Пабло" "Нико" "РадКат" "Стелла")
+HOST=${HOSTS[$RANDOM % ${#HOSTS[@]}]}
+
+# Shuffle and pick 5 sources
 SHUFFLED=($(printf '%s\n' "${SOURCES[@]}" | shuf | head -5))
 
-echo "[$(date -Iseconds)] News cron: fetching ${SHUFFLED[*]}" >> $LOG
+echo "[$(date -Iseconds)] News cron: host=$HOST, fetching ${SHUFFLED[*]}" >> $LOG
 
 for src in "${SHUFFLED[@]}"; do
   RESULT=$(curl -s -X POST "http://127.0.0.1:3000/server/api/news-agent/fetch/$src" \
     -H 'Content-Type: application/json' \
     -H "X-Internal-Key: $INTERNAL_KEY" \
+    -d "{\"host\":\"$HOST\"}" \
     --max-time 120 2>&1)
-  echo "[$(date -Iseconds)] $src: $RESULT" >> $LOG
+  echo "[$(date -Iseconds)] $src ($HOST): $RESULT" >> $LOG
   sleep 3
 done
 
