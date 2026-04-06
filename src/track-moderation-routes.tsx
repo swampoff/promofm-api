@@ -219,7 +219,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           emailSubject = 'Результат модерации — ' + track.title;
           emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
             + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
-            + '<img src="https://promo-music.ru/logo-full.png" alt="Promo.Музыка" style="height:36px;" />'
+            + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
             + '<p style="margin:8px 0 0;color:#888;font-size:13px;">Платформа для музыкантов и лейблов</p>'
             + '</div>'
             + '<div style="padding:32px;">'
@@ -233,7 +233,6 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#F59E0B,#D97706);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Разместить в AI-каталоге</a></p>'
             + '<p>Спасибо за ваш интерес к новым музыкальным формам.</p>'
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
-            
             + '</div>'
             + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
             + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
@@ -246,19 +245,18 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           emailSubject = 'Трек одобрен — ' + track.title;
           emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
             + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
-            + '<img src="https://promo-music.ru/logo-full.png" alt="Promo.Музыка" style="height:36px;" />'
+            + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
             + '<p style="margin:8px 0 0;color:#888;font-size:13px;">Платформа для музыкантов и лейблов</p>'
             + '</div>'
             + '<div style="padding:32px;">'
-            + '<h2 style="color:#10B981;margin:0 0 16px;">Трек одобрен!</h2>'
-            + '<p>Здравствуйте, <strong>' + artistName + '</strong>!</p>'
-            + '<p>Ваш трек <strong>«' + track.title + '»</strong> успешно прошёл модерацию.</p>'
+            + '<p>Добрый день!</p>'
+            + '<p>Благодарим вас за отправку трека на платформу Промо.Музыка. Мы внимательно прослушали вашу работу и с радостью сообщаем, что она прошла модерацию.</p>'
+            + '<p>Ваш трек <strong>«' + track.title + '»</strong> одобрен к размещению, и мы будем рады представить его нашей аудитории.</p>'
             + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽</strong></p>'
-            + '<p>После оплаты трек появится в разделе <strong>Скоро</strong>, а затем будет опубликован.</p>'
+            + '<p>Спасибо за ваше творчество и доверие к нашей платформе — это действительно ценно для нас.</p>'
             + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + moderator_notes + '</p>' : '')
             + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
-            
             + '</div>'
             + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
             + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
