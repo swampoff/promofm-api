@@ -23,6 +23,7 @@ const GEMINI_PROXY_KEY = process.env.GEMINI_PROXY_KEY || 'promofm-gemini-2026';
 const AUTODJ_URL = process.env.AUTODJ_URL || 'http://127.0.0.1:8087';
 const SAMPLE_RATE = 24000;
 const INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+const API_BASE_URL = process.env.API_BASE || 'http://localhost:3000';
 
 const broadcastQueue: { newsId: string; addedAt: number }[] = [];
 let isBroadcasting = false;
@@ -349,6 +350,127 @@ app.get('/status', async (c) => {
     totalBroadcasts,
     model: 'gemini-3.1-flash-live-preview',
   });
+});
+
+
+// --- POST /concerts --- анонс ближайших концертов в эфире
+
+app.post('/concerts', async (c) => {
+  const key = c.req.header('X-Internal-Key') || '';
+  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  const { city, limit, author } = await c.req.json().catch(() => ({ city: '', limit: 5, author: 'DJ Den' }));
+  const speakerAuthor = author || 'DJ Den';
+  const maxConcerts = Math.min(limit || 5, 10);
+
+  // Fetch upcoming concerts
+  let concertsResp: any;
+  try {
+    const r = await fetch(`${API_BASE_URL}/server/api/concert-agent/concerts?limit=${maxConcerts}${city ? '&city=' + encodeURIComponent(city) : ''}`, {
+      headers: { 'X-Internal-Key': INTERNAL_KEY },
+      signal: AbortSignal.timeout(5000),
+    });
+    concertsResp = await r.json();
+  } catch (err: any) {
+    return c.json({ error: 'Failed to fetch concerts: ' + err.message }, 500);
+  }
+
+  const concerts = concertsResp?.data || [];
+  if (concerts.length === 0) {
+    return c.json({ error: 'No upcoming concerts found' }, 404);
+  }
+
+  // Group by date for natural announcement
+  const byDate: Record<string, any[]> = {};
+  for (const concert of concerts) {
+    const d = concert.date || 'unknown';
+    if (!byDate[d]) byDate[d] = [];
+    byDate[d].push(concert);
+  }
+
+  // Build announcement text
+  const lines: string[] = [];
+  const cityLabel = city || 'Москва и Санкт-Петербург';
+  lines.push(`Афиша ближайших концертов: ${cityLabel}.`);
+
+  for (const [date, items] of Object.entries(byDate).slice(0, 5)) {
+    const dateObj = new Date(date + 'T12:00:00');
+    const dayNames = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+    const monthNames = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+    const dayName = dayNames[dateObj.getDay()];
+    const dayNum = dateObj.getDate();
+    const monthName = monthNames[dateObj.getMonth()];
+
+    lines.push(`${dayNum} ${monthName}, ${dayName}:`);
+    for (const item of items.slice(0, 3)) {
+      const artist = item.artist || item.title?.split(' — ')[0] || 'Концерт';
+      const venue = item.venue || '';
+      const itemCity = item.city || '';
+      lines.push(`${artist}${venue ? ', ' + venue : ''}${itemCity && !city ? ', ' + itemCity : ''}.`);
+    }
+    if (items.length > 3) lines.push(`И ещё ${items.length - 3} события.`);
+  }
+
+  lines.push('Подробности и билеты на promo-music.ru в разделе Концерты.');
+
+  const announcementText = lines.join('\n');
+  console.log(`[broadcast] Concert announcement: ${concerts.length} events, ${announcementText.length} chars`);
+
+  // Generate radio script via makeScript and broadcast
+  currentBroadcast = { newsId: 'concert-announce', title: 'Афиша концертов', author: speakerAuthor, startedAt: Date.now() };
+
+  try {
+    const style = AUTHOR_STYLES[speakerAuthor] || AUTHOR_STYLES['DJ Den'];
+    const prompt = `Ты — ${speakerAuthor}, радиоведущий ПРОМО.МУЗЫКА FM. ${style}
+Прочитай афишу концертов как ЖИВОЙ радио-выход. Начни с энергичного приветствия.
+Перечисли концерты кратко и живо. Закончи приглашением на сайт и фразой к следующему треку.
+НЕ используй маркдаун, эмодзи. Только живая речь.
+
+${announcementText}`;
+
+    // Gemini script generation
+    let script = announcementText;
+    try {
+      const geminiUrl = `${GEMINI_PROXY_URL}/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY || ''}`;
+      const resp = await fetch(geminiUrl, {
+        method: 'POST',
+        signal: AbortSignal.timeout(15000),
+        headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.8, maxOutputTokens: 500 },
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json() as any;
+        const geminiText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        if (geminiText.length > 30) script = geminiText.trim();
+      }
+    } catch { /* fallback to raw */ }
+
+    console.log(`[broadcast] Concert script: "${script.slice(0, 80)}..."`);
+
+    const result = await ttsAndInject(script, speakerAuthor);
+    currentBroadcast = null;
+
+    if (!result.ok) {
+      return c.json({ error: result.error || 'Inject failed' }, 500);
+    }
+
+    totalBroadcasts++;
+    return c.json({
+      ok: true,
+      concertsCount: concerts.length,
+      bytes: result.bytes,
+      duration: result.duration,
+      script: script.slice(0, 300),
+    });
+  } catch (err) {
+    currentBroadcast = null;
+    return c.json({ error: safeErrorMessage(err) }, 500);
+  }
 });
 
 export default app;
