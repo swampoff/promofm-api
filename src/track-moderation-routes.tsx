@@ -9,6 +9,7 @@ import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as typed from './db-typed.tsx';
+import { getDbClient } from './db-client.tsx';
 
 const app = new Hono();
 
@@ -68,6 +69,17 @@ async function triggerAiAnalysis(trackId: string, audioUrl: string) {
 app.post('/submitTrack', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
+    const userId = c.get('userId');
+
+    // REQUIRE artist profile before track submission
+    if (userId) {
+      const profile = await getDbClient().from('artist_profiles').select('id').eq('user_id', userId).maybeSingle();
+      if (!profile) {
+        return c.json({ error: 'Сначала заполните профиль артиста в личном кабинете', code: 'PROFILE_REQUIRED' }, 403);
+      }
+    } else {
+      return c.json({ error: 'Авторизация обязательна', code: 'AUTH_REQUIRED' }, 401);
+    }
 
     const track = await typed.insertTrack({
       title: body.title || '',

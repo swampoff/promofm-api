@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
+import { getDbClient } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
@@ -42,6 +43,13 @@ tracksRoutes.get('/:id', async (c) => {
 tracksRoutes.post('/', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
+
+    // REQUIRE artist profile before track submission
+    const profile = await getDbClient().from('artist_profiles').select('id').eq('user_id', userId).maybeSingle();
+    if (!profile) {
+      return c.json({ success: false, error: 'Сначала заполните профиль артиста в личном кабинете', code: 'PROFILE_REQUIRED' }, 403);
+    }
+
     const body = await c.req.json();
 
     const track = await typed.insertTrack({
