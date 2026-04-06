@@ -308,6 +308,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
       });
 
     } else if (action === 'reject') {
+      const { rejection_type } = body;
       await typed.updateTrack(pendingTrackId, {
         moderation_status: 'rejected',
         rejection_reason: rejection_reason || '',
@@ -319,45 +320,85 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
       const rejectEmail = track.uploaded_by_email;
       const rejectName = track.artist_name || 'Артист';
       const reason = rejection_reason || moderator_notes || 'Не указана';
+
       if (rejectEmail) {
-        sendEmail({
-          to: rejectEmail,
-          subject: `Трек отклонён — ${track.title}`,
-          html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">
-            <h2 style="color:#EF4444;margin:0 0 16px;">Трек отклонён</h2>
-            <p>Здравствуйте, <strong>${rejectName}</strong>!</p>
-            <p>К сожалению, ваш трек <strong>«${track.title}»</strong> не прошёл модерацию.</p>
-            <p style="padding:12px;background:#1a1a2e;border-left:3px solid #EF4444;border-radius:4px;"><strong>Причина:</strong> ${reason}</p>
-            <p>Вы можете исправить замечания и загрузить трек повторно.</p>
-            <p>Вопросы? Пишите: <a href="mailto:info@promo-music.ru" style="color:#FF577F;">info@promo-music.ru</a></p>
-          </div>`
-        }).then(() => {
-          const rejectCopyHtml = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">
-            <h2 style="color:#EF4444;">КОПИЯ: Трек отклонён</h2>
-            <p>Артист: <strong>${rejectName}</strong> (${rejectEmail})</p>
-            <p>Трек: <strong>«${track.title}»</strong></p>
-            <p style="padding:12px;background:#1a1a2e;border-left:3px solid #EF4444;border-radius:4px;"><strong>Причина:</strong> ${reason}</p>
-          </div>`;
-          return sendEmail({ to: 'info@promofm.ru', subject: `[КОПИЯ] Отклонён: ${track.title} (${rejectEmail})`, html: rejectCopyHtml });
-        }).catch(err => console.error('[moderation] Reject email failed:', err.message));
+        let rejectHtml: string;
+        let rejectSubject: string;
+
+        if (rejection_type === 'profanity') {
+          // Rejection: profanity / explicit content
+          rejectSubject = 'Результат модерации — ' + track.title;
+          rejectHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
+            + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
+            + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
+            + '<p style="margin:8px 0 0;color:#888;font-size:13px;">Платформа для музыкантов и лейблов</p>'
+            + '</div>'
+            + '<div style="padding:32px;">'
+            + '<p>Добрый день!</p>'
+            + '<p>Благодарим вас за отправку трека на платформу Промо.Музыка и за доверие к нашему отбору.</p>'
+            + '<p>Мы внимательно ознакомились с вашей работой. К сожалению, на данный момент мы не можем принять её к размещению в связи с использованием ненормативной лексики, что не соответствует редакционной политике платформы.</p>'
+            + '<p>При этом хотим отметить, что у трека есть своя энергия и характер, и мы будем рады рассмотреть его повторно, если появится версия без соответствующего контента (clean version).</p>'
+            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + moderator_notes + '</p>' : '')
+            + '<p>Спасибо за ваше творчество и понимание.</p>'
+            + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
+            + '</div>'
+            + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
+            + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
+            + '<p style="margin:0 0 8px;">info@promofm.ru · Москва, Россия</p>'
+            + '<p style="margin:0;color:#555;">Вы получили это письмо, так как отправили трек на модерацию</p>'
+            + '</div>'
+            + '</div>';
+        } else {
+          // General rejection
+          rejectSubject = 'Результат модерации — ' + track.title;
+          rejectHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
+            + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
+            + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
+            + '<p style="margin:8px 0 0;color:#888;font-size:13px;">Платформа для музыкантов и лейблов</p>'
+            + '</div>'
+            + '<div style="padding:32px;">'
+            + '<p>Добрый день!</p>'
+            + '<p>Благодарим вас за отправку трека на платформу Промо.Музыка и за доверие к нашему отбору.</p>'
+            + '<p>Мы внимательно ознакомились с вашей работой, однако на данный момент не готовы включить её в публикацию. Это решение связано с внутренними критериями отбора и текущей редакционной концепцией платформы.</p>'
+            + '<p>Важно отметить, что это не оценка вашего потенциала, скорее вопрос соответствия формату и звучанию, которое мы формируем в данный момент.</p>'
+            + '<p>Будем рады, если вы продолжите делиться с нами своими новыми релизами в будущем, возможно, следующая работа идеально совпадёт с нашим направлением.</p>'
+            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + moderator_notes + '</p>' : '')
+            + '<p>Спасибо за ваше творчество и за то, что выбрали нас.</p>'
+            + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
+            + '</div>'
+            + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
+            + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
+            + '<p style="margin:0 0 8px;">info@promofm.ru · Москва, Россия</p>'
+            + '<p style="margin:0;color:#555;">Вы получили это письмо, так как отправили трек на модерацию</p>'
+            + '</div>'
+            + '</div>';
+        }
+
+        sendEmail({ to: rejectEmail, subject: rejectSubject, html: rejectHtml })
+          .then(() => sendEmail({ to: 'info@promofm.ru', subject: '[КОПИЯ] ' + rejectSubject + ' (' + rejectEmail + ')', html: rejectHtml }))
+          .catch((err: any) => console.error('[moderation] Reject email failed:', err.message));
       }
 
       if (track.user_id) {
+        const rejectMsg = rejection_type === 'profanity'
+          ? 'Трек «' + track.title + '» отклонён: ненормативная лексика. Примем clean version.'
+          : 'Трек «' + track.title + '» отклонён. ' + (reason !== 'Не указана' ? reason : 'Не соответствует формату платформы.');
         notifyCrossCabinet({
           targetUserId: track.user_id,
           targetRole: 'artist',
           sourceRole: 'admin',
           type: 'track_moderation',
-          title: 'Трек отклонён',
-          message: `Трек «${track.title}» отклонён. Причина: ${reason}`,
+          title: 'Результат модерации',
+          message: rejectMsg,
           link: '/cabinet/tracks',
         }).catch(() => {});
       }
 
       return c.json({
         success: true,
-        message: 'Трек отклонён'
+        message: 'Трек отклонён',
       });
+
 
     } else {
       return c.json({ error: 'Invalid action' }, 400);
