@@ -565,4 +565,114 @@ app.post('/reanalyze', requireAuth, requireAdmin, async (c) => {
   }
 });
 
+
+// ─── POST /approve-paid — Админ утверждает оплаченный трек → upcoming (3 дня в "Скоро") ───
+app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { trackIds } = await c.req.json();
+    if (!trackIds || !Array.isArray(trackIds) || trackIds.length === 0) {
+      return c.json({ error: 'trackIds required' }, 400);
+    }
+
+    const UPCOMING_DAYS = 3;
+    const upcomingUntil = new Date(Date.now() + UPCOMING_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    let updated = 0;
+
+    for (const trackId of trackIds) {
+      const track = await typed.getTrackById(trackId);
+      if (!track || track.moderation_status !== 'paid') continue;
+
+      await typed.updateTrack(trackId, {
+        moderation_status: 'upcoming',
+        is_hidden: false,
+        data: {
+          ...(track.data || {}),
+          upcoming_until: upcomingUntil,
+          approved_for_release_at: new Date().toISOString(),
+        },
+      });
+
+      // Notify artist
+      if (track.user_id) {
+        notifyCrossCabinet({
+          targetUserId: track.user_id,
+          targetRole: 'artist',
+          sourceRole: 'admin',
+          type: 'track_upcoming',
+          title: 'Трек скоро в эфире!',
+          message: `"${track.title}" появится в новинках через ${UPCOMING_DAYS} дня`,
+          link: '/artist/tracks',
+        }).catch(() => {});
+      }
+
+      updated++;
+    }
+
+    return c.json({ success: true, updated, upcomingUntil });
+  } catch (error) {
+    console.error('Error in approve-paid:', error);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+// ─── POST /promote-upcoming — Крон: upcoming треки с истёкшим сроком → published ───
+app.post('/promote-upcoming', async (c) => {
+  const key = c.req.header('X-Internal-Key') || '';
+  const expectedKey = process.env.VPS_INTERNAL_KEY || '';
+  if (expectedKey && key !== expectedKey) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  try {
+    const { rows } = await (await import('./db-client.tsx')).pool.query(
+      `SELECT id, title, artist_name, user_id, data FROM tracks WHERE moderation_status = 'upcoming'`
+    );
+
+    const now = new Date();
+    let promoted = 0;
+
+    for (const track of rows) {
+      const upcomingUntil = track.data?.upcoming_until;
+      if (!upcomingUntil || new Date(upcomingUntil) > now) continue;
+
+      await typed.updateTrack(track.id, {
+        moderation_status: 'published',
+        is_hidden: false,
+        data: {
+          ...(track.data || {}),
+          published_at: now.toISOString(),
+        },
+      });
+
+      // Notify artist
+      if (track.user_id) {
+        notifyCrossCabinet({
+          targetUserId: track.user_id,
+          targetRole: 'artist',
+          sourceRole: 'system',
+          type: 'track_published',
+          title: 'Трек опубликован!',
+          message: `"${track.title}" теперь в новинках недели`,
+          link: '/artist/tracks',
+        }).catch(() => {});
+      }
+
+      promoted++;
+    }
+
+    // Rebuild new releases if any were promoted
+    if (promoted > 0) {
+      fetch('http://127.0.0.1:3000/server/api/charts/build-new-releases', {
+        method: 'POST',
+        headers: { 'X-Internal-Key': expectedKey, 'Content-Type': 'application/json' },
+      }).catch(() => {});
+    }
+
+    return c.json({ success: true, promoted, checked: rows.length });
+  } catch (error) {
+    console.error('Error in promote-upcoming:', error);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
 export default app;

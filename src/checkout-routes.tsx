@@ -325,8 +325,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       const { updateTrack } = await import('./db-typed.tsx');
       const trackId = session.metadata.trackId;
       await updateTrack(trackId, {
-        moderation_status: 'published',
-        is_hidden: false,
+        moderation_status: 'paid',
+        is_hidden: true,
         data: {
           payment_completed: true,
           payment_amount: session.amount,
@@ -335,13 +335,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           paid_at: now,
         },
       });
-      log.info({ trackId, amount: session.amount, orderId: session.orderId }, 'track_publish_payment_fulfilled');
-
-      // Auto-rebuild new releases (track is now published and visible)
-      fetch('http://127.0.0.1:3000/server/api/charts/build-new-releases', {
-        method: 'POST',
-        headers: { 'X-Internal-Key': process.env.VPS_INTERNAL_KEY || '', 'Content-Type': 'application/json' },
-      }).catch(err => log.warn({ err: err.message }, 'new_releases_rebuild_after_payment'));
+      log.info({ trackId, amount: session.amount, orderId: session.orderId }, 'track_payment_received');
 
       // Notify via SSE
       try {

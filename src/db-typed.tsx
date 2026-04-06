@@ -80,7 +80,7 @@ export async function getPublishedTracks(limit = 50, orderBy: 'created_at' | 'pl
   const { data, error } = await db()
     .from('tracks')
     .select('*')
-    .in('moderation_status', ['approved', 'published'])
+    .in('moderation_status', ['upcoming', 'published'])
     .eq('is_hidden', false)
     .neq('artist_name', '')
     .order(orderBy, { ascending: false })
@@ -93,7 +93,7 @@ export async function getPublishedTracksByGenre(genre: string, limit = 20) {
   const { data, error } = await db()
     .from('tracks')
     .select('*')
-    .in('moderation_status', ['approved', 'published'])
+    .in('moderation_status', ['upcoming', 'published'])
     .eq('genre', genre)
     .eq('is_hidden', false)
     .order('plays_count', { ascending: false })
@@ -167,7 +167,7 @@ export async function getTrackModerationStats() {
   return {
     total: tracks.length,
     pending: tracks.filter((t: any) => t.moderation_status === 'pending').length,
-    approved: tracks.filter((t: any) => ['approved', 'published'].includes(t.moderation_status)).length,
+    approved: tracks.filter((t: any) => ['approved', 'paid', 'upcoming', 'published'].includes(t.moderation_status)).length,
     rejected: tracks.filter((t: any) => t.moderation_status === 'rejected').length,
   };
 }
@@ -176,7 +176,7 @@ export async function searchPublishedTracks(query: string, limit = 10) {
   const { data, error } = await db()
     .from('tracks')
     .select('*')
-    .in('moderation_status', ['approved', 'published'])
+    .in('moderation_status', ['upcoming', 'published'])
     .or(`title.ilike.%${query}%,artist_name.ilike.%${query}%,genre.ilike.%${query}%`)
     .limit(limit);
   if (error) console.error('[db-typed] searchPublishedTracks:', error);
