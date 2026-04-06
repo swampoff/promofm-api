@@ -87,6 +87,7 @@ import pageviewRoutes from "./pageview-routes.tsx";
 import checkoutRoutes from './checkout-routes.tsx';
 import crossCabinetRoutes from "./cross-cabinet-routes.tsx";
 import concertModerationRoutes from './concert-moderation-routes.tsx';
+import concertAgentRoutes from "./concert-agent-routes.tsx";
 import curatorRoutes from './curator-routes.tsx';
 import securityMonitorRoutes from './security-monitor-routes.tsx';
 import musicGenRoutes from './music-gen-routes.tsx';
@@ -271,6 +272,7 @@ app.route('/server/auth', authRoutes);
 app.route("/server/api/auth", authRoutes);  // compat alias
 app.route('/server/api/concerts', concertsRoutes);
 app.route('/server/api/concert-moderation', concertModerationRoutes);
+app.route("/server/api/concert-agent", concertAgentRoutes);
 app.route('/server/notifications', notificationsRoutes);
 app.route('/server/ticketing', ticketingRoutes);
 app.route('/server/storage', storageRoutes);

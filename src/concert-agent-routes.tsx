@@ -8,6 +8,7 @@ import { concertAgentStore } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 import {
   fetchAllConcerts,
+  fetchAllConcertsExtended,
   fetchConcertsFromSource,
   getPublishedConcerts,
   clearOldConcerts,
@@ -33,7 +34,7 @@ async function requireAdminOrKey(c: any, next: any) {
 concertAgent.post('/fetch', requireAdminOrKey, async (c) => {
   try {
     console.log('[concert-agent] Starting full concert fetch...');
-    const result = await fetchAllConcerts();
+    const result = await fetchAllConcertsExtended();
     return c.json({
       success: true,
       totalAdded: result.totalAdded,

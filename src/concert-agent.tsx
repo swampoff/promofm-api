@@ -534,3 +534,264 @@ export async function clearOldConcerts(): Promise<number> {
 
   return deleted;
 }
+
+
+// ─── Telegram Channel Parser (@maingig format) ──────────
+
+/**
+ * Парсит публичную веб-версию Telegram-канала (t.me/s/<channel>).
+ * Формат @maingig:
+ *   – Город –
+ *   7 апреля (вт):
+ *   • Артист (Площадка)
+ *
+ * Также туровый формат:
+ *   24 апреля — Город (Площадка)
+ *
+ * ВАЖНО: источник НЕ указывается как @maingig — source = "parsed".
+ */
+async function fetchTelegramChannelConcerts(channelName: string): Promise<ParsedConcert[]> {
+  // Proxy through Hostinger VPS (t.me blocked from Russian IP)
+  const url = `http://187.77.85.42/tg-proxy/${channelName}`;
+  const concerts: ParsedConcert[] = [];
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+
+    const resp = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept-Language': 'ru-RU,ru;q=0.9',
+      },
+    });
+    clearTimeout(timeout);
+    if (!resp.ok) {
+      console.log(`[concert-agent] Telegram ${channelName}: HTTP ${resp.status}`);
+      return [];
+    }
+
+    const html = await resp.text();
+
+    // Extract message texts from Telegram widget HTML
+    const messageRegex = /<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/g;
+    let match;
+    const posts: string[] = [];
+    while ((match = messageRegex.exec(html)) !== null) {
+      const text = match[1]
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#\d+;/g, '')
+        .trim();
+      if (text.length > 30) posts.push(text);
+    }
+
+    console.log(`[concert-agent] Telegram ${channelName}: ${posts.length} posts found`);
+
+    // Russian month parser
+    const currentYear = new Date().getFullYear();
+    const monthMap: Record<string, number> = {
+      'январ': 0, 'феврал': 1, 'март': 2, 'апрел': 3, 'мая': 4, 'май': 4, 'июн': 5,
+      'июл': 6, 'август': 7, 'сентябр': 8, 'октябр': 9, 'ноябр': 10, 'декабр': 11,
+    };
+
+    function parseRussianDate(dateStr: string): string {
+      const m = dateStr.match(/(\d{1,2})\s+(\S+)/);
+      if (!m) return '';
+      const day = parseInt(m[1]);
+      const monthWord = m[2].toLowerCase();
+      let monthNum = -1;
+      for (const [prefix, num] of Object.entries(monthMap)) {
+        if (monthWord.startsWith(prefix.slice(0, 3))) {
+          monthNum = num;
+          break;
+        }
+      }
+      if (monthNum < 0) return '';
+      const d = new Date(currentYear, monthNum, day);
+      if (d.getTime() < Date.now() - 30 * 86400000) d.setFullYear(currentYear + 1);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    }
+
+    for (const post of posts) {
+      const lines = post.split('\n').map(l => l.trim()).filter(Boolean);
+      let currentCity = '';
+      let currentDate = '';
+
+      for (const line of lines) {
+        // City header: – Город –  or  — Город —
+        const cityMatch = line.match(/^[\u2013\u2014\u2012\u002D]+\s*(.+?)\s*[\u2013\u2014\u2012\u002D]+$/);
+        if (cityMatch && !cityMatch[1].match(/^\d/)) {
+          currentCity = cityMatch[1].trim();
+          continue;
+        }
+
+        // Date line: "7 апреля (вт):" or "10 апреля (пт):"
+        const dateMatch = line.match(/^(\d{1,2}\s+\S+)\s*\([а-яё]{2}\)\s*:?\s*$/i);
+        if (dateMatch) {
+          currentDate = parseRussianDate(dateMatch[1]);
+          continue;
+        }
+
+        // Concert line: • Артист (Площадка) or • Артист [клаб-шоу] (Площадка)
+        const concertMatch = line.match(/^[•\u2022\-\*]\s*(.+?)\s*\(([^)]+)\)\s*(?:,\s*#.*)?$/);
+        if (concertMatch && currentCity && currentDate) {
+          const rawArtist = concertMatch[1]
+            .replace(/\[.*?\]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const venue = concertMatch[2].trim();
+
+          concerts.push({
+            title: `${rawArtist} \u2014 ${venue}`,
+            artist: rawArtist,
+            venue,
+            city: currentCity,
+            date: currentDate,
+            time: '',
+            price: '',
+            ticketUrl: '',
+            imageUrl: '',
+            description: '',
+            genre: 'other',
+            source: 'parsed',
+            sourceId: 'telegram-curated',
+          });
+          continue;
+        }
+
+        // Tour format: "24 апреля — Город (Площадка)"
+        const tourMatch = line.match(/^(\d{1,2}\s+\S+)\s*[\u2013\u2014\u002D]+\s*(.+?)\s*\(([^)]+)\)$/);
+        if (tourMatch) {
+          const tourDate = parseRussianDate(tourMatch[1]);
+          const tourCity = tourMatch[2].trim();
+          const tourVenue = tourMatch[3].trim();
+          // Find artist name from post context (first non-structural line)
+          const artistLine = lines.find(l =>
+            !l.startsWith('\u2013') && !l.startsWith('\u2014') && !l.startsWith('-') &&
+            !l.match(/^\d/) && !l.startsWith('\u2022') && !l.startsWith('#') &&
+            l.length > 3 && l.length < 100
+          );
+          const tourArtist = artistLine
+            ? artistLine.replace(/\s*(едут|в свой|тур|по стране|который).*/i, '').trim()
+            : '';
+
+          if (tourDate && tourCity) {
+            concerts.push({
+              title: tourArtist ? `${tourArtist} \u2014 ${tourVenue}` : tourVenue,
+              artist: tourArtist,
+              venue: tourVenue,
+              city: tourCity,
+              date: tourDate,
+              time: '',
+              price: '',
+              ticketUrl: '',
+              imageUrl: '',
+              description: '',
+              genre: 'other',
+              source: 'parsed',
+              sourceId: 'telegram-curated',
+            });
+          }
+        }
+      }
+    }
+
+    console.log(`[concert-agent] Telegram ${channelName}: ${concerts.length} concerts parsed`);
+    return concerts;
+  } catch (error) {
+    console.log(`[concert-agent] Telegram ${channelName} error: ${error}`);
+    return [];
+  }
+}
+
+// ─── New Sources: Ticketland, concert.ru ────────────────
+
+const EXTRA_SOURCES: ConcertSource[] = [
+  {
+    id: 'ticketland',
+    name: 'Ticketland',
+    urls: [
+      'https://www.ticketland.ru/koncerty/moskva/',
+      'https://www.ticketland.ru/koncerty/sankt-peterburg/',
+    ],
+    type: 'html_parser',
+    logo: '\uD83C\uDFAB',
+  },
+  {
+    id: 'concert-ru',
+    name: 'Concert.ru',
+    urls: [
+      'https://www.concert.ru/Moscow/Schedule',
+      'https://www.concert.ru/Saint-Petersburg/Schedule',
+    ],
+    type: 'html_parser',
+    logo: '\uD83C\uDFB5',
+  },
+];
+
+// Register extra sources
+for (const s of EXTRA_SOURCES) {
+  if (!CONCERT_SOURCES.find(x => x.id === s.id)) {
+    CONCERT_SOURCES.push(s);
+  }
+}
+
+// ─── Extended fetchAll: includes Telegram channels ──────
+
+const TELEGRAM_CHANNELS = ['maingig'];
+
+export async function fetchAllConcertsExtended(): Promise<{
+  totalAdded: number;
+  results: Record<string, { added: number; total: number; errors: string[] }>;
+}> {
+  // 1. Fetch from all registered sources (KudaGo, Afisha, MTS, Kassir, Ticketland, concert.ru)
+  const baseResult = await fetchAllConcerts();
+
+  // 2. Fetch from Telegram channels (hidden source — NOT attributed)
+  for (const channel of TELEGRAM_CHANNELS) {
+    console.log(`[concert-agent] === Telegram (curated data) ===`);
+    const tgConcerts = await fetchTelegramChannelConcerts(channel);
+
+    if (tgConcerts.length === 0) {
+      baseResult.results[`curated`] = { added: 0, total: 0, errors: ['No concerts parsed'] };
+      continue;
+    }
+
+    // Dedup against existing
+    const store = getConcertStore();
+    const existing = await store.getAll();
+    const existingKeys = new Set(existing.map((c: any) => concertKey(c)));
+
+    let added = 0;
+    for (const concert of tgConcerts) {
+      const key = concertKey(concert);
+      if (existingKeys.has(key)) continue;
+
+      const id = `concert-curated-${crypto.randomUUID()}`;
+      await store.set(id, {
+        id,
+        ...concert,
+        status: 'published' as const,
+        createdAt: new Date().toISOString(),
+      });
+      existingKeys.add(key);
+      added++;
+    }
+
+    baseResult.results['curated'] = { added, total: tgConcerts.length, errors: [] };
+    baseResult.totalAdded += added;
+    console.log(`[concert-agent] Curated data: added=${added}, total=${tgConcerts.length}`);
+  }
+
+  return baseResult;
+}
