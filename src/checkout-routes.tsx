@@ -337,6 +337,12 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       });
       log.info({ trackId, amount: session.amount, orderId: session.orderId }, 'track_publish_payment_fulfilled');
 
+      // Auto-rebuild new releases (track is now published and visible)
+      fetch('http://127.0.0.1:3000/server/api/charts/build-new-releases', {
+        method: 'POST',
+        headers: { 'X-Internal-Key': process.env.VPS_INTERNAL_KEY || '', 'Content-Type': 'application/json' },
+      }).catch(err => log.warn({ err: err.message }, 'new_releases_rebuild_after_payment'));
+
       // Notify via SSE
       try {
         const { emitSSE } = await import('./sse-routes.tsx');
