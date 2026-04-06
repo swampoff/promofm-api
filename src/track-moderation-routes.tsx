@@ -74,7 +74,7 @@ app.post('/submitTrack', requireAuth, async (c) => {
     // REQUIRE artist profile before track submission
     if (userId) {
       const profile = await getDbClient().from('artist_profiles').select('id').eq('user_id', userId).maybeSingle();
-      if (!profile) {
+      if (!profile?.data) {
         return c.json({ error: 'Сначала заполните профиль артиста в личном кабинете', code: 'PROFILE_REQUIRED' }, 403);
       }
     } else {
