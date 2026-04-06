@@ -27,7 +27,7 @@ const log = createLogger("auth");
 const PARTNER_ROLES = ['radio_station', 'radio', 'venue'];
 const MAX_FAILED_ATTEMPTS = 5;
 const JWT_SECRET = process.env.JWT_SECRET!;
-const JWT_EXPIRES_IN = '15m';
+const JWT_EXPIRES_IN = '2h';
 
 // ── PostgreSQL ──
 let pool: Pool | null = null;

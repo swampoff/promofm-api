@@ -317,6 +317,46 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   }
 
 
+
+
+  // ─── Fulfill track_publish payment (moderation → published) ───
+  if (session.metadata?.type === 'track_publish' && session.metadata?.trackId) {
+    try {
+      const { updateTrack } = await import('./db-typed.tsx');
+      const trackId = session.metadata.trackId;
+      await updateTrack(trackId, {
+        moderation_status: 'published',
+        is_hidden: false,
+        data: {
+          payment_completed: true,
+          payment_amount: session.amount,
+          payment_order_id: session.orderId,
+          payment_gateway: session.gateway,
+          paid_at: now,
+        },
+      });
+      log.info({ trackId, amount: session.amount, orderId: session.orderId }, 'track_publish_payment_fulfilled');
+
+      // Notify via SSE
+      try {
+        const { emitSSE } = await import('./sse-routes.tsx');
+        emitSSE(session.userId, 'track_published', {
+          trackId,
+          trackTitle: session.metadata.trackTitle || '',
+          amount: session.amount,
+        });
+        emitSSE('admin', 'track_published', {
+          trackId,
+          trackTitle: session.metadata.trackTitle || '',
+          userId: session.userId,
+          amount: session.amount,
+        });
+      } catch {}
+    } catch (err) {
+      log.error({ err, trackId: session.metadata.trackId }, 'track_publish_fulfillment_error');
+    }
+  }
+
   // ─── Fulfill donation ───
   if (session.type === 'donation' && session.metadata?.donationId) {
     try {
