@@ -71,7 +71,7 @@ app.post('/submitTrack', requireAuth, async (c) => {
 
     const track = await typed.insertTrack({
       title: body.title || '',
-      artist_name: body.artist || '',
+      artist_name: body.artist || body.artist_name || '',
       genre: body.genre || '',
       duration: body.duration || 0,
       audio_url: body.audio_file_url || body.audio_url || '',
@@ -79,8 +79,8 @@ app.post('/submitTrack', requireAuth, async (c) => {
       yandex_music_url: body.yandex_music_url || '',
       youtube_url: body.youtube_url || '',
       spotify_url: body.spotify_url || '',
-      uploaded_by_email: body.uploaded_by_email || '',
-      user_id: body.uploaded_by_user_id || body.user_id || null,
+      uploaded_by_email: body.uploaded_by_email || body.contact_email || body.email || '',
+      user_id: body.uploaded_by_user_id || body.user_id || body.userId || null,
       moderation_status: 'pending',
     });
 
@@ -167,7 +167,7 @@ app.get('/pendingTracks', requireAuth, requireAdmin, async (c) => {
 app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
-    const { pendingTrackId, action, moderator_notes, rejection_reason, overall_score } = body;
+    const { pendingTrackId, action, moderator_notes, rejection_reason, overall_score, is_ai_track } = body;
 
     const track = await typed.getTrackById(pendingTrackId);
     if (!track) {
@@ -188,12 +188,15 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         moderation_comment: moderator_notes || 'Трек одобрен',
         moderated_at: now,
         is_hidden: true,
+        is_ai_track: is_ai_track === true || false,
         data: {
           ...(track.data || {}),
           overall_score: overall_score || null,
           requires_payment: true,
           payment_amount: PUBLICATION_PRICE,
-          ai_flagged: (track.ai_score && track.ai_score > 60) || false,
+          ai_flagged: is_ai_track === true || (track.ai_score && track.ai_score > 60) || false,
+          is_ai_track: is_ai_track === true || false,
+          ai_category: is_ai_track ? 'ai_music' : 'original',
         },
       });
 
@@ -239,12 +242,13 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
 
       return c.json({
         success: true,
-        message: 'Трек одобрен. Ожидает оплаты.',
+        message: is_ai_track ? 'Трек одобрен как ИИ-трек. Ожидает оплаты.' : 'Трек одобрен. Ожидает оплаты.',
         trackId: pendingTrackId,
         paymentRequired: true,
         paymentAmount: PUBLICATION_PRICE,
-        aiFlagged: (track.ai_score && track.ai_score > 60) || false,
+        aiFlagged: is_ai_track === true || (track.ai_score && track.ai_score > 60) || false,
         aiScore: track.ai_score || null,
+        isAiTrack: is_ai_track === true || false,
       });
 
     } else if (action === 'reject') {
