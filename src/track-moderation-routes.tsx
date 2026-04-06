@@ -217,37 +217,59 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           // AI track — special email with AI section offer
           const aiPercent = track.ai_score || 95;
           emailSubject = 'Результат модерации — ' + track.title;
-          emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">'
-            + '<div style="text-align:center;margin-bottom:24px;"><img src="https://promo-music.ru/logo-full.png" alt="Promo.\u041C\u0443\u0437\u044B\u043A\u0430" style="height:40px;" /></div>'
-            + '<p>\u0414\u043E\u0431\u0440\u044B\u0439 \u0434\u0435\u043D\u044C!</p>'
-            + '<p>\u0411\u043B\u0430\u0433\u043E\u0434\u0430\u0440\u0438\u043C \u0432\u0430\u0441 \u0437\u0430 \u0434\u043E\u0432\u0435\u0440\u0438\u0435 \u0438 \u0437\u0430 \u0442\u043E, \u0447\u0442\u043E \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u043B\u0438 \u0441\u0432\u043E\u0439 \u0442\u0440\u0435\u043A \u043D\u0430 \u043F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0443 Promo.\u041C\u0443\u0437\u044B\u043A\u0430. \u041D\u0430\u043C \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0442\u0435\u043B\u044C\u043D\u043E \u0446\u0435\u043D\u043D\u043E, \u0447\u0442\u043E \u0432\u044B \u0434\u0435\u043B\u0438\u0442\u0435\u0441\u044C \u0441\u0432\u043E\u0438\u043C \u0442\u0432\u043E\u0440\u0447\u0435\u0441\u0442\u0432\u043E\u043C \u0441 \u043D\u0430\u043C\u0438.</p>'
-            + '<p>\u0412 \u043F\u0440\u043E\u0446\u0435\u0441\u0441\u0435 \u043C\u043E\u0434\u0435\u0440\u0430\u0446\u0438\u0438 \u043D\u0430\u0448\u0430 \u0441\u0438\u0441\u0442\u0435\u043C\u0430 \u0430\u043D\u0430\u043B\u0438\u0437\u0430 <strong>Promo.Check</strong> \u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0438\u043B\u0430, \u0447\u0442\u043E \u043A\u043E\u043C\u043F\u043E\u0437\u0438\u0446\u0438\u044F <strong>\u00AB' + track.title + '\u00BB</strong> \u0441 \u0432\u044B\u0441\u043E\u043A\u043E\u0439 \u0432\u0435\u0440\u043E\u044F\u0442\u043D\u043E\u0441\u0442\u044C\u044E (\u043E\u043A\u043E\u043B\u043E ' + aiPercent + '%) \u0431\u044B\u043B\u0430 \u0441\u043E\u0437\u0434\u0430\u043D\u0430 \u0441 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u0435\u043C \u0442\u0435\u0445\u043D\u043E\u043B\u043E\u0433\u0438\u0439 \u0438\u0441\u043A\u0443\u0441\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0433\u043E \u0438\u043D\u0442\u0435\u043B\u043B\u0435\u043A\u0442\u0430.</p>'
-            + '<p>\u041C\u044B \u0441 \u0431\u043E\u043B\u044C\u0448\u0438\u043C \u0438\u043D\u0442\u0435\u0440\u0435\u0441\u043E\u043C \u043E\u0442\u043D\u043E\u0441\u0438\u043C\u0441\u044F \u043A \u0440\u0430\u0437\u0432\u0438\u0442\u0438\u044E AI-\u043C\u0443\u0437\u044B\u043A\u0438 \u0438 \u0430\u043A\u0442\u0438\u0432\u043D\u043E \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043C \u044D\u0442\u043E \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u0435. \u0412 \u0441\u0432\u044F\u0437\u0438 \u0441 \u044D\u0442\u0438\u043C \u0433\u043E\u0442\u043E\u0432\u044B \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0438\u0442\u044C \u0432\u0430\u043C \u0440\u0430\u0437\u043C\u0435\u0449\u0435\u043D\u0438\u0435 \u0442\u0440\u0435\u043A\u0430 \u0432 \u043D\u0430\u0448\u0435\u043C \u0441\u043F\u0435\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u043C \u0440\u0430\u0437\u0434\u0435\u043B\u0435, \u043F\u043E\u0441\u0432\u044F\u0449\u0435\u043D\u043D\u043E\u043C AI-\u043A\u043E\u043D\u0442\u0435\u043D\u0442\u0443.</p>'
-            + '<p style="padding:16px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:4px;"><strong>\u0421\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C \u0440\u0430\u0437\u043C\u0435\u0449\u0435\u043D\u0438\u044F \u0441\u043E\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u0442 ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' \u0440\u0443\u0431\u043B\u0435\u0439.</strong></p>'
-            + '<p>\u0415\u0441\u043B\u0438 \u0432\u0430\u043C \u043E\u0442\u043A\u043B\u0438\u043A\u0430\u0435\u0442\u0441\u044F \u044D\u0442\u043E \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u0435, \u0442\u043E \u043C\u044B \u0431\u0443\u0434\u0435\u043C \u0440\u0430\u0434\u044B \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C \u0441\u043E\u0442\u0440\u0443\u0434\u043D\u0438\u0447\u0435\u0441\u0442\u0432\u043E.</p>'
-            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439 \u043C\u043E\u0434\u0435\u0440\u0430\u0442\u043E\u0440\u0430: ' + moderator_notes + '</p>' : '')
-            + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#F59E0B,#D97706);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">\u0420\u0430\u0437\u043C\u0435\u0441\u0442\u0438\u0442\u044C \u0432 AI-\u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435</a></p>'
-            + '<p>\u0421\u043F\u0430\u0441\u0438\u0431\u043E \u0437\u0430 \u0432\u0430\u0448 \u0438\u043D\u0442\u0435\u0440\u0435\u0441 \u043A \u043D\u043E\u0432\u044B\u043C \u043C\u0443\u0437\u044B\u043A\u0430\u043B\u044C\u043D\u044B\u043C \u0444\u043E\u0440\u043C\u0430\u043C.</p>'
-            + '<p style="color:#888;">\u0421 \u0443\u0432\u0430\u0436\u0435\u043D\u0438\u0435\u043C,<br/>\u041A\u043E\u043C\u0430\u043D\u0434\u0430 Promo.\u041C\u0443\u0437\u044B\u043A\u0430</p>'
+          emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
+            + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
+            + '<img src="https://promo-music.ru/logo-full.png" alt="Promo.Музыка" style="height:36px;" />'
+            + '<p style="margin:8px 0 0;color:#888;font-size:13px;">Платформа для музыкантов и лейблов</p>'
+            + '</div>'
+            + '<div style="padding:32px;">'
+            + '<p>Добрый день!</p>'
+            + '<p>Благодарим вас за доверие и за то, что отправили свой трек на платформу Промо.Музыка. Нам действительно ценно, что вы делитесь своим творчеством с нами.</p>'
+            + '<p>В процессе модерации наша система анализа <strong>Promo.Check</strong> определила, что композиция <strong>«' + track.title + '»</strong> с высокой вероятностью (около ' + aiPercent + '%) была создана с использованием технологий искусственного интеллекта.</p>'
+            + '<p>Готовы предложить вам размещение трека в нашем специальном разделе, посвященном AI-контенту.</p>'
+            + '<p style="padding:16px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:4px;"><strong>Стоимость размещения составляет ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' рублей.</strong></p>'
+            + '<p>Если вам откликается это предложение, мы будем рады продолжить сотрудничество.</p>'
+            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий модератора: ' + moderator_notes + '</p>' : '')
+            + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#F59E0B,#D97706);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Разместить в AI-каталоге</a></p>'
+            + '<p>Спасибо за ваш интерес к новым музыкальным формам.</p>'
+            + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
+            
+            + '</div>'
+            + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
+            + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
+            + '<p style="margin:0 0 8px;">info@promofm.ru · Москва, Россия</p>'
+            + '<p style="margin:0;color:#555;">Вы получили это письмо, так как отправили трек на модерацию</p>'
+            + '</div>'
             + '</div>';
         } else {
           // Normal track — standard approval email
-          emailSubject = '\u0422\u0440\u0435\u043A \u043E\u0434\u043E\u0431\u0440\u0435\u043D — ' + track.title;
-          emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">'
-            + '<div style="text-align:center;margin-bottom:24px;"><img src="https://promo-music.ru/logo-full.png" alt="Promo.\u041C\u0443\u0437\u044B\u043A\u0430" style="height:40px;" /></div>'
-            + '<h2 style="color:#10B981;margin:0 0 16px;">\u0422\u0440\u0435\u043A \u043E\u0434\u043E\u0431\u0440\u0435\u043D!</h2>'
-            + '<p>\u0417\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439\u0442\u0435, <strong>' + artistName + '</strong>!</p>'
-            + '<p>\u0412\u0430\u0448 \u0442\u0440\u0435\u043A <strong>\u00AB' + track.title + '\u00BB</strong> \u0443\u0441\u043F\u0435\u0448\u043D\u043E \u043F\u0440\u043E\u0448\u0451\u043B \u043C\u043E\u0434\u0435\u0440\u0430\u0446\u0438\u044E.</p>'
-            + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">\u0414\u043B\u044F \u043F\u0443\u0431\u043B\u0438\u043A\u0430\u0446\u0438\u0438 \u043D\u0435\u043E\u0431\u0445\u043E\u0434\u0438\u043C\u043E \u043F\u0440\u043E\u0438\u0437\u0432\u0435\u0441\u0442\u0438 \u043E\u043F\u043B\u0430\u0442\u0443: <strong>' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' \u20bd</strong></p>'
-            + '<p>\u041F\u043E\u0441\u043B\u0435 \u043E\u043F\u043B\u0430\u0442\u044B \u0442\u0440\u0435\u043A \u043F\u043E\u044F\u0432\u0438\u0442\u0441\u044F \u0432 \u0440\u0430\u0437\u0434\u0435\u043B\u0435 <strong>\u0421\u043A\u043E\u0440\u043E</strong>, \u0430 \u0437\u0430\u0442\u0435\u043C \u0431\u0443\u0434\u0435\u0442 \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u043D.</p>'
-            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439: ' + moderator_notes + '</p>' : '')
-            + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">\u041E\u043F\u043B\u0430\u0442\u0438\u0442\u044C \u0438 \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C</a></p>'
-            + '<p style="color:#888;">\u0421 \u0443\u0432\u0430\u0436\u0435\u043D\u0438\u0435\u043C,<br/>\u041A\u043E\u043C\u0430\u043D\u0434\u0430 Promo.\u041C\u0443\u0437\u044B\u043A\u0430</p>'
+          emailSubject = 'Трек одобрен — ' + track.title;
+          emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
+            + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
+            + '<img src="https://promo-music.ru/logo-full.png" alt="Promo.Музыка" style="height:36px;" />'
+            + '<p style="margin:8px 0 0;color:#888;font-size:13px;">Платформа для музыкантов и лейблов</p>'
+            + '</div>'
+            + '<div style="padding:32px;">'
+            + '<h2 style="color:#10B981;margin:0 0 16px;">Трек одобрен!</h2>'
+            + '<p>Здравствуйте, <strong>' + artistName + '</strong>!</p>'
+            + '<p>Ваш трек <strong>«' + track.title + '»</strong> успешно прошёл модерацию.</p>'
+            + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽</strong></p>'
+            + '<p>После оплаты трек появится в разделе <strong>Скоро</strong>, а затем будет опубликован.</p>'
+            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + moderator_notes + '</p>' : '')
+            + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
+            + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
+            
+            + '</div>'
+            + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
+            + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
+            + '<p style="margin:0 0 8px;">info@promofm.ru · Москва, Россия</p>'
+            + '<p style="margin:0;color:#555;">Вы получили это письмо, так как отправили трек на модерацию</p>'
+            + '</div>'
             + '</div>';
         }
 
         sendEmail({ to: artistEmail, subject: emailSubject, html: emailHtml })
-          .then(() => sendEmail({ to: 'info@promofm.ru', subject: '[\u041A\u041E\u041F\u0418\u042F] ' + emailSubject + ' (' + artistEmail + ')', html: emailHtml }))
+          .then(() => sendEmail({ to: 'info@promofm.ru', subject: '[КОПИЯ] ' + emailSubject + ' (' + artistEmail + ')', html: emailHtml }))
           .catch((err: any) => console.error('[moderation] Email to artist failed:', err.message));
       }
 
