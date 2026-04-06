@@ -57,6 +57,7 @@ const edit = (chatId, msgId, text) => tg('editMessageText', { chat_id: chatId, m
 async function broadcastSpeak(text, author) {
   const r = await fetch(`${API_BASE}/server/api/broadcast/speak`, {
     method: 'POST',
+    signal: AbortSignal.timeout(45000),
     headers: { 'Content-Type': 'application/json', 'X-Internal-Key': INTERNAL_KEY },
     body: JSON.stringify({ text, author }),
   });
@@ -68,7 +69,7 @@ async function broadcastSpeak(text, author) {
 }
 
 async function getStatus() {
-  const r = await fetch(`${API_BASE}/server/api/broadcast/status`);
+  const r = await fetch(`${API_BASE}/server/api/broadcast/status`, { signal: AbortSignal.timeout(5000) });
   return await r.json();
 }
 

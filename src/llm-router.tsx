@@ -106,6 +106,7 @@ async function callOpenRouter(req: LLMRequest, apiKey: string): Promise<LLMRespo
   const start = Date.now();
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    signal: AbortSignal.timeout(20000),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

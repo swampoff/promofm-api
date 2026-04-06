@@ -55,13 +55,44 @@ async function makeScript(title: string, text: string, author: string): Promise<
 Заголовок: ${title}
 Текст: ${text}`;
 
-  const result = await callLLM({
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0.8,
-    maxTokens: 300,
-    tag: 'news-broadcast',
-  });
-  return (result?.content || title).trim();
+  // 1. Gemini через прокси на Hostinger (основной, без кредитов)
+  try {
+    const geminiUrl = `${GEMINI_PROXY_URL}/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY || ''}`;
+    const resp = await fetch(geminiUrl, {
+      method: 'POST',
+      signal: AbortSignal.timeout(15000),
+      headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.8, maxOutputTokens: 300 },
+      }),
+    });
+    if (!resp.ok) throw new Error(`Gemini ${resp.status}`);
+    const data = await resp.json() as any;
+    const geminiText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    if (geminiText.length > 20) {
+      console.log(`[broadcast] Gemini script: ${geminiText.length} chars`);
+      return geminiText.trim();
+    }
+  } catch (geminiErr: any) {
+    console.warn(`[broadcast] Gemini script failed: ${geminiErr.message}`);
+  }
+
+  // 2. Fallback: OpenRouter (если есть кредиты)
+  try {
+    const result = await callLLM({
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.8,
+      maxTokens: 300,
+      tag: 'news-broadcast',
+    });
+    if (result?.content) return result.content.trim();
+  } catch (llmErr: any) {
+    console.warn(`[broadcast] OpenRouter fallback failed: ${llmErr.message?.slice(0, 100)}`);
+  }
+
+  // 3. Raw text — TTS добавит стиль через voice persona
+  return text.slice(0, 500);
 }
 
 // --- Core: TTS → collect PCM → inject into AutoDJ stream ---
@@ -69,6 +100,7 @@ async function makeScript(title: string, text: string, author: string): Promise<
 async function ttsAndInject(text: string, author: string): Promise<{ok: boolean; bytes: number; duration: number; error?: string}> {
   // Step 1: Get PCM stream from Gemini TTS proxy
   const proxyResp = await fetch(`${GEMINI_PROXY_URL}/tts-stream`, {
+    signal: AbortSignal.timeout(30000),
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
     body: JSON.stringify({ text, author }),
@@ -110,6 +142,7 @@ async function ttsAndInject(text: string, author: string): Promise<{ok: boolean;
   // Step 4: POST raw PCM to AutoDJ /api/inject (converts mono 24kHz → stereo 44.1kHz, sets overlay)
   try {
     const injectResp = await fetch(`${AUTODJ_URL}/api/inject`, {
+      signal: AbortSignal.timeout(15000),
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
