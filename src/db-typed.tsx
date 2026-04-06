@@ -52,7 +52,12 @@ export async function getAllTracksForModeration(filters?: { status?: string; gen
   let q = db().from('tracks').select('*');
 
   if (filters?.status && filters.status !== 'all') {
-    q = q.eq('moderation_status', filters.status);
+    if (filters.status === 'published') {
+      // 'Одобрено' tab: show both approved (awaiting payment) and published (paid)
+      q = q.in('moderation_status', ['approved', 'published']);
+    } else {
+      q = q.eq('moderation_status', filters.status);
+    }
   }
   if (filters?.genre) {
     q = q.eq('genre', filters.genre);
