@@ -210,34 +210,70 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         : '';
 
       if (artistEmail) {
-        const emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">'
-          + '<h2 style="color:#10B981;margin:0 0 16px;">Трек одобрен!</h2>'
-          + '<p>Здравствуйте, <strong>' + artistName + '</strong>!</p>'
-          + '<p>Ваш трек <strong>' + track.title + '</strong> успешно прошёл модерацию.</p>'
-          + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽</strong></p>'
-          + '<p>После оплаты трек появится в разделе <strong>Скоро</strong>, а затем будет опубликован.</p>'
-          + aiNote
-          + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + moderator_notes + '</p>' : '')
-          + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
-          + '</div>';
-        sendEmail({ to: artistEmail, subject: 'Трек одобрен — ' + track.title, html: emailHtml })
-          .then(() => sendEmail({ to: 'info@promofm.ru', subject: '[КОПИЯ] Одобрен: ' + track.title + ' (' + artistEmail + ')', html: emailHtml }))
+        let emailHtml: string;
+        let emailSubject: string;
+
+        if (is_ai_track) {
+          // AI track — special email with AI section offer
+          const aiPercent = track.ai_score || 95;
+          emailSubject = 'Результат модерации — ' + track.title;
+          emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">'
+            + '<div style="text-align:center;margin-bottom:24px;"><img src="https://promo-music.ru/logo-full.png" alt="Promo.\u041C\u0443\u0437\u044B\u043A\u0430" style="height:40px;" /></div>'
+            + '<p>\u0414\u043E\u0431\u0440\u044B\u0439 \u0434\u0435\u043D\u044C!</p>'
+            + '<p>\u0411\u043B\u0430\u0433\u043E\u0434\u0430\u0440\u0438\u043C \u0432\u0430\u0441 \u0437\u0430 \u0434\u043E\u0432\u0435\u0440\u0438\u0435 \u0438 \u0437\u0430 \u0442\u043E, \u0447\u0442\u043E \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u043B\u0438 \u0441\u0432\u043E\u0439 \u0442\u0440\u0435\u043A \u043D\u0430 \u043F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0443 Promo.\u041C\u0443\u0437\u044B\u043A\u0430. \u041D\u0430\u043C \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0442\u0435\u043B\u044C\u043D\u043E \u0446\u0435\u043D\u043D\u043E, \u0447\u0442\u043E \u0432\u044B \u0434\u0435\u043B\u0438\u0442\u0435\u0441\u044C \u0441\u0432\u043E\u0438\u043C \u0442\u0432\u043E\u0440\u0447\u0435\u0441\u0442\u0432\u043E\u043C \u0441 \u043D\u0430\u043C\u0438.</p>'
+            + '<p>\u0412 \u043F\u0440\u043E\u0446\u0435\u0441\u0441\u0435 \u043C\u043E\u0434\u0435\u0440\u0430\u0446\u0438\u0438 \u043D\u0430\u0448\u0430 \u0441\u0438\u0441\u0442\u0435\u043C\u0430 \u0430\u043D\u0430\u043B\u0438\u0437\u0430 <strong>Promo.Check</strong> \u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0438\u043B\u0430, \u0447\u0442\u043E \u043A\u043E\u043C\u043F\u043E\u0437\u0438\u0446\u0438\u044F <strong>\u00AB' + track.title + '\u00BB</strong> \u0441 \u0432\u044B\u0441\u043E\u043A\u043E\u0439 \u0432\u0435\u0440\u043E\u044F\u0442\u043D\u043E\u0441\u0442\u044C\u044E (\u043E\u043A\u043E\u043B\u043E ' + aiPercent + '%) \u0431\u044B\u043B\u0430 \u0441\u043E\u0437\u0434\u0430\u043D\u0430 \u0441 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u0435\u043C \u0442\u0435\u0445\u043D\u043E\u043B\u043E\u0433\u0438\u0439 \u0438\u0441\u043A\u0443\u0441\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0433\u043E \u0438\u043D\u0442\u0435\u043B\u043B\u0435\u043A\u0442\u0430.</p>'
+            + '<p>\u041C\u044B \u0441 \u0431\u043E\u043B\u044C\u0448\u0438\u043C \u0438\u043D\u0442\u0435\u0440\u0435\u0441\u043E\u043C \u043E\u0442\u043D\u043E\u0441\u0438\u043C\u0441\u044F \u043A \u0440\u0430\u0437\u0432\u0438\u0442\u0438\u044E AI-\u043C\u0443\u0437\u044B\u043A\u0438 \u0438 \u0430\u043A\u0442\u0438\u0432\u043D\u043E \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043C \u044D\u0442\u043E \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u0435. \u0412 \u0441\u0432\u044F\u0437\u0438 \u0441 \u044D\u0442\u0438\u043C \u0433\u043E\u0442\u043E\u0432\u044B \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0438\u0442\u044C \u0432\u0430\u043C \u0440\u0430\u0437\u043C\u0435\u0449\u0435\u043D\u0438\u0435 \u0442\u0440\u0435\u043A\u0430 \u0432 \u043D\u0430\u0448\u0435\u043C \u0441\u043F\u0435\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u043C \u0440\u0430\u0437\u0434\u0435\u043B\u0435, \u043F\u043E\u0441\u0432\u044F\u0449\u0435\u043D\u043D\u043E\u043C AI-\u043A\u043E\u043D\u0442\u0435\u043D\u0442\u0443.</p>'
+            + '<p style="padding:16px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:4px;"><strong>\u0421\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C \u0440\u0430\u0437\u043C\u0435\u0449\u0435\u043D\u0438\u044F \u0441\u043E\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u0442 ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' \u0440\u0443\u0431\u043B\u0435\u0439.</strong></p>'
+            + '<p>\u0415\u0441\u043B\u0438 \u0432\u0430\u043C \u043E\u0442\u043A\u043B\u0438\u043A\u0430\u0435\u0442\u0441\u044F \u044D\u0442\u043E \u043F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u0435, \u0442\u043E \u043C\u044B \u0431\u0443\u0434\u0435\u043C \u0440\u0430\u0434\u044B \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C \u0441\u043E\u0442\u0440\u0443\u0434\u043D\u0438\u0447\u0435\u0441\u0442\u0432\u043E.</p>'
+            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439 \u043C\u043E\u0434\u0435\u0440\u0430\u0442\u043E\u0440\u0430: ' + moderator_notes + '</p>' : '')
+            + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#F59E0B,#D97706);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">\u0420\u0430\u0437\u043C\u0435\u0441\u0442\u0438\u0442\u044C \u0432 AI-\u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435</a></p>'
+            + '<p>\u0421\u043F\u0430\u0441\u0438\u0431\u043E \u0437\u0430 \u0432\u0430\u0448 \u0438\u043D\u0442\u0435\u0440\u0435\u0441 \u043A \u043D\u043E\u0432\u044B\u043C \u043C\u0443\u0437\u044B\u043A\u0430\u043B\u044C\u043D\u044B\u043C \u0444\u043E\u0440\u043C\u0430\u043C.</p>'
+            + '<p style="color:#888;">\u0421 \u0443\u0432\u0430\u0436\u0435\u043D\u0438\u0435\u043C,<br/>\u041A\u043E\u043C\u0430\u043D\u0434\u0430 Promo.\u041C\u0443\u0437\u044B\u043A\u0430</p>'
+            + '</div>';
+        } else {
+          // Normal track — standard approval email
+          emailSubject = '\u0422\u0440\u0435\u043A \u043E\u0434\u043E\u0431\u0440\u0435\u043D — ' + track.title;
+          emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;padding:32px;border-radius:12px;">'
+            + '<div style="text-align:center;margin-bottom:24px;"><img src="https://promo-music.ru/logo-full.png" alt="Promo.\u041C\u0443\u0437\u044B\u043A\u0430" style="height:40px;" /></div>'
+            + '<h2 style="color:#10B981;margin:0 0 16px;">\u0422\u0440\u0435\u043A \u043E\u0434\u043E\u0431\u0440\u0435\u043D!</h2>'
+            + '<p>\u0417\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439\u0442\u0435, <strong>' + artistName + '</strong>!</p>'
+            + '<p>\u0412\u0430\u0448 \u0442\u0440\u0435\u043A <strong>\u00AB' + track.title + '\u00BB</strong> \u0443\u0441\u043F\u0435\u0448\u043D\u043E \u043F\u0440\u043E\u0448\u0451\u043B \u043C\u043E\u0434\u0435\u0440\u0430\u0446\u0438\u044E.</p>'
+            + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">\u0414\u043B\u044F \u043F\u0443\u0431\u043B\u0438\u043A\u0430\u0446\u0438\u0438 \u043D\u0435\u043E\u0431\u0445\u043E\u0434\u0438\u043C\u043E \u043F\u0440\u043E\u0438\u0437\u0432\u0435\u0441\u0442\u0438 \u043E\u043F\u043B\u0430\u0442\u0443: <strong>' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' \u20bd</strong></p>'
+            + '<p>\u041F\u043E\u0441\u043B\u0435 \u043E\u043F\u043B\u0430\u0442\u044B \u0442\u0440\u0435\u043A \u043F\u043E\u044F\u0432\u0438\u0442\u0441\u044F \u0432 \u0440\u0430\u0437\u0434\u0435\u043B\u0435 <strong>\u0421\u043A\u043E\u0440\u043E</strong>, \u0430 \u0437\u0430\u0442\u0435\u043C \u0431\u0443\u0434\u0435\u0442 \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u043D.</p>'
+            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439: ' + moderator_notes + '</p>' : '')
+            + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">\u041E\u043F\u043B\u0430\u0442\u0438\u0442\u044C \u0438 \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C</a></p>'
+            + '<p style="color:#888;">\u0421 \u0443\u0432\u0430\u0436\u0435\u043D\u0438\u0435\u043C,<br/>\u041A\u043E\u043C\u0430\u043D\u0434\u0430 Promo.\u041C\u0443\u0437\u044B\u043A\u0430</p>'
+            + '</div>';
+        }
+
+        sendEmail({ to: artistEmail, subject: emailSubject, html: emailHtml })
+          .then(() => sendEmail({ to: 'info@promofm.ru', subject: '[\u041A\u041E\u041F\u0418\u042F] ' + emailSubject + ' (' + artistEmail + ')', html: emailHtml }))
           .catch((err: any) => console.error('[moderation] Email to artist failed:', err.message));
       }
 
+
       if (track.user_id) {
-        const aiMsg = (track.ai_score && track.ai_score > 60)
-          ? ' AI: ' + track.ai_score + '% вероятность ИИ.'
-          : '';
-        notifyCrossCabinet({
-          targetUserId: track.user_id,
-          targetRole: 'artist',
-          sourceRole: 'admin',
-          type: 'track_moderation',
-          title: 'Трек одобрен!',
-          message: 'Трек «' + track.title + '» одобрен. Для публикации оплатите ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽.' + aiMsg,
-          link: '/cabinet/tracks',
-        }).catch(() => {});
+        if (is_ai_track) {
+          notifyCrossCabinet({
+            targetUserId: track.user_id,
+            targetRole: 'artist',
+            sourceRole: 'admin',
+            type: 'track_moderation',
+            title: 'Результат модерации',
+            message: 'Композиция «' + track.title + '» определена как AI-трек. Предлагаем размещение в разделе AI-музыки за ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' руб.',
+            link: '/cabinet/tracks',
+          }).catch(() => {});
+        } else {
+          notifyCrossCabinet({
+            targetUserId: track.user_id,
+            targetRole: 'artist',
+            sourceRole: 'admin',
+            type: 'track_moderation',
+            title: 'Трек одобрен!',
+            message: 'Трек «' + track.title + '» одобрен. Для публикации оплатите ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽.',
+            link: '/cabinet/tracks',
+          }).catch(() => {});
+        }
       }
 
       return c.json({
