@@ -42,7 +42,7 @@ const AUTHOR_STYLES: Record<string, string> = {
 };
 
 function cleanText(t: string): string {
-  return t.replace(/<[^>]*>/g, '').replace(/```[\s\S]*?```/g, '').replace(/\s+/g, ' ').trim().slice(0, 3000);
+  return t.replace(/<[^>]*>/g, '').replace(/```[\s\S]*?```/g, '').replace(/—/g, '. ').replace(/\s+/g, ' ').trim().slice(0, 3000);
 }
 
 async function makeScript(title: string, text: string, author: string): Promise<string> {
@@ -283,21 +283,29 @@ app.get('/queue', async (c) => {
 // --- GET /status ---
 
 app.get('/status', async (c) => {
-  // Also fetch AutoDJ status for listener count
+  // Fetch AutoDJ status + stream server listeners
   let autoDjStatus: any = null;
+  let listeners = 0;
   try {
     const r = await fetch(`${AUTODJ_URL}/api/status`, { signal: AbortSignal.timeout(2000) });
     if (r.ok) autoDjStatus = await r.json();
+  } catch { /* silent */ }
+  try {
+    const r = await fetch('http://127.0.0.1:8086/status', { signal: AbortSignal.timeout(2000) });
+    if (r.ok) {
+      const s = await r.json() as any;
+      listeners = s.mounts?.[0]?.meta?.listeners || 0;
+    }
   } catch { /* silent */ }
 
   return c.json({
     success: true,
     mode: 'autodj-inject',
     streamUrl: 'https://promo-music.ru/air/live/promo.fm',
+    listeners,
     autoDj: autoDjStatus ? {
       status: autoDjStatus.status,
       currentTrack: autoDjStatus.current_track,
-      listeners: autoDjStatus.listeners,
     } : null,
     currentBroadcast,
     queueLength: broadcastQueue.length,

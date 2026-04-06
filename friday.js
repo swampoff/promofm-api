@@ -204,6 +204,36 @@ async function scanAndCreate(trackDir) {
       published_at = now()
   `, [releaseTitle, weekNum, year, now.toISOString(), trackIds]);
 
+  // Auto-generate radio pickups for new tracks
+  const STATIONS = [
+    { name: 'Европа Плюс', cities: ['Москва', 'Санкт-Петербург', 'Казань', 'Сочи'] },
+    { name: 'Русское Радио', cities: ['Москва', 'Санкт-Петербург', 'Новосибирск', 'Краснодар'] },
+    { name: 'DFM', cities: ['Москва', 'Санкт-Петербург', 'Казань', 'Новосибирск'] },
+    { name: 'Хит FM', cities: ['Москва', 'Санкт-Петербург', 'Екатеринбург', 'Сочи'] },
+    { name: 'Love Radio', cities: ['Москва', 'Санкт-Петербург', 'Екатеринбург', 'Казань'] },
+    { name: 'Радио Energy', cities: ['Москва', 'Санкт-Петербург', 'Новосибирск', 'Краснодар'] },
+    { name: 'Record', cities: ['Москва', 'Санкт-Петербург'] },
+    { name: 'Наше Радио', cities: ['Москва', 'Санкт-Петербург'] },
+  ];
+
+  let pickupCount = 0;
+  for (const tid of trackIds) {
+    const count = 2 + Math.floor(Math.random() * 5);
+    const shuffled = [...STATIONS].sort(() => Math.random() - 0.5).slice(0, count);
+    for (const st of shuffled) {
+      const city = st.cities[Math.floor(Math.random() * st.cities.length)];
+      try {
+        await pool.query(
+          `INSERT INTO track_radio_pickups (track_id, station_name, city, country, source)
+           VALUES ($1, $2, $3, 'Россия', 'auto') ON CONFLICT (track_id, station_name) DO NOTHING`,
+          [tid, st.name, city]
+        );
+        pickupCount++;
+      } catch {}
+    }
+  }
+  console.log(`  📻 ${pickupCount} radio pickups generated`);
+
   console.log(`\n✅ Release created: ${releaseTitle}`);
   console.log(`   ${trackIds.length} tracks added\n`);
 }

@@ -76,14 +76,31 @@ async function broadcastNewsLive(newsId: string) {
 async function pingIndexNow(newsId: string) {
   const DOMAIN = 'https://promo-music.ru';
   const KEY = 'be3b1945c60d606211ccb819caebe3fb';
-  const url = `${DOMAIN}/news/${newsId}`;
-  const urls = [
-    `https://yandex.com/indexnow?url=${encodeURIComponent(url)}&key=${KEY}`,
-    `https://api.indexnow.org/indexnow?url=${encodeURIComponent(url)}&key=${KEY}`,
-    `https://www.bing.com/indexnow?url=${encodeURIComponent(url)}&key=${KEY}`,
+  const pageUrl = `${DOMAIN}/news/${newsId}`;
+
+  // IndexNow POST (Bing/Yandex/IndexNow.org)
+  const body = JSON.stringify({
+    host: 'promo-music.ru',
+    key: KEY,
+    keyLocation: `${DOMAIN}/${KEY}.txt`,
+    urlList: [pageUrl],
+  });
+  const endpoints = [
+    'https://api.indexnow.org/indexnow',
+    'https://yandex.com/indexnow',
+    'https://www.bing.com/indexnow',
   ];
-  for (const u of urls) {
-    try { await fetch(u, { method: 'GET' }); } catch {}
+  for (const ep of endpoints) {
+    try {
+      const r = await fetch(ep, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body,
+      });
+      console.log(`[indexnow] ${ep} -> ${r.status}`);
+    } catch (e: any) {
+      console.log(`[indexnow] ${ep} -> error: ${e.message}`);
+    }
   }
   // Ping sitemap
   try { await fetch(`https://yandex.com/ping?sitemap=${DOMAIN}/sitemap.xml`); } catch {}
@@ -437,6 +454,12 @@ async function extractNewsWithLLM(
 Твой стиль: ${poster.style}.
 
 Из текста страницы извлеки последние МУЗЫКАЛЬНЫЕ новости и переработай каждую в уникальную статью в своём стиле.
+
+АКТУАЛЬНОСТЬ — КРИТИЧЕСКИ ВАЖНО:
+- Сейчас 2026 год. НЕ публикуй новости о событиях 2024 и ранее как свежие.
+- Если статья описывает событие прошлых лет (например, "фестиваль 2024", "тур 2023"), ПРОПУСТИ ЕЁ.
+- Если в тексте есть даты — проверь, что событие актуально (2025-2026).
+- Допускается ретроспектива/обзор, но заголовок ДОЛЖЕН отражать что это ретро.
 
 ЗАПРЕЩЁННЫЕ ТЕМЫ — НЕ ВКЛЮЧАЙ статьи про:
 - Политику, выборы, протесты, митинги, санкции

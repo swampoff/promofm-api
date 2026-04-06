@@ -11,13 +11,14 @@
  * Команды: /start, /author, /authors, /listeners, /status
  */
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const BOT_TOKEN = process.env.VOICE_BOT_TOKEN || '';
 const RAW_ALLOWED = process.env.VOICE_BOT_ALLOWED_CHATS || '';
 const ALLOWED_CHATS = RAW_ALLOWED === 'ALL' ? []
   : (RAW_ALLOWED || process.env.TELEGRAM_LEAD_CHAT_ID || '').split(',').map(s => s.trim()).filter(Boolean);
 const API_BASE = process.env.API_BASE || 'http://localhost:3000';
 const INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const NEWS_CHANNEL_ID = process.env.TELEGRAM_NEWS_CHANNEL_ID || '-1001185230485';
 
 if (!BOT_TOKEN) { console.error('[voice-bot] No TELEGRAM_BOT_TOKEN'); process.exit(1); }
 
@@ -168,6 +169,60 @@ async function handle(msg) {
   }
 }
 
+// --- Channel auto-voice (posts from @promofm channel) ---
+
+async function handleChannelPost(post) {
+  const chatId = String(post.chat?.id || '');
+  // Only process posts from our news channel
+  if (chatId !== NEWS_CHANNEL_ID) return;
+
+  const text = (post.text || '').trim();
+  if (!text || text.length < 30) return; // Skip short posts (buttons, links only)
+
+  // Only voice Russian-language posts (>40% Cyrillic characters)
+  const cyrillic = (text.match(/[Ѐ-ӿ]/g) || []).length;
+  const letters = (text.match(/[a-zA-ZЀ-ӿ]/g) || []).length;
+  if (letters > 0 && cyrillic / letters < 0.4) {
+    console.log(`[channel] Skipping non-Russian post: ${(cyrillic/letters*100).toFixed(0)}% cyrillic`);
+    return;
+  }
+
+  // Extract clean text: remove emoji, hashtags at end, URLs
+  let cleanText = text
+    .replace(/https?:\/\/\S+/g, '')  // remove URLs
+    .replace(/#\S+/g, '')              // remove hashtags
+    .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '') // remove emoji
+    .replace(/\u2014/g, '. ')  // em-dash to period+space
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (cleanText.length < 20) return;
+
+  // Detect author from post (format: "\u270d\ufe0f AuthorName | Source")
+  let author = 'DJ Den';
+  const knownAuthors = Object.keys(AUTHORS);
+  const authorLine = text.match(/\u270d\ufe0f\s*([^|\n]+)/);
+  if (authorLine) {
+    const name = authorLine[1].trim();
+    const found = knownAuthors.find(a => name.includes(a));
+    if (found) author = found;
+  }
+
+  // Limit text length for TTS
+  if (cleanText.length > 2000) cleanText = cleanText.slice(0, 2000);
+
+  console.log(`[channel] Auto-voice from @promofm: "${cleanText.slice(0, 60)}..." -> ${author}`);
+
+  try {
+    const result = await broadcastSpeak(cleanText, author);
+    totalBroadcasts++;
+    const dur = result.duration ? `${result.duration.toFixed(1)}s` : '?';
+    console.log(`[channel] Voiced: ${dur}`);
+  } catch (err) {
+    console.error(`[channel] Voice error: ${err.message}`);
+  }
+}
+
 // --- Polling ---
 
 let offset = 0;
@@ -175,7 +230,7 @@ let offset = 0;
 async function poll() {
   try {
     const r = await fetch(
-      `${TG_API}/getUpdates?offset=${offset}&timeout=30&allowed_updates=["message"]`,
+      `${TG_API}/getUpdates?offset=${offset}&timeout=30&allowed_updates=["message","channel_post"]`,
       { signal: AbortSignal.timeout(35000) }
     );
     const d = await r.json();
@@ -183,6 +238,7 @@ async function poll() {
       for (const u of d.result) {
         offset = u.update_id + 1;
         if (u.message) handle(u.message).catch(e => console.error('[bot]', e));
+        if (u.channel_post) handleChannelPost(u.channel_post).catch(e => console.error('[channel]', e));
       }
     }
   } catch (e) {
