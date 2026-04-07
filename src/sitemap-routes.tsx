@@ -69,6 +69,9 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   // Feed / discover (0.7)
   { loc: '/publish', changefreq: 'daily', priority: '0.7' },
   { loc: '/checkout', changefreq: 'monthly', priority: '0.4' },
+  // SEO Pillar Pages (long-form content for primary keywords)
+  { loc: '/pesnya-na-radio', changefreq: 'weekly', priority: '0.9' },
+  { loc: '/muzyka-dlya-zavedeniya', changefreq: 'weekly', priority: '0.9' },
   // SEO Landing Pages
   { loc: '/for-artists', changefreq: 'weekly', priority: '0.8' },
   { loc: '/for-djs', changefreq: 'weekly', priority: '0.7' },
@@ -89,6 +92,72 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   { loc: '/contact', changefreq: 'monthly', priority: '0.5' },
   { loc: '/careers', changefreq: 'monthly', priority: '0.5' },
   { loc: '/partners', changefreq: 'monthly', priority: '0.6' },
+  // SEO Pillar — Airplay Monitoring
+  { loc: '/airplay-monitoring', changefreq: 'weekly', priority: '0.9' },
+  // SEO Commercial Aliases — Promo / Distribution / Upload
+  { loc: '/promo', changefreq: 'weekly', priority: '0.9' },
+  { loc: '/promo/ads', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/distribution', changefreq: 'weekly', priority: '0.9' },
+  { loc: '/upload', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/upload/track', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/upload/album', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/upload/video', changefreq: 'weekly', priority: '0.7' },
+  // SEO Commercial Aliases — Charts / Analytics / Evaluate / Monetize
+  { loc: '/chart/airplay', changefreq: 'daily', priority: '0.8' },
+  { loc: '/chart/streaming', changefreq: 'daily', priority: '0.8' },
+  { loc: '/analytics', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/analytics/airplay', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/evaluate', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/monetize', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/monetize/youtube', changefreq: 'weekly', priority: '0.6' },
+  // SEO Commercial Aliases — Events / Concerts
+  { loc: '/events', changefreq: 'daily', priority: '0.8' },
+  { loc: '/events/add', changefreq: 'weekly', priority: '0.6' },
+  // SEO Commercial Aliases — Radio
+  { loc: '/radio/submit', changefreq: 'weekly', priority: '0.9' },
+  { loc: '/radio/listen', changefreq: 'daily', priority: '0.8' },
+  { loc: '/radio/new', changefreq: 'daily', priority: '0.7' },
+  { loc: '/radio/electronic', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/radio/soul-fm', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/radio/soul-fm/playlist', changefreq: 'daily', priority: '0.6' },
+  // SEO Commercial Aliases — Catalog / Press / Reviews
+  { loc: '/new', changefreq: 'daily', priority: '0.8' },
+  { loc: '/new/russian', changefreq: 'daily', priority: '0.7' },
+  { loc: '/playpress', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/reviews', changefreq: 'weekly', priority: '0.7' },
+  // SEO Genre Pages
+  { loc: '/genres/electronic', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/deep-house', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/techno', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/dnb', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/ambient', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/chillout', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/trance', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/electro-house', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/rap', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/hiphop', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/beats', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/trap', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/pop', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/indie', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/alternative', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/lofi', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/soundscapes', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/meditation', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/sound-healing', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/ethnic', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/genres/world', changefreq: 'weekly', priority: '0.7' },
+  // SEO Blog Pages
+  { loc: '/blog/how-to-promote-music', changefreq: 'monthly', priority: '0.7' },
+  { loc: '/blog/how-to-get-on-radio', changefreq: 'monthly', priority: '0.7' },
+  { loc: '/blog/distribution-guide', changefreq: 'monthly', priority: '0.7' },
+  { loc: '/blog/streaming-royalties', changefreq: 'monthly', priority: '0.7' },
+  { loc: '/blog/press-kit-guide', changefreq: 'monthly', priority: '0.7' },
+  { loc: '/blog/organize-concert', changefreq: 'monthly', priority: '0.7' },
+  { loc: '/blog/how-to-record-track', changefreq: 'monthly', priority: '0.7' },
+  { loc: '/blog/best-russian-2026', changefreq: 'weekly', priority: '0.7' },
+  { loc: '/blog/how-we-review', changefreq: 'monthly', priority: '0.6' },
+  { loc: '/blog/radio-formats', changefreq: 'monthly', priority: '0.6' },
 ];
 
 function escapeXml(s: string): string {
