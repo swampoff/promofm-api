@@ -22,20 +22,24 @@ function escapeHtml(str: string): string {
 }
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 
-// SMTP transport (Reg.ru mail hosting)
-const smtpTransport = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'mail.hosting.reg.ru',
-  port: parseInt(process.env.SMTP_PORT || '587'),
+// SMTP transport: localhost Postfix (no auth) or external relay (with auth)
+const smtpConfig: any = {
+  host: process.env.SMTP_HOST || '127.0.0.1',
+  port: parseInt(process.env.SMTP_PORT || '25'),
   secure: false,
-  auth: {
-    user: process.env.SMTP_USER || 'noreply@promo-music.ru',
-    pass: process.env.SMTP_PASS || '',
-  },
   tls: { rejectUnauthorized: false },
   connectionTimeout: 5000,
   greetingTimeout: 5000,
   socketTimeout: 10000,
-});
+};
+// Only add auth if SMTP_PASS is set (external relay like mail.hosting.reg.ru)
+if (process.env.SMTP_PASS) {
+  smtpConfig.auth = {
+    user: process.env.SMTP_USER || 'noreply@promo-music.ru',
+    pass: process.env.SMTP_PASS,
+  };
+}
+const smtpTransport = nodemailer.createTransport(smtpConfig);
 
 interface EmailOptions {
   to: string;
@@ -48,8 +52,8 @@ interface EmailOptions {
  * Send email: SMTP first, then Resend HTTP API fallback
  */
 export async function sendEmail(opts: EmailOptions): Promise<boolean> {
-  // Try SMTP first
-  if (process.env.SMTP_PASS) {
+  // Try SMTP first (localhost Postfix works without auth)
+  {
     try {
       const info = await smtpTransport.sendMail({
         from: opts.from || FROM_EMAIL,
