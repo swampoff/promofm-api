@@ -59,6 +59,8 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
 
     const mapping: Record<string, string> = {
       name: 'full_name',
+      fullName: 'full_name',
+      avatarUrl: 'avatar_url',
       email: 'email',
       role: 'role',
       avatar: 'avatar_url',
@@ -101,16 +103,62 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
          updated_at = NOW()`,
       [
         userId,
-        data.name || null,
-        data.genre || null,
-        data.city || null,
-        data.bio || null,
-        data.avatar || null,
-        data.socialLinks ? JSON.stringify(data.socialLinks) : '{}',
+        (data.fullName as string) || (data.name as string) || null,
+        (data.genre as string) || (Array.isArray(data.genres) && data.genres.length > 0 ? (data.genres as string[])[0] : null),
+        (data.city as string) || null,
+        (data.bio as string) || null,
+        (data.avatarUrl as string) || (data.avatar as string) || null,
+        data.socialLinks || data.socials ? JSON.stringify(data.socialLinks || data.socials) : '{}',
         data.extraData ? JSON.stringify(data.extraData) : '{}',
       ],
       userId
     );
+
+    // Upsert artist_profiles (required for track upload and public pages)
+    const artistName = (data.fullName as string) || (data.name as string) || null;
+    if (artistName) {
+      const genre = (data.genre as string) || (Array.isArray(data.genres) && data.genres.length > 0 ? (data.genres as string[])[0] : null);
+      const subGenres = Array.isArray(data.genres) ? (data.genres as string[]) : (data.genre ? [data.genre as string] : []);
+      const slug = artistName.toLowerCase().replace(/[^a-zа-яё0-9]+/gi, '-').replace(/^-|-$/g, '');
+      const socials = data.socials || data.socialLinks || {};
+      const streamingLinks: Record<string, string> = {};
+      if (typeof socials === 'object' && socials !== null) {
+        const s = socials as Record<string, string>;
+        if (s.spotify) streamingLinks.spotify = s.spotify;
+        if (s.appleMusic) streamingLinks.appleMusic = s.appleMusic;
+      }
+
+      await rlsQuery(
+        `INSERT INTO artist_profiles (user_id, slug, artist_name, genre, sub_genres, city, country, bio, avatar_url, website, social_links, streaming_links)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (user_id) DO UPDATE SET
+           artist_name = COALESCE(EXCLUDED.artist_name, artist_profiles.artist_name),
+           genre = COALESCE(EXCLUDED.genre, artist_profiles.genre),
+           sub_genres = CASE WHEN array_length(EXCLUDED.sub_genres, 1) > 0 THEN EXCLUDED.sub_genres ELSE artist_profiles.sub_genres END,
+           city = COALESCE(EXCLUDED.city, artist_profiles.city),
+           bio = COALESCE(EXCLUDED.bio, artist_profiles.bio),
+           avatar_url = COALESCE(EXCLUDED.avatar_url, artist_profiles.avatar_url),
+           website = COALESCE(EXCLUDED.website, artist_profiles.website),
+           social_links = COALESCE(EXCLUDED.social_links, artist_profiles.social_links),
+           streaming_links = COALESCE(EXCLUDED.streaming_links, artist_profiles.streaming_links),
+           updated_at = NOW()`,
+        [
+          userId,
+          slug,
+          artistName,
+          genre || null,
+          subGenres,
+          (data.city as string) || null,
+          'Russia',
+          (data.bio as string) || null,
+          (data.avatarUrl as string) || (data.avatar as string) || null,
+          (data.website as string) || null,
+          JSON.stringify(socials),
+          JSON.stringify(streamingLinks),
+        ],
+        userId
+      );
+    }
   } catch (err) {
     console.error(`[profile] saveProfile error for ${userId}:`, err);
   }
