@@ -8,3 +8,20 @@ __pycache__/
 *.pyc
 fix-pw.js
 uploads/
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+
+# OS thumbnails
+Thumbs.db
+ehthumbs.db
