@@ -325,8 +325,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       const { updateTrack } = await import('./db-typed.tsx');
       const trackId = session.metadata.trackId;
       await updateTrack(trackId, {
-        moderation_status: 'paid',
-        is_hidden: true,
+        moderation_status: 'published',
+        is_hidden: false,
         data: {
           payment_completed: true,
           payment_amount: session.amount,
