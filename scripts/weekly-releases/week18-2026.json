@@ -1,0 +1,18 @@
+{
+  "weekNumber": 18,
+  "year": 2026,
+  "releaseDate": "2026-04-27",
+  "title": "Новинки недели #18 (27 апреля 2026)",
+  "tracks": [
+    { "artist": "Mari Froes",                "title": "Como Ouro",      "slug": "como-ouro",      "mp3": "01 Como Ouro.mp3",        "duration": 154, "genre": "Electronic" },
+    { "artist": "Muse",                      "title": "Cryogen",        "slug": "cryogen",         "mp3": "01 Cryogen.mp3",          "duration": 301, "genre": "Alternative Rock" },
+    { "artist": "LYRIQ",                     "title": "DON'T GO MAD",   "slug": "dont-go-mad",     "mp3": "01 DON'T GO MAD.mp3",     "duration": 165, "genre": "R&B" },
+    { "artist": "Zivert",                    "title": "GAZ",            "slug": "gaz-zivert",      "mp3": "01 GAZ.mp3",              "duration": 181, "genre": "Pop" },
+    { "artist": "Madonna",                   "title": "I Feel So Free", "slug": "i-feel-so-free",  "mp3": "01 I Feel So Free.mp3",   "duration": 303, "genre": "Pop" },
+    { "artist": "Egor Kreed, ARTIK & ASTI",  "title": "KARMA",          "slug": "karma-kreed",     "mp3": "01 KARMA.mp3",            "duration": 168, "genre": "Pop" },
+    { "artist": "Topic, Becky G",            "title": "Sorry Papi",     "slug": "sorry-papi",      "mp3": "01 Sorry Papi.mp3",       "duration": 170, "genre": "Pop" },
+    { "artist": "DJ SMASH, Artem Kacher",    "title": "КЛАТЧ",          "slug": "klatch",          "mp3": "01 КЛАТЧ.mp3",            "duration": 178, "genre": "Electronic" },
+    { "artist": "NAVAI",                     "title": "Компромисс",     "slug": "kompromiss",      "mp3": "01 Компромисс.mp3",       "duration": 197, "genre": "Pop" },
+    { "artist": "ANNA ASTI, Dima Bilan",     "title": "Эпилог",         "slug": "epilog",          "mp3": "01 Эпилог.mp3",           "duration": 197, "genre": "Pop" }
+  ]
+}
