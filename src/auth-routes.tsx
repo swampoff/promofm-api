@@ -808,8 +808,8 @@ auth.post("/change-password", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 auth.get("/admin/pending-users", requireAuth, requireAdmin, async (c) => {
   try {
-    const result = await sql(`SELECT id, email, full_name, role::text, created_at FROM users WHERE status = 'pending' ORDER BY created_at DESC`);
-    return c.json({ success: true, data: result.rows.map((u: any) => ({ userId: u.id, email: u.email, name: u.full_name, role: u.role, createdAt: u.created_at })) });
+    const result = await sql(`SELECT id, email, full_name, role::text, created_at, is_email_verified FROM users WHERE status = 'pending' ORDER BY created_at DESC`);
+    return c.json({ success: true, data: result.rows.map((u: any) => ({ userId: u.id, email: u.email, name: u.full_name, role: u.role, createdAt: u.created_at, isEmailVerified: !!u.is_email_verified })) });
   } catch (error) {
     return c.json({ success: false, error: "Internal server error" }, 500);
   }
@@ -822,7 +822,7 @@ auth.post("/admin/approve-user", requireAuth, requireAdmin, async (c) => {
   try {
     const { userId } = await c.req.json();
     if (!userId) return c.json({ success: false, error: "userId обязателен" }, 400);
-    const result = await sql(`UPDATE users SET status = 'active'::user_status WHERE id = $1 RETURNING email, full_name`, [userId]);
+    const result = await sql(`UPDATE users SET status = 'active'::user_status, is_email_verified = true, email_verified_at = COALESCE(email_verified_at, NOW()) WHERE id = $1 RETURNING email, full_name`, [userId]);
     if (result.rows.length === 0) return c.json({ success: false, error: "Не найден" }, 404);
     const user = result.rows[0];
     sendAccountApprovedEmail(user.email, user.full_name || '').catch(() => {});
