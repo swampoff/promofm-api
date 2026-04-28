@@ -400,55 +400,76 @@ app.post('/orders/:id/pay', requireAuth, async (c) => {
     const order = await production360OrdersStore.get(orderId) as Production360Order | null;
     if (!order) return c.json({ success: false, error: 'Project not found' }, 404);
 
-    // draft → pending_payment
+    const userId = c.get('userId');
+    let returnUrl = 'https://promo-music.ru/artist/production-360';
+    try { const body = await c.req.json(); if (body?.returnUrl) returnUrl = body.returnUrl; } catch {}
+
+    // draft → pending_payment (готовим заказ к оплате)
     if (order.status === 'draft') {
       const t1 = validateTransition('production_360', 'draft', 'pending_payment');
       if (!t1.valid) return c.json({ success: false, error: t1.error }, 400);
       order.status = 'pending_payment';
       order.statusEnteredAt = new Date().toISOString();
+      order.updatedAt = new Date().toISOString();
       await updateStatusIndex(orderId, 'draft', 'pending_payment');
+      await production360OrdersStore.set(orderId, order);
     }
 
-    // pending_payment → paid
-    const result = executeTransition({
-      pipelineType: 'production_360',
-      contentType: 'production_360',
-      itemId: orderId,
-      itemTitle: order.projectTitle,
-      fromStatus: order.status,
-      toStatus: 'paid',
-      actorId: 'system',
-      actorRole: 'system',
-      action: 'payment_confirmed',
-      price: order.finalPrice,
-      details: `Оплата ${order.finalPrice.toLocaleString('ru-RU')} ₽ за ${order.serviceType}`,
-      notifyUserIds: [order.artistId, 'admin-1'],
-      sseEventType: 'notification',
-      sseData: { category: 'production_360', orderId },
-    });
-    if (!result.success) return c.json({ success: false, error: result.error }, 400);
+    if (order.status !== 'pending_payment') {
+      return c.json({ success: false, error: `Заказ не в статусе pending_payment (текущий: ${order.status})` }, 400);
+    }
 
-    const now = new Date().toISOString();
-    await updateStatusIndex(orderId, order.status, 'paid');
-    order.status = 'paid';
-    order.statusEnteredAt = now;
-    order.paidAt = now;
-    order.updatedAt = now;
-    await production360OrdersStore.set(orderId, order);
+    // Создаём платёжную сессию YooKassa. Статус → paid выставится в webhook после оплаты.
+    const { getGateway } = await import('./payment-gateway.tsx');
+    const { upsertPaymentSession } = await import('./db.tsx');
+    const paymentOrderId = crypto.randomUUID();
 
-    await recordRevenue({
-      channel: 'production_360',
-      description: `360° Продакшн: ${order.serviceType} — ${order.projectTitle}`,
-      grossAmount: order.finalPrice,
-      platformRevenue: order.finalPrice,
-      payoutAmount: 0,
-      commissionRate: 1.0,
-      payerId: order.artistId,
-      payerName: order.artistName,
-      metadata: { orderId, serviceType: order.serviceType, addons: order.addons },
+    const gw = getGateway('yookassa');
+    const result = await gw.createPayment({
+      amount: order.finalPrice,
+      currency: 'RUB',
+      description: `360° Продакшн: ${order.projectTitle}`,
+      gateway: 'yookassa',
+      userId,
+      orderId: paymentOrderId,
+      returnUrl,
+      metadata: {
+        type: 'production_360_payment',
+        productionOrderId: orderId,
+        artistId: order.artistId,
+      },
+      savePaymentMethod: false,
+      type: 'purchase',
     });
 
-    return c.json({ success: true, order });
+    await upsertPaymentSession(paymentOrderId, {
+      orderId: paymentOrderId,
+      userId,
+      gateway: 'yookassa',
+      gatewayPaymentId: result.sessionId,
+      amount: order.finalPrice,
+      currency: 'RUB',
+      status: 'pending',
+      type: 'purchase',
+      description: `360° Продакшн: ${order.projectTitle}`,
+      metadata: {
+        type: 'production_360_payment',
+        productionOrderId: orderId,
+        artistId: order.artistId,
+      },
+      savePaymentMethod: false,
+      confirmationUrl: result.confirmationUrl,
+      returnUrl,
+      createdAt: new Date().toISOString(),
+    });
+
+    return c.json({
+      success: true,
+      data: {
+        orderId: paymentOrderId,
+        confirmationUrl: result.confirmationUrl,
+      },
+    });
   } catch (error) {
     console.error('[production-360] pay error:', error);
     return c.json({ success: false, error: 'Payment failed' }, 500);

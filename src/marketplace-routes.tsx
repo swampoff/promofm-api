@@ -453,7 +453,7 @@ app.post('/beats/:id/purchase', requireAuth, async (c) => {
     const id = c.req.param('id');
     const body = await c.req.json();
     const buyerId = c.get('userId'); // IDOR fix: from JWT, not body
-    const { buyerName, licenseType } = body;
+    const { buyerName, licenseType, returnUrl } = body;
 
     if (!buyerId || !licenseType) {
       return c.json({ success: false, error: 'licenseType required' }, 400);
@@ -472,87 +472,59 @@ app.post('/beats/:id/purchase', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Invalid license type' }, 400);
     }
 
-    // Комиссия платформы 10%
-    const commission = Math.round(price * 0.1);
-    const producerPayout = price - commission;
+    // Создаём платёжную сессию YooKassa. Покупка создаётся в webhook после оплаты.
+    const { getGateway } = await import('./payment-gateway.tsx');
+    const { upsertPaymentSession } = await import('./db.tsx');
+    const orderId = crypto.randomUUID();
+    const safeReturnUrl = returnUrl || 'https://promo-music.ru/marketplace/beats';
 
-    const purchaseId = genId('bp');
-    const purchase = {
-      id: purchaseId,
-      beatId: id,
-      beatTitle: beat.title,
-      producerId: beat.producerId,
-      producerName: beat.producer,
-      buyerId,
-      buyerName: buyerName || 'Покупатель',
-      licenseType,
-      price,
-      commission,
-      producerPayout,
-      status: 'completed',
-      createdAt: nowIso(),
-    };
-
-    // Сохранить покупку
-    await beatPurchasesStore.set(purchaseId, JSON.stringify(purchase));
-
-    // Индекс покупателя
-    const buyerRaw = await beatPurchasesByUserStore.get(buyerId);
-    const buyerPurchases: string[] = buyerRaw
-      ? (typeof buyerRaw === 'string' ? JSON.parse(buyerRaw) : buyerRaw)
-      : [];
-    buyerPurchases.unshift(purchaseId);
-    await beatPurchasesByUserStore.set(buyerId, JSON.stringify(buyerPurchases));
-
-    // Индекс продюсера
-    const prodRaw = await beatPurchasesByProducerStore.get(beat.producerId);
-    const prodPurchases: string[] = prodRaw
-      ? (typeof prodRaw === 'string' ? JSON.parse(prodRaw) : prodRaw)
-      : [];
-    prodPurchases.unshift(purchaseId);
-    await beatPurchasesByProducerStore.set(beat.producerId, JSON.stringify(prodPurchases));
-
-    // Обновить счётчик покупок бита
-    beat.purchases = (beat.purchases || 0) + 1;
-
-    // Если эксклюзив - пометить бит как проданный
-    if (licenseType === 'exclusive') {
-      beat.status = 'sold';
-    }
-
-    await upsertBeat(id, JSON.stringify(beat));
-
-    // Записать комиссию платформы
-    await recordPlatformCommission(
-      'beat',
-      beat.title,
-      price,
-      commission,
-      producerPayout,
-      {
-        producerId: beat.producerId,
-        producerName: beat.producer,
-        buyerId,
+    const gw = getGateway('yookassa');
+    const result = await gw.createPayment({
+      amount: price,
+      currency: 'RUB',
+      description: `Покупка бита: ${beat.title} (${licenseType})`,
+      gateway: 'yookassa',
+      userId: buyerId,
+      orderId,
+      returnUrl: safeReturnUrl,
+      metadata: {
+        type: 'beat_purchase',
+        beatId: id,
+        licenseType,
         buyerName: buyerName || 'Покупатель',
-      }
-    );
+      },
+      savePaymentMethod: false,
+      type: 'purchase',
+    });
 
-    // SSE уведомление продюсеру
-    await sendSSE(beat.producerId, 'beat_purchased', {
-      title: 'Продажа бита',
-      message: `${buyerName || 'Покупатель'} купил "${beat.title}" (${licenseType}) за ${price.toLocaleString()} ₽`,
-      purchaseId,
-      beatId: id,
-      licenseType,
-      price,
-      producerPayout,
+    await upsertPaymentSession(orderId, {
+      orderId,
+      userId: buyerId,
+      gateway: 'yookassa',
+      gatewayPaymentId: result.sessionId,
+      amount: price,
+      currency: 'RUB',
+      status: 'pending',
+      type: 'purchase',
+      description: `Покупка бита: ${beat.title} (${licenseType})`,
+      metadata: {
+        type: 'beat_purchase',
+        beatId: id,
+        licenseType,
+        buyerName: buyerName || 'Покупатель',
+      },
+      savePaymentMethod: false,
+      confirmationUrl: result.confirmationUrl,
+      returnUrl: safeReturnUrl,
+      createdAt: new Date().toISOString(),
     });
 
     return c.json({
       success: true,
       data: {
-        purchase,
-        message: `Бит "${beat.title}" успешно куплен (${licenseType})`,
+        orderId,
+        confirmationUrl: result.confirmationUrl,
+        message: `Перейдите к оплате бита "${beat.title}" (${licenseType})`,
       },
     });
   } catch (error) {
@@ -1545,7 +1517,7 @@ app.post('/digital-goods/:id/purchase', requireAuth, async (c) => {
     const id = c.req.param('id');
     const body = await c.req.json();
     const buyerId = c.get('userId'); // IDOR fix: from JWT
-    const { buyerName } = body;
+    const { buyerName, returnUrl } = body;
 
     if (!buyerId) return c.json({ success: false, error: 'Authorization required' }, 401);
 
@@ -1557,68 +1529,57 @@ app.post('/digital-goods/:id/purchase', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Item is not available' }, 400);
     }
 
-    const commission = Math.round(good.price * 0.1);
-    const producerPayout = good.price - commission;
+    // Создаём платёжную сессию YooKassa. Покупка создаётся в webhook после оплаты.
+    const { getGateway } = await import('./payment-gateway.tsx');
+    const { upsertPaymentSession } = await import('./db.tsx');
+    const orderId = crypto.randomUUID();
+    const safeReturnUrl = returnUrl || 'https://promo-music.ru/marketplace/digital';
 
-    const purchaseId = genId('dgp');
-    const purchase = {
-      id: purchaseId,
-      digitalGoodId: id,
-      title: good.title,
-      category: good.category,
-      producerId: good.producerId,
-      producerName: good.producer,
-      buyerId,
-      buyerName: buyerName || 'Покупатель',
-      price: good.price,
-      commission,
-      producerPayout,
-      status: 'completed',
-      createdAt: nowIso(),
-    };
-
-    await digitalPurchasesStore.set(purchaseId, JSON.stringify(purchase));
-
-    // Индексы
-    const buyerRaw = await digitalPurchasesByUserStore.get(buyerId);
-    const buyerList: string[] = buyerRaw ? (typeof buyerRaw === 'string' ? JSON.parse(buyerRaw) : buyerRaw) : [];
-    buyerList.unshift(purchaseId);
-    await digitalPurchasesByUserStore.set(buyerId, JSON.stringify(buyerList));
-
-    // Обновить продажи
-    good.sales = (good.sales || 0) + 1;
-    await digitalGoodsStore.set(id, JSON.stringify(good));
-
-    // Записать комиссию платформы
-    await recordPlatformCommission(
-      'digital_good',
-      good.title,
-      good.price,
-      commission,
-      producerPayout,
-      {
-        producerId: good.producerId,
-        producerName: good.producer,
-        buyerId,
+    const gw = getGateway('yookassa');
+    const result = await gw.createPayment({
+      amount: good.price,
+      currency: 'RUB',
+      description: `Покупка: ${good.title}`,
+      gateway: 'yookassa',
+      userId: buyerId,
+      orderId,
+      returnUrl: safeReturnUrl,
+      metadata: {
+        type: 'digital_purchase',
+        digitalGoodId: id,
         buyerName: buyerName || 'Покупатель',
-      }
-    );
+      },
+      savePaymentMethod: false,
+      type: 'purchase',
+    });
 
-    // SSE уведомление продюсеру
-    await sendSSE(good.producerId, 'beat_purchased', {
-      title: 'Продажа цифрового товара',
-      message: `${buyerName || 'Покупатель'} купил "${good.title}" за ${good.price.toLocaleString()} ₽`,
-      purchaseId,
-      digitalGoodId: id,
-      price: good.price,
-      producerPayout,
+    await upsertPaymentSession(orderId, {
+      orderId,
+      userId: buyerId,
+      gateway: 'yookassa',
+      gatewayPaymentId: result.sessionId,
+      amount: good.price,
+      currency: 'RUB',
+      status: 'pending',
+      type: 'purchase',
+      description: `Покупка: ${good.title}`,
+      metadata: {
+        type: 'digital_purchase',
+        digitalGoodId: id,
+        buyerName: buyerName || 'Покупатель',
+      },
+      savePaymentMethod: false,
+      confirmationUrl: result.confirmationUrl,
+      returnUrl: safeReturnUrl,
+      createdAt: new Date().toISOString(),
     });
 
     return c.json({
       success: true,
       data: {
-        purchase,
-        message: `"${good.title}" успешно куплен`,
+        orderId,
+        confirmationUrl: result.confirmationUrl,
+        message: `Перейдите к оплате "${good.title}"`,
       },
     });
   } catch (error) {

@@ -357,6 +357,151 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill beat_purchase (Beats Marketplace) ───
+  if (session.metadata?.type === 'beat_purchase' && session.metadata?.beatId) {
+    try {
+      const { getBeat, upsertBeat, beatPurchasesStore, beatPurchasesByUserStore, beatPurchasesByProducerStore } = await import('./db.tsx');
+      const { recordPlatformCommission } = await import('./platform-revenue.tsx');
+      const beatId = session.metadata.beatId;
+      const licenseType = session.metadata.licenseType;
+      const buyerId = session.userId;
+      const buyerName = session.metadata.buyerName || 'Покупатель';
+
+      const raw = await getBeat(beatId);
+      if (raw) {
+        const beat = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        const price = session.amount;
+        const commission = Math.round(price * 0.1);
+        const producerPayout = price - commission;
+        const purchaseId = 'bp_' + Math.random().toString(36).substring(2, 12);
+
+        const purchase = {
+          id: purchaseId, beatId, beatTitle: beat.title,
+          producerId: beat.producerId, producerName: beat.producer,
+          buyerId, buyerName, licenseType, price, commission, producerPayout,
+          status: 'completed', paymentOrderId: session.orderId, paymentGateway: session.gateway,
+          createdAt: now,
+        };
+
+        await beatPurchasesStore.set(purchaseId, JSON.stringify(purchase));
+
+        const buyerRaw = await beatPurchasesByUserStore.get(buyerId);
+        const buyerPurchases: string[] = buyerRaw ? (typeof buyerRaw === 'string' ? JSON.parse(buyerRaw) : buyerRaw) : [];
+        buyerPurchases.unshift(purchaseId);
+        await beatPurchasesByUserStore.set(buyerId, JSON.stringify(buyerPurchases));
+
+        const prodRaw = await beatPurchasesByProducerStore.get(beat.producerId);
+        const prodPurchases: string[] = prodRaw ? (typeof prodRaw === 'string' ? JSON.parse(prodRaw) : prodRaw) : [];
+        prodPurchases.unshift(purchaseId);
+        await beatPurchasesByProducerStore.set(beat.producerId, JSON.stringify(prodPurchases));
+
+        beat.purchases = (beat.purchases || 0) + 1;
+        if (licenseType === 'exclusive') beat.status = 'sold';
+        await upsertBeat(beatId, JSON.stringify(beat));
+
+        await recordPlatformCommission('beat', beat.title, price, commission, producerPayout, {
+          producerId: beat.producerId, producerName: beat.producer, buyerId, buyerName,
+        });
+
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(beat.producerId, 'beat_purchased', {
+            title: 'Продажа бита', purchaseId, beatId, licenseType, price, producerPayout,
+          });
+        } catch {}
+
+        log.info({ beatId, purchaseId, price, orderId: session.orderId }, 'beat_purchase_fulfilled');
+      }
+    } catch (err) {
+      log.error({ err, beatId: session.metadata.beatId }, 'beat_purchase_fulfillment_error');
+    }
+  }
+
+  // ─── Fulfill digital_purchase (Digital Goods Marketplace) ───
+  if (session.metadata?.type === 'digital_purchase' && session.metadata?.digitalGoodId) {
+    try {
+      const { digitalGoodsStore, digitalPurchasesStore, digitalPurchasesByUserStore } = await import('./db.tsx');
+      const { recordPlatformCommission } = await import('./platform-revenue.tsx');
+      const goodId = session.metadata.digitalGoodId;
+      const buyerId = session.userId;
+      const buyerName = session.metadata.buyerName || 'Покупатель';
+
+      const raw = await digitalGoodsStore.get(goodId);
+      if (raw) {
+        const good = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        const price = session.amount;
+        const commission = Math.round(price * 0.1);
+        const producerPayout = price - commission;
+        const purchaseId = 'dgp_' + Math.random().toString(36).substring(2, 12);
+
+        const purchase = {
+          id: purchaseId, digitalGoodId: goodId, title: good.title, category: good.category,
+          producerId: good.producerId, producerName: good.producer,
+          buyerId, buyerName, price, commission, producerPayout,
+          status: 'completed', paymentOrderId: session.orderId, paymentGateway: session.gateway,
+          createdAt: now,
+        };
+
+        await digitalPurchasesStore.set(purchaseId, JSON.stringify(purchase));
+
+        const buyerRaw = await digitalPurchasesByUserStore.get(buyerId);
+        const buyerList: string[] = buyerRaw ? (typeof buyerRaw === 'string' ? JSON.parse(buyerRaw) : buyerRaw) : [];
+        buyerList.unshift(purchaseId);
+        await digitalPurchasesByUserStore.set(buyerId, JSON.stringify(buyerList));
+
+        good.sales = (good.sales || 0) + 1;
+        await digitalGoodsStore.set(goodId, JSON.stringify(good));
+
+        await recordPlatformCommission('digital_good', good.title, price, commission, producerPayout, {
+          producerId: good.producerId, producerName: good.producer, buyerId, buyerName,
+        });
+
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(good.producerId, 'digital_purchased', {
+            title: 'Продажа цифрового товара', purchaseId, digitalGoodId: goodId, price, producerPayout,
+          });
+        } catch {}
+
+        log.info({ goodId, purchaseId, price, orderId: session.orderId }, 'digital_purchase_fulfilled');
+      }
+    } catch (err) {
+      log.error({ err, goodId: session.metadata.digitalGoodId }, 'digital_purchase_fulfillment_error');
+    }
+  }
+
+  // ─── Fulfill production_360_payment (Production 360 Marketplace) ───
+  if (session.metadata?.type === 'production_360_payment' && session.metadata?.productionOrderId) {
+    try {
+      const { production360OrdersStore } = await import('./db.tsx');
+      const productionOrderId = session.metadata.productionOrderId;
+      const order: any = await production360OrdersStore.get(productionOrderId);
+      if (order && order.status === 'pending_payment') {
+        order.status = 'paid';
+        order.statusEnteredAt = now;
+        order.paidAt = now;
+        order.updatedAt = now;
+        order.paymentOrderId = session.orderId;
+        order.paymentGateway = session.gateway;
+        await production360OrdersStore.set(productionOrderId, order);
+
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(order.artistId, 'production_360_paid', {
+            title: 'Заказ оплачен', orderId: productionOrderId, amount: session.amount,
+          });
+          emitSSE('admin', 'production_360_paid', {
+            orderId: productionOrderId, amount: session.amount, artistId: order.artistId,
+          });
+        } catch {}
+
+        log.info({ productionOrderId, amount: session.amount, orderId: session.orderId }, 'production_360_fulfilled');
+      }
+    } catch (err) {
+      log.error({ err, productionOrderId: session.metadata.productionOrderId }, 'production_360_fulfillment_error');
+    }
+  }
+
   // ─── Fulfill donation ───
   if (session.type === 'donation' && session.metadata?.donationId) {
     try {
