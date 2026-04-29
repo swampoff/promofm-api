@@ -10,11 +10,8 @@ import {
   getNotification,
   deleteNotification,
   getNotificationsByUser,
-  dmConversationsStore,
-  dmConvListStore,
-  dmMessagesStore,
-  dmUnreadCountsStore,
 } from './db.tsx';
+import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
 const app = new Hono();
@@ -258,218 +255,163 @@ app.delete('/:notificationId', requireAuth, async (c) => {
 // ============================================
 
 /**
- * GET /messenger/conversations/:userId
- * Получить все разговоры пользователя
+ * GET /messenger/conversations/:userId — все разговоры (SQL)
  */
 app.get('/conversations/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
-
   try {
-    // Get the list of conversation IDs for this user
-    const conversationIds = await dmConvListStore.get(userId) || [];
-
-    if (!Array.isArray(conversationIds) || conversationIds.length === 0) {
-      return c.json({ success: true, data: [] });
-    }
-
-    // Fetch each conversation by ID
-    const conversations = await Promise.all(
-      conversationIds.map((id: string) => dmConversationsStore.get(id))
+    const r = await pool.query(
+      `SELECT c.id, c.participant_ids, c.last_message_text, c.last_message_at, c.data, c.created_at,
+              COALESCE(u.unread_count, 0) as unread_count
+       FROM dm_conversations c
+       LEFT JOIN dm_unread u ON u.conversation_id = c.id AND u.user_id = $1
+       WHERE $1 = ANY(c.participant_ids)
+       ORDER BY c.last_message_at DESC NULLS LAST`,
+      [userId]
     );
-
-    const validConversations = conversations
-      .filter(Boolean)
-      .sort((a: any, b: any) =>
-        new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime()
-      );
-
-    return c.json({
-      success: true,
-      data: validConversations
-    });
+    const data = r.rows.map((row: any) => ({
+      id: row.id,
+      participants: row.participant_ids || [],
+      subject: row.data?.subject || '',
+      type: row.data?.type || 'user',
+      last_message: row.last_message_text || '',
+      last_message_at: row.last_message_at,
+      unread_count: parseInt(row.unread_count) || 0,
+      created_at: row.created_at,
+    }));
+    return c.json({ success: true, data });
   } catch (error) {
     console.error('Error loading conversations:', error);
-    return c.json({
-      success: true,
-      data: []
-    });
+    return c.json({ success: true, data: [] });
   }
 });
 
 /**
- * POST /messenger/conversation/create
- * Создать новый разговор
+ * POST /messenger/conversation/create — создать разговор (SQL)
  */
 app.post('/conversation/create', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const {
-      participants, // array of user IDs
-      subject,
-      type, // 'support' | 'moderation' | 'admin' | 'user'
-    } = body;
-
+    const { participants, subject, type } = body;
     if (!participants || participants.length < 2 || !subject) {
-      return c.json({
-        success: false,
-        error: 'Missing required fields'
-      }, 400);
+      return c.json({ success: false, error: 'Missing required fields' }, 400);
     }
-
-    const conversationId = `${crypto.randomUUID()}`;
-
-    const conversation = {
-      id: conversationId,
-      participants,
-      subject,
-      type: type || 'user',
-      last_message: '',
-      last_message_at: new Date().toISOString(),
-      unread_count: 0,
-      created_at: new Date().toISOString(),
-    };
-
-    // Save the conversation
-    await dmConversationsStore.set(conversationId, conversation);
-
-    // Add conversation to each participant's list
-    for (const participantId of participants) {
-      const existingConversations = await dmConvListStore.get(participantId) || [];
-      await dmConvListStore.set(participantId, [...existingConversations, conversationId]);
-    }
-
+    const conversationId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const dataJson = JSON.stringify({ subject, type: type || 'user' });
+    await pool.query(
+      `INSERT INTO dm_conversations (id, participant_ids, last_message_text, last_message_at, data, created_at)
+       VALUES ($1, $2, '', $3, $4::jsonb, $3)`,
+      [conversationId, participants, now, dataJson]
+    );
     return c.json({
       success: true,
-      data: conversation
+      data: {
+        id: conversationId, participants, subject,
+        type: type || 'user',
+        last_message: '', last_message_at: now,
+        unread_count: 0, created_at: now,
+      },
     });
   } catch (error) {
     console.error('Error creating conversation:', error);
-    return c.json({
-      success: false,
-      error: 'Failed to create conversation'
-    }, 500);
+    return c.json({ success: false, error: 'Failed to create conversation' }, 500);
   }
 });
 
 /**
- * GET /messenger/messages/:conversationId
- * Получить сообщения разговора
+ * GET /messenger/messages/:conversationId — сообщения (SQL)
  */
 app.get('/messages/:conversationId', requireAuth, async (c) => {
   const conversationId = c.req.param('conversationId');
-
   try {
-    // Messages for a conversation are stored as one array under conv_id
-    const messages = await dmMessagesStore.get(conversationId) || [];
-
-    const validMessages = (Array.isArray(messages) ? messages : [])
-      .sort((a: any, b: any) =>
-        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-      );
-
-    return c.json({
-      success: true,
-      data: validMessages
-    });
+    const r = await pool.query(
+      `SELECT id, conversation_id, sender_id, content, message_type, is_read, read_at, created_at
+       FROM dm_messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
+      [conversationId]
+    );
+    const data = r.rows.map((m: any) => ({
+      id: m.id,
+      conversation_id: m.conversation_id,
+      from_user_id: m.sender_id,
+      message: m.content,
+      read: m.is_read,
+      created_at: m.created_at,
+      metadata: {},
+    }));
+    return c.json({ success: true, data });
   } catch (error) {
     console.error('Error loading messages:', error);
-    return c.json({
-      success: true,
-      data: []
-    });
+    return c.json({ success: true, data: [] });
   }
 });
 
 /**
- * POST /messenger-send
- * Отправить сообщение в мессенджер
+ * POST /messenger-send — отправить сообщение (SQL + SSE + notification)
  */
 app.post('/messenger-send', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const {
-      conversation_id,
-      from_user_id,
-      message,
-      metadata,
-    } = body;
-
+    const { conversation_id, from_user_id, message, metadata } = body;
     if (!conversation_id || !from_user_id || !message) {
-      return c.json({
-        success: false,
-        error: 'Missing required fields'
-      }, 400);
+      return c.json({ success: false, error: 'Missing required fields' }, 400);
     }
 
-    const messageId = `${crypto.randomUUID()}`;
+    // Insert message
+    const ins = await pool.query(
+      `INSERT INTO dm_messages (conversation_id, sender_id, content, message_type, is_read, created_at)
+       VALUES ($1, $2, $3, 'text', false, NOW())
+       RETURNING id, created_at`,
+      [conversation_id, from_user_id, message]
+    );
+    const messageId = ins.rows[0].id;
+    const createdAt = ins.rows[0].created_at;
 
-    const messageData = {
-      id: messageId,
-      conversation_id,
-      from_user_id,
-      message,
-      read: false,
-      created_at: new Date().toISOString(),
-      metadata: metadata || {},
-    };
+    // Update conversation
+    const convRes = await pool.query(
+      `UPDATE dm_conversations
+       SET last_message_text = $1, last_message_at = $2
+       WHERE id = $3 RETURNING participant_ids, data`,
+      [message.length > 500 ? message.slice(0, 500) : message, createdAt, conversation_id]
+    );
+    if (convRes.rows.length === 0) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    const participantIds: string[] = convRes.rows[0].participant_ids || [];
+    const convType = convRes.rows[0].data?.type || 'user';
+    const convSubject = convRes.rows[0].data?.subject || '';
 
-    // Append message to the conversation's message array
-    const existingMessages = await dmMessagesStore.get(conversation_id) || [];
-    await dmMessagesStore.set(conversation_id, [...(Array.isArray(existingMessages) ? existingMessages : []), messageData]);
+    // Bump unread + notify each recipient
+    const recipients = participantIds.filter((id: string) => id !== from_user_id);
+    const senderName = metadata?.sender_name || 'Новое сообщение';
 
-    // Обновляем разговор
-    const conversation = await dmConversationsStore.get(conversation_id);
+    for (const recipientId of recipients) {
+      await pool.query(
+        `INSERT INTO dm_unread (user_id, conversation_id, unread_count, updated_at)
+         VALUES ($1, $2, 1, NOW())
+         ON CONFLICT (user_id, conversation_id) DO UPDATE SET
+           unread_count = dm_unread.unread_count + 1, updated_at = NOW()`,
+        [recipientId, conversation_id]
+      );
 
-    if (conversation) {
-      conversation.last_message = message;
-      conversation.last_message_at = new Date().toISOString();
-
-      // Увеличиваем счетчик непрочитанных для других участников
-      conversation.participants.forEach((participantId: string) => {
-        if (participantId !== from_user_id) {
-          conversation.unread_count = (conversation.unread_count || 0) + 1;
-        }
-      });
-
-      await dmConversationsStore.set(conversation_id, conversation);
-
-      // Создаём уведомление для каждого получателя
-      const recipients = conversation.participants.filter((id: string) => id !== from_user_id);
-
-      for (const recipientId of recipients) {
-        const notificationId = `${crypto.randomUUID()}`;
-
-        // Получаем имя отправителя (если есть в metadata)
-        const senderName = metadata?.sender_name || 'Новое сообщение';
-
-        const notification = {
-          id: notificationId,
-          user_id: recipientId,
+      const notifId = crypto.randomUUID();
+      try {
+        await upsertNotification(recipientId, notifId, {
+          id: notifId, user_id: recipientId,
           type: 'new_message',
           title: senderName,
-          message: message.length > 100 ? message.substring(0, 100) + '...' : message,
+          message: message.length > 100 ? message.slice(0, 100) + '...' : message,
           link: `/notifications?tab=messenger&conversation=${conversation_id}`,
-          read: false,
-          starred: false,
-          archived: false,
+          read: false, starred: false, archived: false,
           created_at: new Date().toISOString(),
           metadata: {
-            conversation_id,
-            sender_id: from_user_id,
-            message_id: messageId,
-            conversation_type: conversation.type,
-            conversation_subject: conversation.subject,
+            conversation_id, sender_id: from_user_id, message_id: messageId,
+            conversation_type: convType, conversation_subject: convSubject,
           },
-        };
+        });
+      } catch {}
 
-        // Save notification to notifications table
-        await upsertNotification(recipientId, notificationId, notification);
-
-        // No need to maintain a separate ID list — getNotificationsByUser queries by user_id column
-      }
-
-      // Emit SSE events to all recipients for real-time delivery
-      for (const recipientId of recipients) {
+      try {
         emitSSE(recipientId, {
           type: 'new_direct_message',
           data: {
@@ -477,74 +419,71 @@ app.post('/messenger-send', requireAuth, async (c) => {
             senderId: from_user_id,
             senderName: metadata?.sender_name || '',
             senderRole: metadata?.sender_role || '',
-            text: message.length > 200 ? message.substring(0, 200) + '...' : message,
+            text: message.length > 200 ? message.slice(0, 200) + '...' : message,
             messageId,
-            conversationType: conversation.type,
-            source: conversation.type === 'support' ? 'support' : 'direct',
+            conversationType: convType,
+            source: convType === 'support' ? 'support' : 'direct',
           },
         });
-      }
+      } catch {}
     }
 
     return c.json({
       success: true,
-      data: messageData
+      data: {
+        id: messageId,
+        conversation_id, from_user_id, message,
+        read: false, created_at: createdAt,
+        metadata: metadata || {},
+      },
     });
   } catch (error) {
     console.error('Error sending message:', error);
-    return c.json({
-      success: false,
-      error: 'Failed to send message'
-    }, 500);
+    return c.json({ success: false, error: 'Failed to send message' }, 500);
   }
 });
 
 /**
- * PUT /messenger/conversations/:conversationId/read
- * Отметить разговор как прочитанный
+ * PUT /messenger/conversations/:conversationId/read — пометить прочитанным (SQL)
  */
 app.put('/conversations/:conversationId/read', requireAuth, async (c) => {
   const conversationId = c.req.param('conversationId');
-
+  const userId = c.get('userId');
   try {
-    const conversation = await dmConversationsStore.get(conversationId);
-
-    if (!conversation) {
-      return c.json({
-        success: false,
-        error: 'Conversation not found'
-      }, 404);
+    const conv = await pool.query(
+      `SELECT id, participant_ids, last_message_text, last_message_at, data
+       FROM dm_conversations WHERE id = $1`,
+      [conversationId]
+    );
+    if (conv.rows.length === 0) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
     }
 
-    conversation.unread_count = 0;
-    await dmConversationsStore.set(conversationId, conversation);
+    await pool.query(
+      `UPDATE dm_messages SET is_read = true, read_at = NOW()
+       WHERE conversation_id = $1 AND sender_id != $2 AND is_read = false`,
+      [conversationId, userId]
+    );
+    await pool.query(
+      `UPDATE dm_unread SET unread_count = 0, updated_at = NOW()
+       WHERE user_id = $1 AND conversation_id = $2`,
+      [userId, conversationId]
+    );
 
-    // Отмечаем все сообщения как прочитанные
-    const messages = await dmMessagesStore.get(conversationId) || [];
-
-    if (Array.isArray(messages)) {
-      let changed = false;
-      for (const msg of messages) {
-        if (!msg.read) {
-          msg.read = true;
-          changed = true;
-        }
-      }
-      if (changed) {
-        await dmMessagesStore.set(conversationId, messages);
-      }
-    }
-
+    const r = conv.rows[0];
     return c.json({
       success: true,
-      data: conversation
+      data: {
+        id: r.id,
+        participants: r.participant_ids || [],
+        last_message: r.last_message_text || '',
+        last_message_at: r.last_message_at,
+        unread_count: 0,
+      },
     });
   } catch (error) {
     console.error('Error marking conversation as read:', error);
-    return c.json({
-      success: false,
-      error: 'Failed to mark as read'
-    }, 500);
+    return c.json({ success: false, error: 'Failed' }, 500);
   }
 });
 

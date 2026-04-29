@@ -1,30 +1,34 @@
 /**
- * MESSAGING ROUTES - Единая система личных сообщений для всех кабинетов
- * 
- * Правила коммуникации:
- * - Radio может общаться ТОЛЬКО с platform (admin) и venue
- * - Все остальные кабинеты могут общаться друг с другом
- * 
- * KV Keys:
- *   dm:conv:{conversationId}      -> DirectConversation
- *   dm:convlist:{userId}          -> string[] (conversationIds)
- *   dm:messages:{conversationId}  -> DirectMessage[]
- *   dm:unread:{userId}            -> Record<conversationId, number>
- * 
- * Endpoints:
- * GET    /conversations/:userId              - Список переписок
- * POST   /conversations                      - Создать/найти переписку
- * GET    /messages/:conversationId            - Сообщения
- * POST   /messages/:conversationId            - Отправить сообщение (+SSE)
- * PUT    /messages/:conversationId/read       - Отметить прочитанными
- * GET    /unread/:userId                      - Счётчик непрочитанных
+ * MESSAGING ROUTES — DM между всеми кабинетами
+ *
+ * Native SQL (PostgreSQL). KV store удалён 2026-04-29.
+ *
+ * Tables:
+ *   dm_conversations (id, participant_ids text[], last_message_text, last_message_at, data jsonb)
+ *   dm_messages (id, conversation_id, sender_id, content, message_type, is_read, read_at, created_at)
+ *   dm_unread (user_id, conversation_id, unread_count, updated_at)
+ *
+ * Endpoints (без изменений):
+ *   GET    /conversations/:userId
+ *   POST   /conversations
+ *   GET    /messages/:conversationId
+ *   POST   /messages/:conversationId
+ *   PUT    /messages/:conversationId/read
+ *   GET    /unread/:userId
+ *   PUT    /messages/:messageId/edit
+ *   DELETE /messages/:conversationId/:messageId
+ *   POST   /typing/:conversationId
+ *   GET    /presence/:userId
+ *   GET    /rules
+ *   POST   /presence
+ *   GET    /search-contacts
  */
 
 import { Hono } from 'hono';
-import { dmConvListStore, dmConversationsStore, dmMessagesStore, dmUnreadCountsStore, getAllArtistProfiles, getAllProducerProfiles } from './db.tsx';
 import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { requireAuth } from './auth-middleware.tsx';
+
 // ── Telegram forwarding for admin messages ──
 const TG_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TG_LEAD_CHAT = process.env.TELEGRAM_LEAD_CHAT_ID || '';
@@ -32,7 +36,7 @@ const TG_LEAD_CHAT = process.env.TELEGRAM_LEAD_CHAT_ID || '';
 async function forwardToTelegramIfAdmin(recipientRole: string, senderName: string, text: string): Promise<void> {
   if (recipientRole !== 'admin' || !TG_BOT_TOKEN || !TG_LEAD_CHAT) return;
   const preview = text.length > 300 ? text.slice(0, 300) + '...' : text;
-  const msg = '\u2709\ufe0f promo-music.ru\n\n' + 'От: ' + senderName + '\n' + 'Сообщение: ' + preview;
+  const msg = '✉️ promo-music.ru\n\n' + 'От: ' + senderName + '\n' + 'Сообщение: ' + preview;
   try {
     await fetch('https://api.telegram.org/bot' + TG_BOT_TOKEN + '/sendMessage', {
       method: 'POST',
@@ -41,9 +45,6 @@ async function forwardToTelegramIfAdmin(recipientRole: string, senderName: strin
     });
   } catch {}
 }
-
-
-// Auth: handled by requireAuth middleware (JWT)
 
 const app = new Hono();
 
@@ -56,27 +57,6 @@ interface Participant {
   userName: string;
   role: CabinetRole;
   avatar?: string;
-}
-
-interface DirectConversation {
-  id: string;
-  participants: Participant[];
-  source: 'direct' | 'collab' | 'support';
-  collabOfferId?: string;
-  lastMessage?: string;
-  lastMessageAt?: string;
-  createdAt: string;
-}
-
-interface DirectMessage {
-  id: string;
-  conversationId: string;
-  senderId: string;
-  senderName: string;
-  senderRole: CabinetRole;
-  text: string;
-  attachment?: { type: string; name: string; url?: string };
-  createdAt: string;
 }
 
 // ── Communication Rules ──
@@ -94,12 +74,6 @@ function canCommunicate(roleA: CabinetRole, roleB: CabinetRole): boolean {
   return ALLOWED_CONTACTS[roleA]?.includes(roleB) ?? false;
 }
 
-// ── Helpers ──
-
-function genId(): string {
-  return `dm-${crypto.randomUUID()}`;
-}
-
 function makeConvId(userA: string, userB: string): string {
   return [userA, userB].sort().join('::');
 }
@@ -113,6 +87,35 @@ const ROLE_LABELS: Record<CabinetRole, string> = {
   venue: 'Заведение',
 };
 
+// Map role from DB enum to client-facing role
+function mapRole(role: string): CabinetRole {
+  if (role === 'radio_station' || role === 'radio') return 'radio';
+  if (role === 'admin' || role === 'superadmin') return 'admin';
+  return (role as CabinetRole) || 'artist';
+}
+
+// Hydrate participant info from users + profiles tables
+async function getParticipantInfo(userId: string): Promise<Participant> {
+  try {
+    const r = await pool.query(
+      `SELECT u.id, u.full_name, u.role::text, u.avatar_url
+       FROM users u WHERE u.id::text = $1 LIMIT 1`,
+      [userId]
+    );
+    if (r.rows[0]) {
+      const u = r.rows[0];
+      return {
+        userId,
+        userName: u.full_name || u.id,
+        role: mapRole(u.role),
+        avatar: u.avatar_url || undefined,
+      };
+    }
+  } catch {}
+  // Fallback for non-UUID synthetic ids (admin-1, demo users etc.)
+  return { userId, userName: userId, role: 'artist' };
+}
+
 // ── GET /conversations/:userId ──
 
 app.get('/conversations/:userId', requireAuth, async (c) => {
@@ -122,34 +125,39 @@ app.get('/conversations/:userId', requireAuth, async (c) => {
     return c.json({ success: false, error: 'Access denied: not resource owner' }, 403);
   }
   try {
-    const convIds: string[] = (await dmConvListStore.get(userId)) || [];
-    const conversations: DirectConversation[] = [];
+    const convs = await pool.query(
+      `SELECT c.id, c.participant_ids, c.last_message_text, c.last_message_at, c.data, c.created_at,
+              COALESCE(u.unread_count, 0) as unread_count
+       FROM dm_conversations c
+       LEFT JOIN dm_unread u ON u.conversation_id = c.id AND u.user_id = $1
+       WHERE $1 = ANY(c.participant_ids)
+       ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`,
+      [userId]
+    );
 
-    for (const cid of convIds) {
-      const conv: DirectConversation | null = await dmConversationsStore.get(cid);
-      if (conv) conversations.push(conv);
-    }
+    // Hydrate participants for each conversation
+    const conversations = await Promise.all(
+      convs.rows.map(async (row: any) => {
+        const participants = await Promise.all(
+          (row.participant_ids || []).map((uid: string) => getParticipantInfo(uid))
+        );
+        return {
+          id: row.id,
+          participants,
+          source: row.data?.source || 'direct',
+          collabOfferId: row.data?.collabOfferId,
+          lastMessage: row.last_message_text || undefined,
+          lastMessageAt: row.last_message_at?.toISOString?.() || row.last_message_at,
+          createdAt: row.created_at?.toISOString?.() || row.created_at,
+          unreadCount: parseInt(row.unread_count) || 0,
+        };
+      })
+    );
 
-    // Сортировка: последнее сообщение сверху
-    conversations.sort((a, b) => {
-      const ta = a.lastMessageAt || a.createdAt;
-      const tb = b.lastMessageAt || b.createdAt;
-      return tb.localeCompare(ta);
-    });
-
-    // Непрочитанные
-    const unreadMap: Record<string, number> = (await dmUnreadCountsStore.get(userId)) || {};
-
-    return c.json({
-      success: true,
-      conversations: conversations.map(conv => ({
-        ...conv,
-        unreadCount: unreadMap[conv.id] || 0,
-      })),
-    });
-  } catch (err) {
-    console.log('Error fetching conversations:', err);
-    return c.json({ success: false, error: String(err) }, 500);
+    return c.json({ success: true, conversations });
+  } catch (err: any) {
+    console.error('GET /conversations error:', err);
+    return c.json({ success: false, error: err.message || String(err) }, 500);
   }
 });
 
@@ -167,14 +175,11 @@ app.post('/conversations', requireAuth, async (c) => {
       return c.json({ success: false, error: 'At least 2 participants required' }, 400);
     }
 
-    // Verify auth user is one of the participants (the initiator)
     const authUserId = c.get('userId');
-    const isParticipant = participants.some(p => p.userId === authUserId);
-    if (!isParticipant) {
+    if (!participants.some(p => p.userId === authUserId)) {
       return c.json({ success: false, error: 'Access denied: you must be a participant' }, 403);
     }
 
-    // Enforce communication rules
     const p1 = participants[0];
     const p2 = participants[1];
     if (!canCommunicate(p1.role, p2.role)) {
@@ -187,38 +192,50 @@ app.post('/conversations', requireAuth, async (c) => {
       }, 403);
     }
 
-    // Check if conversation already exists
     const convId = makeConvId(p1.userId, p2.userId);
-    const existing: DirectConversation | null = await dmConversationsStore.get(convId);
+    const participantIds = participants.map(p => p.userId);
 
-    if (existing) {
-      return c.json({ success: true, conversation: existing, created: false });
+    // Try insert; if exists, return existing
+    const existing = await pool.query(
+      `SELECT id, participant_ids, last_message_text, last_message_at, data, created_at
+       FROM dm_conversations WHERE id = $1`,
+      [convId]
+    );
+    if (existing.rows.length > 0) {
+      const row = existing.rows[0];
+      return c.json({
+        success: true,
+        conversation: {
+          id: row.id, participants,
+          source: row.data?.source || 'direct',
+          collabOfferId: row.data?.collabOfferId,
+          lastMessage: row.last_message_text,
+          lastMessageAt: row.last_message_at,
+          createdAt: row.created_at,
+        },
+        created: false,
+      });
     }
 
-    // Create new conversation
-    const conv: DirectConversation = {
-      id: convId,
-      participants,
-      source: source || 'direct',
-      collabOfferId,
-      createdAt: new Date().toISOString(),
-    };
+    const dataJson = JSON.stringify({ source: source || 'direct', collabOfferId });
+    await pool.query(
+      `INSERT INTO dm_conversations (id, participant_ids, last_message_text, last_message_at, data, created_at)
+       VALUES ($1, $2, '', NOW(), $3::jsonb, NOW())`,
+      [convId, participantIds, dataJson]
+    );
 
-    await dmConversationsStore.set(convId, conv);
-
-    // Add to both users' conversation lists
-    for (const p of participants) {
-      const list: string[] = (await dmConvListStore.get(p.userId)) || [];
-      if (!list.includes(convId)) {
-        list.unshift(convId);
-        await dmConvListStore.set(p.userId, list);
-      }
-    }
-
-    return c.json({ success: true, conversation: conv, created: true });
-  } catch (err) {
-    console.log('Error creating conversation:', err);
-    return c.json({ success: false, error: String(err) }, 500);
+    return c.json({
+      success: true,
+      conversation: {
+        id: convId, participants,
+        source: source || 'direct', collabOfferId,
+        createdAt: new Date().toISOString(),
+      },
+      created: true,
+    });
+  } catch (err: any) {
+    console.error('POST /conversations error:', err);
+    return c.json({ success: false, error: err.message || String(err) }, 500);
   }
 });
 
@@ -228,19 +245,42 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
   const conversationId = c.req.param('conversationId');
   const authUserId = c.get('userId');
   try {
-    // Verify auth user is a participant of this conversation
-    const conv: DirectConversation | null = await dmConversationsStore.get(conversationId);
-    if (!conv) {
+    const conv = await pool.query(
+      `SELECT participant_ids FROM dm_conversations WHERE id = $1`,
+      [conversationId]
+    );
+    if (conv.rows.length === 0) {
       return c.json({ success: false, error: 'Conversation not found' }, 404);
     }
-    if (!conv.participants.some(p => p.userId === authUserId)) {
+    if (!conv.rows[0].participant_ids.includes(authUserId)) {
       return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
     }
 
-    const messages: DirectMessage[] = (await dmMessagesStore.get(conversationId)) || [];
+    const msgs = await pool.query(
+      `SELECT m.id, m.conversation_id, m.sender_id, m.content, m.message_type, m.is_read, m.created_at,
+              u.full_name as sender_name, u.role::text as sender_role
+       FROM dm_messages m
+       LEFT JOIN users u ON u.id::text = m.sender_id
+       WHERE m.conversation_id = $1
+       ORDER BY m.created_at ASC`,
+      [conversationId]
+    );
+
+    const messages = msgs.rows.map((m: any) => ({
+      id: m.id,
+      conversationId: m.conversation_id,
+      senderId: m.sender_id,
+      senderName: m.sender_name || m.sender_id,
+      senderRole: mapRole(m.sender_role || 'artist'),
+      text: m.content,
+      type: m.message_type,
+      isRead: m.is_read,
+      createdAt: m.created_at?.toISOString?.() || m.created_at,
+    }));
+
     return c.json({ success: true, messages });
-  } catch (err) {
-    return c.json({ success: false, error: String(err) }, 500);
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || String(err) }, 500);
   }
 });
 
@@ -249,90 +289,91 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
 app.post('/messages/:conversationId', requireAuth, async (c) => {
   const conversationId = c.req.param('conversationId');
   try {
-    const { senderId, senderName, senderRole, text, attachment } = await c.req.json() as {
-      senderId: string;
-      senderName: string;
-      senderRole: CabinetRole;
-      text: string;
-      attachment?: { type: string; name: string; url?: string };
-    };
-
-    if (!senderId || !text) {
-      return c.json({ success: false, error: 'senderId and text required' }, 400);
-    }
-
-    // Prevent spoofing: senderId must match authenticated user
+    const { senderId, senderName, senderRole, text, attachment } = await c.req.json();
     const authUserId = c.get('userId');
-    if (authUserId !== senderId) {
-      return c.json({ success: false, error: 'Access denied: senderId does not match authenticated user' }, 403);
+    if (senderId !== authUserId) {
+      return c.json({ success: false, error: 'Access denied: senderId mismatch' }, 403);
     }
 
-    // Verify conversation exists
-    const conv: DirectConversation | null = await dmConversationsStore.get(conversationId);
-    if (!conv) {
+    const conv = await pool.query(
+      `SELECT participant_ids, data FROM dm_conversations WHERE id = $1`,
+      [conversationId]
+    );
+    if (conv.rows.length === 0) {
       return c.json({ success: false, error: 'Conversation not found' }, 404);
     }
-
-    // Verify sender is a participant
-    const senderParticipant = conv.participants.find(p => p.userId === senderId);
-    if (!senderParticipant) {
-      return c.json({ success: false, error: 'Sender is not a participant' }, 403);
+    const participantIds: string[] = conv.rows[0].participant_ids || [];
+    if (!participantIds.includes(authUserId)) {
+      return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
     }
 
-    const message: DirectMessage = {
-      id: genId(),
-      conversationId,
-      senderId,
-      senderName: senderName || senderParticipant.userName,
-      senderRole: senderRole || senderParticipant.role,
-      text,
-      attachment,
-      createdAt: new Date().toISOString(),
-    };
-
-    // Save message
-    const messages: DirectMessage[] = (await dmMessagesStore.get(conversationId)) || [];
-    messages.push(message);
-    // Keep last 200 messages per conversation
-    if (messages.length > 200) messages.splice(0, messages.length - 200);
-    await dmMessagesStore.set(conversationId, messages);
-
-    // Update conversation's lastMessage
-    conv.lastMessage = text.length > 100 ? text.slice(0, 100) + '...' : text;
-    conv.lastMessageAt = message.createdAt;
-    await dmConversationsStore.set(conversationId, conv);
-
-    // Update unread count for recipient(s)
-    for (const p of conv.participants) {
-      if (p.userId === senderId) continue;
-
-      const unreadMap: Record<string, number> = (await dmUnreadCountsStore.get(p.userId)) || {};
-      unreadMap[conversationId] = (unreadMap[conversationId] || 0) + 1;
-      await dmUnreadCountsStore.set(p.userId, unreadMap);
-
-      // Telegram: forward to admin if recipient is admin
-      forwardToTelegramIfAdmin(p.role, message.senderName, text).catch(() => {});
-
-      // SSE notification to recipient
-      emitSSE(p.userId, {
-        type: 'new_direct_message',
-        data: {
-          conversationId,
-          messageId: message.id,
-          senderId,
-          senderName: message.senderName,
-          senderRole: message.senderRole,
-          text: text.length > 80 ? text.slice(0, 80) + '...' : text,
-          source: conv.source,
-          collabOfferId: conv.collabOfferId,
-        },
-      });
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+      return c.json({ success: false, error: 'Empty message' }, 400);
     }
 
-    return c.json({ success: true, message });
-  } catch (err) {
-    console.log('Error sending message:', err);
-    return c.json({ success: false, error: String(err) }, 500);
+    const messageType = attachment ? 'attachment' : 'text';
+    const ins = await pool.query(
+      `INSERT INTO dm_messages (conversation_id, sender_id, content, message_type, is_read, created_at)
+       VALUES ($1, $2, $3, $4, false, NOW())
+       RETURNING id, created_at`,
+      [conversationId, senderId, text.trim(), messageType]
+    );
+    const msgId = ins.rows[0].id;
+    const createdAt = ins.rows[0].created_at;
+
+    // Update conversation last_message
+    await pool.query(
+      `UPDATE dm_conversations SET last_message_text = $1, last_message_at = NOW() WHERE id = $2`,
+      [text.trim().slice(0, 500), conversationId]
+    );
+
+    // Bump unread for all other participants
+    for (const recipient of participantIds) {
+      if (recipient === senderId) continue;
+      await pool.query(
+        `INSERT INTO dm_unread (user_id, conversation_id, unread_count, updated_at)
+         VALUES ($1, $2, 1, NOW())
+         ON CONFLICT (user_id, conversation_id) DO UPDATE SET
+           unread_count = dm_unread.unread_count + 1, updated_at = NOW()`,
+        [recipient, conversationId]
+      );
+
+      // SSE notify
+      try {
+        emitSSE(recipient, 'dm_new_message', {
+          conversationId, messageId: msgId,
+          senderId, senderName: senderName || '',
+          text: text.trim(),
+          createdAt,
+        });
+      } catch {}
+    }
+
+    // Telegram forward if recipient is admin
+    try {
+      const otherIds = participantIds.filter(id => id !== senderId);
+      for (const otherId of otherIds) {
+        const u = await pool.query(`SELECT role::text FROM users WHERE id::text = $1`, [otherId]);
+        if (u.rows[0]?.role === 'admin' || u.rows[0]?.role === 'superadmin') {
+          await forwardToTelegramIfAdmin('admin', senderName || senderId, text);
+          break;
+        }
+      }
+    } catch {}
+
+    return c.json({
+      success: true,
+      message: {
+        id: msgId, conversationId,
+        senderId, senderName, senderRole,
+        text: text.trim(),
+        attachment,
+        createdAt,
+      },
+    });
+  } catch (err: any) {
+    console.error('POST /messages error:', err);
+    return c.json({ success: false, error: err.message || String(err) }, 500);
   }
 });
 
@@ -340,25 +381,36 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
 
 app.put('/messages/:conversationId/read', requireAuth, async (c) => {
   const conversationId = c.req.param('conversationId');
+  const authUserId = c.get('userId');
   try {
-    const { userId } = await c.req.json() as { userId: string };
-    if (!userId) {
-      return c.json({ success: false, error: 'userId required' }, 400);
+    // Verify membership
+    const conv = await pool.query(
+      `SELECT participant_ids FROM dm_conversations WHERE id = $1`,
+      [conversationId]
+    );
+    if (conv.rows.length === 0) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    if (!conv.rows[0].participant_ids.includes(authUserId)) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
     }
 
-    // Verify auth user matches the reader
-    const authUserId = c.get('userId');
-    if (authUserId !== userId) {
-      return c.json({ success: false, error: 'Access denied: cannot mark read for another user' }, 403);
-    }
-
-    const unreadMap: Record<string, number> = (await dmUnreadCountsStore.get(userId)) || {};
-    delete unreadMap[conversationId];
-    await dmUnreadCountsStore.set(userId, unreadMap);
+    // Mark all messages from OTHERS as read
+    await pool.query(
+      `UPDATE dm_messages SET is_read = true, read_at = NOW()
+       WHERE conversation_id = $1 AND sender_id != $2 AND is_read = false`,
+      [conversationId, authUserId]
+    );
+    // Clear unread counter for this user/conv
+    await pool.query(
+      `UPDATE dm_unread SET unread_count = 0, updated_at = NOW()
+       WHERE user_id = $1 AND conversation_id = $2`,
+      [authUserId, conversationId]
+    );
 
     return c.json({ success: true });
-  } catch (err) {
-    return c.json({ success: false, error: String(err) }, 500);
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || String(err) }, 500);
   }
 });
 
@@ -368,172 +420,147 @@ app.get('/unread/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
   const authUserId = c.get('userId');
   if (authUserId !== userId) {
-    return c.json({ success: false, error: 'Access denied: not resource owner' }, 403);
+    return c.json({ success: false, error: 'Access denied' }, 403);
   }
   try {
-    const unreadMap: Record<string, number> = (await dmUnreadCountsStore.get(userId)) || {};
-    const total = Object.values(unreadMap).reduce((s, n) => s + n, 0);
-    return c.json({ success: true, total, byConversation: unreadMap });
-  } catch (err) {
-    return c.json({ success: false, error: String(err) }, 500);
+    const r = await pool.query(
+      `SELECT conversation_id, unread_count FROM dm_unread WHERE user_id = $1 AND unread_count > 0`,
+      [userId]
+    );
+    const byConv: Record<string, number> = {};
+    let total = 0;
+    for (const row of r.rows) {
+      byConv[row.conversation_id] = parseInt(row.unread_count);
+      total += parseInt(row.unread_count);
+    }
+    return c.json({ success: true, total, byConv });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || String(err) }, 500);
   }
 });
 
-// ── GET /rules - Communication rules (for UI) ──
+// ── PUT /messages/:messageId/edit (edit text) ──
 
-
-// -- Edit message --
 app.put('/messages/:messageId/edit', requireAuth, async (c) => {
+  const messageId = c.req.param('messageId');
+  const authUserId = c.get('userId');
   try {
-    const messageId = c.req.param('messageId');
-    const { conversationId, text } = await c.req.json();
-    const userId = c.get('userId');
-    if (!conversationId || !text) return c.json({ success: false, error: 'conversationId and text required' }, 400);
-
-    const messages: any[] = (await dmMessagesStore.get(conversationId)) || [];
-    const msg = messages.find((m: any) => m.id === messageId);
-    if (!msg) return c.json({ success: false, error: 'Message not found' }, 404);
-    if (msg.senderId !== userId) return c.json({ success: false, error: 'Not your message' }, 403);
-
-    msg.text = text;
-    msg.editedAt = new Date().toISOString();
-    await dmMessagesStore.set(conversationId, messages);
-    return c.json({ success: true, message: msg });
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
+    const { text } = await c.req.json();
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+      return c.json({ success: false, error: 'Empty text' }, 400);
+    }
+    const r = await pool.query(
+      `UPDATE dm_messages SET content = $1 WHERE id = $2 AND sender_id = $3 RETURNING id, conversation_id`,
+      [text.trim(), messageId, authUserId]
+    );
+    if (r.rows.length === 0) {
+      return c.json({ success: false, error: 'Not found or not your message' }, 404);
+    }
+    return c.json({ success: true, messageId, conversationId: r.rows[0].conversation_id });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || String(err) }, 500);
   }
 });
 
-// -- Delete message (soft) --
+// ── DELETE /messages/:conversationId/:messageId ──
+
 app.delete('/messages/:conversationId/:messageId', requireAuth, async (c) => {
+  const conversationId = c.req.param('conversationId');
+  const messageId = c.req.param('messageId');
+  const authUserId = c.get('userId');
   try {
-    const conversationId = c.req.param('conversationId');
-    const messageId = c.req.param('messageId');
-    const userId = c.get('userId');
-
-    const messages: any[] = (await dmMessagesStore.get(conversationId)) || [];
-    const msg = messages.find((m: any) => m.id === messageId);
-    if (!msg) return c.json({ success: false, error: 'Message not found' }, 404);
-    if (msg.senderId !== userId) return c.json({ success: false, error: 'Not your message' }, 403);
-
-    msg.deleted = true;
-    msg.text = '';
-    await dmMessagesStore.set(conversationId, messages);
+    const r = await pool.query(
+      `DELETE FROM dm_messages WHERE id = $1 AND conversation_id = $2 AND sender_id = $3 RETURNING id`,
+      [messageId, conversationId, authUserId]
+    );
+    if (r.rows.length === 0) {
+      return c.json({ success: false, error: 'Not found or not your message' }, 404);
+    }
     return c.json({ success: true });
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || String(err) }, 500);
   }
 });
 
-// -- Typing indicator (ephemeral) --
+// ── POST /typing/:conversationId — fire-and-forget SSE ──
+
 app.post('/typing/:conversationId', requireAuth, async (c) => {
+  const conversationId = c.req.param('conversationId');
+  const authUserId = c.get('userId');
+  try {
+    const conv = await pool.query(
+      `SELECT participant_ids FROM dm_conversations WHERE id = $1`,
+      [conversationId]
+    );
+    if (conv.rows[0]) {
+      const others = (conv.rows[0].participant_ids || []).filter((id: string) => id !== authUserId);
+      for (const other of others) {
+        try { emitSSE(other, 'dm_typing', { conversationId, userId: authUserId }); } catch {}
+      }
+    }
+  } catch {}
   return c.json({ success: true });
 });
 
-// -- Presence check for specific user --
+// ── GET /presence/:userId ──
+
 app.get('/presence/:userId', requireAuth, async (c) => {
-  try {
-    const targetUserId = c.req.param('userId');
-    // Simple presence: check last heartbeat from POST /presence
-    // For now return offline with no lastSeen (heartbeat is fire-and-forget)
-    return c.json({
-      success: true,
-      status: 'offline',
-      lastSeen: null,
-    });
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500);
-  }
+  const userId = c.req.param('userId');
+  // Best-effort presence (no DB) — return basic shape so UI doesn't error
+  return c.json({ success: true, userId, online: false, lastSeenAt: null });
 });
+
+// ── GET /rules — communication matrix for FE ──
 
 app.get('/rules', (c) => {
-  return c.json({
-    success: true,
-    rules: ALLOWED_CONTACTS,
-    labels: ROLE_LABELS,
-    description: 'Правила коммуникации между кабинетами',
-  });
+  return c.json({ success: true, allowedContacts: ALLOWED_CONTACTS, roleLabels: ROLE_LABELS });
 });
 
+// ── POST /presence — heartbeat (no-op) ──
 
-// ── POST /presence - Online presence heartbeat ──
-app.post('/presence', requireAuth, async (c) => {
-  return c.json({ success: true });
-});
+app.post('/presence', requireAuth, (c) => c.json({ success: true }));
 
+// ── GET /search-contacts ──
 
-// ── GET /search-contacts - Search users for new conversations ──
 app.get('/search-contacts', requireAuth, async (c) => {
+  const q = (c.req.query('q') || '').trim().toLowerCase();
+  const role = c.req.query('role') || '';
+  const authRole = c.get('userRole');
+  if (!q) return c.json({ success: true, contacts: [] });
+
+  const contacts: Participant[] = [];
   try {
-    const query = c.req.query('q')?.toLowerCase();
-    const role = c.req.query('role'); // optional filter
-    if (!query || query.length < 2) {
-      return c.json({ success: true, data: [] });
+    const allowed = ALLOWED_CONTACTS[mapRole(authRole)] || [];
+    const params: any[] = [`%${q}%`];
+    let where = `(LOWER(u.full_name) LIKE $1 OR LOWER(u.email) LIKE $1)`;
+    if (role && allowed.includes(role as CabinetRole)) {
+      where += ` AND u.role::text = $2`;
+      params.push(role === 'radio' ? 'radio_station' : role);
+    } else {
+      // Restrict to allowed roles
+      const dbRoles = allowed.map(r => r === 'radio' ? 'radio_station' : r);
+      if (dbRoles.length > 0) {
+        where += ` AND u.role::text = ANY($2)`;
+        params.push(dbRoles);
+      }
     }
-
-    const results: any[] = [];
-
-    // Search in profiles table (registered users with roles)
-    const profilesRes = await pool.query(
-      "SELECT id, COALESCE(display_name, full_name, username) as name, role, avatar_url FROM users WHERE status = 'active' AND LOWER(COALESCE(display_name, full_name, username, '')) LIKE $1 LIMIT 20",
-      ['%' + query + '%']
+    const r = await pool.query(
+      `SELECT u.id, u.full_name, u.role::text, u.avatar_url
+       FROM users u WHERE ${where} AND u.status = 'active' LIMIT 25`,
+      params
     );
-    for (const p of profilesRes.rows) {
-      if (role && p.role !== role) continue;
-      results.push({
-        userId: p.id,
-        userName: p.name || 'Без имени',
-        role: p.role || 'artist',
-        city: '',
-        avatar: p.avatar_url || '',
+    for (const u of r.rows) {
+      contacts.push({
+        userId: u.id,
+        userName: u.full_name || u.id,
+        role: mapRole(u.role),
+        avatar: u.avatar_url || undefined,
       });
     }
-
-    // Search in artist profiles (KV store)
-    if (!role || role === 'artist') {
-      const allArtists = await getAllArtistProfiles();
-      const matchedArtists = allArtists.filter((a: any) =>
-        a && a.name && a.name.toLowerCase().includes(query)
-      ).slice(0, 10);
-      for (const a of matchedArtists) {
-        const exists = results.some(r => r.userId === a.userId || r.userName === a.name);
-        if (!exists) {
-          results.push({
-            userId: a.userId || a.id,
-            userName: a.name,
-            role: 'artist',
-            city: a.city || '',
-            avatar: a.avatar || a.profileImageUrl || '',
-          });
-        }
-      }
-    }
-
-    // Search in producer profiles (KV store)
-    if (!role || role === 'producer') {
-      const allProducers = await getAllProducerProfiles();
-      const matchedProducers = allProducers.filter((p: any) =>
-        p && p.name && p.name.toLowerCase().includes(query)
-      ).slice(0, 10);
-      for (const p of matchedProducers) {
-        const exists = results.some(r => r.userId === p.userId || r.userName === p.name);
-        if (!exists) {
-          results.push({
-            userId: p.userId || p.id,
-            userName: p.name,
-            role: 'producer',
-            city: '',
-            avatar: p.avatar || p.profileImageUrl || '',
-          });
-        }
-      }
-    }
-
-    return c.json({ success: true, data: results.slice(0, 20) });
-  } catch (error: any) {
-    console.error('[messaging] search-contacts error:', error);
-    return c.json({ success: false, error: error.message }, 500);
+  } catch (err: any) {
+    console.error('search-contacts error:', err);
   }
+  return c.json({ success: true, contacts });
 });
 
 export default app;
