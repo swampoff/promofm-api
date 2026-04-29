@@ -51,7 +51,8 @@
  */
 
 import { Hono } from 'hono';
-import { deleteBeat, getBeat, getBeatReview, getBeats, upsertBeat, upsertBeatReview, upsertNotification, beatFavoritesStore, beatPurchasesByProducerStore, beatPurchasesByUserStore, beatPurchasesStore, beatReviewsIndexStore, contractsStore, digitalGoodsStore, digitalPurchasesByUserStore, digitalPurchasesStore, platformRevenueLogStore, platformStatsStore, producerServicesStore, serviceOrdersByClientStore, serviceOrdersByProducerStore, serviceOrdersStore } from './db.tsx';
+import { pool as mpPool } from './db-client.tsx';
+import { deleteBeat, getBeat, getBeatReview, getBeats, upsertBeat, upsertBeatReview, upsertNotification, beatFavoritesStore, beatReviewsIndexStore, contractsStore, digitalGoodsStore, platformRevenueLogStore, platformStatsStore, producerServicesStore, serviceOrdersByClientStore, serviceOrdersByProducerStore, serviceOrdersStore } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { getRevenueStats, recordRevenue } from './platform-revenue.tsx';
 
@@ -281,15 +282,22 @@ app.get('/beats/purchases', requireAuth, async (c) => {
     const userId = c.get('userId'); // IDOR fix: from JWT
     if (!userId) return c.json({ success: false, error: 'userId required' }, 400);
 
-    const raw = await beatPurchasesByUserStore.get(userId);
-    const purchaseIds: string[] = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
-
-    const purchases: any[] = [];
-    for (const pid of purchaseIds) {
-      const p = await beatPurchasesStore.get(pid);
-      if (p) purchases.push(typeof p === 'string' ? JSON.parse(p) : p);
-    }
-
+    const r = await mpPool.query(
+      `SELECT id, beat_id, buyer_id, producer_id, amount, license_type, status, data, created_at
+       FROM beat_purchases WHERE buyer_id = $1 ORDER BY created_at DESC`,
+      [userId]
+    );
+    const purchases = r.rows.map((row: any) => ({
+      id: row.id,
+      beatId: row.beat_id,
+      buyerId: row.buyer_id,
+      producerId: row.producer_id,
+      price: parseFloat(row.amount),
+      licenseType: row.license_type,
+      status: row.status,
+      ...(row.data || {}),
+      createdAt: row.created_at,
+    }));
     return c.json({ success: true, data: purchases });
   } catch (error) {
     console.log('GET /beats/purchases error:', error);
@@ -657,24 +665,12 @@ app.post('/beats/:id/review', requireAuth, async (c) => {
     const beat = typeof beatRaw === 'string' ? JSON.parse(beatRaw) : beatRaw;
 
     // Проверить, что пользователь купил бит
-    const purchasesRaw = await beatPurchasesByUserStore.get(userId);
-    const purchaseIds: string[] = purchasesRaw
-      ? (typeof purchasesRaw === 'string' ? JSON.parse(purchasesRaw) : purchasesRaw)
-      : [];
-
-    let hasPurchased = false;
-    let purchaseLicense = '';
-    for (const pid of purchaseIds) {
-      const p = await beatPurchasesStore.get(pid);
-      if (p) {
-        const purchase = typeof p === 'string' ? JSON.parse(p) : p;
-        if (purchase.beatId === beatId) {
-          hasPurchased = true;
-          purchaseLicense = purchase.licenseType || '';
-          break;
-        }
-      }
-    }
+    const purchaseCheck = await mpPool.query(
+      `SELECT license_type FROM beat_purchases WHERE buyer_id = $1 AND beat_id = $2 LIMIT 1`,
+      [userId, beatId]
+    );
+    const hasPurchased = purchaseCheck.rows.length > 0;
+    const purchaseLicense = purchaseCheck.rows[0]?.license_type || '';
 
     if (!hasPurchased) {
       return c.json({ success: false, error: 'Only buyers can leave reviews' }, 403);

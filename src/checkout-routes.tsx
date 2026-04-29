@@ -154,7 +154,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       
       if (itemType === 'beat' && session.metadata.beatId) {
         // Fulfill beat purchase
-        const { beatPurchasesStore, getBeat } = await import('./db.tsx');
+        const { getBeat } = await import('./db.tsx');
+        const { pool: cPool1 } = await import('./db-client.tsx');
         const beat = await getBeat(session.metadata.beatId);
         if (beat) {
           const purchase = {
@@ -170,7 +171,15 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             status: 'completed',
             createdAt: now,
           };
-          await beatPurchasesStore.set(purchase.id, purchase);
+          await cPool1.query(
+            `INSERT INTO beat_purchases (id, beat_id, buyer_id, producer_id, amount, license_type, status, data, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7::jsonb, NOW())
+             ON CONFLICT (id) DO NOTHING`,
+            [purchase.id, purchase.beatId || null, purchase.buyerId || session.userId,
+             purchase.producerId || null, purchase.price || session.amount,
+             purchase.licenseType || null,
+             JSON.stringify({ ...purchase, paymentOrderId: session.orderId })]
+          );
           log.info({ purchaseId: purchase.id, beatTitle: beat.title }, 'beat_purchase_fulfilled');
           
           // Notify seller via SSE
@@ -185,7 +194,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       
       if (itemType === 'digital_good' && session.metadata.goodId) {
         // Fulfill digital good purchase
-        const { digitalPurchasesStore } = await import('./db.tsx');
+        const { pool: cPool2 } = await import('./db-client.tsx');
         const purchase = {
           id: `bp-${crypto.randomUUID()}`,
           goodId: session.metadata.goodId,
@@ -197,7 +206,14 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           status: 'completed',
           createdAt: now,
         };
-        await digitalPurchasesStore.set(purchase.id, purchase);
+        await cPool2.query(
+          `INSERT INTO digital_purchases (id, good_id, buyer_id, amount, data, created_at)
+           VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+           ON CONFLICT (id) DO NOTHING`,
+          [purchase.id, purchase.digitalGoodId || null, purchase.buyerId || session.userId,
+           purchase.price || session.amount,
+           JSON.stringify({ ...purchase, paymentOrderId: session.orderId })]
+        );
         log.info({ purchaseId: purchase.id }, 'digital_good_fulfilled');
       }
       
@@ -360,7 +376,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // ─── Fulfill beat_purchase (Beats Marketplace) ───
   if (session.metadata?.type === 'beat_purchase' && session.metadata?.beatId) {
     try {
-      const { getBeat, upsertBeat, beatPurchasesStore, beatPurchasesByUserStore, beatPurchasesByProducerStore } = await import('./db.tsx');
+      const { getBeat, upsertBeat } = await import('./db.tsx');
+      const { pool: cPool3 } = await import('./db-client.tsx');
       const { recordPlatformCommission } = await import('./platform-revenue.tsx');
       const beatId = session.metadata.beatId;
       const licenseType = session.metadata.licenseType;
@@ -383,17 +400,13 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           createdAt: now,
         };
 
-        await beatPurchasesStore.set(purchaseId, JSON.stringify(purchase));
-
-        const buyerRaw = await beatPurchasesByUserStore.get(buyerId);
-        const buyerPurchases: string[] = buyerRaw ? (typeof buyerRaw === 'string' ? JSON.parse(buyerRaw) : buyerRaw) : [];
-        buyerPurchases.unshift(purchaseId);
-        await beatPurchasesByUserStore.set(buyerId, JSON.stringify(buyerPurchases));
-
-        const prodRaw = await beatPurchasesByProducerStore.get(beat.producerId);
-        const prodPurchases: string[] = prodRaw ? (typeof prodRaw === 'string' ? JSON.parse(prodRaw) : prodRaw) : [];
-        prodPurchases.unshift(purchaseId);
-        await beatPurchasesByProducerStore.set(beat.producerId, JSON.stringify(prodPurchases));
+        await cPool3.query(
+          `INSERT INTO beat_purchases (id, beat_id, buyer_id, producer_id, amount, license_type, status, data, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7::jsonb, NOW())
+           ON CONFLICT (id) DO NOTHING`,
+          [purchaseId, beatId, buyerId, beat.producerId || null, price, licenseType,
+           JSON.stringify(purchase)]
+        );
 
         beat.purchases = (beat.purchases || 0) + 1;
         if (licenseType === 'exclusive') beat.status = 'sold';
@@ -420,7 +433,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // ─── Fulfill digital_purchase (Digital Goods Marketplace) ───
   if (session.metadata?.type === 'digital_purchase' && session.metadata?.digitalGoodId) {
     try {
-      const { digitalGoodsStore, digitalPurchasesStore, digitalPurchasesByUserStore } = await import('./db.tsx');
+      const { digitalGoodsStore } = await import('./db.tsx');
+      const { pool: cPool4 } = await import('./db-client.tsx');
       const { recordPlatformCommission } = await import('./platform-revenue.tsx');
       const goodId = session.metadata.digitalGoodId;
       const buyerId = session.userId;
@@ -442,12 +456,12 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           createdAt: now,
         };
 
-        await digitalPurchasesStore.set(purchaseId, JSON.stringify(purchase));
-
-        const buyerRaw = await digitalPurchasesByUserStore.get(buyerId);
-        const buyerList: string[] = buyerRaw ? (typeof buyerRaw === 'string' ? JSON.parse(buyerRaw) : buyerRaw) : [];
-        buyerList.unshift(purchaseId);
-        await digitalPurchasesByUserStore.set(buyerId, JSON.stringify(buyerList));
+        await cPool4.query(
+          `INSERT INTO digital_purchases (id, good_id, buyer_id, amount, data, created_at)
+           VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+           ON CONFLICT (id) DO NOTHING`,
+          [purchaseId, goodId, buyerId, price, JSON.stringify(purchase)]
+        );
 
         good.sales = (good.sales || 0) + 1;
         await digitalGoodsStore.set(goodId, JSON.stringify(good));

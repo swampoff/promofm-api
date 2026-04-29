@@ -1233,15 +1233,10 @@ function jsonbStore(table: string, pk = 'id') {
 // ─── Store instances for all tables ───
 
 export const beatFavoritesStore = jsonbStore('beat_favorites', 'user_id');
-export const beatPurchasesStore = jsonbStore('beat_purchases');
-export const beatPurchasesByUserStore = jsonbStore('beat_purchases_by_user', 'user_id');
-export const beatPurchasesByProducerStore = jsonbStore('beat_purchases_by_producer', 'producer_id');
 export const beatReviewsStore = jsonbStore('beat_reviews');
 export const beatReviewsIndexStore = jsonbStore('beat_reviews_index', 'beat_id');
 export const contractsStore = jsonbStore('contracts');
 export const digitalGoodsStore = jsonbStore('digital_goods');
-export const digitalPurchasesStore = jsonbStore('digital_purchases');
-export const digitalPurchasesByUserStore = jsonbStore('digital_purchases_by_user', 'user_id');
 export const producerSettingsStore = jsonbStore('producer_settings', 'user_id');
 export const producerProfileEditStore = jsonbStore('producer_profile_edit', 'user_id');
 export const producerMessagesStore = jsonbStore('producer_messages', 'user_id');
