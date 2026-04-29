@@ -38,7 +38,7 @@ import { Hono } from 'hono';
 import { getRadioAdSlot, getRadioProfile, upsertRadioAdSlot, radioAdSlotIndexStore, radioAdSlotsStore, radioAnalyticsStore, radioArtistRequestsStore, radioFinanceStore, radioNotificationsStore, radioTransactionsStore, radioVenueRequestsStore } from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireRole } from './auth-middleware.tsx';
 import { notifyArtistRequest, notifyVenueRequest } from './email-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
 
@@ -950,6 +950,234 @@ app.post('/player-status', requireAuth, async (c) => {
       acknowledged: true,
       server_time: new Date().toISOString(),
     });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════
+// WEEKLY RELEASES + DOWNLOAD + ROTATION REPORTS (radio_station role)
+// ════════════════════════════════════════════════════════════════════
+
+// GET /weekly-releases/current — Current weekly release with tracks (radio-only access shows download URLs)
+app.get('/weekly-releases/current', requireAuth, requireRole('radio_station'), async (c) => {
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const releaseRes = await pool.query(
+      `SELECT id, title, week_number, year, release_date, track_ids, published_at
+        FROM weekly_releases WHERE is_published = true ORDER BY release_date DESC LIMIT 1`
+    );
+    if (releaseRes.rows.length === 0) {
+      return c.json({ success: true, data: null });
+    }
+    const release = releaseRes.rows[0];
+    const trackIds = release.track_ids || [];
+
+    if (!trackIds.length) {
+      return c.json({ success: true, data: { ...release, tracks: [] } });
+    }
+
+    const tracksRes = await pool.query(
+      `SELECT t.id, t.title, t.artist_name, t.genre, t.duration, t.audio_url, t.cover_url, t.release_date,
+               ap.slug as artist_slug, ap.is_verified as artist_verified
+        FROM tracks t LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
+        WHERE t.id = ANY($1) ORDER BY t.created_at DESC`,
+      [trackIds]
+    );
+    const tracks = tracksRes.rows.map((t: any) => ({
+      ...t,
+      downloadUrl: `/server/api/radio/tracks/${t.id}/download`,
+    }));
+
+    return c.json({ success: true, data: { ...release, tracks } });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// GET /tracks/:id/download — auth radio user, log + redirect to audio_url
+app.get('/tracks/:id/download', requireAuth, requireRole('radio_station'), async (c) => {
+  try {
+    const trackId = c.req.param('id');
+    const userId = c.get('userId');
+    const { pool } = await import('./db-client.tsx');
+
+    const tr = await pool.query(`SELECT id, title, audio_url FROM tracks WHERE id = $1`, [trackId]);
+    if (tr.rows.length === 0) return c.json({ success: false, error: 'Track not found' }, 404);
+    const track = tr.rows[0];
+    if (!track.audio_url) return c.json({ success: false, error: 'Audio file not available' }, 404);
+
+    // Get current weekly release id (informational)
+    const wr = await pool.query(
+      `SELECT id FROM weekly_releases WHERE is_published = true AND $1 = ANY(track_ids) ORDER BY release_date DESC LIMIT 1`,
+      [trackId]
+    );
+    const weeklyReleaseId = wr.rows[0]?.id || null;
+
+    // Get station name from radio profile (best effort)
+    const sp = await pool.query(`SELECT data->>'stationName' as station_name FROM profiles WHERE user_id = $1`, [userId]);
+    const stationName = sp.rows[0]?.station_name || null;
+
+    // Log download
+    await pool.query(
+      `INSERT INTO track_downloads_by_radio (user_id, station_name, track_id, weekly_release_id, ip_addr, user_agent)
+        VALUES ($1, $2, $3, $4, $5, $6)`,
+      [userId, stationName, trackId, weeklyReleaseId,
+       c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
+       c.req.header('user-agent') || '']
+    );
+
+    // Redirect to audio file URL (signed not needed since audio_url is public)
+    return c.redirect(track.audio_url, 302);
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// POST /rotations/report — submit rotation report (status='pending', awaits admin moderation)
+app.post('/rotations/report', requireAuth, requireRole('radio_station'), async (c) => {
+  try {
+    const userId = c.get('userId');
+    const body = await c.req.json();
+    const { trackId, airedAt, city, region, rotationCount, stationName } = body;
+
+    if (!trackId || !airedAt) {
+      return c.json({ success: false, error: 'trackId и airedAt обязательны' }, 400);
+    }
+    const rc = parseInt(rotationCount) || 1;
+    if (rc < 1 || rc > 100) {
+      return c.json({ success: false, error: 'rotationCount должен быть от 1 до 100' }, 400);
+    }
+
+    const { pool } = await import('./db-client.tsx');
+    const trackCheck = await pool.query(`SELECT id, title, artist_name, user_id FROM tracks WHERE id = $1`, [trackId]);
+    if (trackCheck.rows.length === 0) return c.json({ success: false, error: 'Трек не найден' }, 404);
+
+    // Get station name from profile if not provided
+    let finalStationName = stationName;
+    if (!finalStationName) {
+      const sp = await pool.query(`SELECT data->>'stationName' as station_name, full_name FROM users u LEFT JOIN profiles p ON p.user_id = u.id::text WHERE u.id = $1`, [userId]);
+      finalStationName = sp.rows[0]?.station_name || sp.rows[0]?.full_name || 'Радиостанция';
+    }
+
+    const insRes = await pool.query(
+      `INSERT INTO track_radio_pickups (track_id, station_name, city, region, country, picked_up_at, source, rotation_count, aired_at, report_status, submitted_by_user_id)
+        VALUES ($1, $2, $3, $4, 'Россия', NOW(), 'radio_self_report', $5, $6, 'pending', $7) RETURNING id`,
+      [trackId, finalStationName, city || null, region || null, rc, airedAt, userId]
+    );
+
+    return c.json({ success: true, data: { reportId: insRes.rows[0].id, status: 'pending', message: 'Отчёт отправлен на модерацию' } });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// GET /rotations/my-reports — radio's own reports (history)
+app.get('/rotations/my-reports', requireAuth, requireRole('radio_station'), async (c) => {
+  try {
+    const userId = c.get('userId');
+    const { pool } = await import('./db-client.tsx');
+    const res = await pool.query(
+      `SELECT trp.id, trp.track_id, trp.station_name, trp.city, trp.rotation_count, trp.aired_at,
+              trp.report_status, trp.rejection_reason, trp.picked_up_at,
+              t.title as track_title, t.artist_name
+       FROM track_radio_pickups trp
+       LEFT JOIN tracks t ON t.id = trp.track_id
+       WHERE trp.submitted_by_user_id = $1 ORDER BY trp.picked_up_at DESC LIMIT 200`,
+      [userId]
+    );
+    return c.json({ success: true, data: res.rows });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════
+// ADMIN: rotation report moderation
+// ════════════════════════════════════════════════════════════════════
+app.get('/admin/rotation-reports', requireAuth, async (c) => {
+  if (c.get('userRole') !== 'admin') return c.json({ success: false, error: 'Forbidden' }, 403);
+  try {
+    const status = c.req.query('status') || 'pending';
+    const { pool } = await import('./db-client.tsx');
+    const res = await pool.query(
+      `SELECT trp.id, trp.track_id, trp.station_name, trp.city, trp.region, trp.rotation_count,
+              trp.aired_at, trp.report_status, trp.picked_up_at, trp.submitted_by_user_id, trp.rejection_reason,
+              t.title as track_title, t.artist_name, t.cover_url, t.user_id as artist_user_id,
+              u.email as radio_email
+       FROM track_radio_pickups trp
+       LEFT JOIN tracks t ON t.id = trp.track_id
+       LEFT JOIN users u ON u.id = trp.submitted_by_user_id
+       WHERE trp.report_status = $1 ORDER BY trp.picked_up_at DESC LIMIT 200`,
+      [status]
+    );
+    return c.json({ success: true, data: res.rows });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.post('/admin/rotation-reports/:id/approve', requireAuth, async (c) => {
+  if (c.get('userRole') !== 'admin') return c.json({ success: false, error: 'Forbidden' }, 403);
+  try {
+    const reportId = c.req.param('id');
+    const adminId = c.get('userId');
+    const { pool } = await import('./db-client.tsx');
+    const res = await pool.query(
+      `UPDATE track_radio_pickups SET report_status = 'confirmed', reviewed_at = NOW(), reviewed_by = $1
+        WHERE id = $2 AND report_status = 'pending'
+        RETURNING track_id, station_name, city, rotation_count, submitted_by_user_id`,
+      [adminId, reportId]
+    );
+    if (res.rows.length === 0) return c.json({ success: false, error: 'Отчёт не найден или уже модерирован' }, 404);
+    const r = res.rows[0];
+
+    // SSE → artist
+    try {
+      const tr = await pool.query(`SELECT user_id, title FROM tracks WHERE id = $1`, [r.track_id]);
+      if (tr.rows[0]?.user_id) {
+        const { emitSSE } = await import('./sse-routes.tsx');
+        emitSSE(tr.rows[0].user_id, 'rotation_confirmed', {
+          title: 'Ротация подтверждена',
+          message: `«${tr.rows[0].title}» в эфире ${r.station_name} (${r.city || ''}) — ${r.rotation_count} раз`,
+          trackId: r.track_id, stationName: r.station_name, city: r.city,
+        });
+      }
+    } catch {}
+
+    return c.json({ success: true, data: { reportId, status: 'confirmed' } });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+app.post('/admin/rotation-reports/:id/reject', requireAuth, async (c) => {
+  if (c.get('userRole') !== 'admin') return c.json({ success: false, error: 'Forbidden' }, 403);
+  try {
+    const reportId = c.req.param('id');
+    const adminId = c.get('userId');
+    const { reason } = await c.req.json();
+    const { pool } = await import('./db-client.tsx');
+    const res = await pool.query(
+      `UPDATE track_radio_pickups SET report_status = 'rejected', rejection_reason = $1, reviewed_at = NOW(), reviewed_by = $2
+        WHERE id = $3 AND report_status = 'pending' RETURNING submitted_by_user_id, station_name`,
+      [reason || 'Отчёт не подтверждён', adminId, reportId]
+    );
+    if (res.rows.length === 0) return c.json({ success: false, error: 'Отчёт не найден или уже модерирован' }, 404);
+
+    // SSE → radio submitter
+    try {
+      const r = res.rows[0];
+      if (r.submitted_by_user_id) {
+        const { emitSSE } = await import('./sse-routes.tsx');
+        emitSSE(r.submitted_by_user_id, 'rotation_rejected', {
+          title: 'Отчёт отклонён', message: reason || 'Отчёт не подтверждён модератором',
+          reportId,
+        });
+      }
+    } catch {}
+
+    return c.json({ success: true, data: { reportId, status: 'rejected' } });
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
   }
