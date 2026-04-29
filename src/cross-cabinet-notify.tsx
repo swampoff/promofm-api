@@ -162,32 +162,26 @@ export async function getAllNotifications(userId: string, limit = 50): Promise<C
  * Пометить уведомление как прочитанное
  */
 export async function markAsRead(userId: string, notificationId: string): Promise<void> {
-  const all = await getCcnByUser(userId) as CrossCabinetNotification[];
-  const notif = (all || []).find(n => n && n.id === notificationId) || null;
-  if (notif && !notif.read) {
-    notif.read = true;
-    await upsertCcn(userId, notificationId, notif);
-    // Уменьшаем счётчик
-    const current = await getCcnUnreadCount(userId);
-    await setCcnUnreadCount(userId, Math.max(0, current - 1));
-  }
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE cross_cabinet_notifications SET is_read = true
+     WHERE id = $1 AND (target_user_id = $2 OR recipient_id = $2) AND is_read = false`,
+    [notificationId, userId]
+  );
 }
 
 /**
  * Пометить все уведомления как прочитанные
  */
 export async function markAllAsRead(userId: string): Promise<number> {
-  const all = await getCcnByUser(userId) as CrossCabinetNotification[];
-  let count = 0;
-  for (const notif of (all || [])) {
-    if (notif && !notif.read) {
-      notif.read = true;
-      await upsertCcn(userId, notif.id, notif);
-      count++;
-    }
-  }
-  await setCcnUnreadCount(userId, 0);
-  return count;
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `UPDATE cross_cabinet_notifications SET is_read = true
+     WHERE (target_user_id = $1 OR recipient_id = $1) AND is_read = false
+     RETURNING id`,
+    [userId]
+  );
+  return r.rowCount || 0;
 }
 
 /**

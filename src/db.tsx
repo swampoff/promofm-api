@@ -1310,8 +1310,6 @@ export const agentSessionsIndexStore = jsonbStore('agent_sessions_index');
 export const agentQueueStore = jsonbStore('agent_queue');
 export const artistAnalyticsCacheStore = jsonbStore('artist_analytics_cache', 'artist_id');
 export const artistTracksStatsStore = jsonbStore('artist_tracks_stats', 'artist_id');
-export const ccnStore = jsonbStore('cross_cabinet_notifications');
-export const ccnUnreadStore = jsonbStore('ccn_unread_counts', 'user_id');
 export const notificationCampaignsStore = jsonbStore('notification_campaigns');
 export const notificationSettingsKvStore = jsonbStore('notification_settings', 'user_id');
 export const systemConfigStore = jsonbStore('system_config', 'key');
@@ -1428,40 +1426,76 @@ export async function upsertBeatReview(beatId: string, userId: string, review: R
   if (error) console.error('[db] upsertBeatReview:', error);
 }
 
-// ─── CCN (Cross-Cabinet Notifications) with compound key ───
+// ─── CCN (Cross-Cabinet Notifications) — native SQL ───
 
 export async function getCcnByUser(userId: string) {
-  const { data, error } = await db()
-    .from('cross_cabinet_notifications')
-    .select('*')
-    .eq('target_user_id', userId)
-    .order('created_at', { ascending: false });
-  if (error) console.error('[db] getCcnByUser:', error);
-  return (data || []).map((r: any) => r.data ?? r);
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT id, sender_id, sender_role, recipient_id, recipient_role, type, title, message, link,
+            is_read, data, created_at
+     FROM cross_cabinet_notifications
+     WHERE target_user_id = $1 OR recipient_id = $1
+     ORDER BY created_at DESC`,
+    [userId]
+  );
+  return r.rows.map((row: any) => ({
+    id: row.id,
+    sourceUserId: row.sender_id,
+    sourceRole: row.sender_role,
+    targetUserId: row.recipient_id || userId,
+    targetRole: row.recipient_role,
+    type: row.type,
+    title: row.title || '',
+    message: row.message || '',
+    link: row.link || undefined,
+    metadata: row.data || {},
+    read: !!row.is_read,
+    createdAt: row.created_at?.toISOString?.() || row.created_at,
+  }));
 }
 
 export async function upsertCcn(userId: string, notifId: string, notif: Record<string, any>) {
-  const { error } = await db()
-    .from('cross_cabinet_notifications')
-    .upsert({ id: notifId, target_user_id: userId, data: notif, updated_at: new Date().toISOString() }, { onConflict: 'id' });
-  if (error) console.error('[db] upsertCcn:', error);
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO cross_cabinet_notifications
+       (id, sender_id, sender_role, recipient_id, recipient_role, target_user_id, type, title, message, link, is_read, data, created_at)
+     VALUES ($1, $2, $3, $4, $5, $4, $6, $7, $8, $9, $10, $11::jsonb, COALESCE($12::timestamptz, NOW()))
+     ON CONFLICT (id) DO UPDATE SET
+       is_read = EXCLUDED.is_read,
+       title = COALESCE(EXCLUDED.title, cross_cabinet_notifications.title),
+       message = COALESCE(EXCLUDED.message, cross_cabinet_notifications.message),
+       data = COALESCE(EXCLUDED.data, cross_cabinet_notifications.data)`,
+    [
+      notifId,
+      notif.sourceUserId || null,
+      notif.sourceRole || null,
+      userId,
+      notif.targetRole || null,
+      notif.type || 'info',
+      notif.title || '',
+      notif.message || '',
+      notif.link || null,
+      !!notif.read,
+      JSON.stringify(notif.metadata || {}),
+      notif.createdAt || null,
+    ]
+  );
 }
 
 export async function getCcnUnreadCount(userId: string): Promise<number> {
-  const { data, error } = await db()
-    .from('ccn_unread_counts')
-    .select('count')
-    .eq('user_id', userId)
-    .maybeSingle();
-  if (error) console.error('[db] getCcnUnreadCount:', error);
-  return data?.count ?? 0;
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT COUNT(*)::int as count FROM cross_cabinet_notifications
+     WHERE (target_user_id = $1 OR recipient_id = $1) AND is_read = false`,
+    [userId]
+  );
+  return r.rows[0]?.count ?? 0;
 }
 
-export async function setCcnUnreadCount(userId: string, count: number) {
-  const { error } = await db()
-    .from('ccn_unread_counts')
-    .upsert({ user_id: userId, count }, { onConflict: 'user_id' });
-  if (error) console.error('[db] setCcnUnreadCount:', error);
+// kept for backwards compat - now no-op since unread is computed
+export async function setCcnUnreadCount(_userId: string, _count: number) {
+  // Counter is now derived from cross_cabinet_notifications.is_read column.
+  // Function preserved as no-op to avoid breaking callers.
 }
 
 // ─── Notification Campaigns ───
