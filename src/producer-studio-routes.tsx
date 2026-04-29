@@ -16,7 +16,6 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import {
-  paymentWithdrawalsStore,
   producerAiLastStore,
   producerConvsStore,
   producerCustomPortfolioStore,
@@ -640,9 +639,14 @@ app.post('/wallet/withdraw', requireAuth, async (c) => {
     bal.total = bal.available + bal.pending;
     await upsertPaymentBalance(producerId, bal);
     const wd = { id: genId('wd'), producerId, amount: numAmount, method, methodLabel: methodLabel || method, status: 'pending', createdAt: nowIso() };
-    const list = await paymentWithdrawalsStore.get(producerId) || [];
+    const _wq = await (await import('./db-client.tsx')).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [producerId]);
+    const list = (Array.isArray(_wq.rows[0]?.data) ? _wq.rows[0].data : []);
     (list as any[]).unshift(wd);
-    await paymentWithdrawalsStore.set(producerId, list);
+    await (await import('./db-client.tsx')).pool.query(
+      `INSERT INTO payment_withdrawals (user_id, data, created_at, updated_at) VALUES ($1, $2::jsonb, NOW(), NOW())
+       ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [producerId, JSON.stringify(list)]
+    );
     return c.json({ success: true, data: wd });
   } catch (error) { console.log(`Error creating withdrawal: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -654,7 +658,8 @@ app.get('/wallet/withdrawals/:producerId', requireAuth, async (c) => {
   if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
-    const list = await paymentWithdrawalsStore.get(producerId) || [];
+    const _wq = await (await import('./db-client.tsx')).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [producerId]);
+    const list = (Array.isArray(_wq.rows[0]?.data) ? _wq.rows[0].data : []);
     return c.json({ success: true, data: list });
   } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -674,7 +679,7 @@ app.post('/ai/analyze', requireAuth, async (c) => {
       producerConvsStore.get(producerId),
       producerSessionsStore.get(producerId),
       producerSettingsStore.get(producerId),
-      paymentWithdrawalsStore.get(producerId),
+      (await import('./db-client.tsx')).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [producerId]).then((r: any) => Array.isArray(r.rows[0]?.data) ? r.rows[0].data : []),
       producerCustomServicesStore.get(producerId),
     ]);
 

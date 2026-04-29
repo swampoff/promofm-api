@@ -6,7 +6,6 @@
 import { Hono } from 'hono';
 import {
   getPaymentBalance, upsertPaymentBalance, accountingStore,
-  paymentWithdrawalsStore, paymentBalancesStore,
   getPaymentMethods as dbGetPaymentMethods, upsertPaymentMethod,
   insertPaymentTx, getPaymentTxsByUser, getAllPaymentTxs, getPaymentTxStats, getPaymentTxUserSummaries,
 } from './db.tsx';
@@ -86,16 +85,20 @@ async function createWithdrawRequest(userId: string, amount: number, paymentMeth
 
   const id = `wd-${crypto.randomUUID()}`;
   const req = { id, userId, amount, paymentMethodId, status: 'pending', createdAt: new Date().toISOString() };
-  const raw = await paymentWithdrawalsStore.get(userId);
-  const reqs: any[] = raw || [];
+  const _wq = await (await import("./db-client.tsx")).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [userId]);
+  const reqs: any[] = Array.isArray(_wq.rows[0]?.data) ? _wq.rows[0].data : [];
   reqs.push(req);
-  await paymentWithdrawalsStore.set(userId, reqs);
+  await (await import("./db-client.tsx")).pool.query(
+    `INSERT INTO payment_withdrawals (user_id, data, created_at, updated_at) VALUES ($1, $2::jsonb, NOW(), NOW())
+     ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+    [userId, JSON.stringify(reqs)]
+  );
   return id;
 }
 
 async function getWithdrawRequests(userId: string, status?: string): Promise<any[]> {
-  const raw = await paymentWithdrawalsStore.get(userId);
-  let reqs: any[] = raw || [];
+  const _wq2 = await (await import("./db-client.tsx")).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [userId]);
+  let reqs: any[] = Array.isArray(_wq2.rows[0]?.data) ? _wq2.rows[0].data : [];
   if (status) reqs = reqs.filter((r: any) => r.status === status);
   return reqs;
 }

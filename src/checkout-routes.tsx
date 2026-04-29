@@ -11,7 +11,7 @@
  */
 
 import { Hono } from 'hono';
-import { createCoinTransactionKv, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx, paymentWebhookLogsStore } from './db.tsx';
+import { createCoinTransactionKv, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx } from './db.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import {
@@ -780,7 +780,12 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
     // Log raw webhook
     const webhookOrderId = body?.object?.metadata?.order_id;
     if (webhookOrderId) {
-      await paymentWebhookLogsStore.set(webhookOrderId, { body, receivedAt: new Date().toISOString() });
+      await (await import('./db-client.tsx')).pool.query(
+        `INSERT INTO payment_webhook_logs (id, data, created_at, updated_at)
+         VALUES ($1, $2::jsonb, NOW(), NOW())
+         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+        [webhookOrderId, JSON.stringify({ body, receivedAt: new Date().toISOString() })]
+      );
     }
 
     const gw = getGateway('yookassa');
@@ -826,7 +831,12 @@ checkoutRoutes.post('/webhook/tbank', async (c) => {
 
     // Log raw webhook
     if (body.OrderId) {
-      await paymentWebhookLogsStore.set(body.OrderId, { body, receivedAt: new Date().toISOString() });
+      await (await import('./db-client.tsx')).pool.query(
+        `INSERT INTO payment_webhook_logs (id, data, created_at, updated_at)
+         VALUES ($1, $2::jsonb, NOW(), NOW())
+         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+        [body.OrderId, JSON.stringify({ body, receivedAt: new Date().toISOString() })]
+      );
     }
 
     const gw = getGateway('tbank');
@@ -878,7 +888,12 @@ checkoutRoutes.post('/webhook/stripe', async (c) => {
     // Log raw webhook
     const orderId = body?.data?.object?.metadata?.order_id;
     if (orderId) {
-      await paymentWebhookLogsStore.set(orderId, { body, receivedAt: new Date().toISOString() });
+      await (await import('./db-client.tsx')).pool.query(
+        `INSERT INTO payment_webhook_logs (id, data, created_at, updated_at)
+         VALUES ($1, $2::jsonb, NOW(), NOW())
+         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+        [orderId, JSON.stringify({ body, receivedAt: new Date().toISOString() })]
+      );
     }
 
     const gw = getGateway('stripe');
