@@ -270,7 +270,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
 
 
       if (itemType === 'booking_payment' && session.metadata.bookingId) {
-        const { getBooking, upsertBooking, bookingPaymentsStore } = await import('./db.tsx');
+        const { getBooking, upsertBooking } = await import('./db.tsx');
+        const { pool: bpPool } = await import('./db-client.tsx');
         const bid = session.metadata.bookingId;
         const payType = session.metadata.paymentType || 'deposit';
         const booking = await getBooking(bid);
@@ -285,14 +286,13 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           }
           await upsertBooking(bid, booking);
 
-          await bookingPaymentsStore.set(`${bid}_${payType}_${now}`, {
-            bookingId: bid,
-            paymentType: payType,
-            amount: session.amount,
-            gateway: session.gateway,
-            orderId: session.orderId,
-            paidAt: now,
-          });
+          await bpPool.query(
+            `INSERT INTO booking_payments (booking_id, amount, payment_type, status, data, created_at)
+             VALUES ($1, $2, $3, 'paid', $4::jsonb, NOW())
+             ON CONFLICT DO NOTHING`,
+            [bid, session.amount, payType,
+             JSON.stringify({ gateway: session.gateway, orderId: session.orderId, paidAt: now })]
+          );
 
           log.info({ bookingId: bid, paymentType: payType, amount: session.amount }, 'booking_payment_paid');
         }

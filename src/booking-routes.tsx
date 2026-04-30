@@ -25,7 +25,7 @@ import { apiError } from './error-codes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
-import { getArtistProfile, getBooking, getBookingsByUser, getDjProfile, getVenueProfile, upsertBooking, upsertNotification, bookingCalendarStore, bookingPaymentsStore, bookingsByUserStore } from './db.tsx';
+import { getArtistProfile, getBooking, getBookingsByUser, getDjProfile, getVenueProfile, upsertBooking, upsertNotification, bookingCalendarStore } from './db.tsx';
 import { notifyBookingRequest } from './email-helper.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
@@ -50,15 +50,10 @@ async function getUserFromToken(authHeader: string | null) {
 }
 
 // =====================================================
-// HELPER: Добавить booking ID в индекс пользователя
+// HELPER: legacy no-op (bookings indexed via WHERE user_id query)
 // =====================================================
-async function addBookingToUserIndex(userId: string, bookingId: string) {
-  const existing = await bookingsByUserStore.get(userId);
-  const ids: string[] = Array.isArray(existing) ? existing : [];
-  if (!ids.includes(bookingId)) {
-    ids.unshift(bookingId); // newest first
-    await bookingsByUserStore.set(userId, ids);
-  }
+async function addBookingToUserIndex(_userId: string, _bookingId: string) {
+  // No-op: bookings_by_user index removed in Phase 5; queries hit `bookings` table directly.
 }
 
 // =====================================================
