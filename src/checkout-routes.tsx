@@ -246,25 +246,49 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       }
     
       if (itemType === 'content_order' && session.metadata.contentOrderId) {
-        const { contentOrdersStore, contentOrdersByStatusStore } = await import('./db.tsx');
+        const { pool: coPool } = await import('./db-client.tsx');
         const coid = session.metadata.contentOrderId;
-        const order = await contentOrdersStore.get(coid);
-        if (order) {
-          order.status = 'pending';
-          order.updatedAt = now;
-          order.paidAt = now;
-          order.paymentOrderId = session.orderId;
-          order.paymentGateway = session.gateway;
-          await contentOrdersStore.set(coid, order);
-
-          // Move from pending_payment to pending index
-          const ppList = await contentOrdersByStatusStore.get('pending_payment') || [];
-          await contentOrdersByStatusStore.set('pending_payment', ppList.filter((id: string) => id !== coid));
-          const pendList = await contentOrdersByStatusStore.get('pending') || [];
-          pendList.push(coid);
-          await contentOrdersByStatusStore.set('pending', pendList);
-
+        const r = await coPool.query(
+          `UPDATE content_orders SET status = 'pending', paid_at = $1, payment_order_id = $2, payment_gateway = $3, updated_at = NOW() WHERE id = $4 RETURNING id`,
+          [now, session.orderId, session.gateway, coid]
+        );
+        if (r.rows.length > 0) {
           log.info({ contentOrderId: coid, amount: session.amount }, 'content_order_paid');
+        }
+      }
+
+      // ─── Fulfill venue_radio_subscription ───
+      if (itemType === 'venue_radio_subscription' && session.metadata.subscriptionId) {
+        const { pool: vrPool } = await import('./db-client.tsx');
+        const subId = session.metadata.subscriptionId;
+        // Activate for 30 days; extend if already active
+        const r = await vrPool.query(
+          `UPDATE venue_radio_subscriptions
+           SET status = 'active',
+               current_period_start = COALESCE(current_period_start, NOW()),
+               current_period_end = COALESCE(current_period_end, NOW()) + INTERVAL '30 days',
+               payment_order_id = $1, payment_gateway = $2,
+               auto_renew = true, updated_at = NOW()
+           WHERE id = $3
+           RETURNING venue_id, plan_id, current_period_end`,
+          [session.orderId, session.gateway, subId]
+        );
+        if (r.rows.length > 0) {
+          log.info({
+            subscriptionId: subId, venueId: r.rows[0].venue_id, planId: r.rows[0].plan_id,
+            until: r.rows[0].current_period_end, amount: session.amount,
+          }, 'venue_radio_subscription_activated');
+
+          // SSE notify venue
+          try {
+            const { emitSSE } = await import('./sse-routes.tsx');
+            emitSSE(r.rows[0].venue_id, 'venue_radio_activated', {
+              title: 'Подписка ПРОМО.ЭИР активна',
+              message: `Доступ к эфиру до ${new Date(r.rows[0].current_period_end).toLocaleDateString('ru-RU')}`,
+              subscriptionId: subId,
+              planId: r.rows[0].plan_id,
+            });
+          } catch {}
         }
       }
 

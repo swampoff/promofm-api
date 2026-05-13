@@ -1268,9 +1268,6 @@ export const publishChatsStore = jsonbStore('publish_chats', 'order_id');
 export const publishEmailPrefsStore = jsonbStore('publish_email_prefs', 'user_id');
 export const emailHistoryStore = jsonbStore('email_history');
 export const emailTemplatesStore = jsonbStore('email_templates');
-export const contentOrdersStore = jsonbStore('content_orders');
-export const contentOrdersByStatusStore = jsonbStore('content_orders_by_status', 'status');
-export const venueOrdersIndexStore = jsonbStore('venue_orders_index', 'venue_id');
 export const chartAggregationStore = jsonbStore('chart_aggregation');
 export const chartSourcesStore = jsonbStore('chart_sources');
 export const radioAdSlotsStore = jsonbStore('radio_ad_slots');
@@ -1533,10 +1530,6 @@ export async function upsertPaymentBalance(userId: string, balance: { available?
 }
 
 // ── Audio Branding stores ──
-export const audioBrandingOrdersStore = jsonbStore('audio_branding_orders');
-export const audioBrandingByStatusStore = jsonbStore('audio_branding_by_status');
-export const audioBrandingByVenueStore = jsonbStore('audio_branding_by_venue');
-export const audioBrandingByArtistStore = jsonbStore('audio_branding_by_artist');
 
 // ── Production 360 stores ──
 export const production360OrdersStore = jsonbStore('production_360_orders');

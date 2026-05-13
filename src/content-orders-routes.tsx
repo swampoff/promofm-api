@@ -1,34 +1,15 @@
 /**
- * CONTENT ORDERS ROUTES - Система заказа контента (джинглы/реклама/анонсы)
- * 
- * Endpoints:
- * POST   /orders          - Создать заказ (venue)
- * GET    /orders          - Получить заказы (admin/venue)
- * GET    /orders/:id      - Получить заказ по ID
- * PUT    /orders/:id      - Обновить статус заказа (admin)
- * DELETE /orders/:id      - Удалить заказ
+ * CONTENT ORDERS ROUTES — Заказы аудио-контента (джинглы, реклама, voice-over)
+ * Native SQL (PostgreSQL) on `content_orders` table.
  */
 
 import { Hono } from 'hono';
-import { contentOrdersStore, contentOrdersByStatusStore, venueOrdersIndexStore } from './db.tsx';
-import { safeErrorMessage } from './security.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { pool } from './db-client.tsx';
 
 const app = new Hono();
 
-// Статусы заказа
-export type OrderStatus = 
-  | 'pending_payment' // Ожидает оплаты
-  | 'pending'      // Оплачен, ожидает обработки админом
-  | 'processing'   // В работе (отправлено в ElevenLabs)
-  | 'review'       // На проверке у админа
-  | 'ready'        // Готов к прослушиванию клиентом
-  | 'approved'     // Утвержден клиентом
-  | 'revision'     // Требует доработки
-  | 'completed'    // Завершен (в эфире)
-  | 'cancelled';   // Отменен
-
-export interface ContentOrder {
+interface ContentOrder {
   id: string;
   venueId: string;
   venueName: string;
@@ -38,402 +19,231 @@ export interface ContentOrder {
   duration: number;
   voiceType: string;
   price: number;
-  status: OrderStatus;
+  status: 'pending_payment' | 'pending' | 'in_production' | 'ready' | 'delivered' | 'cancelled';
   audioUrl?: string;
-  adminComment?: string;
+  paymentOrderId?: string;
+  paymentGateway?: string;
+  paidAt?: string;
   createdAt: string;
   updatedAt: string;
-  completedAt?: string;
 }
 
-// =====================================================
-// CREATE ORDER (Venue)
-// =====================================================
+function rowToOrder(r: any): ContentOrder {
+  return {
+    id: r.id,
+    venueId: r.venue_id,
+    venueName: r.venue_name || '',
+    contentType: r.content_type,
+    text: r.text,
+    style: r.style || '',
+    duration: r.duration || 0,
+    voiceType: r.voice_type || '',
+    price: parseFloat(r.price) || 0,
+    status: r.status,
+    audioUrl: r.audio_url || undefined,
+    paymentOrderId: r.payment_order_id || undefined,
+    paymentGateway: r.payment_gateway || undefined,
+    paidAt: r.paid_at?.toISOString?.() || r.paid_at,
+    createdAt: r.created_at?.toISOString?.() || r.created_at,
+    updatedAt: r.updated_at?.toISOString?.() || r.updated_at,
+  };
+}
 
-app.post("/orders", requireAuth, async (c) => {
+// ── POST /orders ──
+app.post('/orders', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const { venueId, venueName, contentType, text, style, duration, voiceType, price } = body;
 
-    // Validation
     if (!venueId || !venueName || !contentType || !text || !style || !voiceType || !price) {
-      return c.json({ 
-        success: false, 
-        error: "Missing required fields" 
-      }, 400);
+      return c.json({ success: false, error: 'Missing required fields' }, 400);
     }
-
     if (!['jingles', 'ads', 'announcements'].includes(contentType)) {
-      return c.json({ 
-        success: false, 
-        error: "Invalid content type" 
-      }, 400);
+      return c.json({ success: false, error: 'Invalid content type' }, 400);
     }
-
     if (text.length < 10 || text.length > 300) {
-      return c.json({ 
-        success: false, 
-        error: "Text must be between 10 and 300 characters" 
-      }, 400);
+      return c.json({ success: false, error: 'Text must be between 10 and 300 characters' }, 400);
     }
 
     const orderId = `order_${crypto.randomUUID()}`;
-    const timestamp = new Date().toISOString();
-
-    const order: ContentOrder = {
-      id: orderId,
-      venueId,
-      venueName,
-      contentType,
-      text,
-      style,
-      duration,
-      voiceType,
-      price,
-      status: 'pending_payment',
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-
-    // Save to DB store
-    await contentOrdersStore.set(orderId, order);
-
-    // Add to venue's orders list
-    const venueOrders = await venueOrdersIndexStore.get(venueId) || [];
-    venueOrders.push(orderId);
-    await venueOrdersIndexStore.set(venueId, venueOrders);
-
-    // Add to pending orders list (for admin)
-    const ppOrders = await contentOrdersByStatusStore.get('pending_payment') || [];
-    ppOrders.push(orderId);
-    await contentOrdersByStatusStore.set('pending_payment', ppOrders);
-
-    console.log(`Content order created: ${orderId} (${contentType})`);
-
-    return c.json({
-      success: true,
-      order,
-      message: "Order created successfully"
-    }, 201);
-
-  } catch (error) {
-    console.error("Error creating content order:", error);
-    return c.json({ 
-      success: false, 
-      error: safeErrorMessage(error) 
-    }, 500);
-  }
-});
-
-// =====================================================
-// GET ALL ORDERS (Admin/Venue)
-// =====================================================
-
-app.get("/orders", requireAuth, async (c) => {
-  try {
-    const venueId = c.req.query("venueId");
-    const status = c.req.query("status") as OrderStatus | undefined;
-    const role = c.get('userRole'); // 'admin' or 'venue'
-
-    console.log('GET /orders - role:', role, 'venueId:', venueId, 'status:', status);
-
-    let orderIds: string[] = [];
-
-    if (role === 'admin') {
-      // Admin sees all orders or filtered by status
-      if (status) {
-        orderIds = await contentOrdersByStatusStore.get(status) || [];
-        console.log(`Found ${orderIds.length} orders with status: ${status}`);
-      } else {
-        // Get all orders
-        const allStatuses: OrderStatus[] = ['pending', 'processing', 'review', 'ready', 'approved', 'revision', 'completed', 'cancelled'];
-        for (const s of allStatuses) {
-          const orders = await contentOrdersByStatusStore.get(s) || [];
-          console.log(`Status ${s}: ${orders.length} orders`);
-          orderIds.push(...orders);
-        }
-        console.log(`Total orderIds: ${orderIds.length}`);
-      }
-    } else if (venueId) {
-      // Venue sees only their orders
-      orderIds = await venueOrdersIndexStore.get(venueId) || [];
-      console.log(`Found ${orderIds.length} orders for venue: ${venueId}`);
-    } else {
-      console.warn('Missing venueId or role=admin');
-      return c.json({ 
-        success: false, 
-        error: "venueId or role=admin required" 
-      }, 400);
-    }
-
-    // Fetch all orders
-    const orders: ContentOrder[] = [];
-    for (const orderId of orderIds) {
-      const order = await contentOrdersStore.get(orderId);
-      if (order) {
-        orders.push(order);
-      } else {
-        console.warn(`Order not found in KV: ${orderId}`);
-      }
-    }
-
-    console.log(`Fetched ${orders.length} complete orders from KV`);
-
-    // Filter by status if provided for venue
-    const filteredOrders = status 
-      ? orders.filter(o => o.status === status)
-      : orders;
-
-    // Sort by date (newest first)
-    filteredOrders.sort((a, b) => 
-      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    const r = await pool.query(
+      `INSERT INTO content_orders
+        (id, venue_id, venue_name, content_type, text, style, duration, voice_type, price, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending_payment', NOW(), NOW())
+       RETURNING *`,
+      [orderId, venueId, venueName, contentType, text, style, duration || 30, voiceType, price]
     );
 
-    console.log(`Returning ${filteredOrders.length} content orders`);
-
-    return c.json({
-      success: true,
-      orders: filteredOrders,
-      total: filteredOrders.length
-    });
-
-  } catch (error) {
-    console.error("Error fetching content orders:", error);
-    return c.json({ 
-      success: false, 
-      error: safeErrorMessage(error) 
-    }, 500);
+    console.log(`Content order created: ${orderId} (${contentType})`);
+    return c.json({ success: true, order: rowToOrder(r.rows[0]) });
+  } catch (error: any) {
+    console.error('POST /orders error:', error);
+    return c.json({ success: false, error: error.message || 'Failed to create order' }, 500);
   }
 });
 
-// =====================================================
-// GET ORDER BY ID
-// =====================================================
-
-app.get("/orders/:id", requireAuth, async (c) => {
+// ── GET /orders ── (with optional ?status=&venueId= filters)
+app.get('/orders', requireAuth, async (c) => {
   try {
-    const orderId = c.req.param("id");
-    const order = await contentOrdersStore.get(orderId);
+    const status = c.req.query('status');
+    const venueId = c.req.query('venueId');
+    const userRole = c.get('userRole');
+    const userId = c.get('userId');
 
-    if (!order) {
-      return c.json({ 
-        success: false, 
-        error: "Order not found" 
-      }, 404);
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let pIdx = 1;
+
+    // Non-admin users can only see their own orders
+    if (userRole !== 'admin' && userRole !== 'superadmin') {
+      conditions.push(`venue_id = $${pIdx}`);
+      params.push(userId);
+      pIdx++;
+    } else if (venueId) {
+      conditions.push(`venue_id = $${pIdx}`);
+      params.push(venueId);
+      pIdx++;
     }
 
-    return c.json({
-      success: true,
-      order
-    });
+    if (status) {
+      conditions.push(`status = $${pIdx}`);
+      params.push(status);
+      pIdx++;
+    }
 
-  } catch (error) {
-    console.error("Error fetching content order:", error);
-    return c.json({ 
-      success: false, 
-      error: safeErrorMessage(error) 
-    }, 500);
+    const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+    const r = await pool.query(
+      `SELECT * FROM content_orders ${where} ORDER BY created_at DESC LIMIT 500`,
+      params
+    );
+    return c.json({ success: true, orders: r.rows.map(rowToOrder) });
+  } catch (error: any) {
+    console.error('GET /orders error:', error);
+    return c.json({ success: false, error: error.message }, 500);
   }
 });
 
-// =====================================================
-// UPDATE ORDER STATUS (Admin)
-// =====================================================
-
-app.put("/orders/:id", requireAuth, async (c) => {
+// ── GET /orders/:id ──
+app.get('/orders/:id', requireAuth, async (c) => {
   try {
-    const orderId = c.req.param("id");
+    const orderId = c.req.param('id');
+    const r = await pool.query(`SELECT * FROM content_orders WHERE id = $1`, [orderId]);
+    if (r.rows.length === 0) return c.json({ success: false, error: 'Order not found' }, 404);
+
+    const order = rowToOrder(r.rows[0]);
+    const userRole = c.get('userRole');
+    const userId = c.get('userId');
+    if (userRole !== 'admin' && userRole !== 'superadmin' && order.venueId !== userId) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+    return c.json({ success: true, order });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ── PUT /orders/:id ── (admin only — update status/audio)
+app.put('/orders/:id', requireAuth, requireAdmin, async (c) => {
+  try {
+    const orderId = c.req.param('id');
     const body = await c.req.json();
-    const { status, audioUrl, adminComment } = body;
+    const { status, audioUrl, notes } = body;
 
-    const order = await contentOrdersStore.get(orderId) as ContentOrder;
+    const fields: string[] = [];
+    const params: any[] = [];
+    let pIdx = 1;
 
-    if (!order) {
-      return c.json({ 
-        success: false, 
-        error: "Order not found" 
-      }, 404);
+    if (status) {
+      fields.push(`status = $${pIdx}`);
+      params.push(status);
+      pIdx++;
     }
-
-    const oldStatus = order.status;
-
-    // Update order
-    const updatedOrder: ContentOrder = {
-      ...order,
-      ...(status && { status }),
-      ...(audioUrl && { audioUrl }),
-      ...(adminComment !== undefined && { adminComment }),
-      updatedAt: new Date().toISOString(),
-      ...(status === 'completed' && { completedAt: new Date().toISOString() }),
-    };
-
-    await contentOrdersStore.set(orderId, updatedOrder);
-
-    // Update status lists if status changed
-    if (status && status !== oldStatus) {
-      // Remove from old status list
-      const oldStatusOrders = await contentOrdersByStatusStore.get(oldStatus) || [];
-      const filteredOldOrders = oldStatusOrders.filter((id: string) => id !== orderId);
-      await contentOrdersByStatusStore.set(oldStatus, filteredOldOrders);
-
-      // Add to new status list
-      const newStatusOrders = await contentOrdersByStatusStore.get(status) || [];
-      if (!newStatusOrders.includes(orderId)) {
-        newStatusOrders.push(orderId);
-        await contentOrdersByStatusStore.set(status, newStatusOrders);
-      }
+    if (audioUrl !== undefined) {
+      fields.push(`audio_url = $${pIdx}`);
+      params.push(audioUrl);
+      pIdx++;
     }
+    if (notes !== undefined) {
+      fields.push(`data = jsonb_set(data, '{notes}', to_jsonb($${pIdx}::text))`);
+      params.push(notes);
+      pIdx++;
+    }
+    fields.push(`updated_at = NOW()`);
 
-    console.log(`Order ${orderId} updated: ${oldStatus} → ${status || oldStatus}`);
-
-    return c.json({
-      success: true,
-      order: updatedOrder,
-      message: "Order updated successfully"
-    });
-
-  } catch (error) {
-    console.error("Error updating content order:", error);
-    return c.json({ 
-      success: false, 
-      error: safeErrorMessage(error) 
-    }, 500);
+    params.push(orderId);
+    const r = await pool.query(
+      `UPDATE content_orders SET ${fields.join(', ')} WHERE id = $${pIdx} RETURNING *`,
+      params
+    );
+    if (r.rows.length === 0) return c.json({ success: false, error: 'Order not found' }, 404);
+    return c.json({ success: true, order: rowToOrder(r.rows[0]) });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
   }
 });
 
-// =====================================================
-// DELETE ORDER
-// =====================================================
-
-app.delete("/orders/:id", requireAuth, async (c) => {
+// ── DELETE /orders/:id ── (admin only)
+app.delete('/orders/:id', requireAuth, requireAdmin, async (c) => {
   try {
-    const orderId = c.req.param("id");
-    const order = await contentOrdersStore.get(orderId) as ContentOrder;
-
-    if (!order) {
-      return c.json({ 
-        success: false, 
-        error: "Order not found" 
-      }, 404);
-    }
-
-    // Remove from all lists
-    await contentOrdersStore.del(orderId);
-
-    // Remove from venue orders
-    const venueOrders = await venueOrdersIndexStore.get(order.venueId) || [];
-    await venueOrdersIndexStore.set(order.venueId, venueOrders.filter((id: string) => id !== orderId));
-
-    // Remove from status list
-    const statusOrders = await contentOrdersByStatusStore.get(order.status) || [];
-    await contentOrdersByStatusStore.set(order.status, statusOrders.filter((id: string) => id !== orderId));
-
-    console.log(`Order ${orderId} deleted`);
-
-    return c.json({
-      success: true,
-      message: "Order deleted successfully"
-    });
-
-  } catch (error) {
-    console.error("Error deleting content order:", error);
-    return c.json({ 
-      success: false, 
-      error: safeErrorMessage(error) 
-    }, 500);
+    const orderId = c.req.param('id');
+    const r = await pool.query(`DELETE FROM content_orders WHERE id = $1 RETURNING id`, [orderId]);
+    if (r.rows.length === 0) return c.json({ success: false, error: 'Order not found' }, 404);
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
   }
 });
 
-// =====================================================
-// GET STATS (Admin Dashboard)
-// =====================================================
-
-app.get("/stats", requireAuth, async (c) => {
+// ── GET /stats ── (admin)
+app.get('/stats', requireAuth, requireAdmin, async (c) => {
   try {
-    const statuses: OrderStatus[] = ['pending', 'processing', 'review', 'ready', 'approved', 'revision', 'completed', 'cancelled'];
-    
-    const stats: Record<string, number> = {};
-    let total = 0;
-
-    for (const status of statuses) {
-      const orders = await contentOrdersByStatusStore.get(status) || [];
-      stats[status] = orders.length;
-      total += orders.length;
-    }
-
+    const byStatus = await pool.query(
+      `SELECT status, COUNT(*)::int as count FROM content_orders GROUP BY status`
+    );
+    const totals = await pool.query(
+      `SELECT COUNT(*)::int as total, COALESCE(SUM(price), 0) as revenue FROM content_orders WHERE status != 'pending_payment'`
+    );
     return c.json({
       success: true,
-      stats,
-      total
+      stats: {
+        byStatus: byStatus.rows.reduce((acc: any, r: any) => { acc[r.status] = r.count; return acc; }, {}),
+        total: totals.rows[0].total,
+        revenue: parseFloat(totals.rows[0].revenue) || 0,
+      },
     });
-
-  } catch (error) {
-    console.error("Error fetching stats:", error);
-    return c.json({ 
-      success: false, 
-      error: safeErrorMessage(error) 
-    }, 500);
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
   }
 });
 
+// ── POST /upload — admin uploads audio file for completed order ──
+// Keeping the existing /upload behaviour as-is (it stores in /opt/promofm-api/uploads/)
+import path from 'node:path';
+import fs from 'node:fs/promises';
 
-// POST /upload - Загрузка аудиофайла venue (base64)
-app.post('/upload', requireAuth, async (c) => {
+app.post('/upload', requireAuth, requireAdmin, async (c) => {
   try {
-    const body = await c.req.json();
-    const { audioBase64, fileName, contentType, title } = body;
+    const body = await c.req.parseBody();
+    const file = body.file as File;
+    const orderId = body.orderId as string;
+    if (!file || !orderId) return c.json({ success: false, error: 'file + orderId required' }, 400);
 
-    if (!audioBase64 || !fileName) {
-      return c.json({ success: false, error: 'audioBase64 and fileName required' }, 400);
-    }
+    const buf = Buffer.from(await file.arrayBuffer());
+    const ext = (file.name.split('.').pop() || 'mp3').toLowerCase();
+    const filename = `content_${orderId}_${Date.now()}.${ext}`;
+    const dir = '/opt/promofm-api/uploads/content-orders';
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, filename), buf);
 
-    const fs = await import('node:fs/promises');
-    const path = await import('node:path');
+    const audioUrl = `https://promo-music.ru/server/uploads/content-orders/${filename}`;
+    await pool.query(
+      `UPDATE content_orders SET audio_url = $1, status = 'ready', updated_at = NOW() WHERE id = $2`,
+      [audioUrl, orderId]
+    );
 
-    const buffer = Buffer.from(audioBase64, 'base64');
-    
-    if (buffer.length > 50 * 1024 * 1024) {
-      return c.json({ success: false, error: 'File too large (max 50MB)' }, 400);
-    }
-
-    const timestamp = Date.now();
-    const sanitized = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const storageName = `${timestamp}_${sanitized}`;
-    const uploadDir = '/opt/promofm-api/uploads/venue-content';
-    const filePath = path.default.join(uploadDir, storageName);
-
-    await fs.writeFile(filePath, buffer);
-
-    let duration = 0;
-    try {
-      const { exec } = await import('node:child_process');
-      const { promisify } = await import('node:util');
-      const execAsync = promisify(exec);
-      const { stdout } = await execAsync(
-        `ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${filePath}"`
-      );
-      duration = Math.round(parseFloat(stdout.trim()) || 0);
-    } catch {
-      // ffprobe not available
-    }
-
-    const fileUrl = `/server/uploads/venue-content/${storageName}`;
-
-    return c.json({
-      success: true,
-      file: {
-        url: fileUrl,
-        fileName: storageName,
-        originalName: fileName,
-        size: buffer.length,
-        duration,
-        title: title || fileName,
-        contentType: contentType || 'jingles',
-      }
-    });
-  } catch (err: any) {
-    console.error('Content upload error:', err);
-    return c.json({ success: false, error: err.message }, 500);
+    return c.json({ success: true, audioUrl });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
   }
 });
 

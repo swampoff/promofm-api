@@ -10,7 +10,7 @@
 import { Hono } from 'hono';
 import { getDbClient } from './db-client.tsx';
 import * as db from './db.tsx';
-import { contentOrdersStore } from './db.tsx';
+import { pool as elPool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
@@ -83,12 +83,19 @@ app.post('/generate', requireAdminOrKey, async (c) => {
     console.log('Generating audio for order:', orderId);
 
     // Получаем заказ из KV
-    const order = await contentOrdersStore.get(orderId);
-    
-    if (!order) {
+    const _coRow = await elPool.query('SELECT * FROM content_orders WHERE id = $1', [orderId]);
+    if (_coRow.rows.length === 0) {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
-
+    const _r = _coRow.rows[0];
+    const order: any = {
+      id: _r.id, venueId: _r.venue_id, venueName: _r.venue_name,
+      contentType: _r.content_type, text: _r.text, style: _r.style,
+      duration: _r.duration, voiceType: _r.voice_type, price: parseFloat(_r.price),
+      status: _r.status, audioUrl: _r.audio_url || undefined,
+      createdAt: _r.created_at, updatedAt: _r.updated_at,
+    };
+    
     // Проверяем API ключ
     const apiKey = process.env.ELEVENLABS_API_KEY;
     if (!apiKey) {
@@ -204,7 +211,10 @@ app.post('/generate', requireAdminOrKey, async (c) => {
       updatedAt: new Date().toISOString(),
     };
 
-    await contentOrdersStore.set(orderId, updatedOrder);
+    await elPool.query(
+      'UPDATE content_orders SET status = $1, audio_url = $2, updated_at = NOW() WHERE id = $3',
+      [updatedOrder.status, updatedOrder.audioUrl, orderId]
+    );
 
     console.log('Order updated with audio URL');
 
