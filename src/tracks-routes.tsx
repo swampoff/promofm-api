@@ -56,8 +56,8 @@ tracksRoutes.post('/', requireAuth, async (c) => {
       ...body,
       user_id: userId,
       artist_name: body.artist || body.artist_name || '',
-      audio_url: body.audioUrl || body.audio_url || body.audio_file_url || '',
-      cover_url: body.coverUrl || body.cover_url || body.cover_image_url || '',
+      audio_url: body.audioUrl || body.audio_url || body.audio_file_url || body.audioFile || body.audio || '',
+      cover_url: body.coverUrl || body.cover_url || body.cover_image_url || body.cover || '',
       moderation_status: body.status || 'draft',
     });
 
