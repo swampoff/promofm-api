@@ -72,12 +72,15 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
       displayName: 'display_name',
     };
 
+    // Dedup by target column — last incoming key wins to avoid "multiple assignments to same column"
+    const colToValue = new Map<string, unknown>();
     for (const [key, col] of Object.entries(mapping)) {
-      if (data[key] !== undefined) {
-        setClauses.push(`${col} = $${idx}`);
-        values.push(data[key]);
-        idx++;
-      }
+      if (data[key] !== undefined) colToValue.set(col, data[key]);
+    }
+    for (const [col, value] of colToValue) {
+      setClauses.push(`${col} = $${idx}`);
+      values.push(value);
+      idx++;
     }
 
     if (setClauses.length > 0) {
