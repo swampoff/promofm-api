@@ -348,3 +348,35 @@ export async function notifyModerationSubmitted(data: {
     html,
   });
 }
+
+
+// ── Payment Expired (cancellation_details.reason = expired_on_confirmation) ──
+export async function notifyPaymentExpired(data: {
+  email: string;
+  name?: string;
+  amount: number;
+  currency?: string;
+  description?: string;
+  retryUrl: string;        // deep link обратно в кабинет для повторной оплаты
+  orderId?: string;
+}): Promise<boolean> {
+  const subject = `Не получилось оплатить ${data.amount} ${escapeHtml(data.currency || 'RUB')} — повторить?`;
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #F59E0B;">Не получилось оплатить?</h2>
+    <p>Здравствуйте${data.name ? ', <b>' + escapeHtml(data.name) + '</b>' : ''}!</p>
+    <p>Вы начали оплату на платформе ПРОМО.МУЗЫКА, но не завершили её — платёж был автоматически отменён через несколько минут.</p>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0; margin: 16px 0; background: rgba(255,255,255,0.03); border-radius: 8px;">
+      <tr><td style="padding: 10px; color: #999;">Сумма:</td><td style="padding: 10px; font-size: 18px; font-weight: 700; color: #FF577F;">${data.amount} ${escapeHtml(data.currency || 'RUB')}</td></tr>
+      ${data.description ? `<tr><td style="padding: 10px; color: #999;">Описание:</td><td style="padding: 10px;">${escapeHtml(data.description)}</td></tr>` : ''}
+    </table>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${data.retryUrl}" style="${buttonStyle}">Повторить оплату</a>
+    </p>
+    <p style="color: #888; font-size: 13px;">Если у вас возникли проблемы с оплатой, ответьте на это письмо — мы поможем разобраться.</p>
+    ${data.orderId ? `<p style="color: #555; font-size: 11px; margin-top: 20px;">Номер заказа: <code>${escapeHtml(data.orderId)}</code></p>` : ''}
+  `);
+  // Best-effort Telegram alert
+  notifyAdminTelegram(`⏱ <b>Платёж истёк</b>\n\nEmail: ${stripHtml(data.email)}\nСумма: ${data.amount} ${stripHtml(data.currency || 'RUB')}${data.description ? `\nЗа что: ${stripHtml(data.description)}` : ''}\n\nОтправили reminder с retry-ссылкой.`).catch(() => {});
+  return sendEmail({ to: data.email, subject, html });
+}
+

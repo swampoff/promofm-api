@@ -24,7 +24,7 @@ import {
 } from './payment-gateway.tsx';
 
 import { createLogger } from "./logger.tsx";
-import { notifyPaymentReceived } from './email-helper.tsx';
+import { notifyPaymentReceived, notifyPaymentExpired } from './email-helper.tsx';
 
 const log = createLogger("checkout");
 
@@ -638,11 +638,59 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   log.info({ orderId: session.orderId, gateway: session.gateway, amount: session.amount, currency: session.currency }, 'payment_completed');
 }
 
-async function processPaymentCanceled(session: PaymentSession) {
+async function processPaymentCanceled(session: PaymentSession, rawBody?: any) {
   session.status = 'canceled';
   session.completedAt = new Date().toISOString();
   await upsertPaymentSession(session.orderId, session);
-  log.info({ orderId: session.orderId }, 'payment_canceled');
+
+  // Determine cancellation reason from raw YooKassa webhook payload
+  const reason: string =
+    rawBody?.object?.cancellation_details?.reason ||
+    rawBody?.body?.object?.cancellation_details?.reason ||
+    '';
+  log.info({ orderId: session.orderId, reason }, 'payment_canceled');
+
+  // Email-возврат при expired_on_confirmation: пользователь начал оплату, но не довёл — шлём reminder
+  if (reason === 'expired_on_confirmation') {
+    try {
+      // Resolve user email + name from users table
+      const { pool } = await import('./db-client.tsx');
+      const userRow = await pool.query(
+        `SELECT email, name FROM users WHERE id = $1 LIMIT 1`,
+        [session.userId]
+      );
+      const email = userRow.rows[0]?.email || session.metadata?.payerEmail || '';
+      const name = userRow.rows[0]?.name || session.metadata?.payerName || '';
+
+      if (email) {
+        // Build retry deep-link based on payment type
+        const meta = session.metadata || {};
+        let retryUrl = 'https://promo-music.ru/artist/finances';
+        if (meta.type === 'track_publish' || session.type === 'purchase') {
+          retryUrl = `https://promo-music.ru/artist/tracks?retry=${encodeURIComponent(session.orderId)}`;
+        } else if (session.type === 'subscription') {
+          retryUrl = 'https://promo-music.ru/artist/subscription?retry=1';
+        } else if (session.type === 'topup') {
+          retryUrl = 'https://promo-music.ru/artist/finances?retry=1';
+        }
+
+        await notifyPaymentExpired({
+          email,
+          name,
+          amount: session.amount,
+          currency: session.currency,
+          description: session.description || meta.trackTitle || '',
+          retryUrl,
+          orderId: session.orderId,
+        });
+        log.info({ orderId: session.orderId, email }, 'payment_expired_email_sent');
+      } else {
+        log.warn({ orderId: session.orderId, userId: session.userId }, 'payment_expired_email_skipped_no_address');
+      }
+    } catch (err: any) {
+      log.warn({ err: err.message, orderId: session.orderId }, 'payment_expired_email_failed');
+    }
+  }
 }
 
 // ── POST /create-session ──
@@ -836,7 +884,7 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
     if (payload.eventType === 'payment.succeeded') {
       await processPaymentSuccess(session, payload);
     } else if (payload.eventType === 'payment.canceled') {
-      await processPaymentCanceled(session);
+      await processPaymentCanceled(session, body);
     }
 
     return c.json({ success: true });
