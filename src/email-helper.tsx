@@ -9,6 +9,31 @@ const REPLY_TO = 'noreply@promo-music.ru';
 const SITE_URL = 'https://promo-music.ru';
 const API_BASE = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/server` : 'https://promo-music.ru/server';
 
+// ── Telegram notification ──
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TG_CHAT  = process.env.TELEGRAM_LEAD_CHAT_ID || '';
+
+function stripHtml(s: string): string {
+  return String(s || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+}
+
+export async function notifyAdminTelegram(text: string): Promise<void> {
+  if (!TG_TOKEN || !TG_CHAT) return;
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      console.warn('[Telegram] non-OK:', resp.status, body.slice(0, 200));
+    }
+  } catch (err: any) {
+    console.warn('[Telegram] send failed:', err?.message || err);
+  }
+}
+
 
 // HTML entity escaping for safe email template interpolation
 function escapeHtml(str: string): string {
@@ -222,6 +247,7 @@ export async function notifyTrackUpload(data: { title: string; artist: string; g
       <a href="${SITE_URL}/admin/moderation" style="${buttonStyle}">Модерация</a>
     </p>
   `);
+  notifyAdminTelegram(`🎵 <b>Новый трек на модерации</b>\n\nАртист: <b>${stripHtml(data.artist)}</b>\nТрек: <b>${stripHtml(data.title)}</b>${data.genre ? `\nЖанр: ${stripHtml(data.genre)}` : ''}${data.email ? `\nEmail: ${stripHtml(data.email)}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Модерация</a>`).catch(() => {});
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Трек: ${escapeHtml(data.artist)} — ${escapeHtml(data.title)}`, html });
 }
 
@@ -239,6 +265,7 @@ export async function notifyConcertCreated(data: { title: string; artist?: strin
       <a href="${SITE_URL}/admin/moderation" style="${buttonStyle}">Модерация</a>
     </p>
   `);
+  notifyAdminTelegram(`🎤 <b>Новый концерт</b>\n\nНазвание: <b>${stripHtml(data.title)}</b>${data.artist ? `\nАртист: ${stripHtml(data.artist)}` : ''}${data.city ? `\nГород: ${stripHtml(data.city)}` : ''}${data.venue ? `\nПлощадка: ${stripHtml(data.venue)}` : ''}${data.date ? `\nДата: ${stripHtml(data.date)}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Модерация</a>`).catch(() => {});
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Концерт: ${escapeHtml(data.title)}`, html });
 }
 
@@ -253,6 +280,7 @@ export async function notifyBannerCreated(data: { title?: string; userId?: strin
       <a href="${SITE_URL}/admin/moderation" style="${buttonStyle}">Модерация</a>
     </p>
   `);
+  notifyAdminTelegram(`🏷 <b>Новый баннер на модерации</b>${data.title ? `\n\nНазвание: <b>${stripHtml(data.title)}</b>` : ''}${data.position ? `\nПозиция: ${stripHtml(data.position)}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Модерация</a>`).catch(() => {});
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Баннер: ${escapeHtml(data.title || 'без названия')}`, html });
 }
 
@@ -271,6 +299,7 @@ export async function notifyPaymentReceived(data: { amount: number; currency?: s
       ${data.orderId ? `<tr><td style="padding: 8px; color: #999;">Заказ:</td><td style="padding: 8px; font-family: monospace; font-size: 13px;">${escapeHtml(data.orderId)}</td></tr>` : ''}
     </table>
   `);
+  notifyAdminTelegram(`💰 <b>Оплата получена</b>\n\nСумма: <b>${data.amount} ${stripHtml(data.currency || 'RUB')}</b>\nТип: ${stripHtml(typeLabel)}${data.description ? `\nОписание: ${stripHtml(data.description)}` : ''}${data.userName ? `\nПлательщик: ${stripHtml(data.userName)}` : ''}${data.userEmail ? `\nEmail: ${stripHtml(data.userEmail)}` : ''}${data.gateway ? `\nШлюз: ${stripHtml(data.gateway)}` : ''}${data.orderId ? `\nЗаказ: <code>${stripHtml(data.orderId)}</code>` : ''}`).catch(() => {});
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Оплата ${data.amount} ${data.currency || 'RUB'} — ${escapeHtml(typeLabel)}`, html });
 }
 
@@ -311,6 +340,8 @@ export async function notifyModerationSubmitted(data: {
     </p>
   `);
   const subjectTitle = data.title || data.kind;
+  const extraLines = data.extra ? Object.entries(data.extra).filter(([_, v]) => v).map(([k, v]) => `\n${stripHtml(k)}: ${stripHtml(String(v))}`).join('') : '';
+  notifyAdminTelegram(`📥 <b>Новый ${stripHtml(data.kind)} на модерации</b>${data.title ? `\n\nНазвание: <b>${stripHtml(data.title)}</b>` : ''}${data.artist ? `\nАртист: ${stripHtml(data.artist)}` : ''}${data.plan ? `\nТариф: ${stripHtml(data.plan)}` : ''}${data.email ? `\nEmail: ${stripHtml(data.email)}` : ''}${extraLines}${data.url ? `\nСсылка: ${stripHtml(data.url)}` : ''}\n\n→ <a href="${moderateUrl}">Перейти</a>`).catch(() => {});
   await sendEmail({
     to: ADMIN_EMAIL,
     subject: `[ПРОМО] На модерации (${escapeHtml(data.kind)}): ${escapeHtml(subjectTitle)}`,
