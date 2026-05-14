@@ -723,6 +723,128 @@ app.get('/finance/transactions', requireAuth, async (c) => {
 });
 
 // =====================================================
+// FINANCE / WITHDRAWALS — radio station partner payouts
+// =====================================================
+
+function radioWithdrawalKey(stationUserId: string): string {
+  return `radio:${stationUserId}`;
+}
+
+async function _getRadioWithdrawals(stationUserId: string): Promise<any[]> {
+  const { pool: rwPool } = await import('./db-client.tsx');
+  const r = await rwPool.query(
+    `SELECT data FROM payment_withdrawals WHERE user_id = $1`,
+    [radioWithdrawalKey(stationUserId)]
+  );
+  const raw = r.rows[0]?.data;
+  return Array.isArray(raw) ? raw : [];
+}
+
+async function _saveRadioWithdrawals(stationUserId: string, list: any[]): Promise<void> {
+  const { pool: rwPool } = await import('./db-client.tsx');
+  await rwPool.query(
+    `INSERT INTO payment_withdrawals (user_id, data, created_at, updated_at)
+     VALUES ($1, $2::jsonb, NOW(), NOW())
+     ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+    [radioWithdrawalKey(stationUserId), JSON.stringify(list)]
+  );
+}
+
+async function _getRadioBalance(stationUserId: string): Promise<number> {
+  const { pool: rwPool } = await import('./db-client.tsx');
+  let balance = 0;
+  try {
+    const r = await rwPool.query(`SELECT data FROM radio_finance WHERE radio_id = $1`, [stationUserId]);
+    const data: any = r.rows[0]?.data || {};
+    balance = Number(data?.availableBalance ?? data?.balance ?? data?.totalRevenue ?? 0);
+  } catch {}
+  const wds = await _getRadioWithdrawals(stationUserId);
+  const reserved = wds
+    .filter((w: any) => w?.status !== 'rejected' && w?.status !== 'cancelled')
+    .reduce((s: number, w: any) => s + (Number(w?.amount) || 0), 0);
+  return Math.max(0, balance - reserved);
+}
+
+// GET /finance/withdrawals — список заявок радиостанции
+app.get('/finance/withdrawals', requireAuth, async (c) => {
+  try {
+    const userId = await getRadioUserId(c);
+    const list = await _getRadioWithdrawals(userId);
+    const balance = await _getRadioBalance(userId);
+    return c.json({
+      success: true,
+      withdrawals: list.sort((a: any, b: any) =>
+        String(b?.createdAt || '').localeCompare(String(a?.createdAt || ''))
+      ),
+      balance,
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// POST /finance/withdrawals — создать заявку. body: { amount, paymentMethod?, paymentDetails? }
+// Минимум 500 ₽, без комиссии, проверка баланса.
+app.post('/finance/withdrawals', requireAuth, async (c) => {
+  try {
+    const userId = await getRadioUserId(c);
+    const body = await c.req.json();
+    const amount = Number(body.amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return c.json({ success: false, error: 'amount must be > 0' }, 400);
+    }
+    if (amount < 500) {
+      return c.json({ success: false, error: 'Минимальная сумма вывода — 500 ₽' }, 400);
+    }
+
+    const balance = await _getRadioBalance(userId);
+    if (amount > balance) {
+      return c.json({ success: false, error: `Недостаточно средств. Доступно: ${balance} ₽`, balance }, 400);
+    }
+
+    const id = `wd-${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    const request = {
+      id, source: 'radio', stationId: userId, amount,
+      paymentMethod: body.paymentMethod || 'card',
+      paymentDetails: body.paymentDetails || null,
+      status: 'pending', createdAt: now, updatedAt: now,
+    };
+
+    const list = await _getRadioWithdrawals(userId);
+    list.unshift(request);
+    await _saveRadioWithdrawals(userId, list);
+
+    return c.json({ success: true, withdrawal: request, balance: balance - amount }, 201);
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// POST /finance/withdrawals/:id/cancel — отменить pending заявку
+app.post('/finance/withdrawals/:id/cancel', requireAuth, async (c) => {
+  try {
+    const userId = await getRadioUserId(c);
+    const wdId = c.req.param('id');
+    const list = await _getRadioWithdrawals(userId);
+    const idx = list.findIndex((w: any) => w?.id === wdId);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Withdrawal not found' }, 404);
+    }
+    if (list[idx].status !== 'pending') {
+      return c.json({ success: false, error: `Can only cancel pending requests (current: ${list[idx].status})` }, 400);
+    }
+    list[idx].status = 'cancelled';
+    list[idx].updatedAt = new Date().toISOString();
+    await _saveRadioWithdrawals(userId, list);
+    return c.json({ success: true, withdrawal: list[idx] });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// =====================================================
 // NOTIFICATIONS ENDPOINTS
 // =====================================================
 
