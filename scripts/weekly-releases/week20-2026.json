@@ -1,0 +1,20 @@
+{
+  "weekNumber": 20,
+  "year": 2026,
+  "releaseDate": "2026-05-15",
+  "title": "Новинки недели #20 (15 мая 2026)",
+  "tracks": [
+    { "artist": "Mitya Fomin, Sasha Dith",                "title": "Всё будет хорошо",       "slug": "vse-budet-horosho",    "mp3": "01 Всё будет хорошо (2026).mp3", "duration": 193, "genre": "Pop" },
+    { "artist": "MIA BOYKA",                              "title": "Казак",                   "slug": "kazak",                "mp3": "01 Казак.mp3",                    "duration": 186, "genre": "Pop" },
+    { "artist": "SLAVA SKRIPKA",                          "title": "Ну-ну-ну ай-яй-яй",       "slug": "nu-nu-nu",             "mp3": "01 Ну-ну-ну ай-яй-яй.mp3",        "duration": 180, "genre": "Pop" },
+    { "artist": "By Индия",                               "title": "кавалерия",               "slug": "kavaleriya",           "mp3": "01 кавалерия.mp3",                "duration": 157, "genre": "Pop" },
+    { "artist": "Moya Mishel",                            "title": "На малиновой луне",       "slug": "na-malinovoy-lune",    "mp3": "01 На малиновой луне.mp3",        "duration": 236, "genre": "Pop" },
+    { "artist": "Becky Hill",                             "title": "hands on me",             "slug": "hands-on-me",          "mp3": "01    hands on me.mp3",           "duration": 137, "genre": "Pop" },
+    { "artist": "Madonna, Sabrina Carpenter",             "title": "Bring Your Love",         "slug": "bring-your-love",      "mp3": "01 Bring Your Love.mp3",          "duration": 216, "genre": "Pop" },
+    { "artist": "Maroon 5",                               "title": "Heroine",                 "slug": "heroine",              "mp3": "01 Heroine.mp3",                  "duration": 155, "genre": "Pop Rock" },
+    { "artist": "Melanie C",                              "title": "Drum Machine",            "slug": "drum-machine",         "mp3": "02 Drum Machine.mp3",             "duration": 197, "genre": "Pop" },
+    { "artist": "Tauren Wells, Phil Wickham, Hulvey",     "title": "How Great",               "slug": "how-great",            "mp3": "04 How Great.mp3",                "duration": 206, "genre": "Christian" },
+    { "artist": "Zara Larsson, Shakira",                  "title": "Eurosummer - Girls Trip", "slug": "eurosummer-girls",     "mp3": "06 Eurosummer - Girls Trip.mp3",  "duration": 170, "genre": "Dance" },
+    { "artist": "Jahson Paynter",                         "title": "clear blue!",             "slug": "clear-blue",           "mp3": "06 clear blue!.mp3",              "duration": 257, "genre": "R&B" }
+  ]
+}
