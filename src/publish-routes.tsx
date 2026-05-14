@@ -27,6 +27,7 @@ import { Hono } from 'hono';
 import { getArtistProfile, getNotificationsByUser, publishEmailPrefsStore, publishOrdersStore, upsertNotification } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { notifyModerationSubmitted } from './email-helper.tsx';
 
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
@@ -334,6 +335,23 @@ app.put('/orders/:id/submit', requireAuth, async (c) => {
     await publishOrdersStore.set(id, JSON.stringify(order), { user_id: order.userId });
 
     console.log(`Publish order submitted for review: ${id}`);
+
+    // Email notification to admin
+    notifyModerationSubmitted({
+      kind: order.type === 'concert' ? 'концерт' : 'клип',
+      title: order.title,
+      userId: order.userId,
+      plan: order.plan,
+      url: (order as any).videoUrl || (order as any).posterUrl || (order as any).thumbnailUrl,
+      extra: order.type === 'concert' ? {
+        'Город': (order as any).city || '',
+        'Площадка': (order as any).venueName || '',
+        'Дата': (order as any).eventDate || '',
+      } : {
+        'Категория': (order as any).videoCategory || '',
+      },
+      adminPath: '/ctrl-pm7k2f/publish-moderation',
+    }).catch((err: any) => console.error('[publish-routes] email notify failed:', err?.message));
 
     return c.json({ success: true, order });
   } catch (error: any) {

@@ -21,6 +21,7 @@ import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { notifyModerationSubmitted } from './email-helper.tsx';
 
 const marketing = new Hono();
 
@@ -137,6 +138,19 @@ marketing.post('/campaigns', requireAuth, async (c) => {
         link: 'moderation',
         metadata: { campaignId, artistName: campaign.artist_name },
       });
+      // Email notification to admin (info@promofm.ru)
+      notifyModerationSubmitted({
+        kind: 'промо-кампания',
+        title: campaign.campaign_name,
+        artist: campaign.artist_name,
+        userId: campaign.user_id,
+        plan: String(campaign.budget_preference || ''),
+        extra: {
+          'Каналы': Array.isArray(campaign.channels) ? campaign.channels.join(', ') : '',
+          'Бюджет': campaign.final_price ? String(campaign.final_price) + ' ₽' : '',
+        },
+        adminPath: '/ctrl-pm7k2f/marketing-moderation',
+      }).catch((err: any) => console.error('[marketing-campaigns] email notify failed:', err?.message));
     } catch (e) {
       console.log('Notify admin error (non-critical):', e);
     }

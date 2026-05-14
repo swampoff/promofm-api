@@ -273,3 +273,47 @@ export async function notifyPaymentReceived(data: { amount: number; currency?: s
   `);
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Оплата ${data.amount} ${data.currency || 'RUB'} — ${escapeHtml(typeLabel)}`, html });
 }
+
+// ── Universal Moderation Submission Notification ──
+// Используется когда контент создаётся ИЛИ переходит в состояние pending_review.
+// kind: трек / клип / концерт / баннер / промоакция / кампания / публикация
+export async function notifyModerationSubmitted(data: {
+  kind: string;             // human-readable: 'клип', 'промоакция', etc
+  title?: string;
+  artist?: string;
+  userId?: string;
+  email?: string;
+  plan?: string;
+  url?: string;             // ссылка на материал
+  extra?: Record<string, string>;  // произвольные доп. поля
+  adminPath?: string;       // путь к моделке: /admin/moderation, /admin/publish и т.п.
+}) {
+  const rows: string[] = [];
+  if (data.title)  rows.push(`<tr><td style="padding: 8px; color: #999;">Название:</td><td style="padding: 8px;">${escapeHtml(data.title)}</td></tr>`);
+  if (data.artist) rows.push(`<tr><td style="padding: 8px; color: #999;">Артист:</td><td style="padding: 8px;">${escapeHtml(data.artist)}</td></tr>`);
+  if (data.plan)   rows.push(`<tr><td style="padding: 8px; color: #999;">Тариф:</td><td style="padding: 8px;">${escapeHtml(data.plan)}</td></tr>`);
+  if (data.email)  rows.push(`<tr><td style="padding: 8px; color: #999;">Email:</td><td style="padding: 8px;">${escapeHtml(data.email)}</td></tr>`);
+  if (data.userId) rows.push(`<tr><td style="padding: 8px; color: #999;">User ID:</td><td style="padding: 8px; font-family: monospace; font-size: 12px;">${escapeHtml(data.userId)}</td></tr>`);
+  if (data.url)    rows.push(`<tr><td style="padding: 8px; color: #999;">Ссылка:</td><td style="padding: 8px; word-break: break-all;"><a href="${escapeHtml(data.url)}" style="color: #FF577F;">${escapeHtml(data.url)}</a></td></tr>`);
+  if (data.extra) {
+    for (const [k, v] of Object.entries(data.extra)) {
+      if (v) rows.push(`<tr><td style="padding: 8px; color: #999;">${escapeHtml(k)}:</td><td style="padding: 8px;">${escapeHtml(String(v))}</td></tr>`);
+    }
+  }
+  const moderateUrl = `${SITE_URL}${data.adminPath || '/ctrl-pm7k2f'}`;
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #F59E0B;">Новый ${escapeHtml(data.kind)} на модерации</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      ${rows.join('\n')}
+    </table>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${moderateUrl}" style="${buttonStyle}">Перейти в модерацию</a>
+    </p>
+  `);
+  const subjectTitle = data.title || data.kind;
+  await sendEmail({
+    to: ADMIN_EMAIL,
+    subject: `[ПРОМО] На модерации (${escapeHtml(data.kind)}): ${escapeHtml(subjectTitle)}`,
+    html,
+  });
+}
