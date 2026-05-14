@@ -32,6 +32,41 @@ const requireAdminOrKey = async (c: any, next: () => Promise<void>) => {
   return requireAuth(c, () => requireAdmin(c, next));
 };
 
+
+// iTunes Search API — preview clip + cover
+async function fetchITunesPreview(artist: string, title: string): Promise<{ preview: string; cover: string }> {
+  try {
+    const q = encodeURIComponent(`${artist} ${title}`);
+    const res = await fetch(`https://itunes.apple.com/search?term=${q}&media=music&limit=3&country=us`);
+    if (!res.ok) return { preview: '', cover: '' };
+    const data = (await res.json()) as any;
+    const results = data.results || [];
+    const titleLower = title.toLowerCase().slice(0, 10);
+    let best = results.find((r: any) => (r.trackName || '').toLowerCase().includes(titleLower));
+    if (!best && results.length > 0) best = results[0];
+    if (best) {
+      return {
+        preview: best.previewUrl || '',
+        cover: (best.artworkUrl100 || '').replace('100x100', '500x500'),
+      };
+    }
+  } catch {}
+  return { preview: '', cover: '' };
+}
+
+async function enrichTracksWithPreviews(tracks: any[]): Promise<void> {
+  const batch = 5;
+  for (let i = 0; i < tracks.length; i += batch) {
+    const chunk = tracks.slice(i, i + batch);
+    const results = await Promise.all(chunk.map((t) => fetchITunesPreview(t.artist, t.title)));
+    chunk.forEach((t, idx) => {
+      const r = results[idx];
+      if (!t.audioUrl && r.preview) t.audioUrl = r.preview;
+      if (!t.cover && r.cover) t.cover = r.cover;
+    });
+  }
+}
+
 // ── Source registry ──────────────────────────────────────────────────────
 
 interface AiChartSource {
@@ -184,10 +219,18 @@ app.post('/manual-update', requireAdminOrKey, async (c) => {
         likes: Number(t.likes) || 0,
         cover: t.cover || null,
         url: t.url || null,
+        audioUrl: t.audioUrl || t.audio_url || null,
       })),
       fetchedAt: new Date().toISOString(),
       parsedBy: 'manual_admin',
     };
+
+    // Enrich with iTunes preview + cover (best effort, non-blocking failures OK)
+    try {
+      await enrichTracksWithPreviews(data.tracks);
+    } catch (e) {
+      console.warn('[ai-charts] enrichment failed:', (e as any)?.message);
+    }
 
     await saveSourceData(sourceId, data);
     await rebuildCompositeChart();
@@ -216,6 +259,7 @@ async function rebuildCompositeChart() {
           likes: t.likes || 0,
           cover: t.cover || null,
           url: t.url || null,
+          audioUrl: t.audioUrl || null,
           score,
         });
       }
@@ -232,6 +276,8 @@ async function rebuildCompositeChart() {
       if (!existing.sources.includes(e.source)) existing.sources.push(e.source);
       existing.plays += e.plays;
       existing.likes += e.likes;
+      if (!existing.audioUrl && e.audioUrl) existing.audioUrl = e.audioUrl;
+      if (!existing.cover && e.cover) existing.cover = e.cover;
     } else {
       grouped.set(key, {
         title: e.title,
@@ -242,6 +288,7 @@ async function rebuildCompositeChart() {
         likes: e.likes,
         cover: e.cover,
         url: e.url,
+        audioUrl: e.audioUrl || null,
         score: e.score,
       });
     }
