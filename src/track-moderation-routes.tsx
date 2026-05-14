@@ -215,7 +215,15 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
       console.log(`[moderation] Track ${pendingTrackId} approved. Awaiting payment ${PUBLICATION_PRICE} RUB.` + aiWarning);
 
       // Notify artist: email + in-app
-      const artistEmail = track.uploaded_by_email;
+      // Fallback chain: uploaded_by_email → users.email lookup (may be empty for VK/SSO users without email contact)
+      let artistEmail = track.uploaded_by_email;
+      if (!artistEmail && track.user_id) {
+        try {
+          const { pool } = await import('./db-client.tsx');
+          const ur = await pool.query('SELECT email FROM users WHERE id::text = $1', [String(track.user_id)]);
+          artistEmail = ur.rows[0]?.email || '';
+        } catch {}
+      }
       const artistName = track.artist_name || 'Артист';
       const aiNote = (track.ai_score && track.ai_score > 60)
         ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:4px;"><strong>AI-анализ:</strong> С вероятностью ' + track.ai_score + '% трек создан с помощью ИИ. Мы предлагаем размещение в специальном разделе <strong>ИИ-треки</strong>.</p>'
@@ -329,7 +337,14 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
       });
 
       // Notify artist: email + in-app
-      const rejectEmail = track.uploaded_by_email;
+      let rejectEmail = track.uploaded_by_email;
+      if (!rejectEmail && track.user_id) {
+        try {
+          const { pool } = await import('./db-client.tsx');
+          const ur = await pool.query('SELECT email FROM users WHERE id::text = $1', [String(track.user_id)]);
+          rejectEmail = ur.rows[0]?.email || '';
+        } catch {}
+      }
       const rejectName = track.artist_name || 'Артист';
       const reason = rejection_reason || moderator_notes || 'Не указана';
 
@@ -672,6 +687,90 @@ app.post('/promote-upcoming', async (c) => {
   } catch (error) {
     console.error('Error in promote-upcoming:', error);
     return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+// ───────────────────────────────────────────────────────────────────
+// POST /send-payment-reminders — массовая рассылка для approved без оплаты
+// Body: { minAgeDays?: number }  default 7
+// Header: X-Internal-Key (cron) или admin auth
+// ───────────────────────────────────────────────────────────────────
+const _expectedRemKey = process.env.VPS_INTERNAL_KEY || '';
+
+app.post('/send-payment-reminders', async (c) => {
+  const internalKey = c.req.header('X-Internal-Key');
+  const isCron = internalKey && internalKey === _expectedRemKey;
+  if (!isCron) {
+    // Admin path
+    try {
+      await requireAuth(c, async () => { await requireAdmin(c, async () => {}); });
+    } catch {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+  }
+
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const minAgeDays = parseInt(body.minAgeDays) || 7;
+    const reminderInterval = parseInt(body.reminderIntervalDays) || 7;
+
+    const { pool } = await import('./db-client.tsx');
+    // Find approved tracks older than minAgeDays whose last_reminder_at (in data) is either null or older than reminderInterval
+    const r = await pool.query(`
+      SELECT t.id, t.title, t.artist_name, t.uploaded_by_email, t.user_id,
+             u.email as user_email, t.data, t.created_at
+      FROM tracks t LEFT JOIN users u ON u.id::text = t.user_id::text
+      WHERE t.moderation_status = 'approved'
+        AND t.created_at < NOW() - ($1::int || ' days')::interval
+        AND t.user_id IS NOT NULL AND t.user_id::text NOT LIKE 'sys-%%'
+        AND COALESCE((t.data->>'last_payment_reminder_at')::timestamptz, '1970-01-01'::timestamptz)
+            < NOW() - ($2::int || ' days')::interval
+      ORDER BY t.created_at ASC
+      LIMIT 100
+    `, [minAgeDays, reminderInterval]);
+
+    let sent = 0;
+    let skipped = 0;
+    for (const t of r.rows) {
+      const email = t.uploaded_by_email || t.user_email || '';
+      if (!email) { skipped++; continue; }
+
+      const subject = 'Напоминание об оплате — ' + t.title;
+      const html = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
+        + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;">'
+        + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
+        + '</div><div style="padding:32px;">'
+        + '<p>Добрый день!</p>'
+        + '<p>Ваш трек <strong>«' + t.title + '»</strong> одобрен модерацией и ждёт оплаты для публикации.</p>'
+        + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Стоимость публикации: <strong>5 000 ₽</strong></p>'
+        + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/artist/tracks" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
+        + '<p style="color:#888;">Если у вас вопросы — ответьте на это письмо.</p>'
+        + '</div></div>';
+
+      try {
+        await sendEmail({ to: email, subject, html });
+        sent++;
+        // Stamp reminder
+        await pool.query(`UPDATE tracks SET data = COALESCE(data,'{}'::jsonb) || jsonb_build_object('last_payment_reminder_at', NOW()::text) WHERE id = $1`, [t.id]);
+
+        // SSE
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(String(t.user_id), 'payment_reminder', {
+            title: 'Напоминание об оплате',
+            message: 'Трек «' + t.title + '» ждёт оплату — 5 000 ₽',
+            trackId: t.id,
+            link: '/artist/tracks',
+          });
+        } catch {}
+      } catch (err: any) {
+        console.error('[reminder]', t.id, err?.message);
+      }
+    }
+
+    return c.json({ success: true, sent, skipped, total: r.rows.length, minAgeDays, reminderInterval });
+  } catch (err: any) {
+    return c.json({ success: false, error: err?.message || 'Internal error' }, 500);
   }
 });
 
