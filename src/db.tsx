@@ -1209,7 +1209,12 @@ function jsonbStore(table: string, pk = 'id') {
       return data ? (data.data ?? data) : null;
     },
     async set(id: string, value: any, extra?: Record<string, any>) {
-      const row = { [pk]: id, data: JSON.stringify(value), updated_at: new Date().toISOString(), ...extra };
+      // PG node driver auto-serializes JS object → jsonb. Do NOT JSON.stringify here,
+      // otherwise value is stored as escaped string (jsonb_typeof=string) and consumers
+      // doing JSON.parse on it will fail (object vs string mismatch). Accept value as-is
+      // when caller already passed a string, parse it back to object for proper storage.
+      const normalized = typeof value === 'string' ? (() => { try { return JSON.parse(value); } catch { return value; } })() : value;
+      const row = { [pk]: id, data: normalized, updated_at: new Date().toISOString(), ...extra };
       const { error } = await db().from(table).upsert(row, { onConflict: pk });
       if (error) console.error(`[db] ${table}.set:`, error);
     },
