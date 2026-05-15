@@ -97,18 +97,49 @@ export interface PublishOrder {
 
 // ── Pricing ──────────────────────────────────────────────
 
+// Базовая стоимость размещения БЕЗ подписки.
+// С активной подпиской пользователь получает 'free' (price=0) автоматически — см. resolvePriceForUser().
 const PRICING = {
   video: {
-    free: { price: 0, label: 'Бесплатно', features: ['Публикация на платформе', 'Базовая аналитика', 'Модерация 48ч'] },
-    standard: { price: 990, label: 'Стандарт', features: ['Публикация на платформе', 'Продвижение в ленте', 'Расширенная аналитика', 'Модерация 24ч', 'Попадание в рекомендации'] },
-    premium: { price: 2990, label: 'Премиум', features: ['Публикация на платформе', 'Продвижение в ленте + баннер', 'Полная аналитика', 'Модерация 4ч', 'Топ рекомендаций', 'Публикация в соцсетях ПРОМО.МУЗЫКА', 'Рассылка подписчикам'] },
+    free:     { price:     0, label: 'По подписке',  features: ['Публикация на платформе', 'Базовая аналитика', 'Модерация 48ч'] },
+    standard: { price: 10000, label: 'Размещение клипа', features: ['Публикация на платформе', 'Продвижение в ленте', 'Расширенная аналитика', 'Модерация 24ч'] },
+    premium:  { price: 19990, label: 'Премиум',      features: ['Размещение клипа', 'Баннер на главной', 'Полная аналитика', 'Модерация 4ч', 'Топ рекомендаций', 'Публикация в соцсетях ПРОМО.МУЗЫКА', 'Рассылка подписчикам'] },
   },
   concert: {
-    free: { price: 0, label: 'Бесплатно', features: ['Страница события', 'Базовая аналитика', 'Модерация 48ч'] },
-    standard: { price: 1490, label: 'Стандарт', features: ['Страница события', 'Продвижение на главной', 'Продажа билетов', 'Модерация 24ч', 'Push-уведомления подписчикам'] },
-    premium: { price: 4990, label: 'Премиум', features: ['Страница события', 'Баннер на главной', 'Продажа билетов', 'Модерация 4ч', 'Push + email рассылка', 'Публикация в ПРОМО.ГИД', 'Таргетированное продвижение'] },
+    free:     { price:    0, label: 'По подписке',   features: ['Страница события', 'Базовая аналитика', 'Модерация 48ч'] },
+    standard: { price: 5000, label: 'Размещение концерта', features: ['Страница события', 'Продвижение на главной', 'Продажа билетов', 'Модерация 24ч', 'Push-уведомления подписчикам'] },
+    premium:  { price: 9990, label: 'Премиум',       features: ['Размещение концерта', 'Баннер на главной', 'Продажа билетов', 'Модерация 4ч', 'Push + email рассылка', 'Публикация в ПРОМО.ГИД', 'Таргетированное продвижение'] },
   },
 };
+
+// Проверяет активна ли подписка у пользователя. При наличии — публикация бесплатна.
+async function hasActiveSubscription(userId: string): Promise<boolean> {
+  if (!userId) return false;
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `SELECT data FROM subscriptions WHERE user_id = $1 LIMIT 1`,
+      [userId]
+    );
+    if (r.rows.length === 0) return false;
+    const sub = typeof r.rows[0].data === 'string' ? JSON.parse(r.rows[0].data) : r.rows[0].data;
+    if (sub?.status !== 'active' && sub?.status !== 'trial') return false;
+    if (sub.expires_at) {
+      const expires = new Date(sub.expires_at).getTime();
+      if (!Number.isNaN(expires) && expires < Date.now()) return false;
+    }
+    return true;
+  } catch (e: any) {
+    console.warn('[publish] hasActiveSubscription failed:', e?.message);
+    return false;
+  }
+}
+
+// Resolves real price for user: 0 if active sub, otherwise from PRICING table.
+async function resolvePriceForUser(userId: string, type: 'video' | 'concert', plan: 'free' | 'standard' | 'premium'): Promise<number> {
+  if (await hasActiveSubscription(userId)) return 0;
+  return PRICING[type][plan].price;
+}
 
 function generateId(): string {
   return `pub-${crypto.randomUUID()}`;
@@ -197,6 +228,8 @@ app.post('/orders', requireAuth, async (c) => {
     }
 
     const pricingInfo = PRICING[type as PublishType][plan as keyof typeof PRICING.video];
+    // resolve effective price: 0 if user has active subscription, otherwise PRICING table value
+    const effectivePrice = await resolvePriceForUser(userId, type as 'video' | 'concert', plan as 'free' | 'standard' | 'premium');
 
     const order: PublishOrder = {
       id: generateId(),
@@ -206,7 +239,9 @@ app.post('/orders', requireAuth, async (c) => {
       title,
       description: description || '',
       plan,
-      price: pricingInfo.price,
+      price: effectivePrice,
+      priceBase: pricingInfo.price,
+      subscriptionApplied: effectivePrice === 0 && pricingInfo.price > 0,
       currency: 'RUB',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
