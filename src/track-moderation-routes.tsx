@@ -81,6 +81,18 @@ app.post('/submitTrack', requireAuth, async (c) => {
       return c.json({ error: 'Авторизация обязательна', code: 'AUTH_REQUIRED' }, 401);
     }
 
+    // RULE: трек нельзя отправить на модерацию без аудио-файла
+    const audioFileUrl = body.audio_file_url || body.audio_url || '';
+    if (!audioFileUrl || !audioFileUrl.trim()) {
+      return c.json({
+        error: 'Загрузите аудио-файл трека перед отправкой на модерацию',
+        code: 'AUDIO_REQUIRED'
+      }, 400);
+    }
+    if (!body.title || !body.title.trim()) {
+      return c.json({ error: 'Укажите название трека', code: 'TITLE_REQUIRED' }, 400);
+    }
+
     const track = await typed.insertTrack({
       title: body.title || '',
       artist_name: body.artist || body.artist_name || '',
