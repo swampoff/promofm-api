@@ -778,10 +778,13 @@ export async function fetchAllConcertsExtended(): Promise<{
       if (existingKeys.has(key)) continue;
 
       const id = `concert-curated-${crypto.randomUUID()}`;
+      // RULE: концерты из Telegram-канала (sourceId=telegram-curated) НЕ публикуются автоматически
+      // Только админ через модерацию подтверждает их в published.
+      // См. memory/concert-agent-moderation-rule.md
       await store.set(id, {
         id,
         ...concert,
-        status: 'published' as const,
+        status: 'pending' as const,
         createdAt: new Date().toISOString(),
       });
       existingKeys.add(key);
