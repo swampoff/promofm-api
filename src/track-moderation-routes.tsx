@@ -127,27 +127,21 @@ app.post('/submitTrack', requireAuth, async (c) => {
 });
 
 // GET /pendingTracks — Get tracks by status with filters
-// By default returns only tracks WITH playable audio (audio_url present).
-// Use ?withoutAudio=1 to include tracks missing audio for cleanup workflows.
+// IMPORTANT: ~5700 legacy accounts from old platform are stored without audio_url
+// and will get audio reconnected during migration to promo-music.ru. DO NOT filter them out.
 app.get('/pendingTracks', requireAuth, requireAdmin, async (c) => {
   try {
     const status = c.req.query('status') || 'pending';
     const genre = c.req.query('genre');
     const search = c.req.query('search');
     const limit = parseInt(c.req.query('limit') || '200');
-    const includeNoAudio = c.req.query('withoutAudio') === '1';
 
-    let tracks = await typed.getAllTracksForModeration({
+    const tracks = await typed.getAllTracksForModeration({
       status: status === 'all' ? undefined : status,
       genre: genre || undefined,
       search: search || undefined,
       limit: Math.min(limit, 500),
     });
-
-    // Hide tracks without playable audio from moderation by default
-    if (!includeNoAudio) {
-      tracks = tracks.filter((t: any) => t.audio_url && t.audio_url.trim() !== '');
-    }
 
     // Map to frontend-expected format
     const mapped = tracks.map((t: any) => ({
