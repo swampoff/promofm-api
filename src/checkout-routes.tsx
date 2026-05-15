@@ -397,6 +397,43 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill video_publish / concert_publish (publish_orders → published) ───
+  if (
+    (session.metadata?.type === 'video_publish' || session.metadata?.type === 'concert_publish' || session.metadata?.type === 'concert_publish')
+    && session.metadata?.orderId
+  ) {
+    try {
+      const { pool: pubPool } = await import('./db-client.tsx');
+      const orderId = String(session.metadata.orderId);
+      const row = await pubPool.query(`SELECT data FROM publish_orders WHERE id = $1`, [orderId]);
+      if (row.rows.length === 0) {
+        log.warn({ orderId }, 'publish_order_not_found_for_fulfillment');
+      } else {
+        const ord = typeof row.rows[0].data === 'string' ? JSON.parse(row.rows[0].data) : row.rows[0].data;
+        ord.status = 'published';
+        ord.publishedAt = now;
+        ord.paidAt = now;
+        ord.paymentMethod = session.gateway;
+        ord.paymentSessionId = session.gatewayPaymentId;
+        ord.updatedAt = now;
+        await pubPool.query(
+          `UPDATE publish_orders SET data = $1::jsonb, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify(ord), orderId]
+        );
+        log.info({ orderId, type: session.metadata.type, amount: session.amount }, 'publish_order_payment_fulfilled');
+
+        // Notify via SSE
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(session.userId, 'publish_published', { orderId, type: ord.type, title: ord.title });
+          emitSSE('admin', 'publish_published', { orderId, type: ord.type, title: ord.title, userId: session.userId });
+        } catch {}
+      }
+    } catch (err) {
+      log.error({ err, orderId: session.metadata.orderId }, 'publish_order_fulfillment_error');
+    }
+  }
+
   // ─── Fulfill beat_purchase (Beats Marketplace) ───
   if (session.metadata?.type === 'beat_purchase' && session.metadata?.beatId) {
     try {
