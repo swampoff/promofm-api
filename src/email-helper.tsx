@@ -87,9 +87,10 @@ export async function sendEmail(opts: EmailOptions): Promise<boolean> {
         subject: opts.subject,
         html: opts.html,
         headers: {
-          'List-Unsubscribe': '<mailto:unsubscribe@promo-music.ru>',
           'X-Mailer': 'PROMO.MUSIC Platform',
-          'Precedence': 'bulk',
+          // NOTE: 'Precedence: bulk' и 'List-Unsubscribe' убраны —
+          // Yandex.Mail отправлял всё в папку «Рассылки», админ не видел уведомления.
+          // Транзакционные письма (моderation/payment/seo) теперь идут в Inbox.
         },
       });
       console.log('[Email] Sent via SMTP:', info.messageId, 'to:', opts.to);
