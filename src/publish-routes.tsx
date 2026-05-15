@@ -290,7 +290,7 @@ app.put('/orders/:id', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
 
-    const order: PublishOrder = JSON.parse(data);
+    const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
 
     // Can only edit drafts or orders needing revision
     if (!['draft', 'revision'].includes(order.status)) {
@@ -323,7 +323,7 @@ app.put('/orders/:id/submit', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
 
-    const order: PublishOrder = JSON.parse(data);
+    const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
 
     if (!['draft', 'revision'].includes(order.status)) {
       return c.json({ success: false, error: 'Only draft/revision orders can be submitted' }, 400);
@@ -370,7 +370,7 @@ app.put('/orders/:id/pay', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
 
-    const order: PublishOrder = JSON.parse(data);
+    const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
 
     if (order.status !== 'approved' && order.status !== 'pending_payment') {
       return c.json({ success: false, error: 'Order must be approved before payment' }, 400);
@@ -410,7 +410,7 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
 
-    const order: PublishOrder = JSON.parse(data);
+    const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
 
     const validTransitions: Record<string, string[]> = {
       pending_review: ['in_review', 'rejected'],
@@ -583,7 +583,7 @@ app.put('/admin/batch-status', requireAuth, requireAdmin, async (c) => {
           continue;
         }
 
-        const order: PublishOrder = JSON.parse(data);
+        const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
         const allowed = validTransitions[order.status] || [];
 
         if (!allowed.includes(status)) {
