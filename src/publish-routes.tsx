@@ -399,7 +399,6 @@ app.put('/orders/:id/submit', requireAuth, async (c) => {
 app.put('/orders/:id/pay', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
-    const body = await c.req.json();
     const data = await publishOrdersStore.get(id);
     if (!data) {
       return c.json({ success: false, error: 'Order not found' }, 404);
@@ -411,23 +410,81 @@ app.put('/orders/:id/pay', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Order must be approved before payment' }, 400);
     }
 
-    order.status = 'paid';
-    order.paidAt = new Date().toISOString();
-    order.paymentMethod = body.paymentMethod || 'card';
-    order.updatedAt = new Date().toISOString();
-
-    // Auto-publish for free plans
-    if (order.price === 0) {
+    // Free order (e.g. subscription bypass) — publish immediately
+    if (!order.price || order.price === 0) {
       order.status = 'published';
       order.publishedAt = new Date().toISOString();
+      order.updatedAt = new Date().toISOString();
+      await publishOrdersStore.set(id, JSON.stringify(order), { user_id: order.userId });
+      console.log(`Publish order published (free): ${id}`);
+      return c.json({ success: true, order, free: true });
     }
 
-    await publishOrdersStore.set(id, JSON.stringify(order), { user_id: order.userId });
+    // Paid: create YooKassa session via gateway
+    const { YooKassaGateway } = await import('./gateway-yookassa.tsx');
+    const yk = new YooKassaGateway();
+    const description = order.type === 'concert'
+      ? `Размещение концерта: ${order.title}`
+      : `Размещение клипа: ${order.title}`;
+    const session = await yk.createPayment({
+      orderId: order.id,
+      userId: order.userId,
+      amount: order.price,
+      currency: order.currency || 'RUB',
+      type: 'purchase',
+      description,
+      returnUrl: order.type === 'concert'
+        ? 'https://promo-music.ru/artist/concerts'
+        : 'https://promo-music.ru/artist/videos',
+      metadata: {
+        type: order.type === 'concert' ? 'concert_publish' : 'video_publish',
+        orderId: order.id,
+        title: order.title,
+      },
+    });
 
-    console.log(`Publish order paid: ${id}, method: ${order.paymentMethod}`);
+    // Persist payment_session row for webhook lookup
+    const { pool: payPool } = await import('./db-client.tsx');
+    await payPool.query(
+      `INSERT INTO payment_sessions (user_id, amount, currency, purpose, status, provider, provider_session_id, data, order_id)
+       VALUES ($1, $2, $3, 'purchase', 'pending', 'yookassa', $4, $5::jsonb, $6)
+       ON CONFLICT (order_id) DO UPDATE SET status='pending', data = EXCLUDED.data, provider_session_id = EXCLUDED.provider_session_id, updated_at = NOW()`,
+      [order.userId, order.price, order.currency || 'RUB', session.sessionId,
+       JSON.stringify({
+         orderId: order.id, userId: order.userId, amount: order.price, currency: order.currency || 'RUB',
+         type: 'purchase', status: 'pending', gateway: 'yookassa', gatewayPaymentId: session.sessionId,
+         returnUrl: order.type === 'concert' ? 'https://promo-music.ru/artist/concerts' : 'https://promo-music.ru/artist/videos',
+         description,
+         metadata: {
+           type: order.type === 'concert' ? 'concert_publish' : 'video_publish',
+           orderId: order.id, title: order.title,
+         },
+         createdAt: new Date().toISOString(),
+       }),
+       order.id]
+    );
 
-    return c.json({ success: true, order });
+    // Mark order as pending_payment if not already
+    if (order.status !== 'pending_payment') {
+      order.status = 'pending_payment';
+      order.updatedAt = new Date().toISOString();
+      await publishOrdersStore.set(id, JSON.stringify(order), { user_id: order.userId });
+    }
+
+    console.log(`Publish order pay session created: ${id}, amount=${order.price}`);
+    return c.json({
+      success: true,
+      order,
+      payment: {
+        confirmationUrl: session.confirmationUrl,
+        gateway: 'yookassa',
+        sessionId: session.sessionId,
+        amount: order.price,
+        currency: order.currency || 'RUB',
+      },
+    });
   } catch (error: any) {
+    console.error('Publish order /pay error:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
