@@ -235,6 +235,7 @@ async function scanAndCreate(trackDir) {
   console.log(`  📻 ${pickupCount} radio pickups generated`);
 
   console.log(`\n✅ Release created: ${releaseTitle}`);
+  await addToRadioLibrary(week, year);
   console.log(`   ${trackIds.length} tracks added\n`);
 }
 
@@ -257,6 +258,53 @@ async function showStatus() {
   const artistCount = await pool.query(`SELECT count(*) FROM artist_profiles WHERE data->>'source' = 'friday_release'`);
 
   console.log(`\n  Total: ${trackCount.rows[0].count} tracks, ${artistCount.rows[0].count} artists\n`);
+}
+
+
+// ── Auto-add new tracks to radio_library (ПРОМО.ЭИР) ──
+async function addToRadioLibrary(weekNumber, year) {
+  const fs = require('fs');
+  const path = require('path');
+  const { execSync } = require('child_process');
+  const TARGET_DIR = '/mnt/data/promofm-music/tracks';
+  try { fs.mkdirSync(TARGET_DIR, { recursive: true }); } catch {}
+
+  const r = await pool.query(
+    `SELECT t.id, t.title, t.artist_name, t.genre, t.duration,
+            regexp_replace(t.audio_url, '^.*?/uploads/tracks/', '') AS enc_filename
+     FROM weekly_releases wr
+     JOIN tracks t ON t.id = ANY(wr.track_ids)
+     WHERE wr.week_number = $1 AND wr.year = $2
+       AND t.audio_url IS NOT NULL AND t.audio_url <> ''`,
+    [weekNumber, year]
+  );
+  let added = 0;
+  for (const row of r.rows) {
+    const decoded = decodeURIComponent(row.enc_filename || '');
+    const src = path.join('/opt/promofm-api/uploads/tracks', decoded);
+    if (!fs.existsSync(src)) continue;
+    const stdFilename = (`${row.artist_name} - ${row.title}.mp3`).replace(/\//g, '_');
+    const dest = path.join(TARGET_DIR, stdFilename);
+    if (!fs.existsSync(dest)) {
+      try { fs.copyFileSync(src, dest); } catch (e) { console.error('copy fail:', e.message); continue; }
+    }
+    try {
+      await pool.query(
+        `INSERT INTO radio_library (filename, title, artist, genre, duration_seconds, region, is_vocal, file_path)
+         VALUES ($1, $2, $3, $4, $5, 'Global', true, $6)
+         ON CONFLICT (filename) DO UPDATE
+           SET title = EXCLUDED.title, artist = EXCLUDED.artist,
+               genre = EXCLUDED.genre, duration_seconds = EXCLUDED.duration_seconds,
+               file_path = EXCLUDED.file_path`,
+        [stdFilename, row.title, row.artist_name, row.genre || 'pop', row.duration || 180, dest]
+      );
+      added++;
+    } catch (e) {
+      console.error(`  ✗ radio_library insert "${stdFilename}":`, e.message);
+    }
+  }
+  console.log(`  📻 ${added}/${r.rows.length} tracks added to radio_library`);
+  return added;
 }
 
 // ── CLI ──────────────────────────────────

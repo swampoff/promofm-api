@@ -693,7 +693,7 @@ async function processPaymentCanceled(session: PaymentSession, rawBody?: any) {
       // Resolve user email + name from users table
       const { pool } = await import('./db-client.tsx');
       const userRow = await pool.query(
-        `SELECT email, name FROM users WHERE id = $1 LIMIT 1`,
+        `SELECT email, COALESCE(display_name, full_name, username) AS name FROM users WHERE id = $1 LIMIT 1`,
         [session.userId]
       );
       const email = userRow.rows[0]?.email || session.metadata?.payerEmail || '';
