@@ -5,7 +5,6 @@
  */
 
 import { Hono } from 'hono';
-import { getDbClient } from './db-client.tsx';
 import * as db from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsListProfiles } from './vps-userdata.tsx';
 import { requireAuth } from './auth-middleware.tsx';
@@ -290,10 +289,19 @@ app.put('/profile/:artistId', requireAuth, async (c) => {
       return c.json({ success: false, error: 'No valid fields to update' }, 400);
     }
 
+    // Если клиент явно прислал fullName — он не должен быть пустой строкой.
+    // Это блокирует "пустое сохранение", из-за которого имя оставалось null.
+    if ('fullName' in updates) {
+      const name = typeof updates.fullName === 'string' ? updates.fullName.trim() : '';
+      if (!name) {
+        return c.json({ success: false, error: 'fullName cannot be empty' }, 400);
+      }
+      updates.fullName = name;
+    }
+
     // Получаем текущий профиль или создаём новый
     let currentProfile = await loadFromKv(artistId);
     if (!currentProfile) {
-      const authUserId = c.get('userId');
       const userEmail = c.get('userEmail') || '';
       currentProfile = makeProfile({
         id: artistId,
@@ -313,40 +321,17 @@ app.put('/profile/:artistId', requireAuth, async (c) => {
       },
     };
 
-    // Сохраняем в KV
+    // Сохраняем в PostgreSQL (users + profiles + artist_profiles).
+    // vpsSaveProfile теперь пробрасывает ошибки наверх, чтобы PUT возвращал 500
+    // вместо "тихого успеха", если запись не прошла.
     await saveToKv(artistId, updatedProfile);
-
-    // Best-effort SQL update
-    try {
-      const dbClient = getDbClient();
-      await dbClient
-        .from('artists')
-        .update({
-          full_name: updatedProfile.fullName,
-          bio: updatedProfile.bio,
-          avatar_url: updatedProfile.avatarUrl,
-          location: updatedProfile.location,
-          website: updatedProfile.website,
-          phone: updatedProfile.phone,
-          instagram: updatedProfile.socials.instagram,
-          twitter: updatedProfile.socials.twitter,
-          facebook: updatedProfile.socials.facebook,
-          youtube: updatedProfile.socials.youtube,
-          spotify: updatedProfile.socials.spotify,
-          apple_music: updatedProfile.socials.appleMusic,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('email', currentProfile.email);
-    } catch {
-      console.log('[ArtistProfile] SQL update skipped (table may not exist)');
-    }
 
     console.log(`[ArtistProfile] Updated: ${artistId}`);
     return c.json({ success: true, data: updatedProfile });
 
   } catch (error) {
     console.error(`[ArtistProfile] PUT error: ${error}`);
-    return c.json({ success: false, error: 'Internal server error' }, 500);
+    return c.json({ success: false, error: 'Failed to save profile' }, 500);
   }
 });
 
