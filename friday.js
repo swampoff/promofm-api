@@ -25,6 +25,35 @@ pool.on('connect', (client) => {
   client.query("SELECT set_config('app.current_role', 'admin', false)");
 });
 
+// ── Dedupe helper: skip if (artist, title) already imported ──
+async function isAlreadyImported(artistName, title) {
+  if (!artistName || !title) return false;
+  try {
+    const r = await pool.query(
+      `SELECT 1 FROM tracks
+       WHERE LOWER(artist_name) = LOWER($1) AND LOWER(title) = LOWER($2)
+       LIMIT 1`,
+      [artistName, title]
+    );
+    return r.rows.length > 0;
+  } catch { return false; }
+}
+
+// ── Move processed MP3 to /opt/promofm-api/uploads/processed/ to avoid re-import ──
+function moveToProcessed(mp3Path) {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const processedDir = '/opt/promofm-api/uploads/processed';
+    if (!fs.existsSync(processedDir)) fs.mkdirSync(processedDir, { recursive: true });
+    const dest = path.join(processedDir, path.basename(mp3Path));
+    if (fs.existsSync(mp3Path) && !fs.existsSync(dest)) {
+      fs.renameSync(mp3Path, dest);
+    }
+  } catch (e) { console.error('  ⚠ move-to-processed failed:', e.message); }
+}
+
+
 // ── Helpers ──────────────────────────────
 
 function slugify(name) {
@@ -118,6 +147,13 @@ async function scanAndCreate(trackDir) {
     const duration = meta.duration || getDuration(filePath);
 
     // Split artists (handle ", " and " & ")
+    // Dedupe: skip if (artist, title) already in DB
+    if (await isAlreadyImported(artistName, title)) {
+      console.log(`  ⊘ skip (already imported): ${artistName} — ${title}`);
+      moveToProcessed(filePath);
+      continue;
+    }
+
     const artists = artistName.split(/,\s*|&\s*|\s+feat\.?\s+/i).map(a => a.trim()).filter(Boolean);
     const primaryArtist = artists[0];
     const slug = slugify(primaryArtist);
@@ -189,6 +225,8 @@ async function scanAndCreate(trackDir) {
 
     trackIds.push(trackId);
     console.log(`  ✓ ${artistName} — ${title} (${Math.floor(duration/60)}:${(duration%60).toString().padStart(2,'0')})`);
+    // Move MP3 to processed/ so cron doesn't re-import it next week
+    moveToProcessed(filePath);
   }
 
   // Create weekly release
