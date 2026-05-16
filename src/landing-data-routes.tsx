@@ -386,30 +386,36 @@ landing.get('/tracks/new', async (c) => {
     const limit = parseInt(c.req.query('limit') || '10');
     const tracks = await typed.getPublishedTracks(limit, 'created_at');
 
-    // Fetch radio detections for these tracks
+    // Fetch radio airplay stats — UNION fingerprint detections + manual pickups
     const trackIds = tracks.map((t: any) => t.id).filter(Boolean);
     let radioMap: Record<string, { stations: string[]; stationsCount: number; broadcastCitiesCount: number }> = {};
     if (trackIds.length > 0) {
       try {
+        // UNION: promo_check_detections (audio fingerprint) + track_radio_pickups (manual log) → unique radios + cities per track
         const { rows } = await pool.query(
-          `SELECT d.track_id,
-                  array_agg(DISTINCT d.station_name ORDER BY d.station_name) AS stations,
-                  COUNT(DISTINCT d.station_id) AS stations_count,
-                  COALESCE(SUM(array_length(rs.broadcast_cities, 1)), 0) AS broadcast_cities_count
-           FROM promo_check_detections d
-           LEFT JOIN radio_stations rs ON rs.id = d.station_id
-           WHERE d.track_id = ANY($1::uuid[])
-           GROUP BY d.track_id`,
+          `WITH airplay AS (
+             SELECT track_id, station_name, NULL::text AS city
+             FROM promo_check_detections WHERE track_id = ANY($1::uuid[])
+             UNION ALL
+             SELECT track_id, station_name, city
+             FROM track_radio_pickups WHERE track_id = ANY($1::uuid[])
+           )
+           SELECT track_id,
+                  array_agg(DISTINCT station_name ORDER BY station_name) AS stations,
+                  COUNT(DISTINCT station_name) AS stations_count,
+                  COUNT(DISTINCT city) FILTER (WHERE city IS NOT NULL AND city <> '') AS cities_count
+           FROM airplay WHERE station_name IS NOT NULL AND station_name <> ''
+           GROUP BY track_id`,
           [trackIds]
         );
         for (const row of rows) {
           radioMap[row.track_id] = {
             stations: row.stations || [],
             stationsCount: parseInt(row.stations_count) || 0,
-            broadcastCitiesCount: parseInt(row.broadcast_cities_count) || 0,
+            broadcastCitiesCount: parseInt(row.cities_count) || 0,
           };
         }
-      } catch (e) { /* promo_check_detections may not exist yet */ }
+      } catch (e) { console.warn('[landing] radio airplay query failed:', (e as any)?.message); }
     }
 
     // Map to frontend-expected format
