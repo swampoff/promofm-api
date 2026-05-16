@@ -1762,6 +1762,13 @@ landing.post('/build-albums', async (c) => {
             const artists = (det.artists || []).map((a: any) => a.name).join(', ');
             const coverId = det.coverUri ? det.coverUri.replace('%%', '400x400') : '';
 
+            // Filter: only real albums (type=album with >=4 tracks)
+            // Excludes singles, EPs masquerading as albums, and "хит-сборники с 1 треком"
+            const yType = String(det.type || '').toLowerCase();
+            const yTrackCount = Number(det.trackCount || 0);
+            const isRealAlbum = (yType === 'album' || yType === '') && yTrackCount >= 4;
+            if (!isRealAlbum) return null;
+
             return {
               id: 'ym-' + albumId,
               title: det.title,
@@ -1772,6 +1779,7 @@ landing.post('/build-albums', async (c) => {
               releaseDate: det.releaseDate || '',
               source: 'yandex_music',
               position: batch + idx + 1,
+              trackCount: yTrackCount,
             };
           } catch { return null; }
         });
