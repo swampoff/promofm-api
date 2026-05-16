@@ -209,16 +209,25 @@ export async function getConcertsByUser(userId: string) {
 
 export async function getPublishedConcerts(limit = 20) {
   const now = new Date().toISOString().split('T')[0];
+  // Quality filter: hide low-quality scraped rows (no venue, placeholder, no banner)
   const { data, error } = await db()
     .from('concerts')
     .select('*')
     .in('moderation_status', ['approved', 'published'])
     .gte('event_date', now)
     .eq('is_cancelled', false)
+    .neq('venue_name', '')
+    .neq('venue_name', 'Уточняется')
     .order('event_date', { ascending: true })
-    .limit(limit);
+    .limit(limit * 2);
   if (error) console.error('[db-typed] getPublishedConcerts:', error);
-  return data || [];
+  // Post-filter: require banner image + either ticket_link or price
+  const filtered = (data || []).filter((c: any) => {
+    const hasTicket = (c.ticket_link && String(c.ticket_link).trim() !== '') || (Number(c.ticket_price_min) > 0);
+    const hasBanner = c.banner_image_url && String(c.banner_image_url).trim() !== '';
+    return hasTicket && hasBanner;
+  });
+  return filtered.slice(0, limit);
 }
 
 export async function getPromotedConcerts(limit = 10) {
