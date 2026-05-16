@@ -188,7 +188,7 @@ async function scanAndCreate(trackDir) {
 
     await pool.query(`
       INSERT INTO tracks (id, artist_id, user_id, title, artist_name, genre, duration, audio_url, release_date, moderation_status, data)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'approved', $10)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'published', $10)
       ON CONFLICT (id) DO NOTHING
     `, [
       trackId, finalArtistId, `system-friday-${Date.now()}`,
