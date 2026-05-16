@@ -42,6 +42,21 @@ app.get('/promoted', async (c) => {
 // PERFORMANCE HISTORY
 // ═══════════════════════════════════════
 
+// Map DB row → UI shape (PerformanceHistoryItem)
+function toUiPerformance(row: any) {
+  return {
+    id: row.id,
+    event_name: row.event_name || '',
+    venue_name: row.venue_name,
+    city: row.city,
+    date: row.event_date,
+    audience_size: row.audience_count,
+    type: row.event_type,
+    description: row.description,
+    photos: Array.isArray(row.photos) ? row.photos : [],
+  };
+}
+
 // GET /performance-history
 app.get('/performance-history', requireAuth, async (c) => {
   try {
@@ -50,7 +65,7 @@ app.get('/performance-history', requireAuth, async (c) => {
       'SELECT * FROM performance_history WHERE user_id = $1 ORDER BY event_date DESC',
       [userId]
     );
-    return c.json({ success: true, data: rows });
+    return c.json({ success: true, data: rows.map(toUiPerformance) });
   } catch (error) {
     console.error('Error in GET /performance-history:', error);
     return c.json({ success: true, data: [] });
@@ -63,12 +78,23 @@ app.post('/performance-history', requireAuth, async (c) => {
     const userId = c.get('userId');
     const body = await c.req.json();
     const { rows } = await pool.query(
-      `INSERT INTO performance_history (user_id, venue_name, city, country, event_date, event_type, setlist, notes, audience_count, was_headliner)
+      `INSERT INTO performance_history (user_id, event_name, venue_name, city, country, event_date, event_type, audience_count, description, photos)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
-      [userId, body.venue_name, body.city || null, body.country || 'Россия', body.event_date, body.event_type || 'live', body.setlist || null, body.notes || null, body.audience_count || null, body.was_headliner || false]
+      [
+        userId,
+        body.event_name || null,
+        body.venue_name,
+        body.city || null,
+        body.country || 'Россия',
+        body.date || body.event_date,
+        body.type || body.event_type || 'Концерт',
+        body.audience_size ?? body.audience_count ?? null,
+        body.description || null,
+        JSON.stringify(body.photos || []),
+      ]
     );
-    return c.json({ success: true, data: rows });
+    return c.json({ success: true, data: toUiPerformance(rows[0]) });
   } catch (error) {
     console.error('Error in POST /performance-history:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -81,15 +107,29 @@ app.put('/performance-history/:id', requireAuth, async (c) => {
     const userId = c.get('userId');
     const id = c.req.param('id');
     const body = await c.req.json();
-    const allowed = ['venue_name','city','country','event_date','event_type','setlist','notes','audience_count','was_headliner'];
+    // Translate UI field names → DB column names
+    const uiToDb: Record<string, string> = {
+      event_name: 'event_name',
+      venue_name: 'venue_name',
+      city: 'city',
+      country: 'country',
+      date: 'event_date',
+      event_date: 'event_date',
+      type: 'event_type',
+      event_type: 'event_type',
+      audience_size: 'audience_count',
+      audience_count: 'audience_count',
+      description: 'description',
+      photos: 'photos',
+    };
     const fields: string[] = [];
     const values: any[] = [];
     let i = 1;
     for (const [key, val] of Object.entries(body)) {
-      if (allowed.includes(key)) {
-        fields.push(`${key} = $${i++}`);
-        values.push(val);
-      }
+      const col = uiToDb[key];
+      if (!col) continue;
+      fields.push(`${col} = $${i++}`);
+      values.push(col === 'photos' ? JSON.stringify(val || []) : val);
     }
     if (fields.length === 0) return c.json({ success: false, error: 'No fields to update' }, 400);
     fields.push('updated_at = NOW()');
@@ -99,7 +139,7 @@ app.put('/performance-history/:id', requireAuth, async (c) => {
       values
     );
     if (rows.length === 0) return c.json({ success: false, error: 'Not found' }, 404);
-    return c.json({ success: true, data: rows });
+    return c.json({ success: true, data: toUiPerformance(rows[0]) });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
