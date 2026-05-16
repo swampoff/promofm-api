@@ -285,6 +285,25 @@ export async function notifyBannerCreated(data: { title?: string; userId?: strin
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Баннер: ${escapeHtml(data.title || 'без названия')}`, html });
 }
 
+export async function notifySupportTicket(data: { ticketId: string; subject: string; description: string; category?: string; priority?: string; userName?: string; userEmail?: string; }) {
+  const userLabel = data.userName || data.userEmail || 'неизвестен';
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #6366F1;">Новый тикет в поддержку</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      <tr><td style="padding: 8px; color: #999;">Тема:</td><td style="padding: 8px;"><b>${escapeHtml(data.subject)}</b></td></tr>
+      <tr><td style="padding: 8px; color: #999;">От:</td><td style="padding: 8px;">${escapeHtml(userLabel)}${data.userEmail && data.userName ? ` &lt;${escapeHtml(data.userEmail)}&gt;` : ''}</td></tr>
+      ${data.category ? `<tr><td style="padding: 8px; color: #999;">Категория:</td><td style="padding: 8px;">${escapeHtml(data.category)}</td></tr>` : ''}
+      ${data.priority ? `<tr><td style="padding: 8px; color: #999;">Приоритет:</td><td style="padding: 8px;">${escapeHtml(data.priority)}</td></tr>` : ''}
+      <tr><td style="padding: 8px; color: #999; vertical-align: top;">Сообщение:</td><td style="padding: 8px; white-space: pre-wrap;">${escapeHtml(data.description)}</td></tr>
+    </table>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${SITE_URL}/ctrl-pm7k2f/support" style="${buttonStyle}">Открыть в админке</a>
+    </p>
+  `);
+  notifyAdminTelegram(`🆘 <b>Новый тикет поддержки</b>\n\nТема: <b>${stripHtml(data.subject)}</b>\nОт: ${stripHtml(userLabel)}${data.category ? `\nКатегория: ${stripHtml(data.category)}` : ''}${data.priority ? `\nПриоритет: ${stripHtml(data.priority)}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f/support">Открыть</a>`).catch(() => {});
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Тикет: ${escapeHtml(data.subject)}`, html });
+}
+
 export async function notifyPaymentReceived(data: { amount: number; currency?: string; type: string; description?: string; gateway?: string; userName?: string; userEmail?: string; orderId?: string; }) {
   const typeLabels: Record<string, string> = { purchase: 'Покупка', donation: 'Донат', subscription: 'Подписка', track_test: 'Тестирование трека' };
   const typeLabel = typeLabels[data.type] || data.type;

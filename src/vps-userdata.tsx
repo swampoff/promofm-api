@@ -164,6 +164,7 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
     }
   } catch (err) {
     console.error(`[profile] saveProfile error for ${userId}:`, err);
+    throw err;
   }
 }
 

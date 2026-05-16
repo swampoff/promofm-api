@@ -9,7 +9,8 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { getTicketsByUser, upsertTicket } from './db.tsx';
-import { getDbClient } from './db-client.tsx';
+import { getDbClient, pool } from './db-client.tsx';
+import { notifySupportTicket } from './email-helper.tsx';
 
 const app = new Hono();
 
@@ -162,6 +163,27 @@ app.post('/create', requireAuth, async (c) => {
       }, { onConflict: 'id' });
 
     if (error) console.error('[tickets] create ticket error:', error);
+
+    // Notify admin (email + Telegram). Resolve user identity for the notification
+    // so admins see real name/email instead of UUID.
+    try {
+      const { rows } = await pool.query(
+        'SELECT email, full_name, display_name FROM users WHERE id = $1 LIMIT 1',
+        [user_id],
+      );
+      const u = rows[0] || {};
+      await notifySupportTicket({
+        ticketId,
+        subject,
+        description,
+        category,
+        priority: priority || 'medium',
+        userName: u.full_name || u.display_name || undefined,
+        userEmail: u.email || undefined,
+      });
+    } catch (notifyErr) {
+      console.error('[tickets] admin notify failed:', notifyErr);
+    }
 
     return c.json({
       success: true,
@@ -631,6 +653,39 @@ app.get('/admin/all', requireAuth, requireAdmin, async (c) => {
       .map((r: any) => r.data ?? r)
       .filter(Boolean);
 
+    // Enrich tickets with user_name / user_email / user_avatar from users table
+    // so the admin UI doesn't have to fall back to showing the raw user UUID.
+    const userIds = Array.from(new Set(tickets.map((t: any) => t.user_id).filter(Boolean)));
+    const usersById = new Map<string, { name: string | null; email: string | null; avatar: string | null }>();
+    if (userIds.length > 0) {
+      try {
+        const { rows: userRows } = await pool.query(
+          `SELECT id, email, full_name, display_name, avatar_url
+             FROM users
+            WHERE id = ANY($1::uuid[])`,
+          [userIds],
+        );
+        for (const u of userRows) {
+          usersById.set(u.id, {
+            name: u.full_name || u.display_name || null,
+            email: u.email || null,
+            avatar: u.avatar_url || null,
+          });
+        }
+      } catch (joinErr) {
+        console.error('[tickets] admin/all user join failed:', joinErr);
+      }
+    }
+    tickets = tickets.map((t: any) => {
+      const u = usersById.get(t.user_id);
+      return {
+        ...t,
+        user_name: u?.name || null,
+        user_email: u?.email || null,
+        user_avatar: u?.avatar || null,
+      };
+    });
+
     // Фильтрация
     if (statusFilter && statusFilter !== 'all') {
       tickets = tickets.filter((t: any) => t.status === statusFilter);
@@ -647,7 +702,9 @@ app.get('/admin/all', requireAuth, requireAdmin, async (c) => {
         t.subject?.toLowerCase().includes(s) ||
         t.description?.toLowerCase().includes(s) ||
         t.id?.toLowerCase().includes(s) ||
-        t.user_id?.toLowerCase().includes(s)
+        t.user_id?.toLowerCase().includes(s) ||
+        t.user_name?.toLowerCase().includes(s) ||
+        t.user_email?.toLowerCase().includes(s)
       );
     }
 
