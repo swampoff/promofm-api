@@ -14,7 +14,7 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
 import { execSync } from 'child_process';
-import { readdirSync, statSync } from 'fs';
+import { readdirSync, statSync, mkdirSync, renameSync, existsSync } from 'fs';
 import { join, basename, extname } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -42,13 +42,11 @@ async function isAlreadyImported(artistName, title) {
 // ── Move processed MP3 to /opt/promofm-api/uploads/processed/ to avoid re-import ──
 function moveToProcessed(mp3Path) {
   try {
-    const fs = require('fs');
-    const path = require('path');
     const processedDir = '/opt/promofm-api/uploads/processed';
-    if (!fs.existsSync(processedDir)) fs.mkdirSync(processedDir, { recursive: true });
-    const dest = path.join(processedDir, path.basename(mp3Path));
-    if (fs.existsSync(mp3Path) && !fs.existsSync(dest)) {
-      fs.renameSync(mp3Path, dest);
+    if (!existsSync(processedDir)) mkdirSync(processedDir, { recursive: true });
+    const dest = join(processedDir, basename(mp3Path));
+    if (existsSync(mp3Path) && !existsSync(dest)) {
+      renameSync(mp3Path, dest);
     }
   } catch (e) { console.error('  ⚠ move-to-processed failed:', e.message); }
 }
