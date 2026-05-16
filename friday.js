@@ -271,7 +271,7 @@ async function scanAndCreate(trackDir) {
   console.log(`  📻 ${pickupCount} radio pickups generated`);
 
   console.log(`\n✅ Release created: ${releaseTitle}`);
-  await addToRadioLibrary(week, year);
+  await addToRadioLibrary(weekNum, year);
   console.log(`   ${trackIds.length} tracks added\n`);
 }
 
