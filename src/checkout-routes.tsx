@@ -909,7 +909,9 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
     const session = await getPaymentSession(payload.orderId) as PaymentSession | null;
     if (!session) {
       log.warn({ gateway: 'yookassa', orderId: payload.orderId }, 'webhook_session_not_found');
-      return c.json({ success: false, error: 'Session not found' }, 404);
+      // Return 200 OK — webhook is idempotent. Unknown order = either old test row
+      // deleted from DB or 3rd-party probe. Avoid YK retry storm by acknowledging.
+      return c.json({ success: true, message: 'Session not in DB — acknowledged' });
     }
 
     // Idempotency: skip if already processed
@@ -1017,7 +1019,9 @@ checkoutRoutes.post('/webhook/stripe', async (c) => {
     const session = await getPaymentSession(payload.orderId) as PaymentSession | null;
     if (!session) {
       log.warn({ gateway: 'stripe', orderId: payload.orderId }, 'webhook_session_not_found');
-      return c.json({ success: false, error: 'Session not found' }, 404);
+      // Return 200 OK — webhook is idempotent. Unknown order = either old test row
+      // deleted from DB or 3rd-party probe. Avoid YK retry storm by acknowledging.
+      return c.json({ success: true, message: 'Session not in DB — acknowledged' });
     }
 
     // Idempotency: skip if already processed
