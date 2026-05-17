@@ -310,6 +310,7 @@ app.route("/server/api/og-image", ogImageRoutes);
 
 // Mount Messaging Routes (before catch-all /api)
 app.route("/server/api/messaging", messagingRoutes);
+app.route("/server/api/waitlist", waitlistRoutes);
 
 // Mount Marketplace Routes (beats & services)
 app.route("/server/api/marketplace", marketplaceRoutes);
