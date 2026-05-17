@@ -882,8 +882,11 @@ checkoutRoutes.delete('/methods/:id', requireAuth, async (c) => {
 // ── POST /webhook/yookassa (NO AUTH) ──
 
 checkoutRoutes.post('/webhook/yookassa', async (c) => {
+  let body: any;
+  try { body = await c.req.json(); } catch {
+    return c.json({ success: false, error: 'Invalid JSON' }, 400);
+  }
   try {
-    const body = await c.req.json();
     log.info({ gateway: 'yookassa', bodyPreview: JSON.stringify(body).slice(0, 300) }, 'webhook_received');
 
     // Log raw webhook
@@ -936,8 +939,11 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
 // ── POST /webhook/tbank (NO AUTH) ──
 
 checkoutRoutes.post('/webhook/tbank', async (c) => {
+  let body: any;
+  try { body = await c.req.json(); } catch {
+    return c.json({ success: false, error: 'Invalid JSON' }, 400);
+  }
   try {
-    const body = await c.req.json();
     log.info({ gateway: 'tbank', bodyPreview: JSON.stringify(body).slice(0, 300) }, 'webhook_received');
 
     // Log raw webhook
@@ -992,8 +998,11 @@ checkoutRoutes.post('/webhook/tbank', async (c) => {
 // ── POST /webhook/stripe (NO AUTH) ──
 
 checkoutRoutes.post('/webhook/stripe', async (c) => {
+  let body: any;
+  try { body = await c.req.json(); } catch {
+    return c.json({ success: false, error: 'Invalid JSON' }, 400);
+  }
   try {
-    const body = await c.req.json();
     log.info({ gateway: 'stripe', eventType: body.type, bodyPreview: JSON.stringify(body).slice(0, 300) }, 'webhook_received');
 
     // Log raw webhook
