@@ -34,8 +34,13 @@ export async function requireAuth(c: Context, next: Next) {
     c.set('userRole', decoded.role || 'artist');
 
     await next();
-  } catch (err) {
-    log.error({ err }, 'auth_middleware_error');
+  } catch (err: any) {
+    // TokenExpiredError is expected behavior, not a server error — log as info
+    if (err?.name === 'TokenExpiredError') {
+      log.info({ path: c.req.path, expiredAt: err.expiredAt }, 'token_expired');
+    } else {
+      log.warn({ err: { name: err?.name, message: err?.message }, path: c.req.path }, 'auth_middleware_error');
+    }
     return c.json({ success: false, error: 'Invalid or expired token' }, 401);
   }
 }
