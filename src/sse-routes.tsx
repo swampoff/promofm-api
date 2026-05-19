@@ -137,9 +137,16 @@ app.get('/stream/:userId', requireAuth, (c) => {
   });
 });
 
-// POST /emit/:userId - отправить событие программно
+// POST /emit/:userId - отправить событие в свой SSE-стрим.
+// Только владелец стрима или админ — иначе любой авторизованный пользователь
+// мог бы спуфить уведомления другим юзерам ("платёж принят", "вы заблокированы").
 app.post('/emit/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  const authRole = c.get('userRole');
+  if (userId !== authUserId && authRole !== 'admin') {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
   try {
     const body = await c.req.json();
     emitSSE(userId, { type: body.type || 'notification', data: body.data || body });

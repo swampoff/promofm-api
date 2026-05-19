@@ -28,7 +28,7 @@ const SUBSCRIPTION_PREFIX = 'subscription:';
  * | pro    | Про         | 39 990 ₽  | 399 900 ₽   | 3        | 4 000 ₽       |
  * | elite  | Бизнес      | 149 990 ₽ | 1 499 900 ₽ | 10       | 3 000 ₽       |
  */
-const SUBSCRIPTION_PLANS = {
+export const SUBSCRIPTION_PLANS = {
   spark: {
     name: 'Тест-драйв',
     price_month: 0,
@@ -322,7 +322,7 @@ subscriptions.post('/subscribe', requireAuth, async (c) => {
           orderId,
           userId: user_id,
           gateway: 'yookassa',
-          gatewayPaymentId: result.paymentId,
+          gatewayPaymentId: result.sessionId,
           amount: price,
           currency: 'RUB',
           status: 'pending',
