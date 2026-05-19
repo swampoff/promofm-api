@@ -99,17 +99,25 @@ export class YooKassaGateway implements PaymentGateway {
   }
 
   async verifyWebhook(_request: Request, body: any): Promise<WebhookPayload | null> {
-    // ЮКасса не подписывает webhook-и — верифицируем через GET API
-    const paymentId = body?.object?.id;
-    if (!paymentId) {
-      console.warn('YooKassa webhook: missing payment id');
+    // ЮКасса не подписывает webhook-и — верифицируем через GET API.
+    // For payment.* events `body.object` is a Payment (its `id` is the payment id).
+    // For refund.succeeded `body.object` is a Refund whose `id` is the refund id
+    // but whose `.payment_id` references the original payment we need to look up.
+    const notificationEvent: string = body?.event || '';
+    const objectId: string | undefined = body?.object?.id;
+    const referencedPaymentId: string | undefined = notificationEvent === 'refund.succeeded'
+      ? body?.object?.payment_id
+      : objectId;
+    if (!referencedPaymentId) {
+      console.warn('YooKassa webhook: missing referenced payment id', { notificationEvent });
       return null;
     }
 
-    // Server-side verification
+    // Server-side verification: always fetch the original Payment object so
+    // we can match it to our session via metadata.order_id.
     let verified: any;
     try {
-      const resp = await fetch(`${API_BASE}/payments/${paymentId}`, {
+      const resp = await fetch(`${API_BASE}/payments/${referencedPaymentId}`, {
         headers: { 'Authorization': getAuthHeader() },
       });
       if (!resp.ok) {
@@ -122,24 +130,35 @@ export class YooKassaGateway implements PaymentGateway {
       return null;
     }
 
-    // Map event type
+    // For refund.succeeded the Payment status stays 'succeeded' but we want to
+    // emit payment.refunded so the checkout handler can mark the session and
+    // reverse the credit. For payment.* events we use the Payment.status.
     let eventType: WebhookPayload['eventType'];
-    switch (verified.status) {
-      case 'succeeded': eventType = 'payment.succeeded'; break;
-      case 'canceled': eventType = 'payment.canceled'; break;
-      default:
-        console.log('YooKassa webhook: unhandled status', verified.status);
-        return null;
+    if (notificationEvent === 'refund.succeeded') {
+      eventType = 'payment.refunded';
+    } else {
+      switch (verified.status) {
+        case 'succeeded': eventType = 'payment.succeeded'; break;
+        case 'canceled': eventType = 'payment.canceled'; break;
+        default:
+          console.log('YooKassa webhook: unhandled status', verified.status);
+          return null;
+      }
     }
 
     const metadata = verified.metadata || {};
+    // For refunds the relevant amount is the refund amount, not the original
+    // payment amount — the checkout handler can use it to support partial refunds.
+    const eventAmount = eventType === 'payment.refunded'
+      ? parseFloat(body?.object?.amount?.value || verified.amount?.value || '0')
+      : parseFloat(verified.amount?.value || '0');
 
     return {
       gateway: 'yookassa',
       eventType,
       paymentId: verified.id,
       orderId: metadata.order_id || '',
-      amount: parseFloat(verified.amount?.value || '0'),
+      amount: eventAmount,
       currency: verified.amount?.currency || 'RUB',
       metadata,
       paymentMethodId: verified.payment_method?.id,

@@ -939,6 +939,16 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
       return c.json({ success: true, message: 'Session not in DB — acknowledged' });
     }
 
+    // Refunds operate on already-succeeded sessions, so they bypass the
+    // pending→processing claim that succeeded/canceled events use.
+    if (payload.eventType === 'payment.refunded') {
+      existing.status = 'refunded';
+      existing.completedAt = new Date().toISOString();
+      await upsertPaymentSession(existing.orderId, existing);
+      log.info({ gateway: 'yookassa', orderId: payload.orderId, amount: payload.amount }, 'payment_refunded');
+      return c.json({ success: true, message: 'Refund recorded' });
+    }
+
     // Atomic claim: UPDATE WHERE status='pending' → 'processing'. Returns null if
     // another concurrent webhook delivery already claimed this order, closing the
     // double-credit race window.

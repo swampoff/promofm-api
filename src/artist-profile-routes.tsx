@@ -404,8 +404,11 @@ app.get('/popular', async (c) => {
     return c.json({ success: true, data: allProfiles });
 
   } catch (error) {
+    // Surface the failure with 503 instead of pretending we got an empty
+    // result set — the lander treats success:true+data:[] as "no artists yet"
+    // and stays silent, hiding real DB outages from monitoring.
     console.error(`[ArtistProfile] Popular error: ${error}`);
-    return c.json({ success: true, data: [] });
+    return c.json({ success: false, error: 'Failed to load popular artists' }, 503);
   }
 });
 
