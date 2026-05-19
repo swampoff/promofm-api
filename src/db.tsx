@@ -1562,6 +1562,31 @@ export async function getPaymentBalance(userId: string) {
   return { available: Number(data.available || 0), pending: Number(data.pending || 0), total: Number(data.total || 0) };
 }
 
+/**
+ * Atomic withdrawal: in a single UPDATE, debits `amount` from `available` and
+ * credits the same to `pending`, guarded by `available >= amount`. Returns the
+ * new balance on success or null if there isn't enough money OR the row doesn't
+ * exist. This closes the race window where two concurrent withdraw requests
+ * both read available=1000 and each took 800, ending with a negative balance.
+ */
+export async function debitAvailableToPendingAtomic(userId: string, amount: number): Promise<{ available: number; pending: number; total: number } | null> {
+  const { pool } = await import('./db-client.tsx');
+  const res = await pool.query(
+    `UPDATE payment_balances
+        SET available = available - $2::numeric,
+            pending   = pending   + $2::numeric,
+            total     = (available - $2::numeric) + (pending + $2::numeric),
+            updated_at = NOW()
+      WHERE user_id = $1
+        AND available >= $2::numeric
+      RETURNING available, pending, total`,
+    [userId, amount],
+  );
+  if (res.rowCount === 0) return null;
+  const row = res.rows[0];
+  return { available: Number(row.available), pending: Number(row.pending), total: Number(row.total) };
+}
+
 export async function upsertPaymentBalance(userId: string, balance: { available?: number; pending?: number; total?: number }) {
   const { error } = await db()
     .from('payment_balances')

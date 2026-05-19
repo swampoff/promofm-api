@@ -28,6 +28,9 @@ import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { requireAuth } from './auth-middleware.tsx';
+import { createLogger } from './logger.tsx';
+
+const log = createLogger('messaging');
 
 // ── Telegram forwarding for admin messages ──
 const TG_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
@@ -43,7 +46,9 @@ async function forwardToTelegramIfAdmin(recipientRole: string, senderName: strin
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: TG_LEAD_CHAT, text: msg }),
     });
-  } catch {}
+  } catch (err) {
+    log.warn({ err }, 'telegram_forward_failed');
+  }
 }
 
 const app = new Hono();
@@ -111,7 +116,11 @@ async function getParticipantInfo(userId: string): Promise<Participant> {
         avatar: u.avatar_url || undefined,
       };
     }
-  } catch {}
+  } catch (err) {
+    // DB error: caller will see a default 'artist' role + raw userId as the name.
+    // This can mis-classify role in communication rules, so we surface it loudly.
+    log.error({ err, userId }, 'participant_info_db_error');
+  }
   // Fallback for non-UUID synthetic ids (admin-1, demo users etc.)
   return { userId, userName: userId, role: 'artist' };
 }
@@ -346,7 +355,9 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
           text: text.trim(),
           createdAt,
         });
-      } catch {}
+      } catch (err) {
+        log.warn({ err, recipient, conversationId }, 'dm_sse_emit_failed');
+      }
     }
 
     // Telegram forward if recipient is admin
@@ -359,7 +370,9 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
           break;
         }
       }
-    } catch {}
+    } catch (err) {
+      log.warn({ err, conversationId }, 'admin_telegram_forward_failed');
+    }
 
     return c.json({
       success: true,
@@ -495,10 +508,16 @@ app.post('/typing/:conversationId', requireAuth, async (c) => {
     if (conv.rows[0]) {
       const others = (conv.rows[0].participant_ids || []).filter((id: string) => id !== authUserId);
       for (const other of others) {
-        try { emitSSE(other, 'dm_typing', { conversationId, userId: authUserId }); } catch {}
+        try {
+          emitSSE(other, 'dm_typing', { conversationId, userId: authUserId });
+        } catch (err) {
+          log.warn({ err, other, conversationId }, 'typing_sse_emit_failed');
+        }
       }
     }
-  } catch {}
+  } catch (err) {
+    log.warn({ err, conversationId }, 'typing_lookup_failed');
+  }
   return c.json({ success: true });
 });
 
