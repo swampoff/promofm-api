@@ -11,14 +11,28 @@ import * as db from './db.tsx';
 
 const app = new Hono();
 
-// CORS headers for SSE responses (raw Response bypasses Hono middleware)
+// CORS headers for SSE responses (raw Response bypasses Hono middleware).
+// Allow-list of trusted origins — wildcard '*' previously let any site read
+// authenticated event streams, so a malicious page could subscribe a victim's
+// SSE channel and intercept their notifications.
 import { requireAuth } from './auth-middleware.tsx';
 
-const CORS_HEADERS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User-Id, Cache-Control, Accept',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-};
+const SSE_ALLOWED_ORIGINS = new Set([
+  'https://promo-music.ru',
+  'https://www.promo-music.ru',
+  'https://promofm.org',
+]);
+
+function sseCorsHeaders(origin: string | undefined): Record<string, string> {
+  const allowed = origin && SSE_ALLOWED_ORIGINS.has(origin) ? origin : 'https://promo-music.ru';
+  return {
+    'Access-Control-Allow-Origin': allowed,
+    'Vary': 'Origin',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User-Id, Cache-Control, Accept',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Credentials': 'true',
+  };
+}
 
 // Хранилище активных SSE-подключений (userId -> controller[])
 const connections = new Map<string, Set<ReadableStreamDefaultController>>();
@@ -128,7 +142,7 @@ app.get('/stream/:userId', requireAuth, (c) => {
   
   return new Response(stream, {
     headers: {
-      ...CORS_HEADERS,
+      ...sseCorsHeaders(c.req.header('origin')),
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
       'Connection': 'keep-alive',
@@ -137,9 +151,16 @@ app.get('/stream/:userId', requireAuth, (c) => {
   });
 });
 
-// POST /emit/:userId - отправить событие программно
+// POST /emit/:userId - отправить событие в свой SSE-стрим.
+// Только владелец стрима или админ — иначе любой авторизованный пользователь
+// мог бы спуфить уведомления другим юзерам ("платёж принят", "вы заблокированы").
 app.post('/emit/:userId', requireAuth, async (c) => {
   const userId = c.req.param('userId');
+  const authUserId = c.get('userId');
+  const authRole = c.get('userRole');
+  if (userId !== authUserId && authRole !== 'admin') {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
   try {
     const body = await c.req.json();
     emitSSE(userId, { type: body.type || 'notification', data: body.data || body });

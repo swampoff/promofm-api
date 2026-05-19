@@ -5,7 +5,7 @@
 
 import { Hono } from 'hono';
 import {
-  getPaymentBalance, upsertPaymentBalance, accountingStore,
+  getPaymentBalance, upsertPaymentBalance, debitAvailableToPendingAtomic, accountingStore,
   getPaymentMethods as dbGetPaymentMethods, upsertPaymentMethod,
   insertPaymentTx, getPaymentTxsByUser, getAllPaymentTxs, getPaymentTxStats, getPaymentTxUserSummaries,
 } from './db.tsx';
@@ -70,18 +70,15 @@ async function addPaymentMethod(userId: string, methodData: any): Promise<any> {
 
 async function createWithdrawRequest(userId: string, amount: number, paymentMethodId: string): Promise<string> {
   if (amount <= 0) throw new Error('Amount must be positive');
-  // Check balance
-  const balRaw = await getPaymentBalance(userId);
-  const bal = balRaw || { available: 0, pending: 0, total: 0, userId };
-  const available = Number(bal.available) || 0;
-  if (available < amount) {
+  // Atomic guarded debit: UPDATE ... WHERE available >= amount. If two concurrent
+  // withdraws hit at the same time, only one passes the WHERE clause and the
+  // other gets rowCount=0 here — preventing the negative-balance race.
+  const newBal = await debitAvailableToPendingAtomic(userId, amount);
+  if (!newBal) {
+    const current = await getPaymentBalance(userId);
+    const available = current ? Number(current.available) : 0;
     throw new Error(`Insufficient balance: ${available} RUB available, requested ${amount} RUB`);
   }
-  // Deduct from available, add to pending
-  bal.available = available - amount;
-  bal.pending = (Number(bal.pending) || 0) + amount;
-  bal.total = bal.available + bal.pending;
-  await upsertPaymentBalance(userId, bal);
 
   const id = `wd-${crypto.randomUUID()}`;
   const req = { id, userId, amount, paymentMethodId, status: 'pending', createdAt: new Date().toISOString() };

@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { getSubscription, upsertSubscription, getAllSubscriptions, getPaymentBalance, getPaymentMethods, upsertPaymentBalance, upsertPaymentSession, insertPaymentTx } from './db.tsx';
+import { getSubscription, upsertSubscription, getAllSubscriptions, getPaymentBalance, getPaymentMethods, upsertPaymentBalance, upsertPaymentSession, getPaymentSession, insertPaymentTx } from './db.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
@@ -28,7 +28,7 @@ const SUBSCRIPTION_PREFIX = 'subscription:';
  * | pro    | Про         | 39 990 ₽  | 399 900 ₽   | 3        | 4 000 ₽       |
  * | elite  | Бизнес      | 149 990 ₽ | 1 499 900 ₽ | 10       | 3 000 ₽       |
  */
-const SUBSCRIPTION_PLANS = {
+export const SUBSCRIPTION_PLANS = {
   spark: {
     name: 'Тест-драйв',
     price_month: 0,
@@ -322,7 +322,7 @@ subscriptions.post('/subscribe', requireAuth, async (c) => {
           orderId,
           userId: user_id,
           gateway: 'yookassa',
-          gatewayPaymentId: result.paymentId,
+          gatewayPaymentId: result.sessionId,
           amount: price,
           currency: 'RUB',
           status: 'pending',
@@ -903,7 +903,19 @@ subscriptions.post('/charge-recurring', async (c) => {
 
         const interval = sub.interval || 'month';
         const amount = interval === 'year' ? plan.price_year : plan.price_month;
-        const orderId = crypto.randomUUID();
+
+        // Deterministic orderId per renewal cycle. If this cron run crashes
+        // between the charge call and the session-save, the next run will
+        // reuse the same orderId — and each gateway's Idempotence-Key header
+        // collapses repeated requests with the same key into a single charge.
+        // Also lets us cheap-skip cycles that are already in-flight or done.
+        const orderId = `renew-${userId}-${expiresAt.getTime()}`;
+        const prior = await getPaymentSession(orderId) as any;
+        if (prior && (prior.status === 'succeeded' || prior.status === 'processing')) {
+          skipped++;
+          results.push({ userId, action: 'skipped', reason: `renewal_already_${prior.status}`, orderId });
+          continue;
+        }
 
         const chargeResult = await gateway.chargeRecurring({
           amount,

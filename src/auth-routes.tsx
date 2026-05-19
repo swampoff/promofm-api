@@ -108,6 +108,28 @@ async function createVpsProfile(userId: string, email: string, name: string, rol
   });
 }
 
+/**
+ * Call createVpsProfile() with compensating rollback on failure.
+ * If profile creation throws (DB unreachable, RLS reject, etc.) the just-inserted
+ * users row is deleted so the registration can be safely retried by the client
+ * without hitting a "duplicate email" wall. Returns true on success, false on
+ * rollback (caller should return a 5xx to the client).
+ */
+async function createVpsProfileOrRollback(userId: string, email: string, name: string, role: string, avatar?: string | null): Promise<boolean> {
+  try {
+    await createVpsProfile(userId, email, name, role, avatar);
+    return true;
+  } catch (profileErr) {
+    log.error({ err: profileErr, userId, email, role }, 'profile_create_failed_rolling_back_user');
+    try {
+      await sql('DELETE FROM users WHERE id = $1', [userId]);
+    } catch (rollbackErr) {
+      log.error({ err: rollbackErr, userId }, 'user_rollback_failed');
+    }
+    return false;
+  }
+}
+
 // ── Audit logging ──
 async function logAuthEvent(action: string, details: Record<string, any>, status: string = 'success') {
   try {
@@ -173,7 +195,10 @@ auth.post("/signup", async (c) => {
       }
     }
 
-    await createVpsProfile(userId, email, userName, userRole);
+    const profileOk = await createVpsProfileOrRollback(userId, email, userName, userRole);
+    if (!profileOk) {
+      return c.json({ success: false, error: 'Ошибка регистрации — не удалось создать профиль. Попробуйте ещё раз.' }, 500);
+    }
     log.info({ email, userId, role: userRole, status: accountStatus }, 'user_registered');
     logAuthEvent('signup_success', {
       userId, description: `Регистрация: ${email}, роль: ${userRole}`,
@@ -447,7 +472,10 @@ auth.post("/vk-callback", async (c) => {
       return c.json({ success: false, error: 'Ошибка создания аккаунта' }, 400);
     }
 
-    await createVpsProfile(userId, userEmail, vkName, vkRole, vkAvatar);
+    const profileOk = await createVpsProfileOrRollback(userId, userEmail, vkName, vkRole, vkAvatar);
+    if (!profileOk) {
+      return c.json({ success: false, error: 'Ошибка создания аккаунта — не удалось создать профиль' }, 500);
+    }
     notifyNewUser({ email: userEmail, name: vkName, role: vkRole, via: "vk_oauth" }).catch(() => {});
 
     const accessToken = signToken({ id: userId, email: userEmail, role: vkRole });
@@ -505,15 +533,21 @@ auth.post("/set-role", requireAuth, requireAdmin, async (c) => {
     // Invalidate existing tokens by bumping token_version
     await sql('UPDATE users SET token_version = COALESCE(token_version, 0) + 1 WHERE id = $1', [userId]);
 
-    // Update profile
-    let profile = await vpsGetProfile(userId);
-    if (profile) {
-      profile.role = role;
-      profile.updatedAt = new Date().toISOString();
-      await vpsSaveProfile(userId, profile);
-    } else {
-      const user = result.rows[0];
-      await createVpsProfile(userId, user.email, user.full_name, role, user.avatar_url);
+    // Update profile. The role change in `users` is the source of truth — if the
+    // KV/PG profile sync fails, log it and continue rather than 500'ing the whole
+    // request, since the user already has the new role in the auth table.
+    try {
+      let profile = await vpsGetProfile(userId);
+      if (profile) {
+        profile.role = role;
+        profile.updatedAt = new Date().toISOString();
+        await vpsSaveProfile(userId, profile);
+      } else {
+        const user = result.rows[0];
+        await createVpsProfile(userId, user.email, user.full_name, role, user.avatar_url);
+      }
+    } catch (profileSyncErr) {
+      log.warn({ err: profileSyncErr, userId, role }, 'set_role_profile_sync_failed');
     }
 
     // Audit log
@@ -592,13 +626,37 @@ auth.post("/signout", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/request-reset
 // ──────────────────────────────────────────────────────────────────────
+// Per-email cooldown for password reset emails. The IP-based authLimiter doesn't
+// help against the "spam a specific user's inbox via many IPs" attack. 60s between
+// sends per email is enough to block mailbomb attempts without hurting real users
+// who hit the button twice.
+const RESET_EMAIL_COOLDOWN_MS = 60_000;
+const recentResetSends = new Map<string, number>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, t] of recentResetSends) {
+    if (now - t > RESET_EMAIL_COOLDOWN_MS * 5) recentResetSends.delete(k);
+  }
+}, RESET_EMAIL_COOLDOWN_MS).unref?.();
+
 auth.post("/request-reset", async (c) => {
   try {
     const { email } = await c.req.json();
     if (!email) return c.json({ success: false, error: "Email обязателен" }, 400);
 
+    const emailKey = String(email).toLowerCase().trim();
+
+    // Same fake-success response for cooldown as for "not found" — never leak
+    // whether the email exists or not.
+    const lastSent = recentResetSends.get(emailKey);
+    if (lastSent && Date.now() - lastSent < RESET_EMAIL_COOLDOWN_MS) {
+      return c.json({ success: true, message: "Если аккаунт с таким email существует, мы отправили письмо." });
+    }
+
     const result = await sql(`SELECT id, full_name FROM users WHERE email = $1 AND deleted_at IS NULL`, [email]);
     if (result.rows.length === 0) {
+      // Mark cooldown anyway, so probing for valid emails via timing is harder.
+      recentResetSends.set(emailKey, Date.now());
       return c.json({ success: true, message: "Если аккаунт с таким email существует, мы отправили письмо." });
     }
 
@@ -608,6 +666,7 @@ auth.post("/request-reset", async (c) => {
 
     const profile = await vpsGetProfile(user.id);
     await sendPasswordResetEmail(email, profile?.name || user.full_name || email.split("@")[0], resetToken);
+    recentResetSends.set(emailKey, Date.now());
     log.info({ email }, 'password_reset_sent');
     return c.json({ success: true, message: "Если аккаунт с таким email существует, мы отправили письмо." });
   } catch (error) {

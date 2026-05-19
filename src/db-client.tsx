@@ -603,11 +603,14 @@ class DbClient {
         // Check status
         if (user.status === 'banned') return { data: null, error: { message: 'Account banned' } };
 
-        // Generate JWT
+        // Generate JWT. Match the canonical TTL used by signToken() in
+        // auth-routes.tsx (2h) and include `tv` so password resets / role
+        // changes that bump users.token_version can invalidate this token —
+        // previously the 7d shim token bypassed token-version checks.
         const accessToken = jwt.sign(
-          { sub: user.id, email: user.email, role: user.role || 'artist' },
+          { sub: user.id, email: user.email, role: user.role || 'artist', tv: user.token_version || 1 },
           process.env.JWT_SECRET!,
-          { expiresIn: '7d' }
+          { expiresIn: '2h', algorithm: 'HS256' }
         );
 
         // Update last login

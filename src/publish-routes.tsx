@@ -586,6 +586,15 @@ app.delete('/orders/:id', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
 
+    // Owner check: only the owner or an admin may delete an order. Without this,
+    // any authenticated user could DELETE any other user's order by ID (IDOR).
+    const authUserId = c.get('userId');
+    const authRole = c.get('userRole');
+    const ownerId = (data as any)?.userId;
+    if (ownerId && ownerId !== authUserId && authRole !== 'admin') {
+      return c.json({ success: false, error: 'Forbidden' }, 403);
+    }
+
     await publishOrdersStore.del(id);
 
     console.log(`Publish order deleted: ${id}`);

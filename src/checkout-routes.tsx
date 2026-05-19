@@ -11,7 +11,7 @@
  */
 
 import { Hono } from 'hono';
-import { createCoinTransactionKv, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx } from './db.tsx';
+import { claimPaymentSessionForProcessing, createCoinTransactionKv, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, revertPaymentSessionToPending, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx } from './db.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import {
@@ -22,9 +22,15 @@ import {
   type SavedPaymentMethod,
   type WebhookPayload,
 } from './payment-gateway.tsx';
+import { SUBSCRIPTION_PLANS } from './subscriptions-routes.tsx';
 
 import { createLogger } from "./logger.tsx";
 import { notifyPaymentReceived, notifyPaymentExpired } from './email-helper.tsx';
+
+// Bounds for free-form payment amounts (donation/topup/purchase). RUB.
+// Subscription amounts are validated against SUBSCRIPTION_PLANS below.
+const MIN_PAYMENT_AMOUNT_RUB = 1;
+const MAX_PAYMENT_AMOUNT_RUB = 1_000_000;
 
 const log = createLogger("checkout");
 
@@ -744,11 +750,29 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
     if (!gateway || !['yookassa', 'tbank', 'stripe'].includes(gateway)) {
       return c.json({ success: false, error: 'Укажите gateway: "yookassa", "tbank" или "stripe"' }, 400);
     }
-    if (!amount || amount <= 0) {
-      return c.json({ success: false, error: 'Сумма должна быть больше 0' }, 400);
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+      return c.json({ success: false, error: 'Сумма должна быть положительным числом' }, 400);
+    }
+    if (amount < MIN_PAYMENT_AMOUNT_RUB || amount > MAX_PAYMENT_AMOUNT_RUB) {
+      return c.json({ success: false, error: `Сумма должна быть от ${MIN_PAYMENT_AMOUNT_RUB} до ${MAX_PAYMENT_AMOUNT_RUB} ₽` }, 400);
     }
     if (!type || !['purchase', 'subscription', 'donation', 'topup'].includes(type)) {
       return c.json({ success: false, error: 'Укажите type: purchase, subscription, donation или topup' }, 400);
+    }
+    // For subscriptions the price MUST match the canonical plan price — the client cannot
+    // dictate the amount. This blocks the "open DevTools, lower the price" attack.
+    if (type === 'subscription') {
+      const planKey = metadata?.planKey;
+      const interval = metadata?.interval === 'year' ? 'year' : 'month';
+      const plan = planKey ? (SUBSCRIPTION_PLANS as Record<string, any>)[planKey] : null;
+      if (!plan) {
+        return c.json({ success: false, error: 'Invalid metadata.planKey for subscription' }, 400);
+      }
+      const expected = interval === 'year' ? plan.price_year : plan.price_month;
+      if (Math.abs(amount - expected) > 0.01) {
+        log.warn({ userId, planKey, interval, expected, received: amount }, 'subscription_amount_tampering_blocked');
+        return c.json({ success: false, error: 'Сумма не соответствует тарифу' }, 400);
+      }
     }
     if (!returnUrl) {
       return c.json({ success: false, error: 'returnUrl обязателен' }, 400);
@@ -908,25 +932,48 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
       return c.json({ success: false, error: 'Verification failed' }, 400);
     }
 
-    // Find session
-    const session = await getPaymentSession(payload.orderId) as PaymentSession | null;
-    if (!session) {
+    // Find session for existence check (separate from claim so we can distinguish
+    // "unknown order — third-party probe" from "already processed").
+    const existing = await getPaymentSession(payload.orderId) as PaymentSession | null;
+    if (!existing) {
       log.warn({ gateway: 'yookassa', orderId: payload.orderId }, 'webhook_session_not_found');
       // Return 200 OK — webhook is idempotent. Unknown order = either old test row
       // deleted from DB or 3rd-party probe. Avoid YK retry storm by acknowledging.
       return c.json({ success: true, message: 'Session not in DB — acknowledged' });
     }
 
-    // Idempotency: skip if already processed
-    if (session.status !== 'pending') {
-      log.info({ gateway: 'yookassa', orderId: session.orderId, status: session.status }, 'webhook_already_processed');
+    // Refunds operate on already-succeeded sessions, so they bypass the
+    // pending→processing claim that succeeded/canceled events use.
+    if (payload.eventType === 'payment.refunded') {
+      existing.status = 'refunded';
+      existing.completedAt = new Date().toISOString();
+      await upsertPaymentSession(existing.orderId, existing);
+      log.info({ gateway: 'yookassa', orderId: payload.orderId, amount: payload.amount }, 'payment_refunded');
+      return c.json({ success: true, message: 'Refund recorded' });
+    }
+
+    // Atomic claim: UPDATE WHERE status='pending' → 'processing'. Returns null if
+    // another concurrent webhook delivery already claimed this order, closing the
+    // double-credit race window.
+    const claimed = await claimPaymentSessionForProcessing(payload.orderId) as PaymentSession | null;
+    if (!claimed) {
+      log.info({ gateway: 'yookassa', orderId: payload.orderId, status: existing.status }, 'webhook_already_processed');
       return c.json({ success: true, message: 'Already processed' });
     }
 
-    if (payload.eventType === 'payment.succeeded') {
-      await processPaymentSuccess(session, payload);
-    } else if (payload.eventType === 'payment.canceled') {
-      await processPaymentCanceled(session, body);
+    try {
+      if (payload.eventType === 'payment.succeeded') {
+        await processPaymentSuccess(claimed, payload);
+      } else if (payload.eventType === 'payment.canceled') {
+        await processPaymentCanceled(claimed, body);
+      } else {
+        // Unhandled event type after a successful claim — revert so the gateway can retry.
+        await revertPaymentSessionToPending(payload.orderId);
+      }
+    } catch (processErr) {
+      // Revert the claim so the gateway's retry can succeed once the underlying issue is fixed.
+      await revertPaymentSessionToPending(payload.orderId);
+      throw processErr;
     }
 
     return c.json({ success: true });
@@ -965,26 +1012,39 @@ checkoutRoutes.post('/webhook/tbank', async (c) => {
       return c.text('OK');
     }
 
-    // Find session
-    const session = await getPaymentSession(payload.orderId) as PaymentSession | null;
-    if (!session) {
+    // Find session for existence check.
+    const existing = await getPaymentSession(payload.orderId) as PaymentSession | null;
+    if (!existing) {
       log.warn({ gateway: 'tbank', orderId: payload.orderId }, 'webhook_session_not_found');
       return c.text('OK');
     }
 
-    // Idempotency
-    if (session.status !== 'pending') {
+    // Refunds operate on already-succeeded sessions, so they bypass the pending claim.
+    if (payload.eventType === 'payment.refunded') {
+      existing.status = 'refunded';
+      existing.completedAt = new Date().toISOString();
+      await upsertPaymentSession(existing.orderId, existing);
       return c.text('OK');
     }
 
-    if (payload.eventType === 'payment.succeeded') {
-      await processPaymentSuccess(session, payload);
-    } else if (payload.eventType === 'payment.canceled') {
-      await processPaymentCanceled(session);
-    } else if (payload.eventType === 'payment.refunded') {
-      session.status = 'refunded';
-      session.completedAt = new Date().toISOString();
-      await upsertPaymentSession(session.orderId, session);
+    // Atomic claim for succeeded/canceled. Closes the double-credit race window.
+    const claimed = await claimPaymentSessionForProcessing(payload.orderId) as PaymentSession | null;
+    if (!claimed) {
+      log.info({ gateway: 'tbank', orderId: payload.orderId, status: existing.status }, 'webhook_already_processed');
+      return c.text('OK');
+    }
+
+    try {
+      if (payload.eventType === 'payment.succeeded') {
+        await processPaymentSuccess(claimed, payload);
+      } else if (payload.eventType === 'payment.canceled') {
+        await processPaymentCanceled(claimed);
+      } else {
+        await revertPaymentSessionToPending(payload.orderId);
+      }
+    } catch (processErr) {
+      await revertPaymentSessionToPending(payload.orderId);
+      throw processErr;
     }
 
     // T-Bank requires "OK" as response
@@ -1024,29 +1084,41 @@ checkoutRoutes.post('/webhook/stripe', async (c) => {
       return c.json({ success: false, error: 'Verification failed' }, 400);
     }
 
-    // Find session
-    const session = await getPaymentSession(payload.orderId) as PaymentSession | null;
-    if (!session) {
+    // Find session for existence check.
+    const existing = await getPaymentSession(payload.orderId) as PaymentSession | null;
+    if (!existing) {
       log.warn({ gateway: 'stripe', orderId: payload.orderId }, 'webhook_session_not_found');
       // Return 200 OK — webhook is idempotent. Unknown order = either old test row
-      // deleted from DB or 3rd-party probe. Avoid YK retry storm by acknowledging.
+      // deleted from DB or 3rd-party probe. Avoid retry storm by acknowledging.
       return c.json({ success: true, message: 'Session not in DB — acknowledged' });
     }
 
-    // Idempotency: skip if already processed
-    if (session.status !== 'pending') {
-      log.info({ gateway: 'stripe', orderId: session.orderId, status: session.status }, 'webhook_already_processed');
+    // Refunds bypass the pending claim — they apply to already-succeeded sessions.
+    if (payload.eventType === 'payment.refunded') {
+      existing.status = 'refunded';
+      existing.completedAt = new Date().toISOString();
+      await upsertPaymentSession(existing.orderId, existing);
+      return c.json({ success: true, received: true });
+    }
+
+    // Atomic claim for succeeded/canceled. Closes the double-credit race window.
+    const claimed = await claimPaymentSessionForProcessing(payload.orderId) as PaymentSession | null;
+    if (!claimed) {
+      log.info({ gateway: 'stripe', orderId: payload.orderId, status: existing.status }, 'webhook_already_processed');
       return c.json({ success: true, message: 'Already processed' });
     }
 
-    if (payload.eventType === 'payment.succeeded') {
-      await processPaymentSuccess(session, payload);
-    } else if (payload.eventType === 'payment.canceled') {
-      await processPaymentCanceled(session);
-    } else if (payload.eventType === 'payment.refunded') {
-      session.status = 'refunded';
-      session.completedAt = new Date().toISOString();
-      await upsertPaymentSession(session.orderId, session);
+    try {
+      if (payload.eventType === 'payment.succeeded') {
+        await processPaymentSuccess(claimed, payload);
+      } else if (payload.eventType === 'payment.canceled') {
+        await processPaymentCanceled(claimed);
+      } else {
+        await revertPaymentSessionToPending(payload.orderId);
+      }
+    } catch (processErr) {
+      await revertPaymentSessionToPending(payload.orderId);
+      throw processErr;
     }
 
     return c.json({ success: true, received: true });

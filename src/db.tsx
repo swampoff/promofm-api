@@ -311,6 +311,47 @@ export async function upsertPaymentSession(orderId: string, session: Record<stri
   if (error) console.error('[db] upsertPaymentSession:', error);
 }
 
+/**
+ * Atomic webhook idempotency claim.
+ * Transitions a session's status from 'pending' → 'processing' in a single SQL UPDATE.
+ * Returns the session blob on success, or null if the session is missing OR its status
+ * is no longer 'pending' (another webhook is already processing / has processed it).
+ *
+ * This closes the race window where two concurrent webhook deliveries from the same
+ * gateway would both read status='pending' and double-credit the user's balance.
+ */
+export async function claimPaymentSessionForProcessing(orderId: string): Promise<Record<string, any> | null> {
+  const { pool } = await import('./db-client.tsx');
+  const res = await pool.query(
+    `UPDATE payment_sessions
+        SET status = 'processing',
+            data = data || jsonb_build_object('status', 'processing'),
+            updated_at = NOW()
+      WHERE order_id = $1 AND status = 'pending'
+      RETURNING data`,
+    [orderId],
+  );
+  if (res.rowCount === 0) return null;
+  const row = res.rows[0];
+  return row?.data || null;
+}
+
+/**
+ * Reverts a 'processing' claim back to 'pending' so the gateway's retry can succeed.
+ * No-op if status is not 'processing' (e.g. already succeeded or already reverted).
+ */
+export async function revertPaymentSessionToPending(orderId: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE payment_sessions
+        SET status = 'pending',
+            data = data || jsonb_build_object('status', 'pending'),
+            updated_at = NOW()
+      WHERE order_id = $1 AND status = 'processing'`,
+    [orderId],
+  );
+}
+
 // ─── Subscriptions ───
 
 export async function getSubscription(userId: string) {
@@ -1519,6 +1560,31 @@ export async function getPaymentBalance(userId: string) {
   if (error) console.error('[db] getPaymentBalance:', error);
   if (!data) return null;
   return { available: Number(data.available || 0), pending: Number(data.pending || 0), total: Number(data.total || 0) };
+}
+
+/**
+ * Atomic withdrawal: in a single UPDATE, debits `amount` from `available` and
+ * credits the same to `pending`, guarded by `available >= amount`. Returns the
+ * new balance on success or null if there isn't enough money OR the row doesn't
+ * exist. This closes the race window where two concurrent withdraw requests
+ * both read available=1000 and each took 800, ending with a negative balance.
+ */
+export async function debitAvailableToPendingAtomic(userId: string, amount: number): Promise<{ available: number; pending: number; total: number } | null> {
+  const { pool } = await import('./db-client.tsx');
+  const res = await pool.query(
+    `UPDATE payment_balances
+        SET available = available - $2::numeric,
+            pending   = pending   + $2::numeric,
+            total     = (available - $2::numeric) + (pending + $2::numeric),
+            updated_at = NOW()
+      WHERE user_id = $1
+        AND available >= $2::numeric
+      RETURNING available, pending, total`,
+    [userId, amount],
+  );
+  if (res.rowCount === 0) return null;
+  const row = res.rows[0];
+  return { available: Number(row.available), pending: Number(row.pending), total: Number(row.total) };
 }
 
 export async function upsertPaymentBalance(userId: string, balance: { available?: number; pending?: number; total?: number }) {
