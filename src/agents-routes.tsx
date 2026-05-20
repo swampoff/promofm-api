@@ -95,7 +95,9 @@ async function callAI(messages: { role: 'user' | 'assistant'; content: string }[
   const res = await callLLM({
     system: SYSTEM_PROMPT,
     messages: messages.map(m => ({ ...m, role: m.role as 'user' | 'assistant' })),
-    maxTokens: 2048,
+    // Capped to 1024 — see comment in ecosystem-modes.ts: OpenRouter free-tier
+    // models reject 2048-token requests with 402 when balance is low.
+    maxTokens: 1024,
     tag: 'agents-discuss',
   });
 
