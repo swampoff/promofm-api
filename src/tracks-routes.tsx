@@ -5,10 +5,11 @@
 
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
-import { getDbClient } from './db-client.tsx';
+import { getDbClient, pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
+import { notifyTrackUpload } from './email-helper.tsx';
 
 const tracksRoutes = new Hono();
 // No demo fallback — all endpoints require auth
@@ -70,6 +71,29 @@ tracksRoutes.post('/', requireAuth, async (c) => {
       fetch(`http://127.0.0.1:3000/server/api/promo-check/process/${track.id}`, { method: 'POST' })
         .catch(() => {}); // non-blocking
     }
+
+    // Notify admin (email + Telegram). Resolve email/name from users so
+    // admins see a real identity instead of "anonymous". Fire-and-forget —
+    // the upload itself must not fail because the SMTP / Telegram side is
+    // down.
+    (async () => {
+      try {
+        const { rows } = await pool.query(
+          'SELECT email, full_name, display_name FROM users WHERE id = $1 LIMIT 1',
+          [userId],
+        );
+        const u = rows[0] || {};
+        await notifyTrackUpload({
+          title: track.title || body.title || 'Без названия',
+          artist: u.full_name || u.display_name || track.artist_name || body.artist || body.artist_name || 'Артист',
+          genre: track.genre || body.genre,
+          email: u.email || c.get('userEmail') || undefined,
+          userId,
+        });
+      } catch (notifyErr) {
+        console.error('[tracks] admin notify failed:', notifyErr);
+      }
+    })();
 
     return c.json({ success: true, data: track }, 201);
   } catch (error) {
