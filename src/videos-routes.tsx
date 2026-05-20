@@ -1,8 +1,10 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
+import { pool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { platformStatsStore } from './db.tsx';
+import { notifyVideoUpload } from './email-helper.tsx';
 
 const videosRoutes = new Hono();
 
@@ -378,6 +380,30 @@ videosRoutes.post('/', requireAuth, async (c) => {
       createdAt: body.createdAt || now, updatedAt: now,
     };
     await db.upsertVideo(userId, videoId, video);
+
+    // Notify admin (email + Telegram). Resolve email/name from users so the
+    // alert carries real identity. Fire-and-forget — the upload mustn't fail
+    // because SMTP / Telegram is down.
+    (async () => {
+      try {
+        const { rows } = await pool.query(
+          'SELECT email, full_name, display_name FROM users WHERE id = $1 LIMIT 1',
+          [userId],
+        );
+        const u = rows[0] || {};
+        await notifyVideoUpload({
+          title: body.title || body.name || 'Без названия',
+          artist: u.full_name || u.display_name || body.artist || body.artistName || 'Автор',
+          category: body.category || body.videoCategory,
+          videoUrl: body.videoUrl || body.url,
+          email: u.email || c.get('userEmail') || undefined,
+          userId,
+        });
+      } catch (notifyErr) {
+        console.error('[videos] admin notify failed:', notifyErr);
+      }
+    })();
+
     return c.json({ success: true, data: video }, 201);
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);

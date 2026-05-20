@@ -252,6 +252,24 @@ export async function notifyTrackUpload(data: { title: string; artist: string; g
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Трек: ${escapeHtml(data.artist)} — ${escapeHtml(data.title)}`, html });
 }
 
+export async function notifyVideoUpload(data: { title: string; artist: string; category?: string; videoUrl?: string; email?: string; userId?: string; }) {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #EC4899;">Новое видео на модерации</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      <tr><td style="padding: 8px; color: #999;">Видео:</td><td style="padding: 8px;">${escapeHtml(data.title)}</td></tr>
+      <tr><td style="padding: 8px; color: #999;">Автор:</td><td style="padding: 8px;">${escapeHtml(data.artist)}</td></tr>
+      ${data.category ? `<tr><td style="padding: 8px; color: #999;">Категория:</td><td style="padding: 8px;">${escapeHtml(data.category)}</td></tr>` : ''}
+      ${data.email ? `<tr><td style="padding: 8px; color: #999;">Email:</td><td style="padding: 8px;">${escapeHtml(data.email)}</td></tr>` : ''}
+      ${data.videoUrl ? `<tr><td style="padding: 8px; color: #999;">Ссылка:</td><td style="padding: 8px; word-break: break-all;"><a href="${escapeHtml(data.videoUrl)}" style="color: #60A5FA;">${escapeHtml(data.videoUrl)}</a></td></tr>` : ''}
+    </table>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${SITE_URL}/ctrl-pm7k2f" style="${buttonStyle}">Модерация</a>
+    </p>
+  `);
+  notifyAdminTelegram(`🎬 <b>Новое видео на модерации</b>\n\nАвтор: <b>${stripHtml(data.artist)}</b>\nВидео: <b>${stripHtml(data.title)}</b>${data.category ? `\nКатегория: ${stripHtml(data.category)}` : ''}${data.email ? `\nEmail: ${stripHtml(data.email)}` : ''}${data.videoUrl ? `\nСсылка: ${stripHtml(data.videoUrl)}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Модерация</a>`).catch(() => {});
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Видео: ${escapeHtml(data.artist)} — ${escapeHtml(data.title)}`, html });
+}
+
 export async function notifyConcertCreated(data: { title: string; artist?: string; city?: string; date?: string; venue?: string; }) {
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #10B981;">Новый концерт</h2>
