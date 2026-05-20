@@ -320,7 +320,11 @@ export async function runAgent(
   const llmRequest = {
     system: agent.systemPrompt,
     messages: [{ role: "user" as const, content: userPrompt }],
-    maxTokens: 2048,
+    // Hard cap at 1024 because the OpenRouter free-tier (free models like
+    // gemma-3-12b-it:free) rejects 2048-token requests with HTTP 402 when the
+    // remaining balance can't cover the upper bound — even if the response
+    // itself would be short. Each agent's JSON output fits well under 1k tokens.
+    maxTokens: 1024,
     temperature: agent.mode === "evolve" ? 0.3 : 0.7,
     tag: `ecosystem-${agent.name}`,
     model: agent.model,
@@ -330,10 +334,17 @@ export async function runAgent(
   try {
     llmResponse = await callLLM(llmRequest);
   } catch (err) {
-    // Fallback to default model on 429 rate limit
-    if (agent.model && String(err).includes("429")) {
+    // Recover from two distinct provider errors:
+    //   429 — rate limit on a specific model → retry with default model.
+    //   402 — credit exhausted for the requested max_tokens → retry with a
+    //   smaller cap so a partial answer still lands instead of nothing.
+    const errStr = String(err);
+    if (agent.model && errStr.includes("429")) {
       console.warn(`[ecosystem] ${agent.displayName} (${agent.model}) rate-limited, falling back to default`);
       llmResponse = await callLLM({ ...llmRequest, model: undefined });
+    } else if (errStr.includes("402")) {
+      console.warn(`[ecosystem] ${agent.displayName} hit 402 (low credits), retrying with maxTokens=256`);
+      llmResponse = await callLLM({ ...llmRequest, maxTokens: 256 });
     } else {
       throw err;
     }
