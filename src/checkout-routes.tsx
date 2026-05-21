@@ -11,7 +11,7 @@
  */
 
 import { Hono } from 'hono';
-import { claimPaymentSessionForProcessing, createCoinTransactionKv, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, revertPaymentSessionToPending, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx } from './db.tsx';
+import { claimPaymentSessionForProcessing, createCoinTransactionKv, creditAvailableAtomic, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, incrementCoinBalanceAtomic, revertPaymentSessionToPending, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx } from './db.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import {
@@ -81,27 +81,23 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     createdAt: now,
   });
 
-  // Update user balance for donations/topups
+  // Update user balance for donations/topups. Uses atomic SQL increment to
+  // survive concurrent webhook deliveries — the previous read-modify-write
+  // dropped updates when two fulfillments for the same recipient overlapped
+  // (donation + topup, or two donations from different fans).
   if (session.type === 'donation' || session.type === 'topup') {
     const targetUserId = session.type === 'donation'
       ? (session.metadata.artistId || session.userId)
       : session.userId;
-
-    const balance = (await getPaymentBalance(targetUserId)) || { available: 0, pending: 0, total: 0 };
-    balance.available += session.amount;
-    balance.total += session.amount;
-    await upsertPaymentBalance(targetUserId, balance);
+    await creditAvailableAtomic(targetUserId, session.amount);
   }
 
-  // Topup coins
+  // Topup coins — same race-safety treatment.
   if (session.type === 'topup' && session.metadata.coinAmount) {
     const coinAmount = parseInt(session.metadata.coinAmount);
     if (coinAmount > 0) {
-      const coinBal = (await getCoinBalance(session.userId)) || { balance: 0, userId: session.userId };
-      coinBal.balance += coinAmount;
-      await setCoinBalance(session.userId, coinBal.balance);
+      await incrementCoinBalanceAtomic(session.userId, coinAmount);
 
-      // Coin transaction
       const coinTx = {
         id: `cointx-${session.orderId}`,
         userId: session.userId,
@@ -153,7 +149,11 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         log.info({ userId: session.userId, plan: planKey, interval }, 'subscription_activated');
       }
     } catch (err) {
+      // Surface so the webhook reverts the session to 'pending' and the
+      // gateway retries. Previously the user was charged with no subscription
+      // record created — silent revenue loss with no recovery.
       log.error({ err, userId: session.userId }, 'subscription_activation_error');
+      throw err;
     }
   }
 
@@ -163,7 +163,11 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     try {
       const itemType = session.metadata.itemType;
       
-      if (itemType === 'beat' && session.metadata.beatId) {
+      // Skip the simple beat-purchase path if this webhook also matches the
+      // full beat_purchase fulfillment block below (which records commission
+      // + platform payout). Otherwise both blocks fire and the producer is
+      // credited twice for the same payment.
+      if (itemType === 'beat' && session.metadata.beatId && session.metadata.type !== 'beat_purchase') {
         // Fulfill beat purchase
         const { getBeat } = await import('./db.tsx');
         const { pool: cPool1 } = await import('./db-client.tsx');
@@ -187,7 +191,10 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
              VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7::jsonb, NOW())
              ON CONFLICT (id) DO NOTHING`,
             [purchase.id, purchase.beatId || null, purchase.buyerId || session.userId,
-             purchase.producerId || null, purchase.price || session.amount,
+             // Field is named sellerId on the in-memory purchase object — the
+             // previous `purchase.producerId` reference was always undefined
+             // and producer_id ended up NULL, breaking seller-payout attribution.
+             purchase.sellerId || null, purchase.price || session.amount,
              purchase.licenseType || null,
              JSON.stringify({ ...purchase, paymentOrderId: session.orderId })]
           );
@@ -221,7 +228,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           `INSERT INTO digital_purchases (id, good_id, buyer_id, amount, data, created_at)
            VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
            ON CONFLICT (id) DO NOTHING`,
-          [purchase.id, purchase.digitalGoodId || null, purchase.buyerId || session.userId,
+          // Field is named goodId on the in-memory purchase — previous
+          // `purchase.digitalGoodId` was always undefined.
+          [purchase.id, purchase.goodId || null, purchase.buyerId || session.userId,
            purchase.price || session.amount,
            JSON.stringify({ ...purchase, paymentOrderId: session.orderId })]
         );
@@ -337,7 +346,13 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       }
 
 } catch (err) {
-      log.error({ err }, 'marketplace_fulfillment_error');
+      // Surface to the caller so the webhook handler can revert the session
+      // back to 'pending' and let the gateway retry. Previously this catch
+      // swallowed the error → webhook returned success → money taken with
+      // beat / digital_good / radio_campaign / venue_radio / booking NEVER
+      // delivered (silent service loss).
+      log.error({ err, orderId: session.orderId }, 'marketplace_fulfillment_error');
+      throw err;
     }
   }
 

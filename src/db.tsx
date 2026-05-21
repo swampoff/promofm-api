@@ -250,6 +250,24 @@ export async function setCoinBalance(userId: string, balance: number) {
   if (error) console.error('[db] setCoinBalance:', error);
 }
 
+// Atomic increment via raw SQL — necessary for concurrent topups for the same
+// user. The read-modify-write pattern (getCoinBalance then setCoinBalance)
+// loses updates when two webhooks land in the same event-loop tick.
+// UPSERT-on-conflict ensures users with no existing row get one created.
+export async function incrementCoinBalanceAtomic(userId: string, delta: number): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const res = await pool.query(
+    `INSERT INTO coin_balances (user_id, balance, updated_at)
+     VALUES ($1, $2::numeric, NOW())
+     ON CONFLICT (user_id) DO UPDATE
+       SET balance = coin_balances.balance + EXCLUDED.balance,
+           updated_at = NOW()
+     RETURNING balance`,
+    [userId, delta]
+  );
+  return Number(res.rows[0]?.balance ?? 0);
+}
+
 export async function getCoinTransactions(userId: string) {
   const { data, error } = await db()
     .from('coin_transactions')
@@ -1583,6 +1601,24 @@ export async function debitAvailableToPendingAtomic(userId: string, amount: numb
     [userId, amount],
   );
   if (res.rowCount === 0) return null;
+  const row = res.rows[0];
+  return { available: Number(row.available), pending: Number(row.pending), total: Number(row.total) };
+}
+
+// Atomic credit for donations/topups — counterpart to debitAvailableToPendingAtomic.
+// Replaces the lossy read-modify-write pattern in checkout fulfillment.
+export async function creditAvailableAtomic(userId: string, amount: number): Promise<{ available: number; pending: number; total: number }> {
+  const { pool } = await import('./db-client.tsx');
+  const res = await pool.query(
+    `INSERT INTO payment_balances (user_id, available, pending, total, updated_at)
+     VALUES ($1, $2::numeric, 0, $2::numeric, NOW())
+     ON CONFLICT (user_id) DO UPDATE
+       SET available = payment_balances.available + EXCLUDED.available,
+           total     = payment_balances.total     + EXCLUDED.available,
+           updated_at = NOW()
+     RETURNING available, pending, total`,
+    [userId, amount]
+  );
   const row = res.rows[0];
   return { available: Number(row.available), pending: Number(row.pending), total: Number(row.total) };
 }

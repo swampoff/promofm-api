@@ -434,6 +434,8 @@ app.put('/orders/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
+    const authUserId = c.get('userId');
+    const authRole = c.get('userRole');
     const data = await publishOrdersStore.get(id);
     if (!data) {
       return c.json({ success: false, error: 'Order not found' }, 404);
@@ -441,15 +443,39 @@ app.put('/orders/:id', requireAuth, async (c) => {
 
     const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
 
+    // Owner-only (or admin). Without this check any authed user could PUT
+    // arbitrary edits to any order by guessing the ID.
+    if (order.userId !== authUserId && authRole !== 'admin' && authRole !== 'superadmin') {
+      return c.json({ success: false, error: 'Forbidden' }, 403);
+    }
+
     // Can only edit drafts or orders needing revision
     if (!['draft', 'revision'].includes(order.status)) {
       return c.json({ success: false, error: 'Order can only be edited in draft or revision status' }, 400);
     }
 
-    const updatedOrder = {
+    // Whitelist of fields the artist may modify. Without this filter a malicious
+    // body like `{status:'approved', price:0, subscriptionApplied:true}` would
+    // merge straight into the order — bypassing moderation and the quota system.
+    // Pricing, status, moderation, payment, and timestamp fields are owned by
+    // server-side handlers and must never be artist-mutable.
+    const EDITABLE_FIELDS: ReadonlyArray<keyof PublishOrder> = [
+      'title', 'description',
+      'videoUrl', 'videoSource', 'videoCategory', 'thumbnailUrl', 'tags',
+      'eventDate', 'eventTime', 'city', 'venueName', 'venueAddress',
+      'ticketPriceMin', 'ticketPriceMax', 'ticketUrl', 'posterUrl', 'genre',
+    ];
+    const sanitized: Partial<PublishOrder> = {};
+    for (const key of EDITABLE_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(body, key)) {
+        (sanitized as any)[key] = body[key];
+      }
+    }
+
+    const updatedOrder: PublishOrder = {
       ...order,
-      ...body,
-      id: order.id, // Prevent ID override
+      ...sanitized,
+      id: order.id,
       userId: order.userId,
       updatedAt: new Date().toISOString(),
     };
@@ -819,12 +845,16 @@ app.put('/admin/batch-status', requireAuth, requireAdmin, async (c) => {
       return c.json({ success: false, error: 'status is required' }, 400);
     }
 
-    // Batch transitions are more permissive: admin implicitly takes order for review
+    // Batch transitions mirror the single-order endpoint exactly. Keeping the
+    // two transition tables in sync is critical — divergence here is what let
+    // batch-approve silently auto-publish videos and bypass the admin
+    // publish-confirmation step the single endpoint enforces.
     const validTransitions: Record<string, string[]> = {
       pending_review: ['in_review', 'approved', 'revision', 'rejected'],
       in_review: ['approved', 'revision', 'rejected'],
       revision: ['pending_review'],
-      approved: ['pending_payment', 'published'],
+      approved: ['pending_payment', 'paid', 'published'],
+      pending_payment: ['paid'],
       paid: ['published'],
     };
 
@@ -850,15 +880,29 @@ app.put('/admin/batch-status', requireAuth, requireAdmin, async (c) => {
           continue;
         }
 
+        const preApprovalPrice = order.price;
         order.status = status;
         order.updatedAt = new Date().toISOString();
 
         if (status === 'approved') {
+          // Re-resolve video pricing — subscriber's monthly quota may have
+          // shifted while this order sat in moderation. Excludes THIS order
+          // from the count. Concerts not re-resolved (separate flow).
+          if (order.type === 'video') {
+            const repriced = await resolveVideoPrice(order.userId, order.plan as 'free' | 'standard' | 'premium', order.id);
+            order.plan = repriced.planUsed;
+            order.price = repriced.price;
+            order.priceBase = PRICING.video[repriced.planUsed].price;
+            order.subscriptionApplied = repriced.subscriptionApplied;
+          }
           order.moderatedAt = new Date().toISOString();
           order.moderatorComment = comment || '';
+          // Pipeline aligned with the single-order endpoint and tracks:
+          // approve never publishes directly. price=0 → 'paid' (skip payment),
+          // price>0 → 'pending_payment'. Admin must explicitly publish later.
           if (order.price === 0) {
-            order.status = 'published';
-            order.publishedAt = new Date().toISOString();
+            order.status = 'paid';
+            order.paidAt = new Date().toISOString();
           } else {
             order.status = 'pending_payment';
           }
@@ -879,13 +923,25 @@ app.put('/admin/batch-status', requireAuth, requireAdmin, async (c) => {
 
         await publishOrdersStore.set(orderId, JSON.stringify(order), { user_id: order.userId });
 
+        // Same quota-bump explanation as in the single-order handler.
+        let notificationComment = comment || reason;
+        if (
+          status === 'approved'
+          && order.type === 'video'
+          && preApprovalPrice === 0
+          && order.price > 0
+        ) {
+          const bumpNote = `Бесплатная квота месяца была использована другой заявкой. Тариф изменён на «${order.plan}», к оплате ${order.price.toLocaleString('ru-RU')} ₽.`;
+          notificationComment = notificationComment ? `${bumpNote} ${notificationComment}` : bumpNote;
+        }
+
         // Create notification for the artist
         await createArtistNotification(
           order.userId,
           order.id,
           order.title,
           order.status,
-          comment || reason,
+          notificationComment,
         );
 
         // Send email for critical status changes
@@ -894,7 +950,7 @@ app.put('/admin/batch-status', requireAuth, requireAdmin, async (c) => {
           order.id,
           order.title,
           order.status,
-          comment || reason,
+          notificationComment,
         );
 
         results.push({ id: orderId, success: true, order });

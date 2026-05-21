@@ -957,16 +957,24 @@ subscriptions.post('/charge-recurring', async (c) => {
         charged++;
         results.push({ userId, action: 'charged', amount, gateway: savedMethod.gateway, orderId, newExpiry: newExpiry.toISOString() });
 
-        // Record transaction
-        const txId = `tx-recur-${crypto.randomUUID()}`;
-        const txs: any[] = (await paymentTransactionsStore.get(userId)) || [];
-        txs.push({
-          id: txId, userId, type: 'expense', category: 'subscription',
-          amount, description: `Автопродление «${plan.name}» (${interval === 'year' ? 'год' : 'мес'})`,
+        // Record transaction via the dedicated payment_txns helper. Previous
+        // implementation referenced an unimported `paymentTransactionsStore`,
+        // throwing ReferenceError on every recurring charge and dropping every
+        // paying subscriber down to spark via the outer catch — silent revenue loss.
+        await insertPaymentTx({
+          id: `tx-recur-${crypto.randomUUID()}`,
+          userId,
+          orderId,
+          type: 'expense',
+          category: 'subscription',
+          amount,
+          currency: 'RUB',
+          gateway: savedMethod.gateway,
+          description: `Автопродление «${plan.name}» (${interval === 'year' ? 'год' : 'мес'})`,
           metadata: { tier, interval, recurring: true, orderId },
-          status: 'pending', createdAt: now.toISOString(),
+          status: 'pending',
+          createdAt: now.toISOString(),
         });
-        await paymentTransactionsStore.set(userId, txs);
 
         // Record revenue
         try {
