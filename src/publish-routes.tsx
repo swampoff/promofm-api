@@ -505,7 +505,9 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
     const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
 
     const validTransitions: Record<string, string[]> = {
-      pending_review: ['in_review', 'rejected'],
+      // Admin can directly approve/reject/send-for-revision from initial state —
+      // 'in_review' is an optional "taking ownership" step, not a gate.
+      pending_review: ['in_review', 'approved', 'revision', 'rejected'],
       in_review: ['approved', 'revision', 'rejected'],
       revision: ['pending_review'],
       approved: ['pending_payment', 'published'],
