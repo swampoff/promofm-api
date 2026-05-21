@@ -174,35 +174,11 @@ app.delete("/user/:userId/sessions/:sessionId", requireAuth, requireOwner('userI
   }
 });
 
-// Change password
-app.post("/user/:userId/change-password", requireAuth, requireOwner('userId'), async (c) => {
-  try {
-    const userId = c.req.param("userId");
-    const body = await c.req.json();
-
-    if (!userId) {
-      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID is required');
-    }
-
-    const { currentPassword, newPassword } = body;
-
-    if (!currentPassword || !newPassword) {
-      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'Current and new passwords are required');
-    }
-
-    if (newPassword.length < 8) {
-      return apiError(c, 'VALIDATION_PASSWORD_TOO_SHORT');
-    }
-
-    return c.json({
-      success: true,
-      message: "Password changed successfully"
-    });
-  } catch (error) {
-    console.error("Error changing password:", error);
-    return apiError(c, 'INTERNAL_ERROR');
-  }
-});
+// NOTE: change-password lives at POST /auth/change-password (auth-routes.tsx).
+// The previous duplicate here returned success without verifying currentPassword
+// or persisting newPassword — a no-op dressed up as a working endpoint. Removed
+// because nothing in the frontend called it; settings-api.ts already targets the
+// real /auth path.
 
 // Get payment methods
 app.get("/user/:userId/payment-methods", requireAuth, requireOwner('userId'), async (c) => {

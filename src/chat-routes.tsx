@@ -90,7 +90,10 @@ app.post('/messages/:orderId', requireAuth, async (c) => {
     // Ищем заказ чтобы узнать userId артиста
     const order: any = await publishOrdersStore.get(orderId);
     if (order) {
-      const recipientId = senderRole === 'artist' ? 'admin-moderator' : order.userId;
+      // 'admin' is the shared broadcast channel all admin UIs subscribe to.
+      // Previous 'admin-moderator' was a phantom channel — no one listened to
+      // it, so artist-side chat messages never reached moderators in realtime.
+      const recipientId = senderRole === 'artist' ? 'admin' : order.userId;
       emitSSE(recipientId, {
         type: 'chat_message',
         data: {

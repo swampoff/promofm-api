@@ -158,7 +158,7 @@ function notifyClient(order: Production360Order, step: string, details?: string)
 }
 
 function notifyAdmin(order: Production360Order, step: string, details?: string) {
-  emitSSE('admin-1', {
+  emitSSE('admin', {
     type: 'notification',
     data: {
       title: `360° Продакшн: ${step}`,
