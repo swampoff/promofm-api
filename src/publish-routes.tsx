@@ -516,9 +516,10 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
 
     const allowed = validTransitions[order.status] || [];
     if (!allowed.includes(status)) {
+      console.warn(`[publish/orders] transition rejected: id=${id} from="${order.status}" to="${status}" allowed=[${allowed.join(',')}]`);
       return c.json({
         success: false,
-        error: `Cannot transition from "${order.status}" to "${status}". Allowed: ${allowed.join(', ')}`,
+        error: `Невозможно перевести из «${order.status}» в «${status}». Доступно: ${allowed.join(', ') || '(нет)'}`,
       }, 400);
     }
 
