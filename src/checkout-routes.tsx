@@ -435,9 +435,11 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
-  // ─── Fulfill video_publish / concert_publish (publish_orders → published) ───
+  // ─── Fulfill video_publish / concert_publish (publish_orders → paid) ───
+  // Pipeline aligned with tracks: payment makes the order 'paid', NOT 'published'.
+  // Admin must explicitly publish from the moderation panel after verifying payment.
   if (
-    (session.metadata?.type === 'video_publish' || session.metadata?.type === 'concert_publish' || session.metadata?.type === 'concert_publish')
+    (session.metadata?.type === 'video_publish' || session.metadata?.type === 'concert_publish')
     && session.metadata?.orderId
   ) {
     try {
@@ -448,8 +450,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         log.warn({ orderId }, 'publish_order_not_found_for_fulfillment');
       } else {
         const ord = typeof row.rows[0].data === 'string' ? JSON.parse(row.rows[0].data) : row.rows[0].data;
-        ord.status = 'published';
-        ord.publishedAt = now;
+        ord.status = 'paid';
         ord.paidAt = now;
         ord.paymentMethod = session.gateway;
         ord.paymentSessionId = session.gatewayPaymentId;
@@ -460,11 +461,17 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         );
         log.info({ orderId, type: session.metadata.type, amount: session.amount }, 'publish_order_payment_fulfilled');
 
-        // Notify via SSE
+        // Notify artist payment received + admin that an order awaits publication.
         try {
           const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(session.userId, 'publish_published', { orderId, type: ord.type, title: ord.title });
-          emitSSE('admin', 'publish_published', { orderId, type: ord.type, title: ord.title, userId: session.userId });
+          emitSSE(session.userId, {
+            type: 'publish_paid',
+            data: { orderId, type: ord.type, title: ord.title },
+          });
+          emitSSE('admin', {
+            type: 'publish_paid',
+            data: { orderId, type: ord.type, title: ord.title, userId: session.userId },
+          });
         } catch {}
       }
     } catch (err) {
