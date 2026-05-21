@@ -770,11 +770,14 @@ app.post('/send-payment-reminders', async (c) => {
         // SSE
         try {
           const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(String(t.user_id), 'payment_reminder', {
-            title: 'Напоминание об оплате',
-            message: 'Трек «' + t.title + '» ждёт оплату — 5 000 ₽',
-            trackId: t.id,
-            link: '/artist/tracks',
+          emitSSE(String(t.user_id), {
+            type: 'payment_reminder',
+            data: {
+              title: 'Напоминание об оплате',
+              message: 'Трек «' + t.title + '» ждёт оплату — 5 000 ₽',
+              trackId: t.id,
+              link: '/artist/tracks',
+            },
           });
         } catch {}
       } catch (err: any) {

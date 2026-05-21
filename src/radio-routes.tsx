@@ -1259,10 +1259,13 @@ app.post('/admin/rotation-reports/:id/approve', requireAuth, async (c) => {
       const tr = await pool.query(`SELECT user_id, title FROM tracks WHERE id = $1`, [r.track_id]);
       if (tr.rows[0]?.user_id) {
         const { emitSSE } = await import('./sse-routes.tsx');
-        emitSSE(tr.rows[0].user_id, 'rotation_confirmed', {
-          title: 'Ротация подтверждена',
-          message: `«${tr.rows[0].title}» в эфире ${r.station_name} (${r.city || ''}) — ${r.rotation_count} раз`,
-          trackId: r.track_id, stationName: r.station_name, city: r.city,
+        emitSSE(tr.rows[0].user_id, {
+          type: 'rotation_confirmed',
+          data: {
+            title: 'Ротация подтверждена',
+            message: `«${tr.rows[0].title}» в эфире ${r.station_name} (${r.city || ''}) — ${r.rotation_count} раз`,
+            trackId: r.track_id, stationName: r.station_name, city: r.city,
+          },
         });
       }
     } catch {}
@@ -1292,9 +1295,12 @@ app.post('/admin/rotation-reports/:id/reject', requireAuth, async (c) => {
       const r = res.rows[0];
       if (r.submitted_by_user_id) {
         const { emitSSE } = await import('./sse-routes.tsx');
-        emitSSE(r.submitted_by_user_id, 'rotation_rejected', {
-          title: 'Отчёт отклонён', message: reason || 'Отчёт не подтверждён модератором',
-          reportId,
+        emitSSE(r.submitted_by_user_id, {
+          type: 'rotation_rejected',
+          data: {
+            title: 'Отчёт отклонён', message: reason || 'Отчёт не подтверждён модератором',
+            reportId,
+          },
         });
       }
     } catch {}

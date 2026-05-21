@@ -124,7 +124,9 @@ async function hasActiveSubscription(userId: string): Promise<boolean> {
   try {
     const { pool } = await import('./db-client.tsx');
     const r = await pool.query(
-      `SELECT data FROM subscriptions WHERE user_id = $1 LIMIT 1`,
+      `SELECT data FROM subscriptions WHERE user_id = $1
+       ORDER BY (data->>'updated_at') DESC NULLS LAST, (data->>'created_at') DESC NULLS LAST
+       LIMIT 1`,
       [userId]
     );
     if (r.rows.length === 0) return false;
@@ -225,7 +227,7 @@ const STATUS_LABELS_RU: Record<string, string> = {
   published: 'опубликована',
 };
 
-async function createArtistNotification(
+export async function createArtistNotification(
   userId: string,
   orderId: string,
   orderTitle: string,
@@ -645,6 +647,9 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
     order.status = status;
     order.updatedAt = new Date().toISOString();
 
+    // Capture pre-approval state to detect quota-bump and warn the artist.
+    const preApprovalPrice = order.price;
+    const preApprovalPlan = order.plan;
     if (status === 'approved') {
       // Re-resolve video pricing at approval time: the subscriber's monthly free
       // quota may have been claimed by another order between creation and now.
@@ -685,12 +690,27 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
     await publishOrdersStore.set(id, JSON.stringify(order), { user_id: order.userId });
 
     // Create notification for the artist
+    // If the approve handler bumped the video price (subscriber's monthly free
+    // quota was consumed by another order between creation and approval), surface
+    // it to the artist as a notification comment — the order silently went from
+    // "Бесплатно" to "10 000 ₽" otherwise, which is hostile UX.
+    let notificationComment = comment || reason;
+    if (
+      status === 'approved'
+      && order.type === 'video'
+      && preApprovalPrice === 0
+      && order.price > 0
+    ) {
+      const bumpNote = `Бесплатная квота месяца была использована другой заявкой. Тариф изменён на «${order.plan}», к оплате ${order.price.toLocaleString('ru-RU')} ₽.`;
+      notificationComment = notificationComment ? `${bumpNote} ${notificationComment}` : bumpNote;
+    }
+
     await createArtistNotification(
       order.userId,
       order.id,
       order.title,
       order.status,
-      comment || reason,
+      notificationComment,
     );
 
     // Send email for critical status changes

@@ -197,7 +197,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           if (beat.producerId) {
             try {
               const { emitSSE } = await import('./sse-routes.tsx');
-              emitSSE(beat.producerId, 'beat_sold', { beatTitle: beat.title, price: session.amount, buyerName: purchase.buyerName });
+              emitSSE(beat.producerId, { type: 'beat_sold', data: { beatTitle: beat.title, price: session.amount, buyerName: purchase.buyerName } });
             } catch {}
           }
         }
@@ -251,7 +251,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         if (session.metadata.stationOwnerId) {
           try {
             const { emitSSE } = await import('./sse-routes.tsx');
-            emitSSE(session.metadata.stationOwnerId, 'new_radio_campaign', { budget: session.amount, packageType: campaign.packageType });
+            emitSSE(session.metadata.stationOwnerId, { type: 'new_radio_campaign', data: { budget: session.amount, packageType: campaign.packageType } });
           } catch {}
         }
       }
@@ -293,11 +293,14 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           // SSE notify venue
           try {
             const { emitSSE } = await import('./sse-routes.tsx');
-            emitSSE(r.rows[0].venue_id, 'venue_radio_activated', {
-              title: 'Подписка ПРОМО.ЭИР активна',
-              message: `Доступ к эфиру до ${new Date(r.rows[0].current_period_end).toLocaleDateString('ru-RU')}`,
-              subscriptionId: subId,
-              planId: r.rows[0].plan_id,
+            emitSSE(r.rows[0].venue_id, {
+              type: 'venue_radio_activated',
+              data: {
+                title: 'Подписка ПРОМО.ЭИР активна',
+                message: `Доступ к эфиру до ${new Date(r.rows[0].current_period_end).toLocaleDateString('ru-RU')}`,
+                subscriptionId: subId,
+                planId: r.rows[0].plan_id,
+              },
             });
           } catch {}
         }
@@ -355,10 +358,13 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         // Notify admin about new paid track test
         try {
           const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE('admin', 'track_test_paid', {
-            requestId: reqId,
-            trackTitle: session.metadata.trackTitle || testReq.track_title,
-            amount: session.amount,
+          emitSSE('admin', {
+            type: 'track_test_paid',
+            data: {
+              requestId: reqId,
+              trackTitle: session.metadata.trackTitle || testReq.track_title,
+              amount: session.amount,
+            },
           });
         } catch {}
       }
@@ -391,16 +397,22 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       // Notify via SSE
       try {
         const { emitSSE } = await import('./sse-routes.tsx');
-        emitSSE(session.userId, 'track_published', {
-          trackId,
-          trackTitle: session.metadata.trackTitle || '',
-          amount: session.amount,
+        emitSSE(session.userId, {
+          type: 'track_published',
+          data: {
+            trackId,
+            trackTitle: session.metadata.trackTitle || '',
+            amount: session.amount,
+          },
         });
-        emitSSE('admin', 'track_published', {
-          trackId,
-          trackTitle: session.metadata.trackTitle || '',
-          userId: session.userId,
-          amount: session.amount,
+        emitSSE('admin', {
+          type: 'track_published',
+          data: {
+            trackId,
+            trackTitle: session.metadata.trackTitle || '',
+            userId: session.userId,
+            amount: session.amount,
+          },
         });
       } catch {}
     } catch (err) {
@@ -462,12 +474,17 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         log.info({ orderId, type: session.metadata.type, amount: session.amount }, 'publish_order_payment_fulfilled');
 
         // Notify artist payment received + admin that an order awaits publication.
+        // createArtistNotification persists to the `notifications` table (drives the
+        // unread bell badge) and emits the SSE push. Without this call the artist's
+        // UI only shows the new 'paid' status after a manual refresh.
+        try {
+          const { createArtistNotification } = await import('./publish-routes.tsx');
+          await createArtistNotification(session.userId, orderId, ord.title || '', 'paid');
+        } catch (err) {
+          log.warn({ err, orderId }, 'publish_paid_notification_failed');
+        }
         try {
           const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(session.userId, {
-            type: 'publish_paid',
-            data: { orderId, type: ord.type, title: ord.title },
-          });
           emitSSE('admin', {
             type: 'publish_paid',
             data: { orderId, type: ord.type, title: ord.title, userId: session.userId },
@@ -524,8 +541,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
 
         try {
           const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(beat.producerId, 'beat_purchased', {
-            title: 'Продажа бита', purchaseId, beatId, licenseType, price, producerPayout,
+          emitSSE(beat.producerId, {
+            type: 'beat_purchased',
+            data: { title: 'Продажа бита', purchaseId, beatId, licenseType, price, producerPayout },
           });
         } catch {}
 
@@ -578,8 +596,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
 
         try {
           const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(good.producerId, 'digital_purchased', {
-            title: 'Продажа цифрового товара', purchaseId, digitalGoodId: goodId, price, producerPayout,
+          emitSSE(good.producerId, {
+            type: 'digital_purchased',
+            data: { title: 'Продажа цифрового товара', purchaseId, digitalGoodId: goodId, price, producerPayout },
           });
         } catch {}
 
@@ -607,11 +626,13 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
 
         try {
           const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(order.artistId, 'production_360_paid', {
-            title: 'Заказ оплачен', orderId: productionOrderId, amount: session.amount,
+          emitSSE(order.artistId, {
+            type: 'production_360_paid',
+            data: { title: 'Заказ оплачен', orderId: productionOrderId, amount: session.amount },
           });
-          emitSSE('admin', 'production_360_paid', {
-            orderId: productionOrderId, amount: session.amount, artistId: order.artistId,
+          emitSSE('admin', {
+            type: 'production_360_paid',
+            data: { orderId: productionOrderId, amount: session.amount, artistId: order.artistId },
           });
         } catch {}
 
