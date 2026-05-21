@@ -29,8 +29,13 @@ import { notifyPaymentReceived, notifyPaymentExpired } from './email-helper.tsx'
 
 // Bounds for free-form payment amounts (donation/topup/purchase). RUB.
 // Subscription amounts are validated against SUBSCRIPTION_PLANS below.
+// track_publish amounts are validated against the track's own price below.
 const MIN_PAYMENT_AMOUNT_RUB = 1;
 const MAX_PAYMENT_AMOUNT_RUB = 1_000_000;
+
+// Fallback when track has no per-track price set.
+// Must match PUBLICATION_PRICE in track-moderation-routes.tsx.
+const DEFAULT_TRACK_PUBLICATION_PRICE_RUB = 5000;
 
 const log = createLogger("checkout");
 
@@ -399,7 +404,34 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         });
       } catch {}
     } catch (err) {
-      log.error({ err, trackId: session.metadata.trackId }, 'track_publish_fulfillment_error');
+      // Money was taken but track update failed — flag for manual intervention.
+      // Webhook still returns success to the gateway (no retry), so without this flag
+      // the failure would be invisible: paid session + un-published track.
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.error({ err, trackId: session.metadata.trackId, orderId: session.orderId }, 'track_publish_fulfillment_error');
+      try {
+        session.metadata = {
+          ...(session.metadata || {}),
+          fulfillment_failed: 'true',
+          fulfillment_error: errMsg,
+          fulfillment_failed_at: now,
+        };
+        await upsertPaymentSession(session.orderId, session);
+      } catch {}
+      try {
+        const { emitSSE } = await import('./sse-routes.tsx');
+        emitSSE('admin', {
+          type: 'track_publish_failed',
+          data: {
+            trackId: session.metadata.trackId,
+            trackTitle: session.metadata.trackTitle || '',
+            userId: session.userId,
+            orderId: session.orderId,
+            amount: session.amount,
+            error: errMsg,
+          },
+        });
+      } catch {}
     }
   }
 
@@ -772,6 +804,37 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       if (Math.abs(amount - expected) > 0.01) {
         log.warn({ userId, planKey, interval, expected, received: amount }, 'subscription_amount_tampering_blocked');
         return c.json({ success: false, error: 'Сумма не соответствует тарифу' }, 400);
+      }
+    }
+    // For track_publish the amount MUST match the track's price (per-track or default).
+    // Track must be owned by the payer and in 'approved' status (awaiting payment).
+    // Blocks: pay-1-ruble exploit, pay-for-someone-elses-track, pay-twice on already-published.
+    if (type === 'purchase' && metadata?.type === 'track_publish') {
+      const trackId = metadata?.trackId;
+      if (!trackId) {
+        return c.json({ success: false, error: 'metadata.trackId обязателен для track_publish' }, 400);
+      }
+      try {
+        const { getTrackById } = await import('./db-typed.tsx');
+        const track = await getTrackById(String(trackId));
+        if (!track) {
+          return c.json({ success: false, error: 'Трек не найден' }, 404);
+        }
+        if (track.user_id !== userId) {
+          log.warn({ userId, trackId, ownerId: track.user_id }, 'track_publish_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужой трек' }, 403);
+        }
+        if (track.moderation_status !== 'approved') {
+          return c.json({ success: false, error: `Трек должен быть одобрен модератором (текущий статус: ${track.moderation_status})` }, 400);
+        }
+        const expected = Number((track as any)?.data?.payment_amount) || DEFAULT_TRACK_PUBLICATION_PRICE_RUB;
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, trackId, expected, received: amount }, 'track_publish_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене публикации' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, trackId }, 'track_publish_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить трек' }, 500);
       }
     }
     if (!returnUrl) {
