@@ -151,6 +151,7 @@ const STATUS_LABELS_RU: Record<string, string> = {
   in_review: 'взята на проверку',
   approved: 'одобрена',
   pending_payment: 'ожидает оплаты',
+  paid: 'оплачена, ожидает публикации',
   revision: 'отправлена на доработку',
   rejected: 'отклонена',
   published: 'опубликована',
@@ -410,13 +411,14 @@ app.put('/orders/:id/pay', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Order must be approved before payment' }, 400);
     }
 
-    // Free order (e.g. subscription bypass) — publish immediately
+    // Free order (e.g. subscription bypass) — skip payment but DON'T auto-publish.
+    // Pipeline must end with explicit admin publish step, same as paid orders.
     if (!order.price || order.price === 0) {
-      order.status = 'published';
-      order.publishedAt = new Date().toISOString();
+      order.status = 'paid';
+      order.paidAt = new Date().toISOString();
       order.updatedAt = new Date().toISOString();
       await publishOrdersStore.set(id, JSON.stringify(order), { user_id: order.userId });
-      console.log(`Publish order published (free): ${id}`);
+      console.log(`Publish order marked as paid (free, awaiting admin publish): ${id}`);
       return c.json({ success: true, order, free: true });
     }
 
@@ -510,7 +512,13 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
       pending_review: ['in_review', 'approved', 'revision', 'rejected'],
       in_review: ['approved', 'revision', 'rejected'],
       revision: ['pending_review'],
-      approved: ['pending_payment', 'published'],
+      // 'approved' is split inside the handler: price=0 → 'paid' (skips payment),
+      // price>0 → 'pending_payment'. Explicit 'published' override kept for admin.
+      approved: ['pending_payment', 'paid', 'published'],
+      // Webhook writes 'paid' directly to KV bypassing this validator;
+      // listed here for documentation and for any future admin manual transition.
+      pending_payment: ['paid'],
+      // Admin manually publishes after verifying payment — no auto-publish on payment.
       paid: ['published'],
     };
 
@@ -529,10 +537,12 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
     if (status === 'approved') {
       order.moderatedAt = new Date().toISOString();
       order.moderatorComment = comment || '';
-      // If free plan, auto-publish
+      // Pipeline aligned with tracks: approve never publishes directly.
+      // Free orders (price=0, subscription bypass) skip payment and go to 'paid' —
+      // they still wait for explicit admin publish. Paid orders await artist payment.
       if (order.price === 0) {
-        order.status = 'published';
-        order.publishedAt = new Date().toISOString();
+        order.status = 'paid';
+        order.paidAt = new Date().toISOString();
       } else {
         order.status = 'pending_payment';
       }
