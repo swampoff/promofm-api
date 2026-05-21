@@ -349,11 +349,14 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
 
       // SSE notify
       try {
-        emitSSE(recipient, 'dm_new_message', {
-          conversationId, messageId: msgId,
-          senderId, senderName: senderName || '',
-          text: text.trim(),
-          createdAt,
+        emitSSE(recipient, {
+          type: 'dm_new_message',
+          data: {
+            conversationId, messageId: msgId,
+            senderId, senderName: senderName || '',
+            text: text.trim(),
+            createdAt,
+          },
         });
       } catch (err) {
         log.warn({ err, recipient, conversationId }, 'dm_sse_emit_failed');
@@ -509,7 +512,7 @@ app.post('/typing/:conversationId', requireAuth, async (c) => {
       const others = (conv.rows[0].participant_ids || []).filter((id: string) => id !== authUserId);
       for (const other of others) {
         try {
-          emitSSE(other, 'dm_typing', { conversationId, userId: authUserId });
+          emitSSE(other, { type: 'dm_typing', data: { conversationId, userId: authUserId } });
         } catch (err) {
           log.warn({ err, other, conversationId }, 'typing_sse_emit_failed');
         }
