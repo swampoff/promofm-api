@@ -303,7 +303,7 @@ app.post('/payment/confirm', requireAuth, async (c) => {
     });
 
     // SSE: уведомить администраторов о новой оплаченной заявке
-    emitSSE('admin-1', {
+    emitSSE('admin', {
       type: 'notification',
       data: {
         newStatus: 'in_review',
@@ -584,7 +584,7 @@ app.post('/submit-review', requireAuth, async (c) => {
         request.admin_approval_status = 'pending';
 
         // SSE: уведомить администратора, что анализ готов
-        emitSSE('admin-1', {
+        emitSSE('admin', {
           type: 'notification',
           data: {
             newStatus: 'approved',
