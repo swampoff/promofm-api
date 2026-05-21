@@ -5,7 +5,7 @@
 
 import { Hono } from 'hono';
 import { getSubscription, upsertSubscription, getAllSubscriptions, getPaymentBalance, getPaymentMethods, upsertPaymentBalance, upsertPaymentSession, getPaymentSession, insertPaymentTx } from './db.tsx';
-import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
+import { notifyAllAdmins, notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -450,15 +450,13 @@ subscriptions.post('/subscribe', requireAuth, async (c) => {
         metadata: { tier, interval, price: subscription.price },
       });
 
-      // 5. Cross-cabinet → админу: уведомление о новой подписке
+      // 5. Cross-cabinet → ВСЕМ админам (role-based broadcast)
       if (subscription.price > 0) {
-        await notifyCrossCabinet({
-          targetUserId: 'admin-1',
-          targetRole: 'admin',
+        await notifyAllAdmins({
           sourceRole: cabinetRole,
           type: 'subscription_payment',
           title: `Новая подписка: ${plan.name}`,
-          message: `Пользователь ${user_id} оформил подписку «${plan.name}» за ${subscription.price.toLocaleString()} ₽/${interval === 'year' ? '��од' : 'мес'}`,
+          message: `Пользователь ${user_id} оформил подписку «${plan.name}» за ${subscription.price.toLocaleString()} ₽/${interval === 'year' ? 'год' : 'мес'}`,
           metadata: { userId: user_id, tier, interval, price: subscription.price },
         });
       }
@@ -528,8 +526,8 @@ subscriptions.post('/:userId/cancel', requireAuth, async (c) => {
         metadata: { tier: subscription.tier, status: 'cancelled' },
       });
 
-      await notifyCrossCabinet({
-        targetUserId: 'admin-1', targetRole: 'admin', sourceRole: role,
+      await notifyAllAdmins({
+        sourceRole: role,
         type: 'subscription_payment',
         title: 'Отмена подписки',
         message: `Пользователь ${userId} отменил подписку «${subscription.tierName || subscription.tier}»`,
@@ -791,8 +789,8 @@ subscriptions.post('/:userId/change-plan', requireAuth, async (c) => {
       });
 
       if (price > 0) {
-        await notifyCrossCabinet({
-          targetUserId: 'admin-1', targetRole: 'admin', sourceRole: role,
+        await notifyAllAdmins({
+          sourceRole: role,
           type: 'subscription_payment',
           title: `Смена тарифа: ${plan.name}`,
           message: `Пользователь ${userId} сменил тариф на «${plan.name}» за ${price.toLocaleString()} ₽`,

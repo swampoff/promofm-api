@@ -138,6 +138,52 @@ export async function notifyMultiple(
 }
 
 /**
+ * Уведомить ВСЕХ админов платформы (broadcast). Запрашивает реальных юзеров
+ * с ролью admin/superadmin и создаёт notification для каждого. Заменяет
+ * прежний паттерн `targetUserId: 'admin-1'` который писал в БД для
+ * несуществующего юзера и оставлял уведомления orphan'ами.
+ *
+ * Также эмитит SSE на shared канал 'admin' для UI-подписок которые
+ * слушают broadcast.
+ */
+export async function notifyAllAdmins(
+  common: Omit<NotifyParams, 'targetUserId' | 'targetRole'>
+): Promise<CrossCabinetNotification[]> {
+  const { pool } = await import('./db-client.tsx');
+  let admins: Array<{ userId: string; role: CabinetRole }> = [];
+  try {
+    const r = await pool.query(
+      `SELECT id::text AS user_id, role::text AS role FROM users
+       WHERE role::text IN ('admin', 'superadmin')`
+    );
+    admins = r.rows.map((row: any) => ({
+      userId: row.user_id,
+      role: 'admin' as CabinetRole,
+    }));
+  } catch (err: any) {
+    console.warn('[notifyAllAdmins] failed to load admin users:', err?.message);
+  }
+
+  // Broadcast on the shared SSE channel regardless of how many admin rows
+  // exist — admin UIs subscribed to /api/sse/stream/admin still get the push.
+  emitSSE('admin', {
+    type: mapTypeToSSEEvent(common.type),
+    data: {
+      type: common.type,
+      title: common.title,
+      message: common.message,
+      sourceRole: common.sourceRole,
+      link: common.link,
+      metadata: common.metadata,
+      createdAt: new Date().toISOString(),
+    },
+  });
+
+  if (admins.length === 0) return [];
+  return notifyMultiple(admins, common);
+}
+
+/**
  * Получить все непрочитанные cross-cabinet уведомления пользователя
  */
 export async function getUnreadNotifications(userId: string): Promise<CrossCabinetNotification[]> {

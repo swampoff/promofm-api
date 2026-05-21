@@ -17,7 +17,7 @@
 
 import { Hono } from 'hono';
 import { notificationCampaignsStore, getNotificationCampaignsByUser, upsertNotificationCampaign } from './db.tsx';
-import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
+import { notifyAllAdmins } from './cross-cabinet-notify.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
@@ -126,11 +126,9 @@ marketing.post('/campaigns', requireAuth, async (c) => {
 
     await upsertNotificationCampaign(body.user_id, campaignId, campaign);
 
-    // Cross-cabinet: notify admin about new campaign
+    // Cross-cabinet: notify ALL admins about new campaign (role-based broadcast).
     try {
-      await notifyCrossCabinet({
-        targetUserId: 'admin-1',
-        targetRole: 'admin',
+      await notifyAllAdmins({
         sourceRole: 'artist',
         type: 'admin_action',
         title: 'Новая промо-кампания',

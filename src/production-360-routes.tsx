@@ -504,7 +504,7 @@ app.post('/orders/:id/transition', requireAuth, async (c) => {
       actorRole: actorRole as ActorRole,
       action: action || `transition_to_${toStatus}`,
       details,
-      notifyUserIds: [order.artistId, 'admin-1'],
+      notifyUserIds: [order.artistId, 'admin'],
       sseEventType: 'notification',
       sseData: { category: 'production_360', orderId },
     });
@@ -618,7 +618,7 @@ app.post('/orders/:id/revision', requireAuth, async (c) => {
       actorRole: 'artist',
       action: 'revision_requested',
       details: `${revisionNotes}${targetStage ? ` [этап: ${targetStage}]` : ''}`,
-      notifyUserIds: ['admin-1'],
+      notifyUserIds: ['admin'],
       sseEventType: 'notification',
       sseData: { category: 'production_360', orderId },
     });
@@ -673,7 +673,7 @@ app.post('/orders/:id/approve', requireAuth, async (c) => {
       actorRole: 'artist',
       action: 'client_approved',
       details: feedback,
-      notifyUserIds: ['admin-1'],
+      notifyUserIds: ['admin'],
       sseEventType: 'notification',
       sseData: { category: 'production_360', orderId },
     });
