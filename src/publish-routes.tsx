@@ -78,6 +78,12 @@ export interface PublishOrder {
   // Pricing
   plan: 'free' | 'standard' | 'premium';
   price: number;
+  // Base price of the plan as listed in PRICING (before subscription discount).
+  // Differs from `price` only when subscriptionApplied=true.
+  priceBase?: number;
+  // True when subscriber's monthly free-clip quota was applied — used to count
+  // toward the quota in countUsedFreeVideoQuota().
+  subscriptionApplied?: boolean;
   currency: string;
   paidAt?: string;
   paymentMethod?: string;
@@ -135,10 +141,72 @@ async function hasActiveSubscription(userId: string): Promise<boolean> {
   }
 }
 
-// Resolves real price for user: 0 if active sub, otherwise from PRICING table.
+// Counts video orders for this user this calendar month that already claimed the
+// subscriber's monthly free-clip quota (subscriptionApplied=true), excluding
+// states where the artist abandoned/was-rejected. Used to enforce the
+// "1 free video per month for subscribers" rule at resolution time.
+const FREE_VIDEO_QUOTA_PER_MONTH = 1;
+async function countUsedFreeVideoQuota(userId: string, excludeOrderId?: string): Promise<number> {
+  if (!userId) return 0;
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+    const params: any[] = [userId, monthStart];
+    let exclude = '';
+    if (excludeOrderId) {
+      params.push(excludeOrderId);
+      exclude = ' AND id != $3';
+    }
+    const r = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM publish_orders
+       WHERE user_id = $1
+         AND (data->>'type') = 'video'
+         AND (data->>'subscriptionApplied') = 'true'
+         AND (data->>'status') NOT IN ('draft', 'rejected', 'cancelled', 'revision')
+         AND COALESCE(data->>'paidAt', data->>'createdAt') >= $2${exclude}`,
+      params
+    );
+    return Number(r.rows[0]?.n || 0);
+  } catch (e: any) {
+    console.warn('[publish] countUsedFreeVideoQuota failed:', e?.message);
+    return 0;
+  }
+}
+
+// Resolves the effective price for a video publication.
+// Rules:
+//   - 'free' plan + active subscription + monthly quota available → price=0
+//   - 'free' plan + no sub OR quota used     → auto-bump to 'standard' (10000 RUB)
+//   - 'standard'/'premium'                   → fixed plan price, no subscription discount
+// Returns the final plan applied so the caller can store it on the order.
+async function resolveVideoPrice(
+  userId: string,
+  plan: 'free' | 'standard' | 'premium',
+  excludeOrderId?: string,
+): Promise<{ price: number; planUsed: 'free' | 'standard' | 'premium'; subscriptionApplied: boolean }> {
+  if (plan === 'free') {
+    const isSubscriber = await hasActiveSubscription(userId);
+    if (isSubscriber) {
+      const used = await countUsedFreeVideoQuota(userId, excludeOrderId);
+      if (used < FREE_VIDEO_QUOTA_PER_MONTH) {
+        return { price: 0, planUsed: 'free', subscriptionApplied: true };
+      }
+    }
+    // Free not available — fall back to standard rate.
+    return { price: PRICING.video.standard.price, planUsed: 'standard', subscriptionApplied: false };
+  }
+  return { price: PRICING.video[plan].price, planUsed: plan, subscriptionApplied: false };
+}
+
+// Resolves real price for user. Concerts keep the original subscription-bypass logic.
+// Video pricing is delegated to resolveVideoPrice() which enforces the monthly quota.
 async function resolvePriceForUser(userId: string, type: 'video' | 'concert', plan: 'free' | 'standard' | 'premium'): Promise<number> {
+  if (type === 'video') {
+    return (await resolveVideoPrice(userId, plan)).price;
+  }
   if (await hasActiveSubscription(userId)) return 0;
-  return PRICING[type][plan].price;
+  return PRICING.concert[plan].price;
 }
 
 function generateId(): string {
@@ -208,6 +276,34 @@ app.get('/pricing', (c) => {
   return c.json({ success: true, pricing: PRICING });
 });
 
+// ── GET /quota/video ─────────────────────────────────────
+// Returns the user's current free-video quota state. The publish wizard uses
+// this to disable the 'Free' tier card if quota is unavailable, and to show
+// «У вас 1 бесплатный клип в этом месяце» when it IS available.
+
+app.get('/quota/video', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const hasSubscription = await hasActiveSubscription(userId);
+    const used = hasSubscription ? await countUsedFreeVideoQuota(userId) : 0;
+    const allowance = FREE_VIDEO_QUOTA_PER_MONTH;
+    return c.json({
+      success: true,
+      quota: {
+        hasSubscription,
+        allowance,
+        used,
+        remaining: hasSubscription ? Math.max(0, allowance - used) : 0,
+        freeAvailable: hasSubscription && used < allowance,
+        fallbackPrice: PRICING.video.standard.price,
+      },
+    });
+  } catch (error: any) {
+    console.error('GET /quota/video error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 // ── POST /orders ─────────────────────────────────────────
 
 app.post('/orders', requireAuth, async (c) => {
@@ -228,9 +324,24 @@ app.post('/orders', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Plan must be "free", "standard", or "premium"' }, 400);
     }
 
-    const pricingInfo = PRICING[type as PublishType][plan as keyof typeof PRICING.video];
-    // resolve effective price: 0 if user has active subscription, otherwise PRICING table value
-    const effectivePrice = await resolvePriceForUser(userId, type as 'video' | 'concert', plan as 'free' | 'standard' | 'premium');
+    // Resolve pricing with quota-aware logic for videos. For 'free' plan without
+    // available subscription quota, the resolver auto-bumps to 'standard' — we
+    // persist whichever plan was actually applied so the artist sees the correct
+    // tier and price on the order.
+    let finalPlan: 'free' | 'standard' | 'premium' = plan;
+    let effectivePrice: number;
+    let subscriptionApplied: boolean;
+    if (type === 'video') {
+      const res = await resolveVideoPrice(userId, plan as 'free' | 'standard' | 'premium');
+      finalPlan = res.planUsed;
+      effectivePrice = res.price;
+      subscriptionApplied = res.subscriptionApplied;
+    } else {
+      effectivePrice = await resolvePriceForUser(userId, 'concert', plan as 'free' | 'standard' | 'premium');
+      const conPricing = PRICING.concert[plan as 'free' | 'standard' | 'premium'];
+      subscriptionApplied = effectivePrice === 0 && conPricing.price > 0;
+    }
+    const pricingInfo = PRICING[type as PublishType][finalPlan];
 
     const order: PublishOrder = {
       id: generateId(),
@@ -239,10 +350,10 @@ app.post('/orders', requireAuth, async (c) => {
       status: 'draft',
       title,
       description: description || '',
-      plan,
+      plan: finalPlan,
       price: effectivePrice,
       priceBase: pricingInfo.price,
-      subscriptionApplied: effectivePrice === 0 && pricingInfo.price > 0,
+      subscriptionApplied,
       currency: 'RUB',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -535,6 +646,16 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
     order.updatedAt = new Date().toISOString();
 
     if (status === 'approved') {
+      // Re-resolve video pricing at approval time: the subscriber's monthly free
+      // quota may have been claimed by another order between creation and now.
+      // Exclude THIS order from the count (it's the one being approved).
+      if (order.type === 'video') {
+        const repriced = await resolveVideoPrice(order.userId, order.plan as 'free' | 'standard' | 'premium', order.id);
+        order.plan = repriced.planUsed;
+        order.price = repriced.price;
+        order.priceBase = PRICING.video[repriced.planUsed].price;
+        order.subscriptionApplied = repriced.subscriptionApplied;
+      }
       order.moderatedAt = new Date().toISOString();
       order.moderatorComment = comment || '';
       // Pipeline aligned with tracks: approve never publishes directly.
