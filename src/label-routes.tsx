@@ -950,6 +950,62 @@ app.get('/releases', requireAuth, async (c) => {
       r.actingForArtistName = r.actingForArtistId ? nameMap.get(r.actingForArtistId) || null : null;
     }
 
+    // Tracks: include audio tracks the label has uploaded on behalf of
+    // roster artists. Either user_id = label OR data.labelId = label
+    // catches both the "uploaded via /api/tracks" and the
+    // "/api/track-moderation/submitTrack" branches.
+    const tr = await pool.query(
+      `SELECT t.id, t.title, t.artist_name, t.moderation_status,
+              t.cover_url, t.audio_url, t.genre, t.created_at, t.updated_at,
+              t.artist_id, t.data,
+              ap.artist_name AS resolved_artist_name
+       FROM tracks t
+       LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
+       WHERE t.user_id = $1
+          OR (t.data ->> 'labelId') = $2
+       ORDER BY t.created_at DESC
+       LIMIT 200`,
+      [gate.userId, gate.labelId]
+    );
+
+    // Adapt track rows into the same release shape the UI already renders
+    // so the frontend doesn't have to deal with two collections. `type:
+    // 'track'` is a new union member; `status` maps moderation_status →
+    // existing release-status vocab so the same status pills work.
+    const STATUS_MAP: Record<string, string> = {
+      draft: 'draft',
+      pending: 'pending_review',
+      approved: 'approved',
+      pending_payment: 'pending_payment',
+      published: 'published',
+      rejected: 'rejected',
+    };
+    for (const row of tr.rows) {
+      let payload: any = row.data;
+      try { if (typeof payload === 'string') payload = JSON.parse(payload); } catch { payload = {}; }
+      const trackLabelId = payload?.labelId;
+      // Guard: skip rows owned by this user but explicitly labeled for a
+      // different label (legacy migration safety).
+      if (trackLabelId && trackLabelId !== gate.labelId) continue;
+      releases.push({
+        id: row.id,
+        type: 'track',
+        title: row.title,
+        status: STATUS_MAP[row.moderation_status] || row.moderation_status,
+        plan: 'track',
+        price: 5000,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        actingForArtistId: row.artist_id,
+        actingForArtistName: row.resolved_artist_name || row.artist_name || null,
+        thumbnailUrl: row.cover_url || null,
+        genre: row.genre || null,
+      });
+    }
+
+    // Re-sort merged collection by createdAt DESC.
+    releases.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
     return c.json({ success: true, releases });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
