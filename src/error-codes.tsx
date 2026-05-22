@@ -29,6 +29,11 @@ export const ERROR_CODES = {
   ALREADY_PROCESSED: { code: "ALREADY_PROCESSED", message: "Уже обработано", status: 400 },
   BOOKING_DISABLED: { code: "BOOKING_DISABLED", message: "Букинг отключён", status: 400 },
   CANNOT_CANCEL: { code: "CANNOT_CANCEL", message: "Невозможно отменить", status: 400 },
+  CANCEL_REQUIRES_ADMIN: {
+    code: "CANCEL_REQUIRES_ADMIN",
+    message: "Депозит уже оплачен — отмена возможна только через поддержку (возврат средств)",
+    status: 409,
+  },
 
   // Rate limiting
   RATE_LIMIT: { code: "RATE_LIMIT", message: "Слишком много запросов", status: 429 },

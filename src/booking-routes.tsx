@@ -498,7 +498,9 @@ app.put('/:id/cancel', requireAuth, async (c) => {
 
     const booking = bookingData;
 
-    if (booking.requesterId !== user.id && booking.performerId !== user.id) {
+    const isAdmin = user.role === 'admin' || user.role === 'superadmin';
+    const isParty = booking.requesterId === user.id || booking.performerId === user.id;
+    if (!isParty && !isAdmin) {
       return apiError(c, 'AUTH_ACCESS_DENIED');
     }
 
@@ -506,9 +508,18 @@ app.put('/:id/cancel', requireAuth, async (c) => {
       return apiError(c, 'CANNOT_CANCEL');
     }
 
+    // Once money has moved (deposit paid or full payment confirmed), the
+    // party who didn't pay can't unilaterally torch the booking — that
+    // strands the other party's funds with no automated refund. Admin
+    // override is the only escape (support manually issues the refund).
+    if (!isAdmin && (booking.status === 'deposit_paid' || booking.status === 'confirmed')) {
+      return apiError(c, 'CANCEL_REQUIRES_ADMIN');
+    }
+
     booking.status = 'cancelled';
     booking.cancelledAt = new Date().toISOString();
     booking.cancelledBy = user.id;
+    booking.cancelledByRole = user.role;
     booking.cancellationReason = cancellationReason || 'No reason provided';
     booking.updatedAt = new Date().toISOString();
 
