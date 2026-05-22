@@ -24,8 +24,8 @@ import { getDbClient } from './db-client.tsx';
 import { apiError } from './error-codes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { Hono } from 'hono';
-import { requireAuth } from './auth-middleware.tsx';
-import { getArtistProfile, getBooking, getBookingsByUser, getDjProfile, getVenueProfile, upsertBooking, upsertNotification, bookingCalendarStore } from './db.tsx';
+import { requireAuth, requireRole } from './auth-middleware.tsx';
+import { getArtistProfile, getBooking, getBookingsByUser, getDjProfile, getVenueProfile, upsertBooking, upsertNotification, bookingCalendarStore, getPaymentSession } from './db.tsx';
 import { notifyBookingRequest } from './email-helper.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
@@ -546,5 +546,163 @@ app.put('/:id/cancel', requireAuth, async (c) => {
     return apiError(c, 'INTERNAL_ERROR');
   }
 });
+
+// =====================================================
+// POST /:id/admin/refund-and-cancel
+// =====================================================
+// Admin-only escape hatch for the "deposit_paid / confirmed" cancel
+// case: issues YooKassa refunds against every paid payment for this
+// booking, then flips status to 'cancelled'. Idempotence is enforced
+// by the gateway — calling twice with the same key won't double-refund.
+app.post(
+  '/:id/admin/refund-and-cancel',
+  requireAuth,
+  requireRole('admin', 'superadmin'),
+  async (c) => {
+    try {
+      const user = { id: c.get('userId'), role: c.get('userRole') };
+      const bookingId = c.req.param('id');
+      const body = await c.req.json().catch(() => ({}));
+      const reason: string = String((body as any).reason || 'Отменено администратором с возвратом');
+
+      const booking = await getBooking(bookingId);
+      if (!booking) return apiError(c, 'NOT_FOUND', 'Букинг не найден');
+      if (booking.status === 'cancelled' || booking.status === 'completed') {
+        return apiError(c, 'CANNOT_CANCEL');
+      }
+
+      // Find every paid leg of this booking. booking_payments stores one
+      // row per deposit/final attempt with status=paid for completed ones
+      // and data.gateway / data.orderId for matching the payment session.
+      const { pool } = await import('./db-client.tsx');
+      // Self-heal in case checkout never created the table on a fresh
+      // deploy.
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS booking_payments (
+          id SERIAL PRIMARY KEY,
+          booking_id TEXT NOT NULL,
+          amount NUMERIC NOT NULL,
+          payment_type TEXT NOT NULL,
+          status TEXT NOT NULL,
+          data JSONB DEFAULT '{}'::jsonb,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_booking_payments_booking_id ON booking_payments(booking_id);
+      `).catch(() => {});
+      const { rows: payments } = await pool.query(
+        `SELECT id, amount, payment_type, status, data, created_at
+           FROM booking_payments
+          WHERE booking_id = $1 AND status = 'paid'
+          ORDER BY created_at ASC`,
+        [bookingId]
+      );
+
+      const refundResults: Array<{ paymentType: string; amount: number; refundId: string; status: string }> = [];
+      const refundErrors: string[] = [];
+
+      for (const pmt of payments) {
+        try {
+          const pmtData = (typeof pmt.data === 'string' ? JSON.parse(pmt.data) : (pmt.data || {})) as any;
+          const orderId = pmtData.orderId;
+          if (!orderId) {
+            refundErrors.push(`${pmt.payment_type}: нет orderId — refund невозможен`);
+            continue;
+          }
+          const session = await getPaymentSession(orderId) as any;
+          if (!session?.gatewayPaymentId) {
+            refundErrors.push(`${pmt.payment_type}: payment session не найден`);
+            continue;
+          }
+          if (session.gateway !== 'yookassa') {
+            // Stripe/T-Bank refund flow is separate — not wired here yet.
+            refundErrors.push(`${pmt.payment_type}: gateway ${session.gateway} не поддерживается auto-refund'ом`);
+            continue;
+          }
+          const { YooKassaGateway } = await import('./gateway-yookassa.tsx');
+          const yk = new YooKassaGateway();
+          const result = await yk.refund(session.gatewayPaymentId, Number(pmt.amount), {
+            description: `Возврат по букингу #${bookingId}: ${reason.slice(0, 100)}`,
+            idempotenceKey: `refund-booking-${bookingId}-${pmt.id}`,
+            metadata: { bookingId, paymentType: pmt.payment_type, refundedBy: user.id },
+          });
+          refundResults.push({
+            paymentType: pmt.payment_type,
+            amount: result.amount,
+            refundId: result.id,
+            status: result.status,
+          });
+          // Mark the payment as refunded
+          await pool.query(
+            `UPDATE booking_payments SET status = 'refunded',
+               data = jsonb_set(COALESCE(data, '{}'::jsonb), '{refundId}', to_jsonb($2::text))
+             WHERE id = $1`,
+            [pmt.id, result.id]
+          );
+        } catch (refundErr: any) {
+          refundErrors.push(`${pmt.payment_type}: ${refundErr?.message || refundErr}`);
+        }
+      }
+
+      // Flip booking status only if at least one refund actually succeeded
+      // or there was nothing to refund — never strand "cancelled but money
+      // still on the venue's side" without a clear audit row.
+      if (payments.length > 0 && refundResults.length === 0) {
+        return c.json({
+          success: false,
+          error: 'Ни один платёж не удалось возвратить',
+          details: refundErrors,
+        }, 502);
+      }
+
+      booking.status = 'cancelled';
+      booking.cancelledAt = new Date().toISOString();
+      booking.cancelledBy = user.id;
+      booking.cancelledByRole = user.role;
+      booking.cancellationReason = reason;
+      (booking as any).refunds = refundResults;
+      booking.updatedAt = new Date().toISOString();
+      await upsertBooking(bookingId, booking);
+
+      // Free the date in the performer's calendar
+      try { await bookingCalendarStore.del(booking.performerId); } catch {}
+
+      // Notify both parties
+      const partyMessage = `Букинг "${booking.eventTitle}" отменён администратором` +
+        (refundResults.length > 0
+          ? `. Возвращено: ${refundResults.reduce((s, r) => s + r.amount, 0)} ₽.`
+          : '.');
+      try {
+        await Promise.all([
+          sendNotification({
+            userId: booking.requesterId,
+            type: 'booking_cancelled',
+            title: 'Букинг отменён администратором',
+            message: partyMessage,
+            data: { bookingId, refunds: refundResults },
+          }),
+          sendNotification({
+            userId: booking.performerId,
+            type: 'booking_cancelled',
+            title: 'Букинг отменён администратором',
+            message: partyMessage,
+            data: { bookingId, refunds: refundResults },
+          }),
+        ]);
+      } catch (notifyErr) {
+        console.warn('[admin refund-and-cancel] notify failed:', notifyErr);
+      }
+
+      return c.json({
+        success: true,
+        booking,
+        refunds: refundResults,
+        warnings: refundErrors,
+      });
+    } catch (error: any) {
+      console.error('[admin refund-and-cancel] failed:', error);
+      return apiError(c, 'INTERNAL_ERROR');
+    }
+  }
+);
 
 export default app;
