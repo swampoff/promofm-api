@@ -105,7 +105,42 @@ const AI_CHART_SOURCES: AiChartSource[] = [
     gradient: 'from-orange-500 to-red-500',
     borderColor: 'border-orange-500/30',
   },
+  {
+    id: 'promofm_ai',
+    name: 'ПРОМО.МУЗЫКА AI',
+    url: 'https://promo-music.ru/charts/ai',
+    description: 'AI-треки артистов нашей платформы',
+    gradient: 'from-fuchsia-500 to-purple-600',
+    borderColor: 'border-fuchsia-500/30',
+  },
 ];
+
+// ── Internal AI source: pull from tracks where data.is_ai = true OR data.aiTool exists ──
+async function refreshInternalAiSource(): Promise<number> {
+  const r = await pool.query(
+    `SELECT id, title, artist_name, cover_url, audio_url, plays_count, likes_count,
+            data->>'aiTool' AS ai_tool, created_at
+     FROM tracks
+     WHERE moderation_status = 'published'
+       AND (data->>'is_ai' = 'true' OR data->>'isAi' = 'true' OR data->>'aiTool' IS NOT NULL OR data->>'aiSource' IS NOT NULL)
+       AND audio_url IS NOT NULL AND audio_url <> ''
+     ORDER BY (COALESCE(plays_count,0) * 0.1 + COALESCE(likes_count,0)) DESC
+     LIMIT 30`
+  );
+  const trks = r.rows.map((t, idx) => ({
+    title: t.title,
+    artist: t.artist_name,
+    plays: t.plays_count || 0,
+    likes: t.likes_count || 0,
+    cover: t.cover_url || null,
+    url: `https://promo-music.ru/tracks/${t.id}`,
+    audioUrl: t.audio_url || null,
+    position: idx + 1,
+    aiTool: t.ai_tool || null,
+  }));
+  await saveSourceData('promofm_ai', { sourceId: 'promofm_ai', sourceName: 'ПРОМО.МУЗЫКА AI', tracks: trks, lastUpdated: new Date().toISOString() });
+  return trks.length;
+}
 
 // ── Storage helpers ──────────────────────────────────────────────────────
 
@@ -242,6 +277,8 @@ app.post('/manual-update', requireAdminOrKey, async (c) => {
 
 // Compose PROMO.AI chart from all sources (weighted by plays + likes).
 async function rebuildCompositeChart() {
+  // Refresh internal source first (pulls fresh data from tracks)
+  try { await refreshInternalAiSource(); } catch (e) { console.warn('[ai-charts] internal refresh failed:', e); }
   const allEntries: any[] = [];
   for (const s of AI_CHART_SOURCES) {
     const stored = await getStoredSource(s.id);

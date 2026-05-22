@@ -20,4 +20,4 @@ jobs:
             npm ci --omit=dev
             sudo systemctl restart promofm-api
             sleep 2
-            curl -sf http://localhost:3000/server/api/health || echo "HEALTH CHECK FAILED"
+            curl -sf http://localhost:3000/server/health || echo "HEALTH CHECK FAILED"
