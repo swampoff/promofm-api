@@ -21,8 +21,7 @@ import fs from 'node:fs/promises';
 import {
   getDjProfile, upsertDjProfile,
   djCollaborationsStore, djEventsStore, djNotificationsStore, djSubscriptionsStore,
-  djMixesStore, djReviewsStore,
-  djPitchesStore, djCampaignsStore, djWithdrawalsStore, djTransactionsStore,
+  djCampaignsStore, djWithdrawalsStore, djTransactionsStore,
   getCoinBalance,
 } from './db.tsx';
 import { pool } from './db-client.tsx';
@@ -466,21 +465,32 @@ app.get('/coins/balance', requireAuth, async (c) => {
 app.get('/dashboard/stats', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
-    const [mixes, events, reviews] = await Promise.all([
-      djMixesStore.get(userId).catch(() => []),
-      djEventsStore.get(userId).catch(() => []),
-      djReviewsStore.get(userId).catch(() => []),
-    ]);
-    const mixesArr: any[] = Array.isArray(mixes) ? mixes : [];
-    const eventsArr: any[] = Array.isArray(events) ? events : [];
-    const reviewsArr: any[] = Array.isArray(reviews) ? reviews : [];
+    // dj_mixes / dj_reviews — row-per-record таблицы (не jsonbStore).
+    // Считаем агрегаты прямо в SQL.
+    const mixesAggPromise = pool.query(
+      `SELECT COUNT(*)::int AS cnt, COALESCE(SUM(plays_count), 0)::int AS plays
+         FROM dj_mixes WHERE dj_id = $1`,
+      [userId]
+    ).catch(() => ({ rows: [{ cnt: 0, plays: 0 }] }));
+    const reviewsAggPromise = pool.query(
+      `SELECT AVG(rating)::numeric(4,2) AS avg
+         FROM dj_reviews WHERE dj_id = $1 AND rating > 0`,
+      [userId]
+    ).catch(() => ({ rows: [{ avg: 0 }] }));
 
-    const totalPlays = mixesArr.reduce((s, m) => s + (m.plays || 0), 0);
+    const [mixesAgg, reviewsAgg, events] = await Promise.all([
+      mixesAggPromise,
+      reviewsAggPromise,
+      djEventsStore.get(userId).catch(() => []),
+    ]);
+    const mixesCount = Number(mixesAgg.rows?.[0]?.cnt || 0);
+    const totalPlays = Number(mixesAgg.rows?.[0]?.plays || 0);
+    const avgRating = Number(reviewsAgg.rows?.[0]?.avg || 0);
+    const eventsArr: any[] = Array.isArray(events) ? events : [];
+
     const completedEvents = eventsArr.filter((e: any) => e.status === 'completed');
     const upcomingEvents = eventsArr.filter((e: any) => e.status === 'upcoming' || e.status === 'confirmed');
     const totalEarnings = completedEvents.reduce((s, e: any) => s + (e.fee || 0), 0);
-    const ratingValues = reviewsArr.map((r: any) => Number(r.rating || 0)).filter((n: number) => n > 0);
-    const avgRating = ratingValues.length > 0 ? ratingValues.reduce((s: number, n: number) => s + n, 0) / ratingValues.length : 0;
 
     // followers — берём из mix-subscribers (best-effort), иначе 0
     let followers = 0;
@@ -497,7 +507,7 @@ app.get('/dashboard/stats', requireAuth, async (c) => {
     return c.json({
       success: true,
       data: {
-        mixesCount: mixesArr.length,
+        mixesCount,
         listens: totalPlays,
         bookingsCount: upcomingEvents.length,
         earnings: totalEarnings,
