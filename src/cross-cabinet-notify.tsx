@@ -39,7 +39,8 @@ export type NotificationType =
   | 'beat_purchased'
   | 'new_direct_message'
   | 'subscription_updated'
-  | 'subscription_payment';
+  | 'subscription_payment'
+  | 'payment_update';
 
 export type CabinetRole = 'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer';
 
@@ -264,6 +265,7 @@ function mapTypeToSSEEvent(type: NotificationType): string {
     admin_action: 'notification',
     subscription_updated: 'subscription_updated',
     subscription_payment: 'subscription_payment',
+    payment_update: 'payment_update',
   };
   return directMap[type] || 'notification';
 }

@@ -388,15 +388,24 @@ app.delete('/admin/radio-stations/:id', requireAuth, requireAdmin, async (c) => 
 app.get('/admin/submissions', requireAuth, requireAdmin, async (c) => {
   try {
     await ensureSchema();
+    // Ensure DJ columns even on instances that haven't run migration 006 yet
+    await pool.query(`
+      ALTER TABLE IF EXISTS pitching_submissions
+        ADD COLUMN IF NOT EXISTS actor_role TEXT NOT NULL DEFAULT 'artist',
+        ADD COLUMN IF NOT EXISTS mix_id TEXT
+    `).catch(() => {});
+
     const statusFilter = c.req.query('status'); // optional: pending | accepted | rejected
-    let sql = `SELECT id, user_id, submission_type, target_id, target_name, track_id, video_id,
-                       message, status, moderator_id, moderator_response, created_at, updated_at
+    const actorFilter = c.req.query('actor');   // optional: artist | dj
+    let sql = `SELECT id, user_id, submission_type, target_id, target_name, track_id, video_id, mix_id,
+                       message, status, moderator_id, moderator_response, actor_role,
+                       created_at, updated_at
                 FROM pitching_submissions`;
     const args: any[] = [];
-    if (statusFilter) {
-      sql += ` WHERE status = $1`;
-      args.push(statusFilter);
-    }
+    const conds: string[] = [];
+    if (statusFilter) { conds.push(`status = $${args.length + 1}`); args.push(statusFilter); }
+    if (actorFilter)  { conds.push(`actor_role = $${args.length + 1}`); args.push(actorFilter); }
+    if (conds.length) sql += ` WHERE ${conds.join(' AND ')}`;
     sql += ` ORDER BY created_at DESC LIMIT 500`;
     const r = await pool.query(sql, args);
     return c.json({ success: true, submissions: r.rows });
@@ -418,27 +427,33 @@ app.put('/admin/submissions/:id', requireAuth, requireAdmin, async (c) => {
       `UPDATE pitching_submissions
          SET status = $1, moderator_id = $2, moderator_response = $3, updated_at = NOW()
        WHERE id = $4
-       RETURNING user_id, target_name, submission_type`,
+       RETURNING user_id, target_name, submission_type, actor_role, mix_id`,
       [status, adminId, response || null, id]
     );
     if (r.rows.length === 0) return c.json({ success: false, error: 'Submission not found' }, 404);
 
-    // Notify the artist about the moderation decision.
+    // Notify the submitter (artist or dj) about the moderation decision
     const sub = r.rows[0];
+    const targetRole: 'artist' | 'dj' = sub.actor_role === 'dj' ? 'dj' : 'artist';
     try {
       await notifyCrossCabinet({
         targetUserId: sub.user_id,
-        targetRole: 'artist',
+        targetRole,
         sourceRole: 'admin',
         type: 'pitching_update',
         title: status === 'accepted' ? 'Заявка на питчинг принята' : 'Заявка на питчинг отклонена',
         message: response
-          ? `${sub.target_name}: ${response}`
-          : `${sub.target_name}`,
-        metadata: { submissionId: id, status, submissionType: sub.submission_type },
+          ? `${sub.target_name || ''}: ${response}`
+          : `${sub.target_name || ''}`,
+        metadata: {
+          submissionId: id, status,
+          submissionType: sub.submission_type,
+          actorRole: sub.actor_role || 'artist',
+          mixId: sub.mix_id || null,
+        },
       });
     } catch (e: any) {
-      console.warn('[pitching] artist notify failed:', e?.message);
+      console.warn('[pitching] submitter notify failed:', e?.message);
     }
 
     return c.json({ success: true });

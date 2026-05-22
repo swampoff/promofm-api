@@ -764,19 +764,60 @@ app.post('/finances/withdrawals', requireAuth, async (c) => {
 // PROMOTION — pitches & campaigns
 // ════════════════════════════════════════
 
-// GET /promotion/pitches — питчи миксов на радио/в заведения
+// GET /promotion/pitches — питчи миксов (на модерацию админа, как у артиста)
 app.get('/promotion/pitches', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
-    const list = (await djPitchesStore.get(userId)) || [];
-    return c.json({ success: true, data: Array.isArray(list) ? list : [] });
+    // Гарантируем, что таблица + колонки существуют (на случай первого запроса
+    // ещё до прогона миграции 006).
+    await pool.query(`
+      ALTER TABLE IF EXISTS pitching_submissions
+        ADD COLUMN IF NOT EXISTS actor_role TEXT NOT NULL DEFAULT 'artist',
+        ADD COLUMN IF NOT EXISTS mix_id TEXT
+    `).catch(() => {});
+
+    const { rows } = await pool.query(
+      `SELECT id, submission_type, target_id, target_name, mix_id, message,
+              status, moderator_response, created_at, updated_at
+         FROM pitching_submissions
+        WHERE user_id = $1 AND actor_role = 'dj'
+        ORDER BY created_at DESC
+        LIMIT 200`,
+      [userId]
+    );
+
+    // Денормализация имени микса — одним запросом по уникальным mix_id
+    const mixIds: string[] = Array.from(new Set(rows.map((r: any) => r.mix_id).filter(Boolean)));
+    const titleByMix: Record<string, string> = {};
+    if (mixIds.length > 0) {
+      const { rows: mixRows } = await pool.query(
+        `SELECT id, title FROM dj_mixes WHERE id = ANY($1::text[])`,
+        [mixIds]
+      );
+      mixRows.forEach((m: any) => { titleByMix[m.id] = m.title; });
+    }
+
+    const data = rows.map((r: any) => ({
+      id: r.id,
+      mixId: r.mix_id || '',
+      mixTitle: titleByMix[r.mix_id] || 'Микс',
+      targetType: r.submission_type === 'venue' ? 'venue' : 'radio',
+      targetId: r.target_id,
+      targetName: r.target_name || '',
+      message: r.message || '',
+      status: r.status,
+      moderatorResponse: r.moderator_response || '',
+      sentAt: r.created_at,
+      updatedAt: r.updated_at,
+    }));
+    return c.json({ success: true, data });
   } catch (error) {
     console.error('Error fetching DJ pitches:', error);
     return c.json({ success: true, data: [] });
   }
 });
 
-// POST /promotion/pitches — создать новый питч (отправить микс)
+// POST /promotion/pitches — создать питч (на модерацию админу)
 app.post('/promotion/pitches', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
@@ -789,56 +830,95 @@ app.post('/promotion/pitches', requireAuth, async (c) => {
     if (!mixId) return c.json({ success: false, error: 'mixId обязателен' }, 400);
     if (!targetId) return c.json({ success: false, error: 'targetId обязателен' }, 400);
 
-    // Денормализуем поля для UI (mix title, target name)
-    const djMixes = (await djMixesStore.get(userId)) || [];
-    const mix: any = (djMixes as any[]).find((m: any) => m.id === mixId);
+    await pool.query(`
+      ALTER TABLE IF EXISTS pitching_submissions
+        ADD COLUMN IF NOT EXISTS actor_role TEXT NOT NULL DEFAULT 'artist',
+        ADD COLUMN IF NOT EXISTS mix_id TEXT
+    `).catch(() => {});
 
+    // Lookup target name (radio_profiles / venue_profiles)
     let targetName = '';
     let targetListeners: number | undefined;
     try {
-      if (targetType === 'radio') {
-        const { rows } = await pool.query(
-          `SELECT data FROM radio_profiles WHERE user_id = $1 OR id = $1 LIMIT 1`,
-          [targetId]
-        );
-        targetName = rows[0]?.data?.station_name || rows[0]?.data?.stationName || rows[0]?.data?.name || 'Радиостанция';
-        targetListeners = rows[0]?.data?.listeners_count || rows[0]?.data?.listeners;
+      const table = targetType === 'venue' ? 'venue_profiles' : 'radio_profiles';
+      const { rows } = await pool.query(
+        `SELECT data FROM ${table} WHERE user_id = $1 OR id = $1 LIMIT 1`,
+        [targetId]
+      );
+      const d = rows[0]?.data || {};
+      if (targetType === 'venue') {
+        targetName = d.venue_name || d.venueName || d.name || 'Заведение';
       } else {
-        const { rows } = await pool.query(
-          `SELECT data FROM venue_profiles WHERE user_id = $1 OR id = $1 LIMIT 1`,
-          [targetId]
-        );
-        targetName = rows[0]?.data?.venue_name || rows[0]?.data?.venueName || rows[0]?.data?.name || 'Заведение';
+        targetName = d.station_name || d.stationName || d.name || 'Радиостанция';
+        targetListeners = d.listeners_count || d.listeners;
       }
     } catch (lookupErr) {
-      // лучше отправить питч с пустым названием, чем валиться
       console.warn('Pitch target lookup failed:', lookupErr);
     }
 
+    // Mix title for notifications
+    let mixTitle = 'Микс';
+    try {
+      const { rows: mr } = await pool.query(
+        `SELECT title FROM dj_mixes WHERE id = $1 AND dj_id = $2 LIMIT 1`,
+        [mixId, userId]
+      );
+      if (mr[0]?.title) mixTitle = mr[0].title;
+    } catch { /* ignore */ }
+
+    // Prevent dup pending submission
+    const dup = await pool.query(
+      `SELECT id FROM pitching_submissions
+        WHERE user_id = $1 AND target_id = $2 AND COALESCE(mix_id,'') = $3
+          AND status = 'pending' AND actor_role = 'dj'`,
+      [userId, targetId, mixId]
+    );
+    if (dup.rows.length > 0) {
+      return c.json({ success: false, error: 'Заявка уже отправлена и ждёт модерации' }, 409);
+    }
+
     const id = generateId('pitch');
+    await pool.query(
+      `INSERT INTO pitching_submissions
+         (id, user_id, submission_type, target_id, target_name, mix_id, message, status, actor_role)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'dj')`,
+      [id, userId, targetType, targetId, targetName, mixId, message || null]
+    );
+
+    // Notify admins
+    try {
+      const { notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
+      await notifyAllAdmins({
+        sourceRole: 'dj',
+        type: 'admin_action',
+        title: targetType === 'venue'
+          ? 'DJ: новая заявка в заведение'
+          : 'DJ: новая заявка на радио',
+        message: `«${mixTitle}» → «${targetName || targetId}»`,
+        link: 'pitching-moderation',
+        metadata: { submissionId: id, actorRole: 'dj', submissionType: targetType, targetId, mixId },
+      });
+    } catch (e: any) {
+      console.warn('[dj pitch] notifyAllAdmins failed:', e?.message);
+    }
+
     const now = new Date().toISOString();
-    const pitch = {
-      id,
-      djId: userId,
-      mixId,
-      mixTitle: mix?.title || 'Микс',
-      targetType,
-      targetId,
-      targetName,
-      targetListeners,
-      message,
-      status: 'pending' as const,
-      sentAt: now,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    const list = (await djPitchesStore.get(userId)) || [];
-    const arr = Array.isArray(list) ? list : [];
-    arr.unshift(pitch);
-    await djPitchesStore.set(userId, arr);
-
-    return c.json({ success: true, data: pitch }, 201);
+    return c.json({
+      success: true,
+      data: {
+        id,
+        mixId,
+        mixTitle,
+        targetType,
+        targetId,
+        targetName,
+        targetListeners,
+        message,
+        status: 'pending',
+        sentAt: now,
+        updatedAt: now,
+      },
+    }, 201);
   } catch (error) {
     console.error('Error creating DJ pitch:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);

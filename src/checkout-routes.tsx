@@ -1046,6 +1046,7 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
         }
         const newStatus = verified.status === 'succeeded' ? 'succeeded'
           : verified.status === 'canceled' ? 'canceled' : list[idx].status;
+        const prevStatus = list[idx].status;
         list[idx] = {
           ...list[idx],
           status: newStatus,
@@ -1055,6 +1056,33 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
         };
         await djWithdrawalsStore.set(djId, list);
         log.info({ payoutId, djId, status: newStatus }, 'payout_status_updated');
+
+        // Cross-cabinet push to the DJ (SSE + persisted notification)
+        if (newStatus !== prevStatus) {
+          try {
+            const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+            const w = list[idx];
+            await notifyCrossCabinet({
+              targetUserId: djId,
+              targetRole: 'dj',
+              sourceRole: 'admin',
+              type: 'payment_update',
+              title: newStatus === 'succeeded' ? 'Выплата успешна' : 'Выплата отменена',
+              message: newStatus === 'succeeded'
+                ? `${w.amount} ₽ → ${w.destinationLabel || w.method}`
+                : `${w.amount} ₽: выплата отклонена ЮКассой`,
+              metadata: {
+                withdrawalId: w.id,
+                yooPayoutId: payoutId,
+                status: newStatus,
+                amount: w.amount,
+                method: w.method,
+              },
+            });
+          } catch (notifyErr) {
+            log.warn({ err: notifyErr, djId, payoutId }, 'payout_notify_failed');
+          }
+        }
         return c.json({ success: true });
       } catch (payoutErr) {
         log.error({ err: payoutErr }, 'payout_webhook_failed');
