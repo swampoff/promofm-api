@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireOwner } from './auth-middleware.tsx';
 
 const notifications = new Hono();
 
@@ -51,7 +51,7 @@ export interface NotificationSettings {
 }
 
 // Получить все уведомления пользователя
-notifications.get('/user/:userId', requireAuth, async (c) => {
+notifications.get('/user/:userId', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const notifs = await db.getNotificationsByUser(userId);
@@ -72,7 +72,7 @@ notifications.get('/user/:userId', requireAuth, async (c) => {
 });
 
 // Получить настройки уведомлений
-notifications.get('/settings/:userId', requireAuth, async (c) => {
+notifications.get('/settings/:userId', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const settings = await db.getNotificationSettings(userId);
@@ -103,7 +103,7 @@ notifications.get('/settings/:userId', requireAuth, async (c) => {
 });
 
 // Обновить настройки уведомлений
-notifications.put('/settings/:userId', requireAuth, async (c) => {
+notifications.put('/settings/:userId', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const body = await c.req.json();

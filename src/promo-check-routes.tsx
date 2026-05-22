@@ -6,7 +6,7 @@
 import { Hono } from "hono";
 import { spawn } from "child_process";
 import { pool } from "./db-client.tsx";
-import { requireAuth } from "./auth-middleware.tsx";
+import { requireAuth, requireOwner } from "./auth-middleware.tsx";
 
 const app = new Hono();
 
@@ -72,7 +72,7 @@ app.get("/stats/:trackId", requireAuth, async (c) => {
 
 // ─── All tracks for an artist ─────────────────────────────────────────────────
 
-app.get("/artist/:artistId", requireAuth, async (c) => {
+app.get("/artist/:artistId", requireAuth, requireOwner("artistId"), async (c) => {
   const { artistId } = c.req.param();
   const days = Number(c.req.query("days") || "30");
 

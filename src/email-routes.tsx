@@ -5,7 +5,7 @@
 
 import { Hono } from 'hono';
 import { publishEmailPrefsStore, emailHistoryStore, emailTemplatesStore } from './db.tsx';
-import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin, requireOwner } from './auth-middleware.tsx';
 import { smtpSendEmail } from './smtp-sender.tsx';
 
 const app = new Hono();
@@ -20,7 +20,7 @@ const app = new Hono();
  * GET /subscriptions/:userId
  * Получить настройки email-подписок пользователя
  */
-app.get('/subscriptions/:userId', requireAuth, async (c) => {
+app.get('/subscriptions/:userId', requireAuth, requireOwner('userId'), async (c) => {
   const userId = c.req.param('userId');
   
   try {
@@ -72,7 +72,7 @@ app.get('/subscriptions/:userId', requireAuth, async (c) => {
  * PUT /subscriptions/:userId
  * Обновить настройки email-подписок
  */
-app.put('/subscriptions/:userId', requireAuth, async (c) => {
+app.put('/subscriptions/:userId', requireAuth, requireOwner('userId'), async (c) => {
   const userId = c.req.param('userId');
   
   try {
@@ -106,7 +106,7 @@ app.put('/subscriptions/:userId', requireAuth, async (c) => {
  * GET /history/:userId
  * Получить историю отправленных email
  */
-app.get('/history/:userId', requireAuth, async (c) => {
+app.get('/history/:userId', requireAuth, requireOwner('userId'), async (c) => {
   const userId = c.req.param('userId');
   
   try {
@@ -334,7 +334,7 @@ app.get('/templates/:templateId', requireAuth, async (c) => {
  * GET /stats/:userId
  * ��олучить статистику email
  */
-app.get('/stats/:userId', requireAuth, async (c) => {
+app.get('/stats/:userId', requireAuth, requireOwner('userId'), async (c) => {
   const userId = c.req.param('userId');
   
   try {

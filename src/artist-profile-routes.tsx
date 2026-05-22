@@ -7,7 +7,7 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsListProfiles } from './vps-userdata.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireOwner } from './auth-middleware.tsx';
 
 const app = new Hono();
 
@@ -280,7 +280,7 @@ app.get('/profile/:artistId', async (c) => {
  * PUT /profile/:artistId
  * Обновить профиль с валидацией полей
  */
-app.put('/profile/:artistId', requireAuth, async (c) => {
+app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   const artistId = c.req.param('artistId');
   console.log(`[ArtistProfile] PUT ${artistId}`);
 

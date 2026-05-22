@@ -15,7 +15,7 @@ const app = new Hono();
 // Allow-list of trusted origins — wildcard '*' previously let any site read
 // authenticated event streams, so a malicious page could subscribe a victim's
 // SSE channel and intercept their notifications.
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireOwner } from './auth-middleware.tsx';
 
 const SSE_ALLOWED_ORIGINS = new Set([
   'https://promo-music.ru',
@@ -69,7 +69,7 @@ export function emitSSE(userId: string, event: { type: string; data: any }) {
 }
 
 // SSE Stream endpoint
-app.get('/stream/:userId', requireAuth, (c) => {
+app.get('/stream/:userId', requireAuth, requireOwner('userId'), (c) => {
   const userId = c.req.param('userId');
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let controllerRef: ReadableStreamDefaultController | null = null;

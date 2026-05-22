@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireOwner } from './auth-middleware.tsx';
 import {
   upsertNotification,
   getNotification,
@@ -24,7 +24,7 @@ const app = new Hono();
  * GET /notifications/user/:userId
  * Получить все уведомления пользователя
  */
-app.get('/user/:userId', requireAuth, async (c) => {
+app.get('/user/:userId', requireAuth, requireOwner('userId'), async (c) => {
   const userId = c.req.param('userId');
 
   try {

@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireOwner } from './auth-middleware.tsx';
 import {
   getAllNotifications,
   getUnreadCount,
@@ -15,7 +15,7 @@ import {
 const app = new Hono();
 
 // GET /user/:userId — all notifications (with limit)
-app.get('/user/:userId', requireAuth, async (c) => {
+app.get('/user/:userId', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const limit = parseInt(c.req.query('limit') || '30');
@@ -27,7 +27,7 @@ app.get('/user/:userId', requireAuth, async (c) => {
 });
 
 // GET /user/:userId/unread-count
-app.get('/user/:userId/unread-count', requireAuth, async (c) => {
+app.get('/user/:userId/unread-count', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const count = await getUnreadCount(userId);
@@ -38,7 +38,7 @@ app.get('/user/:userId/unread-count', requireAuth, async (c) => {
 });
 
 // POST /user/:userId/read/:notifId — mark one as read
-app.post('/user/:userId/read/:notifId', requireAuth, async (c) => {
+app.post('/user/:userId/read/:notifId', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const notifId = c.req.param('notifId');
@@ -50,7 +50,7 @@ app.post('/user/:userId/read/:notifId', requireAuth, async (c) => {
 });
 
 // POST /user/:userId/read-all — mark all as read
-app.post('/user/:userId/read-all', requireAuth, async (c) => {
+app.post('/user/:userId/read-all', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const count = await markAllAsRead(userId);
