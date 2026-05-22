@@ -86,6 +86,8 @@ async function ensureSchema(): Promise<void> {
         target_name TEXT,
         track_id TEXT,
         video_id TEXT,
+        mix_id TEXT,
+        actor_role TEXT NOT NULL DEFAULT 'artist',
         message TEXT,
         status TEXT NOT NULL DEFAULT 'pending',
         moderator_id TEXT,
@@ -93,7 +95,13 @@ async function ensureSchema(): Promise<void> {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      -- Self-heal for existing deployments that pre-date the DJ flow.
+      ALTER TABLE pitching_submissions
+        ADD COLUMN IF NOT EXISTS mix_id TEXT,
+        ADD COLUMN IF NOT EXISTS actor_role TEXT NOT NULL DEFAULT 'artist';
       CREATE INDEX IF NOT EXISTS idx_pitching_submissions_user ON pitching_submissions(user_id);
+      CREATE INDEX IF NOT EXISTS idx_pitching_submissions_actor_role ON pitching_submissions(actor_role);
+      CREATE INDEX IF NOT EXISTS idx_pitching_submissions_mix ON pitching_submissions(mix_id);
       CREATE INDEX IF NOT EXISTS idx_pitching_submissions_status ON pitching_submissions(status);
       CREATE INDEX IF NOT EXISTS idx_pitching_submissions_target ON pitching_submissions(target_id);
     `);

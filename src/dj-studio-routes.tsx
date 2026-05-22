@@ -44,6 +44,48 @@ function generateId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
+// Self-heal dj_mixes shape — CREATE TABLE on fresh deploys, ADD COLUMN
+// IF NOT EXISTS for existing deployments. Cheap idempotent SQL, called
+// from /mixes endpoints so first request after deploy doesn't 500.
+let djMixesSchemaReady: Promise<void> | null = null;
+function ensureDjMixesSchema(): Promise<void> {
+  if (djMixesSchemaReady) return djMixesSchemaReady;
+  djMixesSchemaReady = (async () => {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS dj_mixes (
+          id TEXT PRIMARY KEY,
+          dj_id TEXT NOT NULL,
+          title TEXT,
+          genre TEXT,
+          duration INTEGER DEFAULT 0,
+          plays_count INTEGER DEFAULT 0,
+          audio_url TEXT,
+          cover_url TEXT,
+          description TEXT,
+          bpm_range TEXT,
+          status TEXT DEFAULT 'published',
+          data JSONB DEFAULT '{}'::jsonb,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        ALTER TABLE dj_mixes
+          ADD COLUMN IF NOT EXISTS audio_url TEXT,
+          ADD COLUMN IF NOT EXISTS cover_url TEXT,
+          ADD COLUMN IF NOT EXISTS description TEXT,
+          ADD COLUMN IF NOT EXISTS bpm_range TEXT,
+          ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'published';
+        CREATE INDEX IF NOT EXISTS idx_dj_mixes_dj_id ON dj_mixes(dj_id);
+        CREATE INDEX IF NOT EXISTS idx_dj_mixes_created_at ON dj_mixes(created_at DESC);
+      `);
+    } catch (err) {
+      console.error('[dj-studio] ensureDjMixesSchema failed:', err);
+      djMixesSchemaReady = null; // allow retry on next request
+    }
+  })();
+  return djMixesSchemaReady;
+}
+
 // ════════════════════════════════════════
 // PROFILE
 // ════════════════════════════════════════
@@ -465,6 +507,7 @@ app.get('/coins/balance', requireAuth, async (c) => {
 app.get('/dashboard/stats', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
+    await ensureDjMixesSchema();
     // dj_mixes / dj_reviews — row-per-record таблицы (не jsonbStore).
     // Считаем агрегаты прямо в SQL.
     const mixesAggPromise = pool.query(
@@ -1122,6 +1165,7 @@ app.post('/portfolio/upload', requireAuth, async (c) => {
 app.get('/mixes', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
+    await ensureDjMixesSchema();
     const { rows } = await pool.query(
       `SELECT id, dj_id, title, genre, duration, plays_count, audio_url, cover_url,
               description, bpm_range, status, data, created_at, updated_at
@@ -1160,6 +1204,7 @@ app.get('/mixes', requireAuth, async (c) => {
 app.post('/mixes', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
+    await ensureDjMixesSchema();
     const body = await c.req.parseBody();
     const audio = body.audio as File | undefined;
     const cover = body.cover as File | undefined;
