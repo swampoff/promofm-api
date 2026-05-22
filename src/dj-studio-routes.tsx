@@ -643,44 +643,109 @@ app.get('/finances/withdrawals', requireAuth, async (c) => {
   }
 });
 
-// POST /finances/withdrawals — запрос вывода
+// POST /finances/withdrawals — запрос вывода (создаёт YooKassa Payout)
 app.post('/finances/withdrawals', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
     const amount = Number(body.amount || 0);
-    const method = String(body.method || 'bank');
+    const method = String(body.method || 'sbp');
 
     if (!(amount >= 500)) {
       return c.json({ success: false, error: 'Минимальная сумма вывода — 500 ₽' }, 400);
     }
-    if (!['bank', 'yoomoney', 'card'].includes(method)) {
+    if (!['sbp', 'yoomoney', 'card'].includes(method)) {
       return c.json({ success: false, error: 'Недопустимый способ вывода' }, 400);
     }
 
-    // Проверим доступный баланс
+    // Валидация реквизитов по методу
+    let destination: any;
+    let destinationLabel = '';
+    if (method === 'sbp') {
+      const phone = String(body.phone || '').trim();
+      if (!/^\+?\d{10,15}$/.test(phone.replace(/\s/g, ''))) {
+        return c.json({ success: false, error: 'Укажите телефон в формате +7…' }, 400);
+      }
+      destination = { type: 'sbp', phone };
+      destinationLabel = `СБП ${phone.replace(/(\+\d{1,3})\d+(\d{4})/, '$1***$2')}`;
+    } else if (method === 'yoomoney') {
+      const account = String(body.account || '').replace(/\D/g, '');
+      if (!/^\d{11,20}$/.test(account)) {
+        return c.json({ success: false, error: 'Укажите номер кошелька ЮMoney (только цифры)' }, 400);
+      }
+      destination = { type: 'yoo_money', account };
+      destinationLabel = `ЮMoney …${account.slice(-4)}`;
+    } else {
+      // card — требует payoutToken (PCI-токен от виджета ЮКассы на фронте)
+      const payoutToken = String(body.payoutToken || '');
+      const cardLast4 = String(body.cardLast4 || '').slice(0, 4);
+      if (!payoutToken) {
+        return c.json({
+          success: false,
+          error: 'Для вывода на карту нужен payoutToken (токенизация через ЮКасса-виджет)',
+        }, 400);
+      }
+      destination = { type: 'bank_card', payoutToken };
+      destinationLabel = cardLast4 ? `Карта …${cardLast4}` : 'Карта';
+    }
+
+    // Проверим доступный баланс — резервируем под все pending/succeeded заявки
     const events = (await djEventsStore.get(userId)) || [];
     const withdrawalsExisting = (await djWithdrawalsStore.get(userId)) || [];
     const totalEarned = (events as any[])
       .filter((e: any) => e.status === 'completed')
       .reduce((s: number, e: any) => s + (e.fee || 0), 0);
-    const totalAlreadyWithdrawn = (withdrawalsExisting as any[])
-      .filter((w: any) => w.status !== 'rejected')
+    const reservedStatuses = new Set(['pending', 'succeeded', 'paid', 'completed']);
+    const totalReserved = (withdrawalsExisting as any[])
+      .filter((w: any) => reservedStatuses.has(w.status))
       .reduce((s: number, w: any) => s + (w.amount || 0), 0);
-    const available = Math.max(0, totalEarned - totalAlreadyWithdrawn);
+    const available = Math.max(0, totalEarned - totalReserved);
     if (amount > available) {
       return c.json({ success: false, error: `Недостаточно средств. Доступно: ${available} ₽` }, 400);
     }
 
     const id = generateId('wd');
     const now = new Date().toISOString();
+
+    // Сначала пробуем создать выплату — только при успехе записываем в БД
+    let payoutId = '';
+    let payoutStatus: 'pending' | 'succeeded' | 'canceled' = 'pending';
+    try {
+      const { createYooKassaPayout } = await import('./gateway-yookassa-payouts.tsx');
+      const result = await createYooKassaPayout({
+        amountRub: amount,
+        destination,
+        description: `Выплата DJ ${userId}`,
+        idempotenceKey: id,
+        metadata: { withdrawal_id: id, dj_id: userId },
+      });
+      payoutId = result.id;
+      payoutStatus = (result.status as any) === 'succeeded' ? 'succeeded'
+        : (result.status as any) === 'canceled' ? 'canceled' : 'pending';
+    } catch (payoutErr: any) {
+      console.error('YooKassa payout failed:', payoutErr);
+      // Логируем failed-заявку — DJ должен видеть, что произошло
+      const failed = {
+        id, djId: userId, amount, method,
+        destinationLabel,
+        status: 'failed' as const,
+        requestedAt: now, createdAt: now,
+        error: payoutErr?.message || 'Не удалось создать выплату',
+      };
+      const list = Array.isArray(withdrawalsExisting) ? withdrawalsExisting : [];
+      list.unshift(failed);
+      await djWithdrawalsStore.set(userId, list);
+      return c.json({ success: false, error: failed.error }, 502);
+    }
+
     const withdrawal = {
       id,
       djId: userId,
       amount,
       method,
-      details: body.details || null,
-      status: 'pending',
+      destinationLabel,
+      status: payoutStatus,
+      yooPayoutId: payoutId,
       requestedAt: now,
       createdAt: now,
     };

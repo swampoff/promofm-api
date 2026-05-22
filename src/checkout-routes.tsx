@@ -1019,6 +1019,49 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
   try {
     log.info({ gateway: 'yookassa', bodyPreview: JSON.stringify(body).slice(0, 300) }, 'webhook_received');
 
+    // ── Payouts: payout.succeeded / payout.canceled ──
+    const event: string = body?.event || '';
+    if (event.startsWith('payout.')) {
+      try {
+        const { fetchYooKassaPayout } = await import('./gateway-yookassa-payouts.tsx');
+        const { djWithdrawalsStore } = await import('./db.tsx');
+        const payoutId: string = body?.object?.id || '';
+        const withdrawalId: string = body?.object?.metadata?.withdrawal_id || '';
+        const djId: string = body?.object?.metadata?.dj_id || '';
+        if (!payoutId || !djId) {
+          log.warn({ event, payoutId, djId }, 'payout_webhook_missing_metadata');
+          return c.json({ success: true, message: 'No metadata — ignored' });
+        }
+        // Подтверждаем статус через API (webhook без подписи)
+        const verified = await fetchYooKassaPayout(payoutId);
+        if (!verified) {
+          log.warn({ payoutId }, 'payout_verification_failed');
+          return c.json({ success: false, error: 'Verification failed' }, 400);
+        }
+        const list: any[] = (await djWithdrawalsStore.get(djId)) || [];
+        const idx = list.findIndex((w: any) => w.yooPayoutId === payoutId || w.id === withdrawalId);
+        if (idx === -1) {
+          log.warn({ payoutId, djId }, 'payout_withdrawal_not_found');
+          return c.json({ success: true, message: 'Withdrawal not found — acknowledged' });
+        }
+        const newStatus = verified.status === 'succeeded' ? 'succeeded'
+          : verified.status === 'canceled' ? 'canceled' : list[idx].status;
+        list[idx] = {
+          ...list[idx],
+          status: newStatus,
+          ...(newStatus === 'succeeded' ? { paidAt: new Date().toISOString() } : {}),
+          ...(newStatus === 'canceled' ? { canceledAt: new Date().toISOString() } : {}),
+          updatedAt: new Date().toISOString(),
+        };
+        await djWithdrawalsStore.set(djId, list);
+        log.info({ payoutId, djId, status: newStatus }, 'payout_status_updated');
+        return c.json({ success: true });
+      } catch (payoutErr) {
+        log.error({ err: payoutErr }, 'payout_webhook_failed');
+        return c.json({ success: false, error: 'Payout processing failed' }, 500);
+      }
+    }
+
     // Log raw webhook
     const webhookOrderId = body?.object?.metadata?.order_id;
     if (webhookOrderId) {
