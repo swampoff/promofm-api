@@ -356,31 +356,6 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
-  // ─── Fulfill pitching_bundle ───
-  //
-  // Pitching submissions live in `pending_payment` until YooKassa confirms
-  // payment for the order they belong to. On confirmation, flip them to
-  // `pending` (the admin moderation queue) and fan out notifyAllAdmins per
-  // submission. See finalizePitchingBundle() in pitching-routes.tsx — it
-  // owns the SQL + notification logic so this webhook stays a thin caller.
-  if (session.metadata?.itemType === 'pitching_bundle') {
-    try {
-      const submissionIds = String(session.metadata?.submission_ids || '')
-        .split(',')
-        .filter(Boolean);
-      if (submissionIds.length > 0) {
-        const { finalizePitchingBundle } = await import('./pitching-routes.tsx');
-        await finalizePitchingBundle(session.orderId, submissionIds);
-        log.info(
-          { orderId: session.orderId, count: submissionIds.length, amount: session.amount },
-          'pitching_bundle_fulfilled',
-        );
-      }
-    } catch (err) {
-      log.error({ err, orderId: session.orderId }, 'pitching_bundle_fulfillment_error');
-    }
-  }
-
   // ─── Fulfill track_test payment ───
   if (session.metadata?.type === 'track_test' && session.metadata?.requestId) {
     try {
@@ -1059,6 +1034,77 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
   }
   try {
     log.info({ gateway: 'yookassa', bodyPreview: JSON.stringify(body).slice(0, 300) }, 'webhook_received');
+
+    // ── Payouts: payout.succeeded / payout.canceled ──
+    const event: string = body?.event || '';
+    if (event.startsWith('payout.')) {
+      try {
+        const { fetchYooKassaPayout } = await import('./gateway-yookassa-payouts.tsx');
+        const { djWithdrawalsStore } = await import('./db.tsx');
+        const payoutId: string = body?.object?.id || '';
+        const withdrawalId: string = body?.object?.metadata?.withdrawal_id || '';
+        const djId: string = body?.object?.metadata?.dj_id || '';
+        if (!payoutId || !djId) {
+          log.warn({ event, payoutId, djId }, 'payout_webhook_missing_metadata');
+          return c.json({ success: true, message: 'No metadata — ignored' });
+        }
+        // Подтверждаем статус через API (webhook без подписи)
+        const verified = await fetchYooKassaPayout(payoutId);
+        if (!verified) {
+          log.warn({ payoutId }, 'payout_verification_failed');
+          return c.json({ success: false, error: 'Verification failed' }, 400);
+        }
+        const list: any[] = (await djWithdrawalsStore.get(djId)) || [];
+        const idx = list.findIndex((w: any) => w.yooPayoutId === payoutId || w.id === withdrawalId);
+        if (idx === -1) {
+          log.warn({ payoutId, djId }, 'payout_withdrawal_not_found');
+          return c.json({ success: true, message: 'Withdrawal not found — acknowledged' });
+        }
+        const newStatus = verified.status === 'succeeded' ? 'succeeded'
+          : verified.status === 'canceled' ? 'canceled' : list[idx].status;
+        const prevStatus = list[idx].status;
+        list[idx] = {
+          ...list[idx],
+          status: newStatus,
+          ...(newStatus === 'succeeded' ? { paidAt: new Date().toISOString() } : {}),
+          ...(newStatus === 'canceled' ? { canceledAt: new Date().toISOString() } : {}),
+          updatedAt: new Date().toISOString(),
+        };
+        await djWithdrawalsStore.set(djId, list);
+        log.info({ payoutId, djId, status: newStatus }, 'payout_status_updated');
+
+        // Cross-cabinet push to the DJ (SSE + persisted notification)
+        if (newStatus !== prevStatus) {
+          try {
+            const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+            const w = list[idx];
+            await notifyCrossCabinet({
+              targetUserId: djId,
+              targetRole: 'dj',
+              sourceRole: 'admin',
+              type: 'payment_update',
+              title: newStatus === 'succeeded' ? 'Выплата успешна' : 'Выплата отменена',
+              message: newStatus === 'succeeded'
+                ? `${w.amount} ₽ → ${w.destinationLabel || w.method}`
+                : `${w.amount} ₽: выплата отклонена ЮКассой`,
+              metadata: {
+                withdrawalId: w.id,
+                yooPayoutId: payoutId,
+                status: newStatus,
+                amount: w.amount,
+                method: w.method,
+              },
+            });
+          } catch (notifyErr) {
+            log.warn({ err: notifyErr, djId, payoutId }, 'payout_notify_failed');
+          }
+        }
+        return c.json({ success: true });
+      } catch (payoutErr) {
+        log.error({ err: payoutErr }, 'payout_webhook_failed');
+        return c.json({ success: false, error: 'Payout processing failed' }, 500);
+      }
+    }
 
     // Log raw webhook
     const webhookOrderId = body?.object?.metadata?.order_id;

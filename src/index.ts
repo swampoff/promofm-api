@@ -271,6 +271,29 @@ app.get('/server/uploads/venue-content/*', async (c) => {
   return new Response(data, { headers: { 'Content-Type': types[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' } });
 });
 
+// DJ cabinet uploads: avatars, covers, mixes, mix covers, videos, portfolio
+const DJ_UPLOAD_SUBDIRS = ['dj-avatars', 'dj-covers', 'dj-mixes', 'dj-mix-covers', 'dj-videos', 'dj-portfolio'];
+const MIME_BY_EXT: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif',
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/mp4',
+};
+for (const subdir of DJ_UPLOAD_SUBDIRS) {
+  app.get(`/server/uploads/${subdir}/*`, async (c) => {
+    const filename = decodeURIComponent(c.req.path.replace(`/server/uploads/${subdir}/`, ''));
+    if (filename.includes('..') || filename.includes('/')) return c.text('Forbidden', 403);
+    const filePath = `/opt/promofm-api/uploads/${subdir}/${filename}`;
+    if (!existsSync(filePath)) return c.text('Not found', 404);
+    const file = readFileSync(filePath);
+    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    c.header('Content-Type', MIME_BY_EXT[ext] || 'application/octet-stream');
+    c.header('Accept-Ranges', 'bytes');
+    c.header('Cache-Control', 'public, max-age=31536000');
+    c.header('Access-Control-Allow-Origin', '*');
+    return c.body(file);
+  });
+}
+
 app.route('/server/auth', authRoutes);
 app.route("/server/api/auth", authRoutes);  // compat alias
 app.route('/server/api/concerts', concertsRoutes);
