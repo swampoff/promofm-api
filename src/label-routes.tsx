@@ -268,6 +268,49 @@ app.get('/profile/by-slug/:slug', async (c) => {
   }
 });
 
+/**
+ * GET /label/profile/by-slug/:slug/roster — PUBLIC roster snapshot for the
+ * label's public page (no auth). Returns the same shape as the
+ * authenticated /roster but excludes nothing — managed and linked alike are
+ * visible to anyone browsing the label.
+ */
+app.get('/profile/by-slug/:slug/roster', async (c) => {
+  try {
+    await ensureSchema();
+    const slug = c.req.param('slug');
+    const lp = await pool.query(`SELECT id FROM label_profiles WHERE slug = $1`, [slug]);
+    if (lp.rows.length === 0) {
+      return c.json({ success: false, error: 'Label not found' }, 404);
+    }
+    const labelId = lp.rows[0].id;
+    const r = await pool.query(
+      `SELECT
+         ap.id            AS artist_profile_id,
+         ap.user_id       AS artist_user_id,
+         ap.slug          AS slug,
+         ap.artist_name   AS display_name,
+         ap.avatar_url    AS avatar_url,
+         ap.city          AS city,
+         ap.is_verified   AS is_verified,
+         ap.is_managed    AS is_managed,
+         CASE
+           WHEN ap.managed_by_label_id = $1 THEN 'managed'
+           WHEN ap.label_id = $1 THEN 'linked'
+           ELSE 'unknown'
+         END              AS kind,
+         ap.total_plays   AS total_plays,
+         ap.total_followers AS total_followers
+       FROM artist_profiles ap
+       WHERE ap.managed_by_label_id = $1 OR ap.label_id = $1
+       ORDER BY ap.total_plays DESC NULLS LAST, ap.artist_name ASC`,
+      [labelId]
+    );
+    return c.json({ success: true, roster: r.rows });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 // ── Roster ────────────────────────────────────────────────────────────────────
 
 app.get('/roster', requireAuth, async (c) => {
