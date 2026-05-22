@@ -860,7 +860,9 @@ app.post('/promotion/pitches', requireAuth, async (c) => {
         targetName = d.venue_name || d.venueName || d.name || 'Заведение';
       } else {
         targetName = d.station_name || d.stationName || d.name || 'Радиостанция';
-        targetListeners = d.listeners_count || d.listeners;
+        const raw = d.listeners_count ?? d.listeners;
+        const n = typeof raw === 'number' ? raw : parseInt(String(raw || '').replace(/\D/g, ''), 10);
+        if (Number.isFinite(n) && n > 0) targetListeners = n;
       }
     } catch (lookupErr) {
       console.warn('Pitch target lookup failed:', lookupErr);
@@ -1239,6 +1241,11 @@ app.get('/promotion/targets', requireAuth, async (c) => {
     const table = type === 'venue' ? 'venue_profiles' : 'radio_profiles';
     const { rows } = await pool.query(`SELECT user_id, data FROM ${table} LIMIT $1`, [limit]);
 
+    const toNum = (v: any): number | null => {
+      if (v == null || v === '') return null;
+      const n = typeof v === 'number' ? v : parseInt(String(v).replace(/\D/g, ''), 10);
+      return Number.isFinite(n) ? n : null;
+    };
     const targets = (rows || []).map((r: any) => {
       const d = r.data || {};
       if (type === 'radio') {
@@ -1246,9 +1253,9 @@ app.get('/promotion/targets', requireAuth, async (c) => {
           id: r.user_id,
           name: d.station_name || d.stationName || d.name || 'Радиостанция',
           city: d.city || '',
-          genres: d.genres || [],
-          listeners: d.listeners_count || d.listeners || null,
-          logo: d.logo_url || d.logoUrl || null,
+          genres: Array.isArray(d.genres) ? d.genres : [],
+          listeners: toNum(d.listeners_count ?? d.listeners),
+          logo: d.logo_url || d.logoUrl || d.avatarUrl || null,
         };
       }
       return {
@@ -1256,8 +1263,8 @@ app.get('/promotion/targets', requireAuth, async (c) => {
         name: d.venue_name || d.venueName || d.name || 'Заведение',
         city: d.city || '',
         type: d.venue_type || d.type || '',
-        capacity: d.capacity || null,
-        logo: d.logo_url || d.logoUrl || null,
+        capacity: toNum(d.capacity),
+        logo: d.logo_url || d.logoUrl || d.avatarUrl || null,
       };
     });
 
