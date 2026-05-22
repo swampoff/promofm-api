@@ -29,6 +29,7 @@ interface ArtistProfile {
   fullName: string;
   bio: string;
   avatarUrl: string;
+  coverUrl: string;
   location: string;
   city: string;
   country: string;
@@ -53,7 +54,7 @@ interface ArtistProfile {
 
 // Допустимые поля для обновления через PUT
 const ALLOWED_UPDATE_FIELDS = new Set([
-  'fullName', 'bio', 'avatarUrl', 'location', 'city', 'country',
+  'fullName', 'bio', 'avatarUrl', 'coverUrl', 'location', 'city', 'country',
   'website', 'phone', 'genres', 'label', 'manager', 'bookingEmail',
   'careerStart', 'languages', 'username', 'email', 'socials',
 ]);
@@ -70,6 +71,7 @@ function makeProfile(overrides: Partial<ArtistProfile> & { id: string; email: st
     username: '',
     bio: '',
     avatarUrl: '',
+    coverUrl: '',
     location: '',
     city: '',
     country: 'Россия',
@@ -249,6 +251,7 @@ app.get('/profile/:artistId', async (c) => {
           fullName: apRow.artist_name || '',
           bio: apRow.bio || '',
           avatarUrl: apRow.avatar_url || '',
+          coverUrl: apRow.data?.coverUrl || '',
           city: apRow.city || '',
           country: apRow.country || 'Россия',
           genres: apRow.sub_genres || (apRow.genre ? [apRow.genre] : []),

@@ -28,12 +28,15 @@ export async function vpsGetProfile(userId: string): Promise<Record<string, unkn
     );
     if (res.rows.length === 0) return null;
     const row = res.rows[0];
+    const extra = (row.extraData && typeof row.extraData === 'object') ? row.extraData as Record<string, unknown> : {};
     return {
       userId: row.userId,
       email: row.email,
       name: row.name || row.displayName || '',
       role: row.role || 'artist',
       avatar: row.avatar || null,
+      avatarUrl: row.avatar || null,
+      coverUrl: (extra.coverUrl as string) || '',
       isEmailVerified: row.isEmailVerified || false,
       accountStatus: row.accountStatus || 'active',
       bio: row.bio || '',
@@ -91,6 +94,12 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
       );
     }
 
+    // Build jsonb blob: coverUrl + any extraData (merged non-destructively into profiles.data)
+    const dataBlob: Record<string, unknown> = {
+      ...((data.extraData && typeof data.extraData === 'object') ? data.extraData as Record<string, unknown> : {}),
+    };
+    if (typeof data.coverUrl === 'string') dataBlob.coverUrl = data.coverUrl;
+
     // Upsert profiles table (for genre, city, social_links, extra data)
     await rlsQuery(
       `INSERT INTO profiles (user_id, artist_name, genre, city, bio, avatar_url, social_links, data, updated_at)
@@ -102,7 +111,7 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
          bio = COALESCE(EXCLUDED.bio, profiles.bio),
          avatar_url = COALESCE(EXCLUDED.avatar_url, profiles.avatar_url),
          social_links = COALESCE(EXCLUDED.social_links, profiles.social_links),
-         data = COALESCE(EXCLUDED.data, profiles.data),
+         data = COALESCE(profiles.data, '{}'::jsonb) || EXCLUDED.data,
          updated_at = NOW()`,
       [
         userId,
@@ -112,7 +121,7 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
         (data.bio as string) || null,
         (data.avatarUrl as string) || (data.avatar as string) || null,
         data.socialLinks || data.socials ? JSON.stringify(data.socialLinks || data.socials) : '{}',
-        data.extraData ? JSON.stringify(data.extraData) : '{}',
+        JSON.stringify(dataBlob),
       ],
       userId
     );
@@ -132,8 +141,8 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
       }
 
       await rlsQuery(
-        `INSERT INTO artist_profiles (user_id, slug, artist_name, genre, sub_genres, city, country, bio, avatar_url, website, social_links, streaming_links)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `INSERT INTO artist_profiles (user_id, slug, artist_name, genre, sub_genres, city, country, bio, avatar_url, website, social_links, streaming_links, data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (user_id) DO UPDATE SET
            artist_name = COALESCE(EXCLUDED.artist_name, artist_profiles.artist_name),
            genre = COALESCE(EXCLUDED.genre, artist_profiles.genre),
@@ -144,6 +153,7 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
            website = COALESCE(EXCLUDED.website, artist_profiles.website),
            social_links = COALESCE(EXCLUDED.social_links, artist_profiles.social_links),
            streaming_links = COALESCE(EXCLUDED.streaming_links, artist_profiles.streaming_links),
+           data = COALESCE(artist_profiles.data, '{}'::jsonb) || EXCLUDED.data,
            updated_at = NOW()`,
         [
           userId,
@@ -158,6 +168,7 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
           (data.website as string) || null,
           JSON.stringify(socials),
           JSON.stringify(streamingLinks),
+          JSON.stringify(dataBlob),
         ],
         userId
       );

@@ -185,7 +185,7 @@ app.get('/submissions', requireAuth, async (c) => {
   }
 });
 
-async function createSubmission(c: any, submissionType: 'playlist' | 'radio') {
+async function createSubmission(c: any, submissionType: 'playlist' | 'radio' | 'influencer' | 'outlet') {
   await ensureSchema();
   const userId = c.get('userId') as string;
   const body = await c.req.json();
@@ -198,15 +198,19 @@ async function createSubmission(c: any, submissionType: 'playlist' | 'radio') {
     return c.json({ success: false, error: 'Either trackId or videoId is required' }, 400);
   }
 
-  // Soft target lookup — the catalog DB stores ids like 'p1'/'p2', but the
-  // existing track-pitching modal sends hardcoded ids like 'spotify' /
-  // 'apple_music'. Don't reject those; just snapshot whichever name we know.
-  const targetTable = submissionType === 'playlist' ? 'pitching_playlists' : 'pitching_radio_stations';
-  const targetRow = await pool.query(
-    `SELECT name FROM ${targetTable} WHERE id = $1 AND status = 'active'`,
-    [targetId]
-  );
-  const targetName: string = (targetRow.rows[0]?.name as string) || targetNameFromBody || targetId;
+  // Soft target lookup — playlists & radio stations live in their own
+  // catalogue tables. Influencer and outlet catalogues are frontend-only
+  // for now (catalogInfluencers / catalogMediaOutlets in src/data), so
+  // we trust the targetName from the request body for those types.
+  let targetName: string = targetNameFromBody || targetId;
+  if (submissionType === 'playlist' || submissionType === 'radio') {
+    const targetTable = submissionType === 'playlist' ? 'pitching_playlists' : 'pitching_radio_stations';
+    const targetRow = await pool.query(
+      `SELECT name FROM ${targetTable} WHERE id = $1 AND status = 'active'`,
+      [targetId]
+    );
+    targetName = (targetRow.rows[0]?.name as string) || targetName;
+  }
 
   // Prevent duplicate pending submission of the same track/video to the same target.
   const dup = await pool.query(
@@ -232,7 +236,12 @@ async function createSubmission(c: any, submissionType: 'playlist' | 'radio') {
     await notifyAllAdmins({
       sourceRole: 'artist',
       type: 'admin_action',
-      title: submissionType === 'playlist' ? 'Новая заявка на плейлист' : 'Новая заявка на радиостанцию',
+      title:
+        submissionType === 'playlist' ? 'Новая заявка на плейлист'
+      : submissionType === 'radio'    ? 'Новая заявка на радиостанцию'
+      : submissionType === 'influencer' ? 'Новая заявка блогеру'
+      : submissionType === 'outlet'   ? 'Новый пресс-релиз'
+      : 'Новая заявка на питчинг',
       message: `Артист ${userId} → «${targetName}»`,
       link: 'pitching-moderation',
       metadata: { submissionId: id, targetId, submissionType },
@@ -255,6 +264,22 @@ app.post('/submit-pitch', requireAuth, async (c) => {
 app.post('/submit-radio', requireAuth, async (c) => {
   try {
     return await createSubmission(c, 'radio');
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.post('/submit-influencer', requireAuth, async (c) => {
+  try {
+    return await createSubmission(c, 'influencer');
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.post('/submit-outlet', requireAuth, async (c) => {
+  try {
+    return await createSubmission(c, 'outlet');
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
