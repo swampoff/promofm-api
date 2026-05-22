@@ -20,7 +20,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import {
   getDjProfile, upsertDjProfile,
-  djCollaborationsStore, djEventsStore, djNotificationsStore, djSubscriptionsStore,
+  djEventsStore, djNotificationsStore, djSubscriptionsStore,
   djCampaignsStore, djWithdrawalsStore, djTransactionsStore,
   getCoinBalance,
 } from './db.tsx';
@@ -47,6 +47,38 @@ async function getUserId(c: any): Promise<string> {
 
 function generateId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
+}
+
+// Self-heal dj_collab_invites — row-per-invite table replaces the old
+// jsonbStore which stored invites in the SENDER's row (bug — receiver
+// never saw the invite). Called from /collaborations endpoints.
+let djCollabInvitesSchemaReady: Promise<void> | null = null;
+function ensureDjCollabInvitesSchema(): Promise<void> {
+  if (djCollabInvitesSchemaReady) return djCollabInvitesSchemaReady;
+  djCollabInvitesSchemaReady = (async () => {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS dj_collab_invites (
+          id TEXT PRIMARY KEY,
+          from_dj_id TEXT NOT NULL,
+          to_dj_id TEXT NOT NULL,
+          type TEXT,
+          message TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          reason TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_dj_collab_invites_from ON dj_collab_invites(from_dj_id);
+        CREATE INDEX IF NOT EXISTS idx_dj_collab_invites_to ON dj_collab_invites(to_dj_id);
+        CREATE INDEX IF NOT EXISTS idx_dj_collab_invites_status ON dj_collab_invites(status);
+      `);
+    } catch (err) {
+      console.error('[dj-studio] ensureDjCollabInvitesSchema failed:', err);
+      djCollabInvitesSchemaReady = null;
+    }
+  })();
+  return djCollabInvitesSchemaReady;
 }
 
 // Self-heal dj_mixes shape — CREATE TABLE on fresh deploys, ADD COLUMN
@@ -261,74 +293,231 @@ app.delete('/events/:id', requireAuth, requireDjRole, async (c) => {
 // COLLABORATIONS
 // ════════════════════════════════════════
 
-// GET /collaborations
+// Helper: enrich invite row with display fields from dj_profiles for the
+// "other" party (from the caller's perspective).
+async function enrichInvite(row: any, viewerId: string) {
+  const otherId = row.from_dj_id === viewerId ? row.to_dj_id : row.from_dj_id;
+  let other: any = { djId: otherId, djName: '', djCity: '', rating: 0, genres: [] };
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, dj_name, location, genres, rating, data
+         FROM dj_profiles WHERE id = $1 OR user_id = $1 LIMIT 1`,
+      [otherId]
+    );
+    if (rows[0]) {
+      const d = rows[0].data || {};
+      const p = d.profile || d;
+      other.djName = rows[0].dj_name || p.djName || '';
+      other.djCity = rows[0].location || p.city || '';
+      other.genres = rows[0].genres || p.genres || [];
+      other.rating = parseFloat(rows[0].rating) || 0;
+    }
+  } catch { /* fall through with bare otherId */ }
+
+  const direction = row.from_dj_id === viewerId ? 'outgoing' : 'incoming';
+  // UI status mapping (incoming-pending shows as 'incoming' for the tab).
+  let uiStatus = row.status;
+  if (row.status === 'pending') uiStatus = direction === 'incoming' ? 'incoming' : 'outgoing';
+
+  return {
+    id: row.id,
+    fromDjId: row.from_dj_id,
+    toDjId: row.to_dj_id,
+    direction,
+    djId: otherId,
+    djName: other.djName,
+    djCity: other.djCity,
+    genres: other.genres,
+    rating: other.rating,
+    type: row.type || 'b2b',
+    message: row.message || '',
+    status: uiStatus,            // incoming | outgoing | accepted | declined | cancelled
+    rawStatus: row.status,
+    reason: row.reason || '',
+    date: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// GET /collaborations — all invites involving the caller (incoming + outgoing)
 app.get('/collaborations', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const collabs = await djCollaborationsStore.get(userId) || [];
-    return c.json({ success: true, data: collabs });
+    await ensureDjCollabInvitesSchema();
+    const { rows } = await pool.query(
+      `SELECT id, from_dj_id, to_dj_id, type, message, status, reason,
+              created_at, updated_at
+         FROM dj_collab_invites
+        WHERE from_dj_id = $1 OR to_dj_id = $1
+        ORDER BY created_at DESC LIMIT 200`,
+      [userId]
+    );
+    const enriched = await Promise.all(rows.map(r => enrichInvite(r, userId)));
+    return c.json({ success: true, data: enriched });
   } catch (error) {
+    console.error('Error fetching DJ collaborations:', error);
     return c.json({ success: true, data: [] });
   }
 });
 
-// POST /collaborations
+// POST /collaborations — invite a target DJ to collaborate.
+// Body: { toDjId, type?, message? }
 app.post('/collaborations', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
+    const toDjId = String(body.toDjId || body.targetDjId || '').trim();
+    if (!toDjId) return c.json({ success: false, error: 'toDjId обязателен' }, 400);
+    if (toDjId === userId) return c.json({ success: false, error: 'Нельзя пригласить самого себя' }, 400);
+
+    const allowedTypes = new Set(['b2b', 'remix', 'event', 'mentorship']);
+    const type = allowedTypes.has(body.type) ? body.type : 'b2b';
+    const message = String(body.message || '').slice(0, 2000);
+
+    await ensureDjCollabInvitesSchema();
+
+    // Dedupe: don't create another pending invite to the same DJ.
+    const dup = await pool.query(
+      `SELECT id FROM dj_collab_invites
+        WHERE from_dj_id = $1 AND to_dj_id = $2 AND status = 'pending'
+        LIMIT 1`,
+      [userId, toDjId]
+    );
+    if (dup.rows.length > 0) {
+      return c.json({ success: false, error: 'Активный инвайт этому DJ уже есть' }, 409);
+    }
+
     const id = generateId('collab');
-    const now = new Date().toISOString();
+    await pool.query(
+      `INSERT INTO dj_collab_invites (id, from_dj_id, to_dj_id, type, message, status)
+       VALUES ($1, $2, $3, $4, $5, 'pending')`,
+      [id, userId, toDjId, type, message || null]
+    );
 
-    const collab = {
-      id,
-      ...body,
-      djId: userId,
-      status: 'pending',
-      createdAt: now,
-    };
+    // Notify recipient (cross-cabinet — SSE + persisted)
+    try {
+      const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+      await notifyCrossCabinet({
+        targetUserId: toDjId,
+        targetRole: 'dj',
+        sourceRole: 'dj',
+        type: 'collab_offer',
+        title: 'Новое предложение коллаборации',
+        message: message || `Тип: ${type}`,
+        metadata: { inviteId: id, fromDjId: userId, type },
+      });
+    } catch (e: any) {
+      console.warn('[dj-collab] notifyCrossCabinet failed:', e?.message);
+    }
 
-    const collabs = (await djCollaborationsStore.get(userId)) || [];
-    collabs.push(collab);
-    await djCollaborationsStore.set(userId, collabs);
-
-    return c.json({ success: true, data: collab }, 201);
+    const { rows } = await pool.query(
+      `SELECT id, from_dj_id, to_dj_id, type, message, status, reason, created_at, updated_at
+         FROM dj_collab_invites WHERE id = $1`,
+      [id]
+    );
+    const out = await enrichInvite(rows[0], userId);
+    return c.json({ success: true, data: out }, 201);
   } catch (error) {
+    console.error('Error creating DJ collab invite:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
-// PUT /collaborations/:id/accept
+// PUT /collaborations/:id/accept — only the recipient can accept.
 app.put('/collaborations/:id/accept', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const collabId = c.req.param('id');
-    const collabs = (await djCollaborationsStore.get(userId)) || [];
-    const idx = collabs.findIndex((col: any) => col.id === collabId);
-    if (idx === -1) return c.json({ success: false, error: 'Collaboration not found' }, 404);
+    const inviteId = c.req.param('id');
+    await ensureDjCollabInvitesSchema();
+    const res = await pool.query(
+      `UPDATE dj_collab_invites
+          SET status = 'accepted', updated_at = NOW()
+        WHERE id = $1 AND to_dj_id = $2 AND status = 'pending'
+        RETURNING id, from_dj_id, to_dj_id, type, message, status, reason, created_at, updated_at`,
+      [inviteId, userId]
+    );
+    if (res.rowCount === 0) {
+      return c.json({ success: false, error: 'Инвайт не найден или у вас нет прав' }, 404);
+    }
+    const row = res.rows[0];
 
-    collabs[idx].status = 'accepted';
-    collabs[idx].updatedAt = new Date().toISOString();
-    await djCollaborationsStore.set(userId, collabs);
-    return c.json({ success: true, data: collabs[idx] });
+    try {
+      const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+      await notifyCrossCabinet({
+        targetUserId: row.from_dj_id,
+        targetRole: 'dj',
+        sourceRole: 'dj',
+        type: 'collab_response',
+        title: 'Ваше предложение коллаборации принято',
+        message: '',
+        metadata: { inviteId, response: 'accepted' },
+      });
+    } catch { /* best-effort */ }
+
+    const out = await enrichInvite(row, userId);
+    return c.json({ success: true, data: out });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
-// PUT /collaborations/:id/decline
+// PUT /collaborations/:id/decline — only the recipient can decline.
 app.put('/collaborations/:id/decline', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const collabId = c.req.param('id');
-    const collabs = (await djCollaborationsStore.get(userId)) || [];
-    const idx = collabs.findIndex((col: any) => col.id === collabId);
-    if (idx === -1) return c.json({ success: false, error: 'Collaboration not found' }, 404);
+    const inviteId = c.req.param('id');
+    const body = await c.req.json().catch(() => ({}));
+    const reason = String((body as any).reason || '').slice(0, 500);
+    await ensureDjCollabInvitesSchema();
+    const res = await pool.query(
+      `UPDATE dj_collab_invites
+          SET status = 'declined', reason = $3, updated_at = NOW()
+        WHERE id = $1 AND to_dj_id = $2 AND status = 'pending'
+        RETURNING id, from_dj_id, to_dj_id, type, message, status, reason, created_at, updated_at`,
+      [inviteId, userId, reason || null]
+    );
+    if (res.rowCount === 0) {
+      return c.json({ success: false, error: 'Инвайт не найден или у вас нет прав' }, 404);
+    }
+    const row = res.rows[0];
 
-    collabs[idx].status = 'declined';
-    collabs[idx].updatedAt = new Date().toISOString();
-    await djCollaborationsStore.set(userId, collabs);
-    return c.json({ success: true, data: collabs[idx] });
+    try {
+      const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+      await notifyCrossCabinet({
+        targetUserId: row.from_dj_id,
+        targetRole: 'dj',
+        sourceRole: 'dj',
+        type: 'collab_response',
+        title: 'Ваше предложение коллаборации отклонено',
+        message: reason || '',
+        metadata: { inviteId, response: 'declined' },
+      });
+    } catch { /* best-effort */ }
+
+    const out = await enrichInvite(row, userId);
+    return c.json({ success: true, data: out });
+  } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// DELETE /collaborations/:id — sender cancels a pending invite of his own.
+app.delete('/collaborations/:id', requireAuth, requireDjRole, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const inviteId = c.req.param('id');
+    await ensureDjCollabInvitesSchema();
+    const res = await pool.query(
+      `UPDATE dj_collab_invites
+          SET status = 'cancelled', updated_at = NOW()
+        WHERE id = $1 AND from_dj_id = $2 AND status = 'pending'
+        RETURNING from_dj_id, to_dj_id`,
+      [inviteId, userId]
+    );
+    if (res.rowCount === 0) {
+      return c.json({ success: false, error: 'Инвайт не найден или уже обработан' }, 404);
+    }
+    return c.json({ success: true });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
