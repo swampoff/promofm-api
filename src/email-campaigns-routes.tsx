@@ -9,7 +9,6 @@ import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { emailHistoryStore, emailTemplatesStore, publishEmailPrefsStore } from './db.tsx';
 import { upsertEmailCampaign, getEmailCampaigns } from './db.tsx';
 import { smtpSendEmail, smtpSendBatch } from './smtp-sender.tsx';
-// Supabase removed — using vpsListProfiles() for user listing
 import { vpsListProfiles } from './vps-userdata.tsx';
 
 const app = new Hono();

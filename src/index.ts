@@ -1,6 +1,6 @@
 /**
  * PromoFM API Server — Node.js + Hono
- * Entry point: replaces Supabase Edge Functions handler
+ * Entry point for the VPS-hosted backend.
  */
 import 'dotenv/config';
 import { readFileSync, existsSync } from 'fs';
@@ -230,7 +230,7 @@ app.get('/server/health', async (c) => {
 // Also respond on /api/health (nginx proxied path)
 app.get('/api/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString(), version: '3.0.0-vps' }));
 
-// Mount routes — same paths as Supabase Edge Functions
+// Mount routes
 // ── Static files: tracks & covers ──
 app.get('/server/uploads/tracks/*', async (c) => {
   const filename = decodeURIComponent(c.req.path.replace('/server/uploads/tracks/', ''));

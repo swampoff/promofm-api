@@ -145,7 +145,7 @@ app.post('/generate', requireAdminOrKey, async (c) => {
     const audioData = await response.arrayBuffer();
     console.log('Audio generated, size:', audioData.byteLength, 'bytes');
 
-    // Сохраняем в Supabase Storage
+    // Сохраняем в storage
     const dbClient = getDbClient();
 
     // Создаем bucket если не существует

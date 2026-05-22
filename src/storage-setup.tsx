@@ -1,7 +1,6 @@
 /**
- * STORAGE SETUP — Local filesystem (replaces Supabase Storage)
- * Creates upload directories instead of Supabase buckets.
- * Provides file upload/delete/list/stats operations.
+ * STORAGE SETUP — Local filesystem on VPS
+ * Creates upload directories and provides file upload/delete/list/stats operations.
  */
 import { mkdirSync, existsSync, writeFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve, extname, basename, dirname } from 'node:path';

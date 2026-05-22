@@ -10,7 +10,7 @@ Node.js + Hono + PostgreSQL 16, JWT auth, ~34K LOC.
 - **Runtime**: Node.js 22 + tsx (TypeScript)
 - **Framework**: Hono (lightweight HTTP)
 - **Database**: PostgreSQL 16 (168 tables, RLS enabled)
-- **Auth**: JWT (jsonwebtoken + bcrypt), NO Supabase
+- **Auth**: JWT (jsonwebtoken + bcrypt)
 - **Deploy**: systemd + nginx + certbot, VPS 194.67.122.99
 
 ## File Structure
@@ -44,6 +44,6 @@ npx tsx src/index.ts            # Run dev server
 
 - See `docs/AGENTS.md` for Bug Diagnosis & Fix Protocol
 - NEVER commit .env or secrets
-- NEVER use Supabase, KV Store, or Vercel
+- Only the project's own VPS — no external BaaS, no serverless platforms
 - All data stays on own VPS (PostgreSQL + Node.js + JWT)
 - Quality > Speed — always do it right, never cut corners

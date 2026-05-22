@@ -10,7 +10,7 @@ import { requireAuth } from './auth-middleware.tsx';
 
 const promotion = new Hono();
 
-// Supabase client - используем singleton
+// DB client singleton wrapper
 const getDbClientLegacy = () => {
   return getDbClient();
 };

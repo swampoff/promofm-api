@@ -330,7 +330,7 @@ contentHealth.post('/telegram', requireAuth, requireAdmin, async (c) => {
     if (!telegramBotToken || !telegramChatId) {
       return c.json({
         success: false,
-        error: 'TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID не настроены. Добавьте их в секреты Supabase.',
+        error: 'TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID не настроены. Добавьте их в переменные окружения .env.',
       }, 400);
     }
 
