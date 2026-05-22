@@ -12,7 +12,7 @@
 // ─── ROLE DEFINITIONS ───────────────────────────────────────────
 
 export const ROLES = [
-  'superadmin', 'admin', 'producer', 'radio_station', 'dj', 'venue', 'artist', 'engineer',
+  'superadmin', 'admin', 'producer', 'radio_station', 'label', 'dj', 'venue', 'artist', 'engineer',
 ] as const;
 
 export type Role = typeof ROLES[number];
@@ -27,6 +27,7 @@ const ROLE_LEVEL: Record<Role, number> = {
   producer: 50,
   radio_station: 40,
   engineer: 40,
+  label: 35,
   dj: 30,
   venue: 30,
   artist: 10,
@@ -154,6 +155,19 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   ],
 
   artist: [
+    'tracks:create', 'tracks:read', 'tracks:update', 'tracks:delete',
+    'videos:create', 'videos:read', 'videos:update', 'videos:delete',
+    'profile:read', 'profile:update',
+    'bookings:create',
+    'payments:create', 'payments:view_own',
+    'checkout:create',
+    'analytics:view_own',
+  ],
+
+  // Record label: superset of artist (publishes on behalf of roster artists)
+  // plus moderation-light roster operations. No `tracks:moderate` — releases
+  // still go through admin moderation.
+  label: [
     'tracks:create', 'tracks:read', 'tracks:update', 'tracks:delete',
     'videos:create', 'videos:read', 'videos:update', 'videos:delete',
     'profile:read', 'profile:update',

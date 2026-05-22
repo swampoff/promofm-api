@@ -39,9 +39,13 @@ export type NotificationType =
   | 'beat_purchased'
   | 'new_direct_message'
   | 'subscription_updated'
-  | 'subscription_payment';
+  | 'subscription_payment'
+  | 'label_invitation'
+  | 'label_invitation_response'
+  | 'label_release_published'
+  | 'label_member_left';
 
-export type CabinetRole = 'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer';
+export type CabinetRole = 'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer' | 'label';
 
 export interface CrossCabinetNotification {
   id: string;
