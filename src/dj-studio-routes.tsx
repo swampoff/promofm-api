@@ -16,6 +16,8 @@
  */
 
 import { Hono } from 'hono';
+import path from 'node:path';
+import fs from 'node:fs/promises';
 import {
   getDjProfile, upsertDjProfile,
   djCollaborationsStore, djEventsStore, djNotificationsStore, djSubscriptionsStore,
@@ -824,6 +826,250 @@ app.post('/promotion/campaigns', requireAuth, async (c) => {
     return c.json({ success: true, data: campaign }, 201);
   } catch (error) {
     console.error('Error creating DJ campaign:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ════════════════════════════════════════
+// UPLOADS — avatar, cover, mixes, portfolio
+// ════════════════════════════════════════
+
+const UPLOADS_BASE = process.env.UPLOADS_DIR || '/opt/promofm-api/uploads';
+const PUBLIC_BASE = process.env.PUBLIC_UPLOADS_BASE_URL || 'https://promo-music.ru/server/uploads';
+
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;       // 8 MB
+const MAX_AUDIO_BYTES = 200 * 1024 * 1024;     // 200 MB (DJ mixes can be long)
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;     // 100 MB
+
+const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif']);
+const AUDIO_EXTS = new Set(['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac']);
+const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov', 'm4v']);
+
+function sanitizeExt(name: string | undefined, allowed: Set<string>): string | null {
+  const ext = String(name || '').split('.').pop()?.toLowerCase() || '';
+  return allowed.has(ext) ? ext : null;
+}
+
+async function saveUpload(file: File, subdir: string, prefix: string, allowed: Set<string>, maxBytes: number) {
+  if (file.size > maxBytes) {
+    throw new Error(`Файл слишком большой (макс. ${Math.round(maxBytes / 1024 / 1024)} МБ)`);
+  }
+  const ext = sanitizeExt(file.name, allowed);
+  if (!ext) throw new Error('Недопустимый формат файла');
+  const dir = path.join(UPLOADS_BASE, subdir);
+  await fs.mkdir(dir, { recursive: true });
+  const filename = `${prefix}-${crypto.randomUUID()}.${ext}`;
+  const buf = Buffer.from(await file.arrayBuffer());
+  await fs.writeFile(path.join(dir, filename), buf);
+  return {
+    filename,
+    url: `${PUBLIC_BASE}/${subdir}/${filename}`,
+    size: file.size,
+    ext,
+  };
+}
+
+// POST /profile/avatar — загрузить аватар DJ
+app.post('/profile/avatar', requireAuth, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+
+    const uploaded = await saveUpload(file, 'dj-avatars', `avatar-${userId}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+
+    const data: any = (await getDjProfile(userId)) || {};
+    if (!data.profile) data.profile = {};
+    data.profile.avatarUrl = uploaded.url;
+    await upsertDjProfile(userId, data);
+
+    return c.json({ success: true, data: { url: uploaded.url } });
+  } catch (error: any) {
+    console.error('DJ avatar upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
+  }
+});
+
+// POST /profile/cover — загрузить обложку
+app.post('/profile/cover', requireAuth, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+
+    const uploaded = await saveUpload(file, 'dj-covers', `cover-${userId}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+
+    const data: any = (await getDjProfile(userId)) || {};
+    if (!data.profile) data.profile = {};
+    data.profile.coverUrl = uploaded.url;
+    await upsertDjProfile(userId, data);
+
+    return c.json({ success: true, data: { url: uploaded.url } });
+  } catch (error: any) {
+    console.error('DJ cover upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
+  }
+});
+
+// POST /portfolio/upload — загрузить файл (аудио/видео) в портфолио
+app.post('/portfolio/upload', requireAuth, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    const categoryId = String(body.categoryId || 'misc');
+    const displayName = String(body.name || file?.name || 'Файл');
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+
+    const isVideo = sanitizeExt(file.name, VIDEO_EXTS);
+    const allowed = isVideo ? VIDEO_EXTS : AUDIO_EXTS;
+    const maxBytes = isVideo ? MAX_VIDEO_BYTES : MAX_AUDIO_BYTES;
+    const subdir = isVideo ? 'dj-videos' : 'dj-portfolio';
+    const uploaded = await saveUpload(file, subdir, `pf-${userId}`, allowed, maxBytes);
+
+    const portfolioFile = {
+      id: `pf-${crypto.randomUUID()}`,
+      name: displayName,
+      url: uploaded.url,
+      kind: isVideo ? 'video' : 'audio',
+      size: `${Math.round(uploaded.size / 1024 / 1024 * 10) / 10} МБ`,
+      date: new Date().toISOString(),
+    };
+
+    const data: any = (await getDjProfile(userId)) || {};
+    const cats: any[] = Array.isArray(data.portfolioCategories) ? data.portfolioCategories : [];
+    let cat = cats.find((x: any) => x.id === categoryId);
+    if (!cat) {
+      cat = { id: categoryId, label: categoryId, files: [] };
+      cats.push(cat);
+    }
+    cat.files = Array.isArray(cat.files) ? cat.files : [];
+    cat.files.unshift(portfolioFile);
+    data.portfolioCategories = cats;
+    await upsertDjProfile(userId, data);
+
+    return c.json({ success: true, data: portfolioFile });
+  } catch (error: any) {
+    console.error('DJ portfolio upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
+  }
+});
+
+// ════════════════════════════════════════
+// MIXES (DJ-owned CRUD)
+// ════════════════════════════════════════
+
+// GET /mixes — список собственных миксов (для DjMixManager)
+app.get('/mixes', requireAuth, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const { rows } = await pool.query(
+      `SELECT id, dj_id, title, genre, duration, plays_count, audio_url, cover_url,
+              description, bpm_range, status, data, created_at, updated_at
+         FROM dj_mixes
+        WHERE dj_id = $1
+        ORDER BY created_at DESC`,
+      [userId]
+    );
+    const mixes = (rows || []).map((r: any) => ({
+      id: r.id,
+      title: r.title || '',
+      genre: r.genre || '',
+      duration: r.duration ? `${Math.floor(r.duration / 60)}:${String(r.duration % 60).padStart(2, '0')}` : '',
+      durationSec: r.duration || 0,
+      plays: r.plays_count || 0,
+      likes: r.data?.likes || 0,
+      downloads: r.data?.downloads || 0,
+      comments: r.data?.comments || 0,
+      audioUrl: r.audio_url || '',
+      coverUrl: r.cover_url || '',
+      description: r.description || '',
+      bpmRange: r.bpm_range || '',
+      isPremium: !!r.data?.isPremium,
+      price: r.data?.price || 0,
+      status: r.status || 'published',
+      createdAt: r.created_at,
+    }));
+    return c.json({ success: true, data: mixes });
+  } catch (error: any) {
+    console.error('Error fetching own DJ mixes:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+// POST /mixes — загрузить новый микс (multipart: audio, cover, title, genre…)
+app.post('/mixes', requireAuth, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const body = await c.req.parseBody();
+    const audio = body.audio as File | undefined;
+    const cover = body.cover as File | undefined;
+    const title = String(body.title || '').trim();
+    const genre = String(body.genre || '').trim();
+    const description = String(body.description || '').slice(0, 2000);
+    const bpmRange = String(body.bpmRange || '').slice(0, 32);
+    const durationSec = Math.max(0, Number(body.durationSec || 0));
+    const isPremium = String(body.isPremium || 'false') === 'true';
+    const price = Math.max(0, Number(body.price || 0));
+
+    if (!audio) return c.json({ success: false, error: 'Аудио-файл обязателен' }, 400);
+    if (!title) return c.json({ success: false, error: 'Название микса обязательно' }, 400);
+
+    const audioUploaded = await saveUpload(audio, 'dj-mixes', `mix-${userId}`, AUDIO_EXTS, MAX_AUDIO_BYTES);
+    let coverUrl = '';
+    if (cover && cover.size > 0) {
+      const coverUploaded = await saveUpload(cover, 'dj-mix-covers', `cover-${userId}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+      coverUrl = coverUploaded.url;
+    }
+
+    const id = `mix-${crypto.randomUUID()}`;
+    const data = { likes: 0, downloads: 0, comments: 0, isPremium, price };
+
+    await pool.query(
+      `INSERT INTO dj_mixes
+         (id, dj_id, title, genre, duration, plays_count, audio_url, cover_url, description, bpm_range, status, data, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, 'published', $10, NOW(), NOW())`,
+      [id, userId, title, genre, durationSec, audioUploaded.url, coverUrl, description, bpmRange, data]
+    );
+
+    return c.json({
+      success: true,
+      data: {
+        id, djId: userId, title, genre,
+        duration: durationSec ? `${Math.floor(durationSec / 60)}:${String(durationSec % 60).padStart(2, '0')}` : '',
+        durationSec,
+        plays: 0, likes: 0, downloads: 0, comments: 0,
+        audioUrl: audioUploaded.url,
+        coverUrl,
+        description, bpmRange,
+        isPremium, price,
+        status: 'published',
+        createdAt: new Date().toISOString(),
+      },
+    }, 201);
+  } catch (error: any) {
+    console.error('Error uploading DJ mix:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 500);
+  }
+});
+
+// DELETE /mixes/:id — удалить микс (свой)
+app.delete('/mixes/:id', requireAuth, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const id = c.req.param('id');
+    const res = await pool.query(
+      `DELETE FROM dj_mixes WHERE id = $1 AND dj_id = $2`,
+      [id, userId]
+    );
+    if (res.rowCount === 0) {
+      return c.json({ success: false, error: 'Микс не найден' }, 404);
+    }
+    return c.json({ success: true });
+  } catch (error: any) {
+    console.error('Error deleting DJ mix:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });

@@ -24,22 +24,26 @@ function formatExperience(years: number): string {
 
 function mapRow(row: any) {
   const d = row.data || {};
+  // Editor stores nested under `profile`. Older rows may have fields on data root.
+  const p = d.profile || d;
+  const b = d.booking || d;
   return {
     id: row.id,
-    name: row.dj_name || d.djName || '',
-    photo: row.photo_url || row.avatar_url || d.avatarUrl || '',
-    city: row.location || d.city || '',
-    genres: row.genres || d.genres || [],
+    name: row.dj_name || p.djName || d.djName || '',
+    photo: row.photo_url || row.avatar_url || p.avatarUrl || d.avatarUrl || '',
+    coverUrl: p.coverUrl || d.coverUrl || '',
+    city: row.location || p.city || d.city || '',
+    genres: row.genres || p.genres || d.genres || [],
     rating: parseFloat(row.rating) || 0,
     reviewsCount: parseInt(row.total_reviews) || 0,
-    priceFrom: parseInt(row.price_from) || parseInt(row.hourly_rate) || d.ratePerHour || d.ratePerEvent || 0,
+    priceFrom: parseInt(row.price_from) || parseInt(row.hourly_rate) || b.ratePerHour || b.ratePerEvent || 0,
     experience: formatExperience(parseInt(row.experience_years) || 0),
-    verified: row.is_verified || d.verified || false,
-    available: row.is_available !== false && (d.openForBookings !== false),
-    topGenre: (row.genres && row.genres[0]) || '',
+    verified: row.is_verified || p.verified || d.verified || false,
+    available: row.is_available !== false && (b.openForBookings !== false),
+    topGenre: (row.genres && row.genres[0]) || (p.genres && p.genres[0]) || '',
     completedGigs: parseInt(row.completed_gigs) || 0,
-    bio: row.bio || d.bio || d.bioShort || '',
-    tags: row.tags || d.specializations || [],
+    bio: row.bio || p.bio || p.bioShort || d.bio || d.bioShort || '',
+    tags: row.tags || p.specializations || d.specializations || [],
   };
 }
 
