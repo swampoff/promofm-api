@@ -376,6 +376,16 @@ app.post('/collaborations', requireAuth, requireDjRole, async (c) => {
 
     await ensureDjCollabInvitesSchema();
 
+    // Verify target is an actual DJ profile (don't let invites pile up
+    // orphaned against non-existent userIds).
+    const targetExists = await pool.query(
+      `SELECT 1 FROM dj_profiles WHERE id = $1 OR user_id = $1 LIMIT 1`,
+      [toDjId]
+    );
+    if (targetExists.rowCount === 0) {
+      return c.json({ success: false, error: 'DJ-получатель не найден' }, 404);
+    }
+
     // Dedupe: don't create another pending invite to the same DJ.
     const dup = await pool.query(
       `SELECT id FROM dj_collab_invites
@@ -1146,15 +1156,24 @@ app.post('/promotion/pitches', requireAuth, requireDjRole, async (c) => {
       console.warn('Pitch target lookup failed:', lookupErr);
     }
 
-    // Mix title for notifications
+    // Verify the mix actually belongs to the caller (a DJ shouldn't be
+    // able to pitch someone else's mix). Falls open ONLY when the table
+    // can't be queried (fresh deploy) — the check kicks in as soon as
+    // the mix table is reachable.
     let mixTitle = 'Микс';
     try {
+      await ensureDjMixesSchema();
       const { rows: mr } = await pool.query(
         `SELECT title FROM dj_mixes WHERE id = $1 AND dj_id = $2 LIMIT 1`,
         [mixId, userId]
       );
+      if (mr.length === 0) {
+        return c.json({ success: false, error: 'Микс не найден в вашей библиотеке' }, 404);
+      }
       if (mr[0]?.title) mixTitle = mr[0].title;
-    } catch { /* ignore */ }
+    } catch (e) {
+      console.warn('[dj-pitch] mix ownership check skipped:', e);
+    }
 
     // Prevent dup pending submission
     const dup = await pool.query(

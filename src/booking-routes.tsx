@@ -115,17 +115,22 @@ async function getPerformerProfile(performerId: string, performerType: string) {
     };
   }
 
-  // Try DJ profile
+  // Try DJ profile.
+  // Editor stores data nested under `profile` / `booking`. Legacy rows are
+  // flat. Read both shapes so a booking can be created against either.
   const djData = await getDjProfile(performerId);
   if (djData) {
-    const dj = djData;
+    const dj: any = djData;
+    const p = dj.profile || dj;
+    const b = dj.booking || dj;
     return {
       userId: dj.userId || dj.id,
-      displayName: dj.djName || dj.name,
-      avatar: dj.avatar,
-      hourlyRate: dj.hourlyRate || 4000,
-      minimumBookingHours: dj.minimumBookingHours || 2,
-      bookingEnabled: true,
+      displayName: p.djName || dj.djName || dj.name || '',
+      avatar: p.avatarUrl || dj.avatar || '',
+      hourlyRate: b.ratePerHour || dj.hourlyRate || 4000,
+      minimumBookingHours: b.minBookingHours || dj.minimumBookingHours || 2,
+      // Backend supports a per-DJ off-switch via booking.openForBookings.
+      bookingEnabled: b.openForBookings !== false,
     };
   }
 
