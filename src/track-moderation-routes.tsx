@@ -70,15 +70,52 @@ app.post('/submitTrack', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const userId = c.get('userId');
+    const userRole = c.get('userRole') as string | undefined;
+    if (!userId) {
+      return c.json({ error: 'Авторизация обязательна', code: 'AUTH_REQUIRED' }, 401);
+    }
 
-    // REQUIRE artist profile before track submission
-    if (userId) {
-      const profile = await getDbClient().from('artist_profiles').select('id').eq('user_id', userId).maybeSingle();
+    // Label-on-behalf: same shape as tracks-routes — actingForArtistId
+    // resolves to the roster artist's profile, the row is owned/paid by
+    // the label, and the track's display name is snapshotted.
+    let resolvedArtistId: string | null = null;
+    let resolvedArtistName: string = body.artist || body.artist_name || '';
+    let actingForArtistId: string | undefined;
+    let actingForArtistUserId: string | undefined;
+    let labelId: string | undefined;
+
+    if (body.actingForArtistId) {
+      if (userRole !== 'label') {
+        return c.json({ error: 'actingForArtistId доступно только роли label', code: 'ROLE_FORBIDDEN' }, 403);
+      }
+      const { pool } = await import('./db-client.tsx');
+      const lp = await pool.query(`SELECT id FROM label_profiles WHERE user_id = $1`, [userId]);
+      if (lp.rows.length === 0) {
+        return c.json({ error: 'Сначала заполните профиль лейбла', code: 'LABEL_PROFILE_REQUIRED' }, 400);
+      }
+      labelId = lp.rows[0].id;
+      const ap = await pool.query(
+        `SELECT id, user_id, artist_name FROM artist_profiles
+         WHERE id = $1 AND (managed_by_label_id = $2 OR label_id = $2)`,
+        [body.actingForArtistId, labelId]
+      );
+      if (ap.rows.length === 0) {
+        return c.json({ error: 'Артист не в вашем ростере', code: 'ARTIST_NOT_IN_ROSTER' }, 403);
+      }
+      resolvedArtistId = ap.rows[0].id;
+      resolvedArtistName = ap.rows[0].artist_name || resolvedArtistName;
+      actingForArtistId = resolvedArtistId || undefined;
+      actingForArtistUserId = ap.rows[0].user_id || undefined;
+    } else {
+      // Artist branch — require own artist profile
+      const profile = await getDbClient().from('artist_profiles').select('id, artist_name').eq('user_id', userId).maybeSingle();
       if (!profile?.data) {
         return c.json({ error: 'Сначала заполните профиль артиста в личном кабинете', code: 'PROFILE_REQUIRED' }, 403);
       }
-    } else {
-      return c.json({ error: 'Авторизация обязательна', code: 'AUTH_REQUIRED' }, 401);
+      resolvedArtistId = (profile.data as any).id;
+      if (!resolvedArtistName) {
+        resolvedArtistName = (profile.data as any).artist_name || '';
+      }
     }
 
     // RULE: трек нельзя отправить на модерацию без аудио-файла
@@ -95,7 +132,8 @@ app.post('/submitTrack', requireAuth, async (c) => {
 
     const track = await typed.insertTrack({
       title: body.title || '',
-      artist_name: body.artist || body.artist_name || '',
+      artist_name: resolvedArtistName,
+      artist_id: resolvedArtistId,
       genre: body.genre || '',
       duration: body.duration || 0,
       audio_url: body.audio_file_url || body.audio_url || '',
@@ -104,8 +142,9 @@ app.post('/submitTrack', requireAuth, async (c) => {
       youtube_url: body.youtube_url || '',
       spotify_url: body.spotify_url || '',
       uploaded_by_email: c.get('userEmail') || body.uploaded_by_email || body.contact_email || body.email || '',
-      user_id: c.get('userId') || null,  // ALWAYS from JWT — requireAuth guarantees this
+      user_id: userId,  // owner / payer (label for on-behalf, artist otherwise)
       moderation_status: 'pending',
+      data: actingForArtistId ? { actingForArtistId, actingForArtistUserId, labelId } : {},
     });
 
     if (!track) {
