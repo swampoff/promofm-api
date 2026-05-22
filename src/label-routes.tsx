@@ -897,4 +897,138 @@ app.post('/invitations/leave', requireAuth, async (c) => {
   }
 });
 
+// ── Aggregated reads: releases + analytics across roster ──────────────────────
+
+/**
+ * GET /label/releases — list publish orders submitted by this label across
+ * its roster. Returns orders + the resolved artist display_name for each.
+ */
+app.get('/releases', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    if (!gate.labelId) return c.json({ success: true, releases: [] });
+
+    // Pull orders that the label owns. publish-orders are stored in KV
+    // (publish_orders table) — `data` is the JSON blob from
+    // publishOrdersStore. The fast path uses the `user_id` column.
+    const r = await pool.query(
+      `SELECT id AS order_id, data, created_at, updated_at
+       FROM publish_orders
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 200`,
+      [gate.userId]
+    );
+
+    // Filter to orders with labelId set to this label (defensive — guards
+    // against any leftover from before the label-on-behalf field was added).
+    const releases: any[] = [];
+    for (const row of r.rows) {
+      let payload: any;
+      try {
+        payload = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+      } catch { continue; }
+      if (payload?.labelId && payload.labelId !== gate.labelId) continue;
+      releases.push(payload);
+    }
+
+    // Resolve artist display names for the actingFor* set in one query.
+    const artistIds = Array.from(new Set(
+      releases.map(r => r?.actingForArtistId).filter(Boolean)
+    ));
+    const nameMap = new Map<string, string>();
+    if (artistIds.length > 0) {
+      const ap = await pool.query(
+        `SELECT id, artist_name FROM artist_profiles WHERE id = ANY($1)`,
+        [artistIds]
+      );
+      for (const row of ap.rows) nameMap.set(row.id, row.artist_name);
+    }
+    for (const r of releases) {
+      r.actingForArtistName = r.actingForArtistId ? nameMap.get(r.actingForArtistId) || null : null;
+    }
+
+    return c.json({ success: true, releases });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+/**
+ * GET /label/analytics/overview — aggregated counters across the entire
+ * roster. Sums plays/likes/followers from artist_profiles + tracks for any
+ * artist where managed_by_label_id OR label_id = this label.
+ */
+app.get('/analytics/overview', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    if (!gate.labelId) {
+      return c.json({
+        success: true,
+        overview: {
+          artistsManaged: 0, artistsLinked: 0,
+          totalPlays: 0, totalLikes: 0, totalFollowers: 0,
+          totalTracks: 0, publishedTracks: 0,
+          topArtists: [],
+        },
+      });
+    }
+
+    const cnt = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE managed_by_label_id = $1) AS managed,
+         COUNT(*) FILTER (WHERE label_id = $1)             AS linked,
+         COALESCE(SUM(total_plays), 0)                     AS total_plays,
+         COALESCE(SUM(total_followers), 0)                 AS total_followers
+       FROM artist_profiles
+       WHERE managed_by_label_id = $1 OR label_id = $1`,
+      [gate.labelId]
+    );
+
+    const tr = await pool.query(
+      `SELECT
+         COUNT(*)                                  AS total_tracks,
+         COUNT(*) FILTER (WHERE t.moderation_status = 'approved') AS published_tracks,
+         COALESCE(SUM(t.likes_count), 0)           AS total_likes,
+         COALESCE(SUM(t.plays_count), 0)           AS total_track_plays
+       FROM tracks t
+       JOIN artist_profiles ap ON ap.id = t.artist_id
+       WHERE ap.managed_by_label_id = $1 OR ap.label_id = $1`,
+      [gate.labelId]
+    );
+
+    const top = await pool.query(
+      `SELECT ap.id, ap.artist_name AS display_name, ap.avatar_url,
+              ap.total_plays, ap.total_followers
+       FROM artist_profiles ap
+       WHERE ap.managed_by_label_id = $1 OR ap.label_id = $1
+       ORDER BY ap.total_plays DESC NULLS LAST
+       LIMIT 5`,
+      [gate.labelId]
+    );
+
+    const row = cnt.rows[0] || {};
+    const trRow = tr.rows[0] || {};
+    return c.json({
+      success: true,
+      overview: {
+        artistsManaged: Number(row.managed) || 0,
+        artistsLinked: Number(row.linked) || 0,
+        totalPlays: Math.max(Number(row.total_plays) || 0, Number(trRow.total_track_plays) || 0),
+        totalLikes: Number(trRow.total_likes) || 0,
+        totalFollowers: Number(row.total_followers) || 0,
+        totalTracks: Number(trRow.total_tracks) || 0,
+        publishedTracks: Number(trRow.published_tracks) || 0,
+        topArtists: top.rows,
+      },
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 export default app;

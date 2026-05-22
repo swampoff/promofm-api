@@ -95,6 +95,14 @@ export interface PublishOrder {
   rejectionReason?: string;
   revisionNotes?: string;
 
+  // Label-on-behalf: present when a label submitted the release for one of
+  // their roster artists (managed or linked). Order's `userId` stays the
+  // label's user_id (they own/pay for the order); these fields tell the
+  // pipeline who the eventual track should attribute to and notify.
+  actingForArtistId?: string;     // artist_profiles.id
+  actingForArtistUserId?: string; // users.id (null when target is managed)
+  labelId?: string;               // label_profiles.id
+
   // Timestamps
   createdAt: string;
   updatedAt: string;
@@ -312,7 +320,8 @@ app.post('/orders', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const userId = c.get('userId');
-    const { type, title, description, plan = 'free', ...rest } = body;
+    const userRole = c.get('userRole') as string | undefined;
+    const { type, title, description, plan = 'free', actingForArtistId, ...rest } = body;
 
     if (!type || !title) {
       return c.json({ success: false, error: 'Missing required fields: type, title' }, 400);
@@ -324,6 +333,33 @@ app.post('/orders', requireAuth, async (c) => {
 
     if (!['free', 'standard', 'premium'].includes(plan)) {
       return c.json({ success: false, error: 'Plan must be "free", "standard", or "premium"' }, 400);
+    }
+
+    // Label-on-behalf: validate `actingForArtistId` against roster.
+    // Sets actingFor*Id + labelId on the order; pipeline will use them when
+    // the order reaches the `published` track-creation hook.
+    let actingForArtistUserId: string | undefined;
+    let labelId: string | undefined;
+    if (actingForArtistId) {
+      if (userRole !== 'label') {
+        return c.json({ success: false, error: 'actingForArtistId доступно только роли label' }, 403);
+      }
+      const { pool } = await import('./db-client.tsx');
+      const lp = await pool.query(`SELECT id FROM label_profiles WHERE user_id = $1`, [userId]);
+      if (lp.rows.length === 0) {
+        return c.json({ success: false, error: 'Сначала заполните профиль лейбла' }, 400);
+      }
+      labelId = lp.rows[0].id;
+      // Roster guard: artist must be managed by OR linked to this label.
+      const ap = await pool.query(
+        `SELECT id, user_id FROM artist_profiles
+         WHERE id = $1 AND (managed_by_label_id = $2 OR label_id = $2)`,
+        [actingForArtistId, labelId]
+      );
+      if (ap.rows.length === 0) {
+        return c.json({ success: false, error: 'Артист не в вашем ростере' }, 403);
+      }
+      actingForArtistUserId = ap.rows[0].user_id || undefined;
     }
 
     // Resolve pricing with quota-aware logic for videos. For 'free' plan without
@@ -357,6 +393,11 @@ app.post('/orders', requireAuth, async (c) => {
       priceBase: pricingInfo.price,
       subscriptionApplied,
       currency: 'RUB',
+      ...(actingForArtistId ? {
+        actingForArtistId,
+        actingForArtistUserId,
+        labelId,
+      } : {}),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       // Spread type-specific fields
@@ -738,6 +779,23 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
       order.status,
       notificationComment,
     );
+
+    // Label-on-behalf: if the order was submitted by a label for a linked
+    // artist, also notify the (real) artist user — so they see the
+    // moderation decision in their own bell, not just the label's.
+    if (order.actingForArtistUserId && order.actingForArtistUserId !== order.userId) {
+      try {
+        await createArtistNotification(
+          order.actingForArtistUserId,
+          order.id,
+          order.title,
+          order.status,
+          notificationComment,
+        );
+      } catch (e: any) {
+        console.warn('[publish] dual artist notify failed:', e?.message);
+      }
+    }
 
     // Send email for critical status changes
     await sendCriticalEmailNotification(
