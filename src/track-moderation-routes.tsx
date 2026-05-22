@@ -502,8 +502,11 @@ app.get('/genres', async (c) => {
   return c.json({ genres: GENRES });
 });
 
-// GET /uploadStats
-app.get('/uploadStats', requireAuth, requireAdmin, async (c) => {
+// GET /uploadStats — artist sees how many tracks they can still upload
+// on the current plan. Was gated behind requireAdmin which made every
+// artist's track-upload page hang on a 403 (no stats → loading state
+// stuck, then UI rendered nothing useful).
+app.get('/uploadStats', requireAuth, async (c) => {
   try {
     return c.json({
       current: 0,
