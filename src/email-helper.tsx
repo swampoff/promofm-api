@@ -191,6 +191,28 @@ export async function sendVerificationEmail(email: string, name: string, token: 
   return sendEmail({ to: email, subject: 'Подтвердите email — ПРОМО.МУЗЫКА', html });
 }
 
+export async function sendLabelInvitationEmail(
+  toEmail: string,
+  labelName: string,
+  message: string | null,
+  acceptUrl: string,
+): Promise<boolean> {
+  const safeName = escapeHtml(labelName);
+  const safeMsg = message ? escapeHtml(message) : '';
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Приглашение от лейбла</h2>
+    <p>Лейбл <strong>${safeName}</strong> приглашает вас в свой ростер на ПРОМО.МУЗЫКА.</p>
+    ${safeMsg ? `<blockquote style="border-left: 3px solid #FF577F; margin: 18px 0; padding: 4px 14px; color: #ccc; font-style: italic;">${safeMsg}</blockquote>` : ''}
+    <p>После принятия лейбл сможет выпускать ваши релизы через единую модерацию платформы. Вы сможете в любой момент выйти из лейбла в своём кабинете.</p>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${acceptUrl}" style="${buttonStyle}">Открыть приглашение</a>
+    </p>
+    <p style="color: #999; font-size: 14px;">Если вы не ожидаете это приглашение — просто проигнорируйте письмо.</p>
+    <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">Прямая ссылка: ${acceptUrl}</p>
+  `);
+  return sendEmail({ to: toEmail, subject: `Приглашение от лейбла «${safeName}» — ПРОМО.МУЗЫКА`, html });
+}
+
 export async function notifyArtistRequest(data: { artistName: string; trackTitle: string; genre?: string; stationName?: string; stationId: string; }) {
   const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: #FF577F;">Новая заявка артиста на радио</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px; font-weight: bold;">Артист:</td><td>${escapeHtml(data.artistName)}</td></tr><tr><td style="padding: 8px; font-weight: bold;">Трек:</td><td>${escapeHtml(data.trackTitle)}</td></tr>${data.genre ? `<tr><td style="padding: 8px; font-weight: bold;">Жанр:</td><td>${escapeHtml(data.genre)}</td></tr>` : ''}<tr><td style="padding: 8px; font-weight: bold;">Радиостанция:</td><td>${escapeHtml(data.stationName || data.stationId)}</td></tr></table></div>`;
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Заявка: ${escapeHtml(data.artistName)} — ${escapeHtml(data.trackTitle)}`, html });
