@@ -356,6 +356,31 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill pitching_bundle ───
+  //
+  // Pitching submissions live in `pending_payment` until YooKassa confirms
+  // payment for the order they belong to. On confirmation, flip them to
+  // `pending` (the admin moderation queue) and fan out notifyAllAdmins per
+  // submission. See finalizePitchingBundle() in pitching-routes.tsx — it
+  // owns the SQL + notification logic so this webhook stays a thin caller.
+  if (session.metadata?.itemType === 'pitching_bundle') {
+    try {
+      const submissionIds = String(session.metadata?.submission_ids || '')
+        .split(',')
+        .filter(Boolean);
+      if (submissionIds.length > 0) {
+        const { finalizePitchingBundle } = await import('./pitching-routes.tsx');
+        await finalizePitchingBundle(session.orderId, submissionIds);
+        log.info(
+          { orderId: session.orderId, count: submissionIds.length, amount: session.amount },
+          'pitching_bundle_fulfilled',
+        );
+      }
+    } catch (err) {
+      log.error({ err, orderId: session.orderId }, 'pitching_bundle_fulfillment_error');
+    }
+  }
+
   // ─── Fulfill track_test payment ───
   if (session.metadata?.type === 'track_test' && session.metadata?.requestId) {
     try {
