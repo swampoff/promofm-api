@@ -24,7 +24,7 @@ import * as db from './db.tsx';
 import { collabMessagesStore, collabOffersByArtistStore, collabOffersByProducerStore } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireOwner } from './auth-middleware.tsx';
 
 const app = new Hono();
 
@@ -286,7 +286,7 @@ app.post('/chat/:offerId', requireAuth, async (c) => {
 
 // ── GET /stats/:userId ──
 
-app.get('/stats/:userId', requireAuth, async (c) => {
+app.get('/stats/:userId', requireAuth, requireOwner('userId'), async (c) => {
   const userId = c.req.param('userId');
   try {
     const asArtist: CollabOffer[] = (await collabOffersByArtistStore.get(userId)) || [];

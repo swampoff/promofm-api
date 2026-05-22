@@ -24,6 +24,19 @@ import { join } from 'path';
 
 const storage = new Hono();
 
+// Buckets a regular authenticated user (artist) is allowed to write to.
+// Everything else (attachments, concert-banners, banner-images, news-images,
+// misc) requires admin/moderator role. `attachments` is marked private and
+// must never be writable by an arbitrary artist.
+const ARTIST_WRITABLE_BUCKETS = new Set([
+  'track-covers',
+  'track-audio',
+  'artist-avatars',
+  'video-files',
+  'video-thumbnails',
+]);
+const PRIVILEGED_ROLES = new Set(['admin', 'superadmin', 'moderator']);
+
 // Initialize storage buckets on server start
 let storageInitialized = false;
 
@@ -144,6 +157,24 @@ storage.post('/upload', requireAuth, async (c) => {
       return c.json({
         success: false,
         error: 'Invalid bucket name',
+      }, 400);
+    }
+
+    // Bucket ACL: artists may only target the artist-writable whitelist.
+    // Privileged roles (admin/superadmin/moderator) may upload anywhere.
+    const role = c.get('userRole');
+    if (!ARTIST_WRITABLE_BUCKETS.has(bucketName) && !PRIVILEGED_ROLES.has(role)) {
+      return c.json({
+        success: false,
+        error: 'Access denied: not allowed to upload to this bucket',
+      }, 403);
+    }
+
+    // Prevent path traversal: subpath must not escape the bucket subdir
+    if (path && (path.includes('..') || path.startsWith('/'))) {
+      return c.json({
+        success: false,
+        error: 'Invalid path',
       }, 400);
     }
     

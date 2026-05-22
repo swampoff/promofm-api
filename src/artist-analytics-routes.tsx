@@ -13,14 +13,14 @@
  */
 
 import { Hono } from 'hono';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireOwner } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { getArtistProfile, artistAnalyticsCacheStore } from './db.tsx';
 
 const app = new Hono();
 
 // GET /overview/:artistId — Real analytics from tracks table
-app.get('/overview/:artistId', requireAuth, async (c) => {
+app.get('/overview/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   const artistId = c.req.param('artistId');
   const period = c.req.query('period') || 'month';
 
@@ -89,7 +89,7 @@ app.get('/overview/:artistId', requireAuth, async (c) => {
 });
 
 // GET /timeline/:artistId — Not yet tracked (no historical data)
-app.get('/timeline/:artistId', requireAuth, async (c) => {
+app.get('/timeline/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   return c.json({
     success: true,
     timeline: [],
@@ -99,7 +99,7 @@ app.get('/timeline/:artistId', requireAuth, async (c) => {
 });
 
 // GET /tracks/:artistId — Real track stats from DB
-app.get('/tracks/:artistId', requireAuth, async (c) => {
+app.get('/tracks/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   const artistId = c.req.param('artistId');
 
   try {
@@ -137,7 +137,7 @@ app.get('/tracks/:artistId', requireAuth, async (c) => {
 });
 
 // GET /geography/:artistId — Not yet tracked
-app.get('/geography/:artistId', requireAuth, async (c) => {
+app.get('/geography/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   return c.json({
     success: true,
     geography: [],
@@ -146,7 +146,7 @@ app.get('/geography/:artistId', requireAuth, async (c) => {
 });
 
 // GET /platforms/:artistId — Not yet tracked
-app.get('/platforms/:artistId', requireAuth, async (c) => {
+app.get('/platforms/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   return c.json({
     success: true,
     platforms: [],
