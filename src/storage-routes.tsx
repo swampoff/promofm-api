@@ -190,11 +190,26 @@ storage.post('/upload', requireAuth, async (c) => {
       const tmpPath = join('/tmp', 'upload_scan_' + Date.now() + '_' + filename);
       const { writeFileSync, unlinkSync } = await import('fs');
       writeFileSync(tmpPath, fileData);
-      const scanResult = spawnSync('clamscan', ['--no-summary', tmpPath], { timeout: 30000, encoding: 'utf8' });
-      unlinkSync(tmpPath);
-      if (scanResult.status === 1) {
-        console.error('[storage] VIRUS DETECTED:', { filename, output: scanResult.stdout?.trim() });
-        return c.json({ success: false, error: 'File rejected by security scan' }, 400);
+      // ClamAV scan timeout. Default 30s is too tight for big audio /
+      // video uploads on slower disks — bumped to 90s and made env-tunable
+      // (CLAMSCAN_TIMEOUT_MS) so prod can adjust without a code change.
+      // We disable the scan entirely if CLAMSCAN_TIMEOUT_MS === '0'.
+      const scanTimeoutMs = Number(process.env.CLAMSCAN_TIMEOUT_MS ?? 90000);
+      if (scanTimeoutMs <= 0) {
+        // Skip silently — operator opted out.
+        try { unlinkSync(tmpPath); } catch {}
+      } else {
+        const scanResult = spawnSync('clamscan', ['--no-summary', tmpPath], { timeout: scanTimeoutMs, encoding: 'utf8' });
+        unlinkSync(tmpPath);
+        if (scanResult.status === 1) {
+          console.error('[storage] VIRUS DETECTED:', { filename, output: scanResult.stdout?.trim() });
+          return c.json({ success: false, error: 'File rejected by security scan' }, 400);
+        }
+        if (scanResult.error?.code === 'ETIMEDOUT' || (scanResult as any).signal === 'SIGTERM') {
+          // clamscan ran past the timeout — log loudly but DON'T block the
+          // upload. Otherwise a slow disk locks artists out of publishing.
+          console.warn('[storage] ClamAV timed out after', scanTimeoutMs, 'ms — accepting upload anyway:', filename);
+        }
       }
     } catch (e) {
       // ClamAV not available — continue without scan
