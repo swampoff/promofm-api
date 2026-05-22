@@ -1,27 +1,35 @@
 /**
  * COLLABORATION ROUTES - Producer-Artist сотрудничество
- * 
+ *
  * Продюсер предлагает биты/услуги артисту через систему предложений.
- * Артист может принять, отклонить или обсудить предложение.
- * 
- * KV Keys:
- *   collab_offers:{artistId}     -> CollabOffer[]
- *   collab_offers_by:{producerId} -> CollabOffer[]
- *   collab_chat:{offerId}        -> CollabMessage[]
- * 
+ * Артист может принять, отклонить, начать обсуждение или подтвердить завершение.
+ *
+ * Storage (JSONB stores, will move to native columns later — see kv-to-sql-migration.md):
+ *   collab_offers_by_artist   (pk: artist_id)   -> CollabOffer[]
+ *   collab_offers_by_producer (pk: producer_id) -> CollabOffer[]
+ *   collab_messages           (pk: id)          -> CollabMessage[] (one row per offer)
+ *
+ * Дубль (offer хранится в обоих сторах) пишется атомарно через одну PG-транзакцию
+ * — иначе при сбое второй записи у одной стороны статус мог отставать.
+ *
  * Endpoints:
- * POST   /offers              - Создать предложение (producer)
+ * POST   /offers              - Создать предложение (producer; producerId из JWT)
  * GET    /offers/artist/:id   - Предложения для артиста
  * GET    /offers/producer/:id - Предложения от продюсера
- * PUT    /offers/:id/respond  - Ответить на предложение (artist)
+ * PUT    /offers/:id/respond  - Ответить на предложение (artist из JWT)
+ * PUT    /offers/:id/complete - Подтвердить завершение (artist из JWT)
  * GET    /chat/:offerId       - Сообщения по предложению
- * POST   /chat/:offerId       - Отправить сообщение
+ * POST   /chat/:offerId       - Отправить сообщение (sender из JWT)
  * GET    /stats/:userId       - Статистика коллабораций
  */
 
 import { Hono } from 'hono';
-import * as db from './db.tsx';
-import { collabMessagesStore, collabOffersByArtistStore, collabOffersByProducerStore } from './db.tsx';
+import {
+  collabMessagesStore,
+  collabOffersByArtistStore,
+  collabOffersByProducerStore,
+} from './db.tsx';
+import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
 import { requireAuth, requireOwner } from './auth-middleware.tsx';
@@ -50,6 +58,7 @@ interface CollabOffer {
   createdAt: string;
   updatedAt: string;
   respondedAt?: string;
+  completedAt?: string;
   artistComment?: string;
 }
 
@@ -68,23 +77,94 @@ function genId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-// ── POST /offers - Создать предложение ──
+/**
+ * Атомарно записывает оффер в оба JSONB-стора одной транзакцией.
+ * Любая ошибка во второй записи откатывает первую — стороны не разъезжаются.
+ */
+async function writeOfferAtomic(artistId: string, producerId: string, offer: CollabOffer) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: artistRows } = await client.query(
+      'SELECT data FROM collab_offers_by_artist WHERE artist_id = $1',
+      [artistId],
+    );
+    const artistOffers: CollabOffer[] = (artistRows[0]?.data as CollabOffer[]) || [];
+    const aIdx = artistOffers.findIndex(o => o.id === offer.id);
+    if (aIdx === -1) artistOffers.unshift(offer);
+    else artistOffers[aIdx] = offer;
+
+    const { rows: producerRows } = await client.query(
+      'SELECT data FROM collab_offers_by_producer WHERE producer_id = $1',
+      [producerId],
+    );
+    const producerOffers: CollabOffer[] = (producerRows[0]?.data as CollabOffer[]) || [];
+    const pIdx = producerOffers.findIndex(o => o.id === offer.id);
+    if (pIdx === -1) producerOffers.unshift(offer);
+    else producerOffers[pIdx] = offer;
+
+    const updatedAt = new Date().toISOString();
+    await client.query(
+      `INSERT INTO collab_offers_by_artist (artist_id, data, updated_at)
+       VALUES ($1, $2::jsonb, $3)
+       ON CONFLICT (artist_id) DO UPDATE SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at`,
+      [artistId, JSON.stringify(artistOffers), updatedAt],
+    );
+    await client.query(
+      `INSERT INTO collab_offers_by_producer (producer_id, data, updated_at)
+       VALUES ($1, $2::jsonb, $3)
+       ON CONFLICT (producer_id) DO UPDATE SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at`,
+      [producerId, JSON.stringify(producerOffers), updatedAt],
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** Найти оффер в любом из сторов по id. Возвращает null если не найден. */
+async function findOffer(offerId: string): Promise<CollabOffer | null> {
+  // Сначала пробуем индекс по продюсеру (offers редко бывают много к одному артисту,
+  // но порядок не критичен — оффер дублируется в обоих сторах).
+  const allArtists = await collabOffersByArtistStore.getAll() as CollabOffer[][];
+  for (const list of allArtists) {
+    const match = (list || []).find(o => o.id === offerId);
+    if (match) return match;
+  }
+  return null;
+}
+
+// ── POST /offers — создать предложение (продюсер) ──
 
 app.post('/offers', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const producerId = c.get('userId'); // IDOR fix: from JWT
-    const { producerName, artistId, artistName, type, title, description, price, audioPreviewUrl, bpm, key: musicKey, genre, tags, deadline } = body;
+    const producerId = c.get('userId') as string; // IDOR-safe: from JWT
+    const {
+      producerName, producerAvatar,
+      artistId, artistName,
+      type, title, description,
+      price, audioPreviewUrl, bpm, key: musicKey, genre, tags, deadline,
+    } = body;
 
     if (!artistId || !title) {
       return c.json({ success: false, error: 'artistId, title required' }, 400);
     }
+    if (artistId === producerId) {
+      return c.json({ success: false, error: 'Cannot offer collaboration to yourself' }, 400);
+    }
 
+    const now = new Date().toISOString();
     const offer: CollabOffer = {
       id: genId('offer'),
       producerId,
       producerName: producerName || 'Продюсер',
-      producerAvatar: body.producerAvatar,
+      producerAvatar,
       artistId,
       artistName: artistName || 'Артист',
       type: type || 'beat',
@@ -99,23 +179,12 @@ app.post('/offers', requireAuth, async (c) => {
       tags: tags || [],
       status: 'pending',
       deadline,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: now,
+      updatedAt: now,
     };
 
-    // Сохраняем для артиста
-    const artistKey = `collab_offers:${artistId}`;
-    const artistOffers: CollabOffer[] = (await collabOffersByArtistStore.get(artistId)) || [];
-    artistOffers.unshift(offer);
-    await collabOffersByArtistStore.set(artistId, artistOffers);
+    await writeOfferAtomic(artistId, producerId, offer);
 
-    // Сохраняем для продюсера
-    const producerKey = `collab_offers_by:${producerId}`;
-    const producerOffers: CollabOffer[] = (await collabOffersByProducerStore.get(offer.producerId)) || [];
-    producerOffers.unshift(offer);
-    await collabOffersByProducerStore.set(producerId, producerOffers);
-
-    // SSE уведомление артисту
     emitSSE(artistId, {
       type: 'collab_offer',
       data: {
@@ -136,7 +205,7 @@ app.post('/offers', requireAuth, async (c) => {
 
 // ── GET /offers/artist/:id ──
 
-app.get('/offers/artist/:id', requireAuth, async (c) => {
+app.get('/offers/artist/:id', requireAuth, requireOwner('id'), async (c) => {
   const artistId = c.req.param('id');
   try {
     const offers: CollabOffer[] = (await collabOffersByArtistStore.get(artistId)) || [];
@@ -148,7 +217,7 @@ app.get('/offers/artist/:id', requireAuth, async (c) => {
 
 // ── GET /offers/producer/:id ──
 
-app.get('/offers/producer/:id', requireAuth, async (c) => {
+app.get('/offers/producer/:id', requireAuth, requireOwner('id'), async (c) => {
   const producerId = c.req.param('id');
   try {
     const offers: CollabOffer[] = (await collabOffersByProducerStore.get(producerId)) || [];
@@ -158,59 +227,104 @@ app.get('/offers/producer/:id', requireAuth, async (c) => {
   }
 });
 
-// ── PUT /offers/:id/respond ──
+// ── PUT /offers/:id/respond — артист отвечает (accept/decline/discussion) ──
 
 app.put('/offers/:id/respond', requireAuth, async (c) => {
   const offerId = c.req.param('id');
   try {
-    const { artistId, status, comment } = await c.req.json();
-    if (!artistId || !status) {
-      return c.json({ success: false, error: 'artistId and status required' }, 400);
-    }
+    const { status, comment } = await c.req.json();
+    const userId = c.get('userId') as string;
 
     const validStatuses = ['accepted', 'declined', 'discussion'];
     if (!validStatuses.includes(status)) {
-      return c.json({ success: false, error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` }, 400);
+      return c.json(
+        { success: false, error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` },
+        400,
+      );
     }
 
-    // Обновляем в списке артиста
-    const artistKey = `collab_offers:${artistId}`;
-    const artistOffers: CollabOffer[] = (await collabOffersByArtistStore.get(artistId)) || [];
+    const artistOffers: CollabOffer[] = (await collabOffersByArtistStore.get(userId)) || [];
+    const offerIdx = artistOffers.findIndex(o => o.id === offerId);
+    if (offerIdx === -1) {
+      // Либо нет такого оффера, либо он адресован другому артисту — для атакующего неотличимо.
+      return c.json({ success: false, error: 'Offer not found' }, 404);
+    }
+
+    const original = artistOffers[offerIdx];
+    if (original.status !== 'pending' && original.status !== 'discussion') {
+      return c.json(
+        { success: false, error: `Cannot respond to offer in status ${original.status}` },
+        409,
+      );
+    }
+
+    const now = new Date().toISOString();
+    const updated: CollabOffer = {
+      ...original,
+      status,
+      updatedAt: now,
+      respondedAt: now,
+      ...(comment ? { artistComment: comment } : {}),
+    };
+
+    await writeOfferAtomic(updated.artistId, updated.producerId, updated);
+
+    const statusLabel =
+      status === 'accepted' ? 'принял' :
+      status === 'declined' ? 'отклонил' :
+      'хочет обсудить';
+    emitSSE(updated.producerId, {
+      type: 'collab_response',
+      data: {
+        offerId,
+        artistName: updated.artistName,
+        status,
+        message: `${updated.artistName} ${statusLabel} предложение "${updated.title}"`,
+      },
+    });
+
+    return c.json({ success: true, offer: updated });
+  } catch (err) {
+    return c.json({ success: false, error: String(err) }, 500);
+  }
+});
+
+// ── PUT /offers/:id/complete — артист подтверждает завершение коллабы ──
+
+app.put('/offers/:id/complete', requireAuth, async (c) => {
+  const offerId = c.req.param('id');
+  try {
+    const userId = c.get('userId') as string;
+
+    const artistOffers: CollabOffer[] = (await collabOffersByArtistStore.get(userId)) || [];
     const offerIdx = artistOffers.findIndex(o => o.id === offerId);
     if (offerIdx === -1) {
       return c.json({ success: false, error: 'Offer not found' }, 404);
     }
 
-    const offer = artistOffers[offerIdx];
-    offer.status = status;
-    offer.updatedAt = new Date().toISOString();
-    offer.respondedAt = new Date().toISOString();
-    if (comment) offer.artistComment = comment;
-    artistOffers[offerIdx] = offer;
-    await collabOffersByArtistStore.set(artistId, artistOffers);
-
-    // Обновляем в списке продюсера
-    const producerKey = `collab_offers_by:${offer.producerId}`;
-    const producerOffers: CollabOffer[] = (await collabOffersByProducerStore.get(offer.producerId)) || [];
-    const pIdx = producerOffers.findIndex(o => o.id === offerId);
-    if (pIdx !== -1) {
-      producerOffers[pIdx] = { ...offer };
-      await collabOffersByProducerStore.set(offer.producerId, producerOffers);
+    const original = artistOffers[offerIdx];
+    if (original.status !== 'accepted') {
+      return c.json(
+        { success: false, error: `Can complete only accepted offers (current: ${original.status})` },
+        409,
+      );
     }
 
-    // SSE уведомление продюсеру
-    const statusLabel = status === 'accepted' ? 'принял' : status === 'declined' ? 'отклонил' : 'хочет обсудить';
-    emitSSE(offer.producerId, {
+    const now = new Date().toISOString();
+    const updated: CollabOffer = { ...original, status: 'completed', updatedAt: now, completedAt: now };
+    await writeOfferAtomic(updated.artistId, updated.producerId, updated);
+
+    emitSSE(updated.producerId, {
       type: 'collab_response',
       data: {
         offerId,
-        artistName: offer.artistName,
-        status,
-        message: `${offer.artistName} ${statusLabel} предложение "${offer.title}"`,
+        artistName: updated.artistName,
+        status: 'completed',
+        message: `${updated.artistName} подтвердил завершение коллаборации "${updated.title}"`,
       },
     });
 
-    return c.json({ success: true, offer });
+    return c.json({ success: true, offer: updated });
   } catch (err) {
     return c.json({ success: false, error: String(err) }, 500);
   }
@@ -221,6 +335,15 @@ app.put('/offers/:id/respond', requireAuth, async (c) => {
 app.get('/chat/:offerId', requireAuth, async (c) => {
   const offerId = c.req.param('offerId');
   try {
+    const userId = c.get('userId') as string;
+
+    // Доступ только участникам оффера.
+    const offer = await findOffer(offerId);
+    if (!offer) return c.json({ success: false, error: 'Offer not found' }, 404);
+    if (offer.artistId !== userId && offer.producerId !== userId) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+
     const messages: CollabMessage[] = (await collabMessagesStore.get(offerId)) || [];
     return c.json({ success: true, messages });
   } catch (err) {
@@ -233,50 +356,53 @@ app.get('/chat/:offerId', requireAuth, async (c) => {
 app.post('/chat/:offerId', requireAuth, async (c) => {
   const offerId = c.req.param('offerId');
   try {
-    const { senderId, senderName, senderRole, text, attachment } = await c.req.json();
-    if (!senderId || !text) {
-      return c.json({ success: false, error: 'senderId and text required' }, 400);
+    const { text, attachment, senderName } = await c.req.json();
+    const userId = c.get('userId') as string;
+
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return c.json({ success: false, error: 'text required' }, 400);
+    }
+
+    // Identity & authorization — нельзя писать в чат, если ты не сторона этого оффера.
+    // Это же даёт нам корректный senderRole без доверия body.
+    const offer = await findOffer(offerId);
+    if (!offer) return c.json({ success: false, error: 'Offer not found' }, 404);
+    let senderRole: 'producer' | 'artist';
+    let recipientId: string;
+    if (offer.producerId === userId) {
+      senderRole = 'producer';
+      recipientId = offer.artistId;
+    } else if (offer.artistId === userId) {
+      senderRole = 'artist';
+      recipientId = offer.producerId;
+    } else {
+      return c.json({ success: false, error: 'Access denied' }, 403);
     }
 
     const message: CollabMessage = {
       id: genId('cmsg'),
       offerId,
-      senderId,
-      senderName: senderName || 'User',
-      senderRole: senderRole || 'artist',
+      senderId: userId,
+      senderName: (typeof senderName === 'string' && senderName.trim()) || 'User',
+      senderRole,
       text,
       attachment,
       createdAt: new Date().toISOString(),
     };
 
-    const chatKey = `collab_chat:${offerId}`;
     const messages: CollabMessage[] = (await collabMessagesStore.get(offerId)) || [];
     messages.push(message);
     await collabMessagesStore.set(offerId, messages);
 
-    // Определяем получателя — ищем оффер в обоих KV по senderId
-    let recipientId = '';
-    // Если отправитель — продюсер, оффер лежит в его producer-store
-    // Если артист — в его artist-store
-    const senderOffers = senderRole === 'producer'
-      ? ((await collabOffersByProducerStore.get(senderId)) || [])
-      : ((await collabOffersByArtistStore.get(senderId)) || []);
-    const matchedOffer = senderOffers.find((o: any) => o.id === offerId);
-    if (matchedOffer) {
-      recipientId = senderRole === 'producer' ? matchedOffer.artistId : matchedOffer.producerId;
-    }
-
-    if (recipientId) {
-      emitSSE(recipientId, {
-        type: 'collab_message',
-        data: {
-          offerId,
-          senderName,
-          text: text.length > 100 ? text.slice(0, 100) + '...' : text,
-          message: `${senderName}: ${text.length > 60 ? text.slice(0, 60) + '...' : text}`,
-        },
-      });
-    }
+    emitSSE(recipientId, {
+      type: 'collab_message',
+      data: {
+        offerId,
+        senderName: message.senderName,
+        text: text.length > 100 ? text.slice(0, 100) + '...' : text,
+        message: `${message.senderName}: ${text.length > 60 ? text.slice(0, 60) + '...' : text}`,
+      },
+    });
 
     return c.json({ success: true, message });
   } catch (err) {
@@ -291,7 +417,7 @@ app.get('/stats/:userId', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const asArtist: CollabOffer[] = (await collabOffersByArtistStore.get(userId)) || [];
     const asProducer: CollabOffer[] = (await collabOffersByProducerStore.get(userId)) || [];
-    
+
     const all = [...asArtist, ...asProducer];
     const stats = {
       totalReceived: asArtist.length,
