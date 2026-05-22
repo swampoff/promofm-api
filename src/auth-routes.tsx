@@ -12,6 +12,7 @@ import { upsertNotification } from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsStoreToken, vpsGetToken, vpsUseToken } from './vps-userdata.tsx';
 import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail } from "./email-helper.tsx";
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { isValidRole } from './roles.tsx';
 import {
   checkAccountLockout, recordLoginAttempt, getFailedAttemptsCount,
   verifyCaptcha,
@@ -166,7 +167,9 @@ auth.post("/signup", async (c) => {
     if (pwErr) return c.json({ success: false, error: pwErr }, 400);
     if (!consentPersonalData) return c.json({ success: false, error: "Необходимо согласие на обработку персональных данных" }, 400);
 
-    const userRole = (role && role !== "admin" && role !== "superadmin") ? role : "artist";
+    // Whitelist: only allow roles declared in roles.tsx, and block admin/superadmin
+    // (those are server-assigned only). Fallback to 'artist' for any unknown input.
+    const userRole = (role && isValidRole(role) && role !== "admin" && role !== "superadmin") ? role : "artist";
     const isPartner = PARTNER_ROLES.includes(userRole);
     const accountStatus = isPartner ? 'pending' : 'active';
     const userName = name || email.split("@")[0];
