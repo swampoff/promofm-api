@@ -117,7 +117,21 @@ app.get('/profile', requireAuth, requireDjRole, async (c) => {
 app.put('/profile', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
+    const role = c.get('userRole');
     const body = await c.req.json();
+
+    // Admin-only fields: a regular DJ shouldn't be able to self-verify
+    // through PUT /profile (mapRow returns `verified` to the public
+    // marketplace). Strip on both levels we support — root and nested.
+    if (role !== 'admin' && role !== 'superadmin') {
+      if (body && typeof body === 'object') {
+        delete body.verified;
+        delete body.is_verified;
+        if (body.profile && typeof body.profile === 'object') {
+          delete body.profile.verified;
+        }
+      }
+    }
 
     await upsertDjProfile(userId, body);
     return c.json({ success: true, data: body });
@@ -148,12 +162,26 @@ app.post('/events', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
+    if (!body?.title || typeof body.title !== 'string' || !body.title.trim()) {
+      return c.json({ success: false, error: 'title обязателен' }, 400);
+    }
     const id = generateId('ev');
     const now = new Date().toISOString();
+    const allowedStatuses = new Set(['upcoming', 'confirmed', 'completed', 'cancelled']);
+    const allowedTypes = new Set(['club', 'festival', 'private', 'stream']);
 
     const event = {
       id,
       ...body,
+      // Sanity-clamp numeric and enum fields so a sloppy client can't
+      // poison aggregates (negative fee → wrong totalEarnings, etc.)
+      title: String(body.title).slice(0, 200).trim(),
+      venue: String(body.venue || '').slice(0, 200),
+      city: String(body.city || '').slice(0, 100),
+      fee: Math.max(0, Number(body.fee) || 0),
+      capacity: Math.max(0, Number(body.capacity) || 0),
+      status: allowedStatuses.has(body.status) ? body.status : 'upcoming',
+      type: allowedTypes.has(body.type) ? body.type : 'club',
       djId: userId,
       createdAt: now,
       updatedAt: now,
@@ -194,7 +222,20 @@ app.put('/events/:id', requireAuth, requireDjRole, async (c) => {
     const idx = events.findIndex((e: any) => e.id === eventId);
     if (idx === -1) return c.json({ success: false, error: 'Event not found' }, 404);
 
-    events[idx] = { ...events[idx], ...body, updatedAt: new Date().toISOString() };
+    // Re-clamp the same fields POST does, so a status/fee tweak via PUT
+    // can't bypass the validation we apply on create.
+    const allowedStatuses = new Set(['upcoming', 'confirmed', 'completed', 'cancelled']);
+    const allowedTypes = new Set(['club', 'festival', 'private', 'stream']);
+    const patch: any = { ...body };
+    if (patch.fee !== undefined) patch.fee = Math.max(0, Number(patch.fee) || 0);
+    if (patch.capacity !== undefined) patch.capacity = Math.max(0, Number(patch.capacity) || 0);
+    if (patch.status !== undefined && !allowedStatuses.has(patch.status)) delete patch.status;
+    if (patch.type !== undefined && !allowedTypes.has(patch.type)) delete patch.type;
+    if (typeof patch.title === 'string') patch.title = patch.title.slice(0, 200);
+    // Cannot reassign event to another DJ via PUT.
+    delete patch.djId;
+
+    events[idx] = { ...events[idx], ...patch, updatedAt: new Date().toISOString() };
     await djEventsStore.set(userId, events);
     return c.json({ success: true, data: events[idx] });
   } catch (error) {
@@ -1015,7 +1056,7 @@ app.post('/promotion/campaigns', requireAuth, requireDjRole, async (c) => {
       status: 'active',
       impressions: 0,
       clicks: 0,
-      budget: Number(body.budget || 0),
+      budget: Math.max(0, Number(body.budget || 0)),
       spent: 0,
       mixId: body.mixId || null,
       startedAt: now,
