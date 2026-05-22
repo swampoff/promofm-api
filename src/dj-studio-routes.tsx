@@ -26,11 +26,16 @@ import {
 } from './db.tsx';
 import { pool } from './db-client.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
-import { resolveUserId } from './resolve-user-id.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireRole } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
+
+// Все DJ-эндпоинты требуют роль 'dj' (или admin/superadmin для служебного
+// доступа). Без этого артист/радио/заведение с валидным токеном могли
+// бы дёрнуть PUT /profile и создать orphan-запись dj_profiles на свой
+// userId.
+const requireDjRole = requireRole('dj', 'admin', 'superadmin');
 
 // Fallback DJ user ID
 const FALLBACK_DJ_USER_ID = 'anonymous';
@@ -91,7 +96,7 @@ function ensureDjMixesSchema(): Promise<void> {
 // ════════════════════════════════════════
 
 // GET /profile - загрузить профиль DJ
-app.get('/profile', requireAuth, async (c) => {
+app.get('/profile', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const data = await getDjProfile(userId);
@@ -109,7 +114,7 @@ app.get('/profile', requireAuth, async (c) => {
 });
 
 // PUT /profile - сохранить профиль DJ
-app.put('/profile', requireAuth, async (c) => {
+app.put('/profile', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
@@ -127,7 +132,7 @@ app.put('/profile', requireAuth, async (c) => {
 // ════════════════════════════════════════
 
 // GET /events - список событий DJ
-app.get('/events', requireAuth, async (c) => {
+app.get('/events', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const events = await djEventsStore.get(userId) || [];
@@ -139,7 +144,7 @@ app.get('/events', requireAuth, async (c) => {
 });
 
 // POST /events - создать событие
-app.post('/events', requireAuth, async (c) => {
+app.post('/events', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
@@ -166,7 +171,7 @@ app.post('/events', requireAuth, async (c) => {
 });
 
 // GET /events/:id
-app.get('/events/:id', requireAuth, async (c) => {
+app.get('/events/:id', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const eventId = c.req.param('id');
@@ -180,7 +185,7 @@ app.get('/events/:id', requireAuth, async (c) => {
 });
 
 // PUT /events/:id
-app.put('/events/:id', requireAuth, async (c) => {
+app.put('/events/:id', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const eventId = c.req.param('id');
@@ -198,7 +203,7 @@ app.put('/events/:id', requireAuth, async (c) => {
 });
 
 // DELETE /events/:id
-app.delete('/events/:id', requireAuth, async (c) => {
+app.delete('/events/:id', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const eventId = c.req.param('id');
@@ -216,7 +221,7 @@ app.delete('/events/:id', requireAuth, async (c) => {
 // ════════════════════════════════════════
 
 // GET /collaborations
-app.get('/collaborations', requireAuth, async (c) => {
+app.get('/collaborations', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const collabs = await djCollaborationsStore.get(userId) || [];
@@ -227,7 +232,7 @@ app.get('/collaborations', requireAuth, async (c) => {
 });
 
 // POST /collaborations
-app.post('/collaborations', requireAuth, async (c) => {
+app.post('/collaborations', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
@@ -253,7 +258,7 @@ app.post('/collaborations', requireAuth, async (c) => {
 });
 
 // PUT /collaborations/:id/accept
-app.put('/collaborations/:id/accept', requireAuth, async (c) => {
+app.put('/collaborations/:id/accept', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const collabId = c.req.param('id');
@@ -271,7 +276,7 @@ app.put('/collaborations/:id/accept', requireAuth, async (c) => {
 });
 
 // PUT /collaborations/:id/decline
-app.put('/collaborations/:id/decline', requireAuth, async (c) => {
+app.put('/collaborations/:id/decline', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const collabId = c.req.param('id');
@@ -293,7 +298,7 @@ app.put('/collaborations/:id/decline', requireAuth, async (c) => {
 // ════════════════════════════════════════
 
 // GET /notifications
-app.get('/notifications', requireAuth, async (c) => {
+app.get('/notifications', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const notifications = await djNotificationsStore.get(userId) || [];
@@ -304,7 +309,7 @@ app.get('/notifications', requireAuth, async (c) => {
 });
 
 // POST /notifications/read
-app.post('/notifications/read', requireAuth, async (c) => {
+app.post('/notifications/read', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
@@ -387,12 +392,12 @@ const DJ_PLANS = [
 ];
 
 // GET /plans - тарифные планы
-app.get('/plans', requireAuth, async (c) => {
+app.get('/plans', requireAuth, requireDjRole, async (c) => {
   return c.json({ success: true, data: DJ_PLANS });
 });
 
 // GET /subscription/:djId - текущая подписка DJ
-app.get('/subscription/:djId', requireAuth, async (c) => {
+app.get('/subscription/:djId', requireAuth, requireDjRole, async (c) => {
   try {
     const djId = c.req.param('djId');
     const sub = await djSubscriptionsStore.get(djId);
@@ -422,7 +427,7 @@ app.get('/subscription/:djId', requireAuth, async (c) => {
 });
 
 // POST /subscription/:djId/change - смена плана
-app.post('/subscription/:djId/change', requireAuth, async (c) => {
+app.post('/subscription/:djId/change', requireAuth, requireDjRole, async (c) => {
   try {
     const djId = c.req.param('djId');
     const body = await c.req.json();
@@ -488,7 +493,7 @@ app.post('/subscription/:djId/change', requireAuth, async (c) => {
 // ════════════════════════════════════════
 
 // GET /coins/balance — баланс коинов DJ (используется в сайдбаре)
-app.get('/coins/balance', requireAuth, async (c) => {
+app.get('/coins/balance', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const bal = await getCoinBalance(userId);
@@ -504,7 +509,7 @@ app.get('/coins/balance', requireAuth, async (c) => {
 // ════════════════════════════════════════
 
 // GET /dashboard/stats — агрегированная статистика для главной DJ-кабинета
-app.get('/dashboard/stats', requireAuth, async (c) => {
+app.get('/dashboard/stats', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     await ensureDjMixesSchema();
@@ -582,7 +587,7 @@ function inCurrentMonth(iso: string | undefined): boolean {
 }
 
 // GET /finances/overview — балансы DJ (рассчитываются из событий + транзакций)
-app.get('/finances/overview', requireAuth, async (c) => {
+app.get('/finances/overview', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const [events, withdrawals, txs] = await Promise.all([
@@ -638,7 +643,7 @@ app.get('/finances/overview', requireAuth, async (c) => {
 });
 
 // GET /finances/transactions — история транзакций (события + явные tx-записи)
-app.get('/finances/transactions', requireAuth, async (c) => {
+app.get('/finances/transactions', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const [events, txs] = await Promise.all([
@@ -685,7 +690,7 @@ app.get('/finances/transactions', requireAuth, async (c) => {
 });
 
 // GET /finances/withdrawals — выплаты
-app.get('/finances/withdrawals', requireAuth, async (c) => {
+app.get('/finances/withdrawals', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const list = (await djWithdrawalsStore.get(userId)) || [];
@@ -697,7 +702,7 @@ app.get('/finances/withdrawals', requireAuth, async (c) => {
 });
 
 // POST /finances/withdrawals — запрос вывода (создаёт YooKassa Payout)
-app.post('/finances/withdrawals', requireAuth, async (c) => {
+app.post('/finances/withdrawals', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
@@ -818,7 +823,7 @@ app.post('/finances/withdrawals', requireAuth, async (c) => {
 // ════════════════════════════════════════
 
 // GET /promotion/pitches — питчи миксов (на модерацию админа, как у артиста)
-app.get('/promotion/pitches', requireAuth, async (c) => {
+app.get('/promotion/pitches', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     // Гарантируем, что таблица + колонки существуют (на случай первого запроса
@@ -871,7 +876,7 @@ app.get('/promotion/pitches', requireAuth, async (c) => {
 });
 
 // POST /promotion/pitches — создать питч (на модерацию админу)
-app.post('/promotion/pitches', requireAuth, async (c) => {
+app.post('/promotion/pitches', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
@@ -981,7 +986,7 @@ app.post('/promotion/pitches', requireAuth, async (c) => {
 });
 
 // GET /promotion/campaigns — рекламные кампании
-app.get('/promotion/campaigns', requireAuth, async (c) => {
+app.get('/promotion/campaigns', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const list = (await djCampaignsStore.get(userId)) || [];
@@ -993,7 +998,7 @@ app.get('/promotion/campaigns', requireAuth, async (c) => {
 });
 
 // POST /promotion/campaigns — создать кампанию
-app.post('/promotion/campaigns', requireAuth, async (c) => {
+app.post('/promotion/campaigns', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
@@ -1070,7 +1075,7 @@ async function saveUpload(file: File, subdir: string, prefix: string, allowed: S
 }
 
 // POST /profile/avatar — загрузить аватар DJ
-app.post('/profile/avatar', requireAuth, async (c) => {
+app.post('/profile/avatar', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.parseBody();
@@ -1092,7 +1097,7 @@ app.post('/profile/avatar', requireAuth, async (c) => {
 });
 
 // POST /profile/cover — загрузить обложку
-app.post('/profile/cover', requireAuth, async (c) => {
+app.post('/profile/cover', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.parseBody();
@@ -1114,7 +1119,7 @@ app.post('/profile/cover', requireAuth, async (c) => {
 });
 
 // POST /portfolio/upload — загрузить файл (аудио/видео) в портфолио
-app.post('/portfolio/upload', requireAuth, async (c) => {
+app.post('/portfolio/upload', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.parseBody();
@@ -1162,7 +1167,7 @@ app.post('/portfolio/upload', requireAuth, async (c) => {
 // ════════════════════════════════════════
 
 // GET /mixes — список собственных миксов (для DjMixManager)
-app.get('/mixes', requireAuth, async (c) => {
+app.get('/mixes', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     await ensureDjMixesSchema();
@@ -1201,7 +1206,7 @@ app.get('/mixes', requireAuth, async (c) => {
 });
 
 // POST /mixes — загрузить новый микс (multipart: audio, cover, title, genre…)
-app.post('/mixes', requireAuth, async (c) => {
+app.post('/mixes', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     await ensureDjMixesSchema();
@@ -1258,7 +1263,7 @@ app.post('/mixes', requireAuth, async (c) => {
 });
 
 // DELETE /mixes/:id — удалить микс (свой)
-app.delete('/mixes/:id', requireAuth, async (c) => {
+app.delete('/mixes/:id', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const id = c.req.param('id');
@@ -1277,7 +1282,7 @@ app.delete('/mixes/:id', requireAuth, async (c) => {
 });
 
 // GET /promotion/targets?type=radio|venue — каталог целей для питча
-app.get('/promotion/targets', requireAuth, async (c) => {
+app.get('/promotion/targets', requireAuth, requireDjRole, async (c) => {
   try {
     const type = c.req.query('type') === 'venue' ? 'venue' : 'radio';
     const query = String(c.req.query('q') || '').trim().toLowerCase();
