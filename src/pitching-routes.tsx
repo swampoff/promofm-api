@@ -1,26 +1,30 @@
 /**
- * PITCHING ROUTES — каталог плейлистов/радиостанций + сабмиссии артистов + админ-модерация
+ * PITCHING ROUTES — каталог стриминговых плейлистов + сабмиссии артистов с оплатой ЮКассой
  *
- * До этого рефакторинга весь модуль был фейком: каталог хардкоден массивами,
- * submit-pitch/submit-radio только писали в console.log и возвращали выдуманный
- * submissionId. Артисты «питчинговали» в пустоту, никто не модерировал.
+ * Pitching на этой платформе — это distribution трека/видео в стриминговые
+ * плейлисты (Spotify / Apple Music / Яндекс.Музыка / Deezer и т.п.).
+ * Радиостанции и заведения — отдельные фичи, в этом модуле их нет.
+ *
+ * Денежный путь:
+ *   1. Артист на /pitching-page собирает «корзину» позиций из каталога
+ *   2. POST /pitching/submit создаёт N submissions со status='pending_payment'
+ *      и одну ЮКасса-сессию на сумму всех позиций; возвращает confirmation_url
+ *   3. Артист уходит на ЮКассу, оплачивает, ЮКасса дёргает /checkout/webhook/yookassa
+ *   4. Webhook видит metadata.itemType='pitching_bundle' и переводит submissions
+ *      из pending_payment → pending (модерация), notifyAllAdmins по каждой
+ *   5. Админ модерирует через /pitching/admin/submissions — артист получает SSE push
  *
  * Public/auth endpoints:
- *   GET    /pitching/playlists                — список активных плейлистов
- *   GET    /pitching/radio-stations           — список активных радиостанций
+ *   GET    /pitching/playlists                — каталог активных плейлистов
  *   GET    /pitching/submissions              — собственные сабмиссии артиста
- *   POST   /pitching/submit-pitch             — сабмишшен на плейлист (трек/видео)
- *   POST   /pitching/submit-radio             — сабмишшен на радиостанцию
+ *   POST   /pitching/submit                   — bundle-сабмит (создаёт payment session)
  *
  * Admin endpoints (requireAdmin):
  *   POST   /pitching/admin/playlists          — создать плейлист
  *   PUT    /pitching/admin/playlists/:id      — обновить
  *   DELETE /pitching/admin/playlists/:id      — архивировать (soft delete)
- *   POST   /pitching/admin/radio-stations     — создать радиостанцию
- *   PUT    /pitching/admin/radio-stations/:id — обновить
- *   DELETE /pitching/admin/radio-stations/:id — архивировать
  *   GET    /pitching/admin/submissions        — все сабмиссии (фильтр по status)
- *   PUT    /pitching/admin/submissions/:id    — модерация (status + response)
+ *   PUT    /pitching/admin/submissions/:id    — модерация (accepted/rejected + response)
  */
 
 import { Hono } from 'hono';
@@ -28,21 +32,19 @@ import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { notifyAllAdmins, notifyCrossCabinet } from './cross-cabinet-notify.tsx';
+import { getGateway, type PaymentSession } from './payment-gateway.tsx';
+import { upsertPaymentSession } from './db.tsx';
 
 const app = new Hono();
 
 // ── Schema bootstrap (idempotent) ────────────────────────────────────────────
-//
-// Same self-bootstrap pattern as src/waitlist-routes.tsx. Runs CREATE TABLE
-// IF NOT EXISTS on first hit to any pitching endpoint — no manual SSH-DDL step
-// required on deploy. Seeds the catalog with the previous hardcoded entries
-// so existing fronts don't see an empty list on first deploy.
 
 let schemaReady: Promise<void> | null = null;
 
 async function ensureSchema(): Promise<void> {
   if (schemaReady) return schemaReady;
   schemaReady = (async () => {
+    // 1. Catalog: streaming playlists with price.
     await pool.query(`
       CREATE TABLE IF NOT EXISTS pitching_playlists (
         id TEXT PRIMARY KEY,
@@ -52,7 +54,11 @@ async function ensureSchema(): Promise<void> {
         genre TEXT,
         region TEXT,
         description TEXT,
+        curator TEXT,
         curator_contact TEXT,
+        image_url TEXT,
+        acceptance_rate INT NOT NULL DEFAULT 0,
+        price_rub NUMERIC(10, 2) NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'active',
         created_by TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -61,33 +67,29 @@ async function ensureSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_pitching_playlists_status ON pitching_playlists(status);
       CREATE INDEX IF NOT EXISTS idx_pitching_playlists_platform ON pitching_playlists(platform);
     `);
+    // Add columns to pre-existing deployments where the table was created
+    // by an earlier schema (without price/curator/image_url/acceptance_rate).
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS pitching_radio_stations (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        region TEXT,
-        country TEXT,
-        genre TEXT,
-        website TEXT,
-        contact_email TEXT,
-        status TEXT NOT NULL DEFAULT 'active',
-        created_by TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS idx_pitching_radio_status ON pitching_radio_stations(status);
+      ALTER TABLE pitching_playlists
+        ADD COLUMN IF NOT EXISTS curator TEXT,
+        ADD COLUMN IF NOT EXISTS image_url TEXT,
+        ADD COLUMN IF NOT EXISTS acceptance_rate INT NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS price_rub NUMERIC(10, 2) NOT NULL DEFAULT 0;
     `);
+
+    // 2. Submissions log with payment fields.
     await pool.query(`
       CREATE TABLE IF NOT EXISTS pitching_submissions (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
-        submission_type TEXT NOT NULL,
         target_id TEXT NOT NULL,
         target_name TEXT,
         track_id TEXT,
         video_id TEXT,
         message TEXT,
-        status TEXT NOT NULL DEFAULT 'pending',
+        price_rub NUMERIC(10, 2) NOT NULL DEFAULT 0,
+        payment_session_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending_payment',
         moderator_id TEXT,
         moderator_response TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -96,30 +98,28 @@ async function ensureSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_pitching_submissions_user ON pitching_submissions(user_id);
       CREATE INDEX IF NOT EXISTS idx_pitching_submissions_status ON pitching_submissions(status);
       CREATE INDEX IF NOT EXISTS idx_pitching_submissions_target ON pitching_submissions(target_id);
+      CREATE INDEX IF NOT EXISTS idx_pitching_submissions_payment ON pitching_submissions(payment_session_id);
     `);
-    // Seed once if empty so the frontend's first load isn't blank.
-    const pCount = await pool.query(`SELECT COUNT(*)::int AS n FROM pitching_playlists`);
-    if (Number(pCount.rows[0]?.n || 0) === 0) {
-      await pool.query(`
-        INSERT INTO pitching_playlists (id, name, platform, followers, genre) VALUES
-          ('p1', 'New Music Friday', 'Spotify',     5000000, NULL),
-          ('p2', 'Top Hits',         'Apple Music', 3000000, 'Pop'),
-          ('p3', 'Electronic Rising','Spotify',      800000, 'Electronic'),
-          ('p4', 'Indie Radar',      'Deezer',       200000, 'Indie')
-        ON CONFLICT (id) DO NOTHING
-      `);
-    }
-    const sCount = await pool.query(`SELECT COUNT(*)::int AS n FROM pitching_radio_stations`);
-    if (Number(sCount.rows[0]?.n || 0) === 0) {
-      await pool.query(`
-        INSERT INTO pitching_radio_stations (id, name, region, genre) VALUES
-          ('r1', 'Hit FM',           'Global',  'Pop'),
-          ('r2', 'Rock Radio',       'USA',     'Rock'),
-          ('r3', 'Jazz Cafe',        'France',  'Jazz'),
-          ('r4', 'Electronic Waves', 'Germany', 'Electronic')
-        ON CONFLICT (id) DO NOTHING
-      `);
-    }
+    // Idempotent column adds for pre-existing deployments.
+    await pool.query(`
+      ALTER TABLE pitching_submissions
+        ADD COLUMN IF NOT EXISTS price_rub NUMERIC(10, 2) NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS payment_session_id TEXT;
+    `);
+    // Drop the now-unused submission_type column if it exists. Pitching is
+    // always playlist-targeted in this module; the column is a leftover from
+    // the radio-stations era.
+    await pool.query(`
+      ALTER TABLE pitching_submissions DROP COLUMN IF EXISTS submission_type;
+    `);
+
+    // 3. One-time cleanup of legacy fake submissions: anything created before
+    // the payment column existed had status='pending' but no money behind it.
+    // Per "Удалить все старые (Recommended)" — purge them so admins don't see
+    // ghost rows in /admin/moderation/pitchings.
+    await pool.query(`
+      DELETE FROM pitching_submissions WHERE price_rub = 0 AND payment_session_id IS NULL;
+    `);
   })();
   return schemaReady;
 }
@@ -134,7 +134,8 @@ app.get('/playlists', async (c) => {
   try {
     await ensureSchema();
     const r = await pool.query(
-      `SELECT id, name, platform, followers, genre, region, description, curator_contact
+      `SELECT id, name, platform, followers, genre, region, description,
+              curator, curator_contact, image_url, acceptance_rate, price_rub
        FROM pitching_playlists WHERE status = 'active'
        ORDER BY followers DESC, name ASC`
     );
@@ -144,29 +145,16 @@ app.get('/playlists', async (c) => {
   }
 });
 
-app.get('/radio-stations', async (c) => {
-  try {
-    await ensureSchema();
-    const r = await pool.query(
-      `SELECT id, name, region, country, genre, website, contact_email
-       FROM pitching_radio_stations WHERE status = 'active'
-       ORDER BY name ASC`
-    );
-    return c.json({ success: true, stations: r.rows });
-  } catch (error: any) {
-    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
-  }
-});
-
-// ── Submissions (artist) ──────────────────────────────────────────────────────
+// ── Artist submissions ────────────────────────────────────────────────────────
 
 app.get('/submissions', requireAuth, async (c) => {
   try {
     await ensureSchema();
     const userId = c.get('userId') as string;
     const r = await pool.query(
-      `SELECT id, submission_type, target_id, target_name, track_id, video_id,
-              message, status, moderator_response, created_at, updated_at
+      `SELECT id, target_id, target_name, track_id, video_id, message,
+              price_rub, payment_session_id, status, moderator_response,
+              created_at, updated_at
        FROM pitching_submissions WHERE user_id = $1
        ORDER BY created_at DESC LIMIT 200`,
       [userId]
@@ -177,76 +165,194 @@ app.get('/submissions', requireAuth, async (c) => {
   }
 });
 
-async function createSubmission(c: any, submissionType: 'playlist' | 'radio') {
-  await ensureSchema();
-  const userId = c.get('userId') as string;
-  const body = await c.req.json();
-  const { targetId, trackId, videoId, message, targetName: targetNameFromBody } = body || {};
-
-  if (!targetId) {
-    return c.json({ success: false, error: 'targetId is required' }, 400);
-  }
-  if (!trackId && !videoId) {
-    return c.json({ success: false, error: 'Either trackId or videoId is required' }, 400);
-  }
-
-  // Soft target lookup — the catalog DB stores ids like 'p1'/'p2', but the
-  // existing track-pitching modal sends hardcoded ids like 'spotify' /
-  // 'apple_music'. Don't reject those; just snapshot whichever name we know.
-  const targetTable = submissionType === 'playlist' ? 'pitching_playlists' : 'pitching_radio_stations';
-  const targetRow = await pool.query(
-    `SELECT name FROM ${targetTable} WHERE id = $1 AND status = 'active'`,
-    [targetId]
-  );
-  const targetName: string = (targetRow.rows[0]?.name as string) || targetNameFromBody || targetId;
-
-  // Prevent duplicate pending submission of the same track/video to the same target.
-  const dup = await pool.query(
-    `SELECT id FROM pitching_submissions
-     WHERE user_id = $1 AND target_id = $2 AND status = 'pending'
-       AND COALESCE(track_id, '') = COALESCE($3, '')
-       AND COALESCE(video_id, '') = COALESCE($4, '')`,
-    [userId, targetId, trackId || null, videoId || null]
-  );
-  if (dup.rows.length > 0) {
-    return c.json({ success: false, error: 'Заявка уже отправлена и ждёт модерации' }, 409);
-  }
-
-  const id = generateId('pit');
-  await pool.query(
-    `INSERT INTO pitching_submissions
-       (id, user_id, submission_type, target_id, target_name, track_id, video_id, message, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')`,
-    [id, userId, submissionType, targetId, targetName, trackId || null, videoId || null, message || null]
-  );
-
+/**
+ * POST /pitching/submit — bundle-submit with payment.
+ *
+ * Body:
+ *   {
+ *     items: [
+ *       { targetId: 'p1', trackId?: '...', videoId?: '...', message?: '...' },
+ *       ...
+ *     ],
+ *     returnUrl: 'https://promo-music.ru/cabinet/pitching?paid=1'
+ *   }
+ *
+ * Pricing is server-authoritative: prices come from pitching_playlists.price_rub,
+ * not from the client (client never gets to set its own price). Submissions are
+ * created in status='pending_payment' and only flip to 'pending' (moderation
+ * queue) when the YooKassa webhook confirms payment.
+ *
+ * Returns: { success, orderId, confirmationUrl, amount, submission_ids }
+ */
+app.post('/submit', requireAuth, async (c) => {
   try {
-    await notifyAllAdmins({
-      sourceRole: 'artist',
-      type: 'admin_action',
-      title: submissionType === 'playlist' ? 'Новая заявка на плейлист' : 'Новая заявка на радиостанцию',
-      message: `Артист ${userId} → «${targetName}»`,
-      link: 'pitching-moderation',
-      metadata: { submissionId: id, targetId, submissionType },
+    await ensureSchema();
+    const userId = c.get('userId') as string;
+    const body = await c.req.json();
+    const items = Array.isArray(body?.items) ? body.items : [];
+    const returnUrl: string | undefined = body?.returnUrl;
+
+    if (items.length === 0) {
+      return c.json({ success: false, error: 'items пустой' }, 400);
+    }
+    if (items.length > 50) {
+      return c.json({ success: false, error: 'Слишком много позиций в одном питче (максимум 50)' }, 400);
+    }
+    if (!returnUrl) {
+      return c.json({ success: false, error: 'returnUrl обязателен' }, 400);
+    }
+    // Validate every item has a track or video.
+    for (const it of items) {
+      if (!it?.targetId) {
+        return c.json({ success: false, error: 'Каждая позиция должна содержать targetId' }, 400);
+      }
+      if (!it?.trackId && !it?.videoId) {
+        return c.json({ success: false, error: 'Каждая позиция должна содержать trackId или videoId' }, 400);
+      }
+    }
+
+    // Load all selected catalog rows in one query — server-authoritative pricing.
+    const targetIds: string[] = Array.from(new Set(items.map((it: any) => String(it.targetId))));
+    const catalogRes = await pool.query(
+      `SELECT id, name, price_rub FROM pitching_playlists WHERE id = ANY($1) AND status = 'active'`,
+      [targetIds]
+    );
+    const catalog = new Map<string, { name: string; price_rub: number }>();
+    for (const row of catalogRes.rows) {
+      catalog.set(row.id, { name: row.name, price_rub: Number(row.price_rub) });
+    }
+
+    // Bail out if any selected target was missing/archived. Don't half-submit.
+    for (const id of targetIds) {
+      if (!catalog.has(id)) {
+        return c.json({ success: false, error: `Площадка ${id} недоступна для питчинга` }, 400);
+      }
+    }
+
+    // Sum prices, create submissions.
+    const orderId = crypto.randomUUID();
+    let total = 0;
+    const submissionIds: string[] = [];
+
+    // BEGIN a transaction so a partial failure doesn't leave orphan submissions.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const it of items) {
+        const cat = catalog.get(String(it.targetId))!;
+        const id = generateId('pit');
+        await client.query(
+          `INSERT INTO pitching_submissions
+             (id, user_id, target_id, target_name, track_id, video_id, message,
+              price_rub, payment_session_id, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending_payment')`,
+          [
+            id,
+            userId,
+            it.targetId,
+            cat.name,
+            it.trackId || null,
+            it.videoId || null,
+            it.message || null,
+            cat.price_rub,
+            orderId,
+          ]
+        );
+        submissionIds.push(id);
+        total += cat.price_rub;
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    // Edge case: free catalog (price_rub=0 everywhere). Skip the gateway hop
+    // and flip the submissions straight to 'pending'.
+    if (total <= 0) {
+      await pool.query(
+        `UPDATE pitching_submissions
+           SET status = 'pending', updated_at = NOW()
+         WHERE id = ANY($1)`,
+        [submissionIds]
+      );
+      try {
+        for (const sid of submissionIds) {
+          await notifyAllAdmins({
+            sourceRole: 'artist',
+            type: 'admin_action',
+            title: 'Новая заявка на питчинг',
+            message: `Артист ${userId} → бесплатная позиция`,
+            link: 'pitching-moderation',
+            metadata: { submissionId: sid },
+          });
+        }
+      } catch (e: any) {
+        console.warn('[pitching] notifyAllAdmins (free) failed:', e?.message);
+      }
+      return c.json({
+        success: true,
+        orderId,
+        confirmationUrl: null,
+        amount: 0,
+        submission_ids: submissionIds,
+        free: true,
+      });
+    }
+
+    // Create the YooKassa session. metadata.itemType='pitching_bundle' tells
+    // the checkout webhook handler to flip submissions to 'pending'.
+    const gw = getGateway('yookassa');
+    const description = items.length === 1
+      ? `Питчинг в «${catalog.get(items[0].targetId)!.name}»`
+      : `Питчинг: ${items.length} позиций`;
+
+    const gwResult = await gw.createPayment({
+      amount: total,
+      currency: 'RUB',
+      description,
+      gateway: 'yookassa',
+      userId,
+      orderId,
+      returnUrl,
+      type: 'purchase',
+      metadata: {
+        itemType: 'pitching_bundle',
+        submission_ids: submissionIds.join(','),
+      },
     });
-  } catch (e: any) {
-    console.warn('[pitching] notifyAllAdmins failed:', e?.message);
-  }
 
-  return c.json({ success: true, submissionId: id });
-}
+    const session: PaymentSession = {
+      orderId,
+      userId,
+      gateway: 'yookassa',
+      gatewayPaymentId: gwResult.sessionId,
+      amount: total,
+      currency: 'RUB',
+      status: 'pending',
+      type: 'purchase',
+      description,
+      metadata: {
+        itemType: 'pitching_bundle',
+        submission_ids: submissionIds.join(','),
+      },
+      savePaymentMethod: false,
+      confirmationUrl: gwResult.confirmationUrl,
+      returnUrl,
+      createdAt: new Date().toISOString(),
+    };
+    await upsertPaymentSession(orderId, session);
 
-app.post('/submit-pitch', requireAuth, async (c) => {
-  try {
-    return await createSubmission(c, 'playlist');
-  } catch (error: any) {
-    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
-  }
-});
-
-app.post('/submit-radio', requireAuth, async (c) => {
-  try {
-    return await createSubmission(c, 'radio');
+    return c.json({
+      success: true,
+      orderId,
+      confirmationUrl: gwResult.confirmationUrl,
+      amount: total,
+      submission_ids: submissionIds,
+      free: false,
+    });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -258,7 +364,10 @@ app.post('/admin/playlists', requireAuth, requireAdmin, async (c) => {
   try {
     await ensureSchema();
     const body = await c.req.json();
-    const { name, platform, followers, genre, region, description, curator_contact } = body || {};
+    const {
+      name, platform, followers, genre, region, description,
+      curator, curator_contact, image_url, acceptance_rate, price_rub,
+    } = body || {};
     if (!name || !platform) {
       return c.json({ success: false, error: 'name and platform are required' }, 400);
     }
@@ -266,10 +375,17 @@ app.post('/admin/playlists', requireAuth, requireAdmin, async (c) => {
     const adminId = c.get('userId') as string;
     await pool.query(
       `INSERT INTO pitching_playlists
-         (id, name, platform, followers, genre, region, description, curator_contact, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [id, name, platform, Number(followers) || 0, genre || null, region || null,
-       description || null, curator_contact || null, adminId]
+         (id, name, platform, followers, genre, region, description,
+          curator, curator_contact, image_url, acceptance_rate, price_rub, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        id, name, platform, Number(followers) || 0,
+        genre || null, region || null, description || null,
+        curator || null, curator_contact || null, image_url || null,
+        Math.max(0, Math.min(100, Number(acceptance_rate) || 0)),
+        Math.max(0, Number(price_rub) || 0),
+        adminId,
+      ]
     );
     return c.json({ success: true, id });
   } catch (error: any) {
@@ -282,7 +398,10 @@ app.put('/admin/playlists/:id', requireAuth, requireAdmin, async (c) => {
     await ensureSchema();
     const id = c.req.param('id');
     const body = await c.req.json();
-    const allowed = ['name', 'platform', 'followers', 'genre', 'region', 'description', 'curator_contact', 'status'];
+    const allowed = [
+      'name', 'platform', 'followers', 'genre', 'region', 'description',
+      'curator', 'curator_contact', 'image_url', 'acceptance_rate', 'price_rub', 'status',
+    ];
     const sets: string[] = [];
     const args: any[] = [];
     let i = 1;
@@ -320,82 +439,25 @@ app.delete('/admin/playlists/:id', requireAuth, requireAdmin, async (c) => {
   }
 });
 
-app.post('/admin/radio-stations', requireAuth, requireAdmin, async (c) => {
-  try {
-    await ensureSchema();
-    const body = await c.req.json();
-    const { name, region, country, genre, website, contact_email } = body || {};
-    if (!name) return c.json({ success: false, error: 'name is required' }, 400);
-    const id = generateId('rs');
-    const adminId = c.get('userId') as string;
-    await pool.query(
-      `INSERT INTO pitching_radio_stations
-         (id, name, region, country, genre, website, contact_email, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [id, name, region || null, country || null, genre || null, website || null, contact_email || null, adminId]
-    );
-    return c.json({ success: true, id });
-  } catch (error: any) {
-    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
-  }
-});
-
-app.put('/admin/radio-stations/:id', requireAuth, requireAdmin, async (c) => {
-  try {
-    await ensureSchema();
-    const id = c.req.param('id');
-    const body = await c.req.json();
-    const allowed = ['name', 'region', 'country', 'genre', 'website', 'contact_email', 'status'];
-    const sets: string[] = [];
-    const args: any[] = [];
-    let i = 1;
-    for (const key of allowed) {
-      if (Object.prototype.hasOwnProperty.call(body, key)) {
-        sets.push(`${key} = $${i++}`);
-        args.push((body as any)[key]);
-      }
-    }
-    if (sets.length === 0) return c.json({ success: false, error: 'No editable fields supplied' }, 400);
-    args.push(id);
-    const r = await pool.query(
-      `UPDATE pitching_radio_stations SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${i} RETURNING id`,
-      args
-    );
-    if (r.rows.length === 0) return c.json({ success: false, error: 'Station not found' }, 404);
-    return c.json({ success: true });
-  } catch (error: any) {
-    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
-  }
-});
-
-app.delete('/admin/radio-stations/:id', requireAuth, requireAdmin, async (c) => {
-  try {
-    await ensureSchema();
-    const id = c.req.param('id');
-    const r = await pool.query(
-      `UPDATE pitching_radio_stations SET status = 'archived', updated_at = NOW() WHERE id = $1 RETURNING id`,
-      [id]
-    );
-    if (r.rows.length === 0) return c.json({ success: false, error: 'Station not found' }, 404);
-    return c.json({ success: true });
-  } catch (error: any) {
-    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
-  }
-});
-
 // ── Admin: submissions moderation ─────────────────────────────────────────────
 
 app.get('/admin/submissions', requireAuth, requireAdmin, async (c) => {
   try {
     await ensureSchema();
-    const statusFilter = c.req.query('status'); // optional: pending | accepted | rejected
-    let sql = `SELECT id, user_id, submission_type, target_id, target_name, track_id, video_id,
-                       message, status, moderator_id, moderator_response, created_at, updated_at
+    const statusFilter = c.req.query('status'); // optional: pending | accepted | rejected | pending_payment
+    let sql = `SELECT id, user_id, target_id, target_name, track_id, video_id,
+                       message, price_rub, payment_session_id, status,
+                       moderator_id, moderator_response, created_at, updated_at
                 FROM pitching_submissions`;
     const args: any[] = [];
     if (statusFilter) {
       sql += ` WHERE status = $1`;
       args.push(statusFilter);
+    } else {
+      // Default: hide pending_payment rows from the moderation queue — those
+      // are payment limbo, not real submissions yet. Admins can still see them
+      // by passing ?status=pending_payment explicitly.
+      sql += ` WHERE status != 'pending_payment'`;
     }
     sql += ` ORDER BY created_at DESC LIMIT 500`;
     const r = await pool.query(sql, args);
@@ -417,13 +479,15 @@ app.put('/admin/submissions/:id', requireAuth, requireAdmin, async (c) => {
     const r = await pool.query(
       `UPDATE pitching_submissions
          SET status = $1, moderator_id = $2, moderator_response = $3, updated_at = NOW()
-       WHERE id = $4
-       RETURNING user_id, target_name, submission_type`,
+       WHERE id = $4 AND status = 'pending'
+       RETURNING user_id, target_name`,
       [status, adminId, response || null, id]
     );
-    if (r.rows.length === 0) return c.json({ success: false, error: 'Submission not found' }, 404);
+    if (r.rows.length === 0) {
+      return c.json({ success: false, error: 'Submission not found or already moderated' }, 404);
+    }
 
-    // Notify the artist about the moderation decision.
+    // Notify the artist about the decision.
     const sub = r.rows[0];
     try {
       await notifyCrossCabinet({
@@ -432,10 +496,8 @@ app.put('/admin/submissions/:id', requireAuth, requireAdmin, async (c) => {
         sourceRole: 'admin',
         type: 'pitching_update',
         title: status === 'accepted' ? 'Заявка на питчинг принята' : 'Заявка на питчинг отклонена',
-        message: response
-          ? `${sub.target_name}: ${response}`
-          : `${sub.target_name}`,
-        metadata: { submissionId: id, status, submissionType: sub.submission_type },
+        message: response ? `${sub.target_name}: ${response}` : `${sub.target_name}`,
+        metadata: { submissionId: id, status },
       });
     } catch (e: any) {
       console.warn('[pitching] artist notify failed:', e?.message);
@@ -446,5 +508,42 @@ app.put('/admin/submissions/:id', requireAuth, requireAdmin, async (c) => {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
+
+/**
+ * INTERNAL — called by checkout webhook when a pitching_bundle session is paid.
+ * Flips all submissions for that order from pending_payment to pending and
+ * fans out admin notifications. Exported so checkout-routes.tsx can wire it
+ * in without going back through HTTP.
+ */
+export async function finalizePitchingBundle(orderId: string, submissionIds: string[]): Promise<void> {
+  await ensureSchema();
+  if (submissionIds.length === 0) return;
+
+  // Only flip rows that are still in pending_payment — guards against double
+  // webhook deliveries.
+  const r = await pool.query(
+    `UPDATE pitching_submissions
+       SET status = 'pending', updated_at = NOW()
+     WHERE id = ANY($1) AND status = 'pending_payment' AND payment_session_id = $2
+     RETURNING id, user_id, target_name`,
+    [submissionIds, orderId]
+  );
+  if (r.rows.length === 0) return;
+
+  for (const row of r.rows) {
+    try {
+      await notifyAllAdmins({
+        sourceRole: 'artist',
+        type: 'admin_action',
+        title: 'Новая заявка на питчинг',
+        message: `Артист ${row.user_id} → «${row.target_name}»`,
+        link: 'pitching-moderation',
+        metadata: { submissionId: row.id, orderId },
+      });
+    } catch (e: any) {
+      console.warn('[pitching] notifyAllAdmins (paid) failed:', e?.message);
+    }
+  }
+}
 
 export default app;
