@@ -1,14 +1,14 @@
 /**
  * MIGRATION RUNNER (Stub)
- * Миграции не нужны - приложение использует JSON stores.
- * Экспорты сохранены для обратной совместимости с migration-routes.tsx
+ *
+ * Real schema migrations are inlined into each route module as
+ * `ensureSchema()` / `CREATE TABLE IF NOT EXISTS` blocks that run on
+ * first request — no centralised migration framework. This module is
+ * kept only for the legacy `migration-routes.tsx` admin endpoint.
  */
 
-/**
- * Выполнить все миграции (stub - SQL-миграции не используются)
- */
 export async function runAllMigrations() {
-  console.log('Migrations skipped: application uses JSON stores.');
+  console.log('Migrations skipped: schema bootstraps inline in each route module.');
   return {
     success: true,
     results: {
@@ -24,14 +24,11 @@ export async function runAllMigrations() {
   };
 }
 
-/**
- * Проверить статус таблиц (stub)
- */
 export async function checkTablesStatus() {
   return {
     success: true,
-    mode: 'kv_store',
-    message: 'Application uses JSON stores. SQL tables are not required.',
-    existingTables: ['kv_store_84730125'],
+    mode: 'inline-bootstrap',
+    message: 'Tables are created on demand by individual route modules.',
+    existingTables: [],
   };
 }

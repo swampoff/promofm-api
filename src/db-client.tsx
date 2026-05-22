@@ -92,7 +92,7 @@ class QueryBuilder {
 
   select(cols: string = '*') {
     if (this._mode === 'insert' || this._mode === 'update' || this._mode === 'upsert' || this._mode === 'delete') {
-      // Supabase API: .select() after mutation means "return the inserted/updated rows"
+      // PostgREST-style: .select() after mutation means "return the inserted/updated rows"
       this._select = cols;
       this._returnData = true;
       return this;

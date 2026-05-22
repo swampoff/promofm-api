@@ -1,4 +1,4 @@
--- Migration: Create users table for auth (replaces Supabase Auth)
+-- Migration: Create users table for auth (JWT-based)
 -- Run on VPS PostgreSQL: promofm database
 
 CREATE TABLE IF NOT EXISTS users (

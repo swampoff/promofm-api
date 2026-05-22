@@ -1,7 +1,7 @@
 /**
  * AUTH ROUTES
  * Регистрация, вход, VK OAuth, сброс пароля, верификация email
- * PostgreSQL + bcrypt + JWT (БЕЗ Supabase)
+ * PostgreSQL + bcrypt + JWT
  */
 
 import { Hono } from 'hono';
