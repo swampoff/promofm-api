@@ -44,22 +44,72 @@ tracksRoutes.get('/:id', async (c) => {
 tracksRoutes.post('/', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
-
-    // REQUIRE artist profile before track submission
-    const profile = await getDbClient().from('artist_profiles').select('id').eq('user_id', userId).maybeSingle();
-    if (!profile?.data) {
-      return c.json({ success: false, error: 'Сначала заполните профиль артиста в личном кабинете', code: 'PROFILE_REQUIRED' }, 403);
-    }
-
+    const userRole = c.get('userRole') as string | undefined;
     const body = await c.req.json();
+
+    // Label-on-behalf branch: when a label uploads a track for a roster
+    // artist, we set tracks.user_id = label (owner/payer) and
+    // tracks.artist_id = roster artist's profile.id. The artist's display
+    // name is snapshotted from artist_profiles so the catalog row stays
+    // stable even if the artist is later renamed or removed from the roster.
+    let artistId: string | null = null;
+    let artistName: string | null = null;
+    let actingForArtistId: string | undefined;
+    let actingForArtistUserId: string | undefined;
+    let labelId: string | undefined;
+
+    if (body.actingForArtistId) {
+      if (userRole !== 'label') {
+        return c.json({ success: false, error: 'actingForArtistId доступно только роли label', code: 'ROLE_FORBIDDEN' }, 403);
+      }
+      const lp = await pool.query(`SELECT id FROM label_profiles WHERE user_id = $1`, [userId]);
+      if (lp.rows.length === 0) {
+        return c.json({ success: false, error: 'Сначала заполните профиль лейбла', code: 'LABEL_PROFILE_REQUIRED' }, 400);
+      }
+      labelId = lp.rows[0].id;
+      const ap = await pool.query(
+        `SELECT id, user_id, artist_name FROM artist_profiles
+         WHERE id = $1 AND (managed_by_label_id = $2 OR label_id = $2)`,
+        [body.actingForArtistId, labelId]
+      );
+      if (ap.rows.length === 0) {
+        return c.json({ success: false, error: 'Артист не в вашем ростере', code: 'ARTIST_NOT_IN_ROSTER' }, 403);
+      }
+      artistId = ap.rows[0].id;
+      artistName = ap.rows[0].artist_name || '';
+      actingForArtistId = artistId || undefined;
+      actingForArtistUserId = ap.rows[0].user_id || undefined;
+    } else {
+      // Artist branch: REQUIRE own artist profile before track submission
+      const profile = await getDbClient().from('artist_profiles').select('id, artist_name').eq('user_id', userId).maybeSingle();
+      if (!profile?.data) {
+        return c.json({ success: false, error: 'Сначала заполните профиль артиста в личном кабинете', code: 'PROFILE_REQUIRED' }, 403);
+      }
+      artistId = (profile.data as any).id;
+      // Fall back to client-supplied artist_name (legacy fronts), but prefer
+      // the canonical name from artist_profiles so audit trails match.
+      artistName = (profile.data as any).artist_name || body.artist || body.artist_name || '';
+    }
 
     const track = await typed.insertTrack({
       ...body,
       user_id: userId,
-      artist_name: body.artist || body.artist_name || '',
+      artist_id: artistId,
+      artist_name: artistName,
       audio_url: body.audioUrl || body.audio_url || body.audio_file_url || body.audioFile || body.audio || '',
       cover_url: body.coverUrl || body.cover_url || body.cover_image_url || body.cover || '',
       moderation_status: body.status || 'draft',
+      // Persist label-on-behalf context inside `tracks.data` so the checkout
+      // webhook can dual-notify both the label and the linked artist when the
+      // track is published. Existing `data` keys are preserved.
+      data: {
+        ...(body.data || {}),
+        ...(actingForArtistId ? {
+          actingForArtistId,
+          actingForArtistUserId,
+          labelId,
+        } : {}),
+      },
     });
 
     if (!track) {

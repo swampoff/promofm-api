@@ -454,6 +454,22 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             amount: session.amount,
           },
         });
+        // Label-on-behalf: if the order's metadata or the track's own data
+        // points to a linked artist's user_id, push a duplicate notification
+        // to that artist's bell too. Managed-artist case has no user_id, so
+        // this branch is a no-op there.
+        const actingUserId = session.metadata?.actingForArtistUserId as string | undefined;
+        if (actingUserId && actingUserId !== session.userId) {
+          emitSSE(actingUserId, {
+            type: 'track_published',
+            data: {
+              trackId,
+              trackTitle: session.metadata.trackTitle || '',
+              amount: session.amount,
+              viaLabel: true,
+            },
+          });
+        }
       } catch {}
     } catch (err) {
       // Money was taken but track update failed — flag for manual intervention.
