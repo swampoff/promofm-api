@@ -166,6 +166,53 @@ export class YooKassaGateway implements PaymentGateway {
     };
   }
 
+  /**
+   * Issue a refund against a previously-succeeded payment. Used by the
+   * admin "Refund + Cancel" booking flow (POST /api/booking/:id/admin/
+   * refund-and-cancel).
+   *
+   * Docs: https://yookassa.ru/developers/api#create_refund
+   * Auth: same Basic <shopId:secretKey> as createPayment (no separate
+   * agent credentials needed — refunds are billed against the
+   * original charge).
+   */
+  async refund(paymentId: string, amountRub: number, opts?: {
+    description?: string;
+    idempotenceKey?: string;
+    metadata?: Record<string, string>;
+  }): Promise<{ id: string; status: 'succeeded' | 'pending' | 'canceled'; amount: number; raw: any }> {
+    const body: any = {
+      amount: {
+        value: amountRub.toFixed(2),
+        currency: 'RUB',
+      },
+      payment_id: paymentId,
+      description: opts?.description?.slice(0, 250),
+      metadata: opts?.metadata || {},
+    };
+
+    const response = await fetch(`${API_BASE}/refunds`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': getAuthHeader(),
+        'Idempotence-Key': opts?.idempotenceKey || `refund-${paymentId}-${Date.now()}`,
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('YooKassa refund error:', data);
+      throw new Error(data.description || data.message || `YooKassa refund error ${response.status}`);
+    }
+    return {
+      id: data.id,
+      status: data.status,
+      amount: parseFloat(data.amount?.value || '0'),
+      raw: data,
+    };
+  }
+
   async chargeRecurring(params: RecurringChargeRequest): Promise<PaymentSessionResult> {
     const body = {
       amount: {

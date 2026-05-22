@@ -268,6 +268,21 @@ app.put('/events/:id', requireAuth, requireDjRole, async (c) => {
     delete patch.djId;
 
     events[idx] = { ...events[idx], ...patch, updatedAt: new Date().toISOString() };
+    // Stamp completedAt/cancelledAt on the status transition, so analytics
+    // (monthEarnings filters by completedAt || date) and history get the
+    // real moment of completion — not the event's original calendar date.
+    if (patch.status === 'completed' && !events[idx].completedAt) {
+      events[idx].completedAt = events[idx].updatedAt;
+    }
+    if (patch.status === 'cancelled' && !events[idx].cancelledAt) {
+      events[idx].cancelledAt = events[idx].updatedAt;
+    }
+    // If the DJ flips it back to upcoming, drop the stale completion/cancel
+    // stamps so the filter doesn't mistakenly count it again.
+    if (patch.status === 'upcoming' || patch.status === 'confirmed') {
+      delete events[idx].completedAt;
+      delete events[idx].cancelledAt;
+    }
     await djEventsStore.set(userId, events);
     return c.json({ success: true, data: events[idx] });
   } catch (error) {
