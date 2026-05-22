@@ -26,6 +26,8 @@ import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
+import { sendLabelInvitationEmail } from './email-helper.tsx';
 
 const app = new Hono();
 
@@ -299,6 +301,597 @@ app.get('/roster', requireAuth, async (c) => {
       [gate.labelId]
     );
     return c.json({ success: true, roster: r.rows });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── Roster: managed artists CRUD ──────────────────────────────────────────────
+//
+// Managed artists are artist_profiles rows with user_id IS NULL and
+// managed_by_label_id = this label. Only the owning label can edit them.
+// Deletion is hard-DELETE only when no tracks reference the artist; otherwise
+// the response is 409 with a hint.
+
+const ALLOWED_MANAGED_FIELDS = [
+  'artist_name', 'slug', 'genre', 'sub_genres', 'country', 'city', 'bio',
+  'avatar_url', 'cover_url', 'data',
+] as const;
+
+app.post('/roster/managed', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    if (!gate.labelId) {
+      return c.json({ success: false, error: 'Сначала заполните профиль лейбла' }, 400);
+    }
+    const body = await c.req.json();
+    const displayName = String(body?.display_name || body?.artist_name || '').trim();
+    if (!displayName) {
+      return c.json({ success: false, error: 'Имя артиста обязательно' }, 400);
+    }
+    // Slug: explicit or derived; collision-retry against existing rows.
+    let slug = slugify(String(body?.slug || displayName));
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const exists = await pool.query(`SELECT 1 FROM artist_profiles WHERE slug = $1`, [slug]);
+      if (exists.rows.length === 0) break;
+      slug = `${slugify(displayName)}-${Math.random().toString(36).slice(2, 6)}`;
+    }
+    const r = await pool.query(
+      `INSERT INTO artist_profiles
+         (artist_name, slug, genre, sub_genres, country, city, bio,
+          avatar_url, cover_url, data, is_managed, managed_by_label_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11)
+       RETURNING id, slug, artist_name, avatar_url, city, is_verified, created_at`,
+      [
+        displayName,
+        slug,
+        body?.genre || null,
+        Array.isArray(body?.sub_genres) ? body.sub_genres : null,
+        body?.country || null,
+        body?.city || null,
+        body?.bio || null,
+        body?.avatar_url || null,
+        body?.cover_url || null,
+        body?.data ? JSON.stringify(body.data) : null,
+        gate.labelId,
+      ]
+    );
+    return c.json({ success: true, artist: r.rows[0] });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.put('/roster/managed/:id', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+
+    const id = c.req.param('id');
+    // Ownership guard — only the label that manages this artist can edit.
+    const owner = await pool.query(
+      `SELECT managed_by_label_id FROM artist_profiles WHERE id = $1`,
+      [id]
+    );
+    if (owner.rows.length === 0 || owner.rows[0].managed_by_label_id !== gate.labelId) {
+      return c.json({ success: false, error: 'Артист не найден в вашем ростере' }, 404);
+    }
+
+    const body = await c.req.json();
+    const sets: string[] = [];
+    const args: any[] = [];
+    let i = 1;
+    for (const key of ALLOWED_MANAGED_FIELDS) {
+      const incomingKey = key === 'artist_name' && body.display_name !== undefined ? 'display_name' : key;
+      if (Object.prototype.hasOwnProperty.call(body, incomingKey)) {
+        sets.push(`${key} = $${i++}`);
+        args.push(key === 'data' ? JSON.stringify((body as any)[incomingKey]) : (body as any)[incomingKey]);
+      }
+    }
+    if (sets.length === 0) {
+      return c.json({ success: false, error: 'No editable fields supplied' }, 400);
+    }
+    args.push(id);
+    const r = await pool.query(
+      `UPDATE artist_profiles SET ${sets.join(', ')}, updated_at = NOW()
+       WHERE id = $${i} AND managed_by_label_id = $${i + 1}
+       RETURNING id`,
+      [...args, gate.labelId]
+    );
+    if (r.rows.length === 0) {
+      return c.json({ success: false, error: 'Артист не найден' }, 404);
+    }
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.delete('/roster/managed/:id', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    const id = c.req.param('id');
+
+    // Ownership guard.
+    const owner = await pool.query(
+      `SELECT managed_by_label_id FROM artist_profiles WHERE id = $1`,
+      [id]
+    );
+    if (owner.rows.length === 0 || owner.rows[0].managed_by_label_id !== gate.labelId) {
+      return c.json({ success: false, error: 'Артист не найден в вашем ростере' }, 404);
+    }
+
+    // Refuse if any tracks reference this artist — pushes the human decision
+    // back to the label (transfer? archive?). DB-level no-op is much worse
+    // than a clear 409.
+    const t = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM tracks WHERE artist_id = $1`,
+      [id]
+    );
+    if (Number(t.rows[0]?.n || 0) > 0) {
+      return c.json({
+        success: false,
+        error: 'У артиста есть треки — сначала удалите или передайте их.',
+        code: 'has_tracks',
+      }, 409);
+    }
+
+    await pool.query(`DELETE FROM artist_profiles WHERE id = $1`, [id]);
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── Roster: sever linked artist (label-initiated) ─────────────────────────────
+
+app.delete('/roster/linked/:id', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    const id = c.req.param('id');
+
+    const before = await pool.query(
+      `SELECT user_id, artist_name FROM artist_profiles
+       WHERE id = $1 AND label_id = $2`,
+      [id, gate.labelId]
+    );
+    if (before.rows.length === 0) {
+      return c.json({ success: false, error: 'Артист не привязан к вашему лейблу' }, 404);
+    }
+    await pool.query(
+      `UPDATE artist_profiles SET label_id = NULL, updated_at = NOW()
+       WHERE id = $1 AND label_id = $2`,
+      [id, gate.labelId]
+    );
+
+    // Notify the artist that the label has severed the link.
+    if (before.rows[0].user_id) {
+      try {
+        const labelRow = await pool.query(
+          `SELECT display_name FROM label_profiles WHERE id = $1`,
+          [gate.labelId]
+        );
+        const labelName = labelRow.rows[0]?.display_name || 'Лейбл';
+        await notifyCrossCabinet({
+          targetUserId: before.rows[0].user_id,
+          targetRole: 'artist',
+          sourceRole: 'label',
+          type: 'label_member_left',
+          title: 'Лейбл прекратил сотрудничество',
+          message: `Лейбл «${labelName}» снял вас с ростера.`,
+          metadata: { labelId: gate.labelId, artistProfileId: id, initiatedBy: 'label' },
+        });
+      } catch (e: any) {
+        console.warn('[label] linked-sever notify failed:', e?.message);
+      }
+    }
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── Invitations (label side) ──────────────────────────────────────────────────
+
+function makeAcceptUrl(): string {
+  const base = process.env.PUBLIC_URL || 'https://promo-music.ru';
+  return `${base}/artist/settings?tab=labels`;
+}
+
+app.post('/invitations', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    if (!gate.labelId) {
+      return c.json({ success: false, error: 'Сначала заполните профиль лейбла' }, 400);
+    }
+    const body = await c.req.json();
+    const invitedEmail = String(body?.invited_email || '').trim().toLowerCase();
+    const message = body?.message ? String(body.message).slice(0, 1000) : null;
+    if (!invitedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(invitedEmail)) {
+      return c.json({ success: false, error: 'Некорректный email' }, 400);
+    }
+
+    // Resolve user_id if the artist is already registered.
+    const u = await pool.query(
+      `SELECT id, role::text AS role FROM users WHERE lower(email) = $1 AND deleted_at IS NULL`,
+      [invitedEmail]
+    );
+    const artistUserId: string | null = u.rows[0]?.id || null;
+    if (artistUserId && u.rows[0].role !== 'artist') {
+      return c.json({ success: false, error: 'Пользователь не зарегистрирован как артист' }, 400);
+    }
+    // Self-invite guard.
+    if (artistUserId === gate.userId) {
+      return c.json({ success: false, error: 'Нельзя пригласить самого себя' }, 400);
+    }
+    // If the artist is already linked to *this* label, no invitation needed.
+    if (artistUserId) {
+      const linked = await pool.query(
+        `SELECT 1 FROM artist_profiles WHERE user_id = $1 AND label_id = $2`,
+        [artistUserId, gate.labelId]
+      );
+      if (linked.rows.length > 0) {
+        return c.json({ success: false, error: 'Артист уже в вашем ростере' }, 409);
+      }
+    }
+
+    // Insert; partial unique index will reject duplicate pending invites.
+    let invitationId: string;
+    try {
+      const ins = await pool.query(
+        `INSERT INTO label_invitations
+           (label_id, artist_user_id, invited_email, status, message, invited_by)
+         VALUES ($1, $2, $3, 'pending', $4, $5)
+         RETURNING id`,
+        [gate.labelId, artistUserId, invitedEmail, message, gate.userId]
+      );
+      invitationId = ins.rows[0].id;
+    } catch (e: any) {
+      if (e?.code === '23505') {
+        return c.json({ success: false, error: 'Приглашение уже отправлено и ждёт ответа' }, 409);
+      }
+      throw e;
+    }
+
+    // Look up label name once for both the email and the SSE push.
+    const labelRow = await pool.query(
+      `SELECT display_name FROM label_profiles WHERE id = $1`,
+      [gate.labelId]
+    );
+    const labelName = labelRow.rows[0]?.display_name || 'Лейбл';
+
+    // SSE push if the artist is already registered.
+    if (artistUserId) {
+      try {
+        await notifyCrossCabinet({
+          targetUserId: artistUserId,
+          targetRole: 'artist',
+          sourceRole: 'label',
+          type: 'label_invitation',
+          title: 'Приглашение от лейбла',
+          message: `${labelName} приглашает вас в ростер.`,
+          link: '/artist/settings?tab=labels',
+          metadata: { invitationId, labelId: gate.labelId },
+        });
+      } catch (e: any) {
+        console.warn('[label] invitation notify failed:', e?.message);
+      }
+    }
+
+    // Email — fires for both registered and not-yet-registered artists.
+    try {
+      await sendLabelInvitationEmail(invitedEmail, labelName, message, makeAcceptUrl());
+    } catch (e: any) {
+      console.warn('[label] invitation email failed:', e?.message);
+    }
+
+    return c.json({ success: true, invitationId, artistFound: !!artistUserId });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.get('/invitations', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    if (!gate.labelId) return c.json({ success: true, invitations: [] });
+
+    const statusFilter = c.req.query('status');
+    const args: any[] = [gate.labelId];
+    let where = `label_id = $1`;
+    if (statusFilter) {
+      where += ` AND status = $2`;
+      args.push(statusFilter);
+    }
+    const r = await pool.query(
+      `SELECT id, artist_user_id, invited_email, status, message,
+              created_at, responded_at, expires_at
+       FROM label_invitations
+       WHERE ${where}
+       ORDER BY created_at DESC LIMIT 200`,
+      args
+    );
+    return c.json({ success: true, invitations: r.rows });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.delete('/invitations/:id', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    const id = c.req.param('id');
+
+    const r = await pool.query(
+      `UPDATE label_invitations
+         SET status = 'revoked', responded_at = NOW()
+       WHERE id = $1 AND label_id = $2 AND status = 'pending'
+       RETURNING id`,
+      [id, gate.labelId]
+    );
+    if (r.rows.length === 0) {
+      return c.json({ success: false, error: 'Приглашение не найдено или не в статусе pending' }, 404);
+    }
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── Invitations (artist side) ─────────────────────────────────────────────────
+//
+// Mounted here under /label/* for namespace cohesion — the existing
+// auth middleware in artist-profile-routes only checks bearer, role check
+// happens in-handler. Frontend client calls /label/invitations/incoming/*.
+
+app.get('/invitations/incoming', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const userId = c.get('userId') as string;
+    const userEmailRow = await pool.query(`SELECT email FROM users WHERE id = $1`, [userId]);
+    const userEmail = (userEmailRow.rows[0]?.email || '').toLowerCase();
+
+    const r = await pool.query(
+      `SELECT li.id, li.label_id, li.invited_email, li.status, li.message,
+              li.created_at, li.expires_at,
+              lp.display_name AS label_display_name,
+              lp.avatar_url   AS label_avatar_url,
+              lp.slug         AS label_slug
+       FROM label_invitations li
+       JOIN label_profiles lp ON lp.id = li.label_id
+       WHERE (li.artist_user_id = $1 OR lower(li.invited_email) = $2)
+         AND li.status = 'pending'
+         AND li.expires_at > NOW()
+       ORDER BY li.created_at DESC`,
+      [userId, userEmail]
+    );
+    return c.json({ success: true, invitations: r.rows });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.post('/invitations/:id/accept', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const userId = c.get('userId') as string;
+    const role = c.get('userRole') as string;
+    if (role !== 'artist') {
+      return c.json({ success: false, error: 'Принимать приглашение может только артист' }, 403);
+    }
+    const id = c.req.param('id');
+    const userEmailRow = await pool.query(`SELECT email FROM users WHERE id = $1`, [userId]);
+    const userEmail = (userEmailRow.rows[0]?.email || '').toLowerCase();
+
+    const inv = await pool.query(
+      `SELECT label_id, status, expires_at
+       FROM label_invitations
+       WHERE id = $1 AND (artist_user_id = $2 OR lower(invited_email) = $3)`,
+      [id, userId, userEmail]
+    );
+    if (inv.rows.length === 0) {
+      return c.json({ success: false, error: 'Приглашение не найдено' }, 404);
+    }
+    if (inv.rows[0].status !== 'pending') {
+      return c.json({ success: false, error: 'Приглашение уже обработано' }, 409);
+    }
+    if (new Date(inv.rows[0].expires_at) < new Date()) {
+      return c.json({ success: false, error: 'Срок приглашения истёк' }, 410);
+    }
+
+    const labelId = inv.rows[0].label_id;
+
+    // Single transaction: lock artist's own profile, set label_id, flip invite.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // The artist may have multiple artist_profiles rows in legacy data; pick
+      // the canonical one (most recently updated).
+      const ap = await client.query(
+        `SELECT id, label_id FROM artist_profiles
+         WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`,
+        [userId]
+      );
+      if (ap.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return c.json({ success: false, error: 'Профиль артиста не найден' }, 400);
+      }
+      if (ap.rows[0].label_id && ap.rows[0].label_id !== labelId) {
+        // Artist is already linked to another label — explicit decision needed.
+        await client.query('ROLLBACK');
+        return c.json({
+          success: false,
+          error: 'Сначала покиньте текущий лейбл, чтобы принять новое приглашение',
+          code: 'already_linked',
+        }, 409);
+      }
+      await client.query(
+        `UPDATE artist_profiles SET label_id = $1, updated_at = NOW() WHERE id = $2`,
+        [labelId, ap.rows[0].id]
+      );
+      await client.query(
+        `UPDATE label_invitations
+           SET status = 'accepted', responded_at = NOW(), artist_user_id = $1
+         WHERE id = $2`,
+        [userId, id]
+      );
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    // Notify the label.
+    try {
+      const owner = await pool.query(
+        `SELECT user_id FROM label_profiles WHERE id = $1`,
+        [labelId]
+      );
+      if (owner.rows[0]?.user_id) {
+        const artistName = await pool.query(
+          `SELECT artist_name FROM artist_profiles WHERE user_id = $1 LIMIT 1`,
+          [userId]
+        );
+        await notifyCrossCabinet({
+          targetUserId: owner.rows[0].user_id,
+          targetRole: 'label',
+          sourceRole: 'artist',
+          type: 'label_invitation_response',
+          title: 'Артист принял приглашение',
+          message: `${artistName.rows[0]?.artist_name || userEmail} в вашем ростере.`,
+          link: '/label/roster',
+          metadata: { invitationId: id, decision: 'accepted', artistUserId: userId },
+        });
+      }
+    } catch (e: any) {
+      console.warn('[label] accept notify failed:', e?.message);
+    }
+
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.post('/invitations/:id/decline', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const userId = c.get('userId') as string;
+    const role = c.get('userRole') as string;
+    if (role !== 'artist') {
+      return c.json({ success: false, error: 'Только артист может отклонить приглашение' }, 403);
+    }
+    const id = c.req.param('id');
+    const userEmailRow = await pool.query(`SELECT email FROM users WHERE id = $1`, [userId]);
+    const userEmail = (userEmailRow.rows[0]?.email || '').toLowerCase();
+
+    const r = await pool.query(
+      `UPDATE label_invitations
+         SET status = 'declined', responded_at = NOW(), artist_user_id = $1
+       WHERE id = $2 AND status = 'pending'
+         AND (artist_user_id = $1 OR lower(invited_email) = $3)
+       RETURNING label_id`,
+      [userId, id, userEmail]
+    );
+    if (r.rows.length === 0) {
+      return c.json({ success: false, error: 'Приглашение не найдено или уже обработано' }, 404);
+    }
+
+    // Notify the label.
+    try {
+      const owner = await pool.query(
+        `SELECT user_id FROM label_profiles WHERE id = $1`,
+        [r.rows[0].label_id]
+      );
+      if (owner.rows[0]?.user_id) {
+        await notifyCrossCabinet({
+          targetUserId: owner.rows[0].user_id,
+          targetRole: 'label',
+          sourceRole: 'artist',
+          type: 'label_invitation_response',
+          title: 'Приглашение отклонено',
+          message: `${userEmail} отклонил(а) приглашение в ростер.`,
+          link: '/label/roster',
+          metadata: { invitationId: id, decision: 'declined' },
+        });
+      }
+    } catch (e: any) {
+      console.warn('[label] decline notify failed:', e?.message);
+    }
+
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.post('/invitations/leave', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const userId = c.get('userId') as string;
+    const role = c.get('userRole') as string;
+    if (role !== 'artist') {
+      return c.json({ success: false, error: 'Только артист может покинуть лейбл' }, 403);
+    }
+
+    // Find the artist's current label (if any) before clearing.
+    const before = await pool.query(
+      `SELECT id, label_id FROM artist_profiles
+       WHERE user_id = $1 AND label_id IS NOT NULL
+       ORDER BY updated_at DESC LIMIT 1`,
+      [userId]
+    );
+    if (before.rows.length === 0) {
+      return c.json({ success: false, error: 'Вы не состоите в лейбле' }, 404);
+    }
+    const labelId: string = before.rows[0].label_id;
+    await pool.query(
+      `UPDATE artist_profiles SET label_id = NULL, updated_at = NOW()
+       WHERE id = $1`,
+      [before.rows[0].id]
+    );
+
+    // Notify the label.
+    try {
+      const owner = await pool.query(
+        `SELECT user_id FROM label_profiles WHERE id = $1`,
+        [labelId]
+      );
+      if (owner.rows[0]?.user_id) {
+        const artistName = await pool.query(
+          `SELECT artist_name FROM artist_profiles WHERE user_id = $1 LIMIT 1`,
+          [userId]
+        );
+        await notifyCrossCabinet({
+          targetUserId: owner.rows[0].user_id,
+          targetRole: 'label',
+          sourceRole: 'artist',
+          type: 'label_member_left',
+          title: 'Артист покинул лейбл',
+          message: `${artistName.rows[0]?.artist_name || ''} вышел(а) из вашего ростера.`,
+          link: '/label/roster',
+          metadata: { artistUserId: userId, initiatedBy: 'artist' },
+        });
+      }
+    } catch (e: any) {
+      console.warn('[label] leave notify failed:', e?.message);
+    }
+    return c.json({ success: true });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
