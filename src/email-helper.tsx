@@ -440,3 +440,51 @@ export async function notifyPaymentExpired(data: {
   return sendEmail({ to: data.email, subject, html });
 }
 
+// ── Live Support Chat ────────────────────────────────────────────
+
+/**
+ * Ping admins (email + Telegram) that a NEW live-chat session was
+ * just started by a visitor. Fired from POST /chat-support/init.
+ */
+export async function notifyChatNewSession(data: { sessionId: string; guestName?: string; guestEmail?: string; firstMessage?: string; }) {
+  const who = data.guestName || data.guestEmail || 'аноним';
+  const link = `${SITE_URL}/ctrl-pm7k2f/live-chat?session=${encodeURIComponent(data.sessionId)}`;
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #06B6D4;">Новый чат с посетителем</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      <tr><td style="padding: 8px; color: #999;">От:</td><td style="padding: 8px;"><b>${escapeHtml(who)}</b></td></tr>
+      ${data.guestEmail ? `<tr><td style="padding: 8px; color: #999;">Email:</td><td style="padding: 8px;">${escapeHtml(data.guestEmail)}</td></tr>` : ''}
+      ${data.firstMessage ? `<tr><td style="padding: 8px; color: #999; vertical-align: top;">Первое сообщение:</td><td style="padding: 8px; white-space: pre-wrap;">${escapeHtml(data.firstMessage)}</td></tr>` : ''}
+    </table>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${link}" style="${buttonStyle}">Открыть live-чат</a>
+    </p>
+  `);
+  notifyAdminTelegram(`💬 <b>Новый live-чат на сайте</b>\n\nОт: ${stripHtml(who)}${data.guestEmail ? `\nEmail: ${stripHtml(data.guestEmail)}` : ''}${data.firstMessage ? `\n\n${stripHtml(data.firstMessage).slice(0, 500)}` : ''}\n\n→ <a href="${link}">Открыть в админке</a>`).catch(() => {});
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Новый чат — ${who}`, html });
+}
+
+/**
+ * Email-back to the visitor when admin replied while the chat widget
+ * is offline (no active SSE stream). Lets the visitor return to the
+ * conversation later. Only fired when guest_email is set on the session.
+ */
+export async function sendChatGuestReplyEmail(data: { toEmail: string; toName?: string; adminName: string; body: string; sessionId: string; guestToken: string; }) {
+  const returnLink = `${SITE_URL}/?chat=${encodeURIComponent(data.sessionId)}&t=${encodeURIComponent(data.guestToken)}`;
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Вам ответили в чате</h2>
+    ${data.toName ? `<p>Здравствуйте, <strong>${escapeHtml(data.toName)}</strong>!</p>` : ''}
+    <p>Оператор <strong>${escapeHtml(data.adminName)}</strong> ответил в чате на promo-music.ru:</p>
+    <blockquote style="margin: 16px 0; padding: 16px 20px; background: #0e0e1f; border-left: 3px solid #FF577F; border-radius: 6px; color: #e0e0e0; white-space: pre-wrap;">${escapeHtml(data.body)}</blockquote>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${returnLink}" style="${buttonStyle}">Открыть чат</a>
+    </p>
+    <p style="color: #888; font-size: 13px;">Просто перейдите по кнопке — ваша история переписки восстановится. Также можно ответить на это письмо: ответ дойдёт до того же оператора.</p>
+  `);
+  return sendEmail({
+    to: data.toEmail,
+    subject: `Ответ в чате на ПРОМО.МУЗЫКА — ${escapeHtml(data.adminName)}`,
+    html,
+  });
+}
+
