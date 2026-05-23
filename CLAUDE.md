@@ -70,11 +70,44 @@ the checklist below.
 | `concerts` | `artist_id` | `uuid` |
 | `notifications` | `id` | `text` (legacy composite ids like `notif_1779…`) |
 | `notifications` | `user_id` | `uuid` (pg-node implicit-casts string→uuid here; explicit `::text` not needed) |
+| `radio_stations` | `id` | `uuid` PK |
+| `radio_stations` | `station_name` | `text` |
+| `promo_check_monitoring` | `id` | `uuid` PK |
+| `promo_check_monitoring` | `station_id` | `uuid NOT NULL` ← FK to `radio_stations(id)` — REQUIRED on every INSERT |
+| `promo_check_monitoring` | `station_name` | `text` (UNIQUE INDEX `uq_promo_check_monitoring_station` since 010_promo_check_monitoring_seed.sql) |
+| `promo_check_monitoring` | `stream_url` | `text` |
+| `promo_check_monitoring` | `active` | `boolean DEFAULT true` |
+| `promo_check_monitoring` | `error_count` | `integer DEFAULT 0` |
 | **All `:artistId` / `:userId` URL params** | arrive as | `text` |
 
 Anything else: verify with `\d <table>` or
 `SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '<t>'`
 *before* writing the code, not after the revert.
+
+### Seeding promo_check_monitoring — the radio_stations FK trap
+
+Migration 010 missed this on first pass: `promo_check_monitoring.
+station_id` is a NOT NULL FK to `radio_stations(id)`. A bare INSERT
+that omits station_id (or supplies one that doesn't exist) fails the
+constraint. Pattern for any future seed PR that adds a station:
+
+```sql
+DO $$
+DECLARE s_id UUID;
+BEGIN
+  SELECT id INTO s_id FROM radio_stations WHERE station_name = 'Авторадио';
+  IF s_id IS NULL THEN
+    INSERT INTO radio_stations (station_name, /* other required cols */)
+    VALUES ('Авторадио', /* ... */)
+    RETURNING id INTO s_id;
+  END IF;
+  INSERT INTO promo_check_monitoring (station_id, station_name, stream_url, active)
+  VALUES (s_id, 'Авторадио', 'http://…', false)
+  ON CONFLICT (station_name) DO NOTHING;
+END $$;
+```
+
+Order matters: radio_stations row first, FK second.
 
 ### Cast rules
 
