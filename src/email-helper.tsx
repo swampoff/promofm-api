@@ -488,3 +488,52 @@ export async function sendChatGuestReplyEmail(data: { toEmail: string; toName?: 
   });
 }
 
+// ── Venue trial expiration ───────────────────────────────────────
+
+/**
+ * Warning sent ~3 days before a venue's 14-day trial expires.
+ * Gives the venue owner time to choose a tariff before access
+ * downgrades from «Бизнес» (trial) to «Старт» (paid).
+ */
+export async function sendVenueTrialEndingEmail(data: { toEmail: string; venueName: string; daysRemaining: number; expiresAtIso: string; }) {
+  const expiresHuman = new Date(data.expiresAtIso).toLocaleDateString('ru-RU', { day: '2-digit', month: 'long', year: 'numeric' });
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Триал ПРОМО.ЭИР заканчивается</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
+    <p>Ваш 14-дневный пробный период на ПРОМО.ЭИР заканчивается <strong>${escapeHtml(expiresHuman)}</strong> (через ${data.daysRemaining} ${data.daysRemaining === 1 ? 'день' : 'дн.'}).</p>
+    <p style="padding:12px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:6px;color:#e0e0e0;">После окончания триала доступ к расширенным функциям («Бизнес» — мультизоны, расширенная аналитика, расписание, приоритетная поддержка) приостановится. Чтобы продолжить пользоваться этими возможностями — выберите тариф в кабинете.</p>
+    <p style="text-align:center;margin:28px 0;">
+      <a href="${SITE_URL}/venue/subscription" style="${buttonStyle}">Выбрать тариф</a>
+    </p>
+    <p style="color:#888;font-size:13px;">Если ничего не сделать — заведение перейдёт на бесплатный режим: 1 зона, до 5 плейлистов, базовый каталог. Все ваши данные сохранятся, можно будет вернуться к платному тарифу в любое время.</p>
+  `);
+  return sendEmail({
+    to: data.toEmail,
+    subject: `ПРОМО.ЭИР: триал заканчивается через ${data.daysRemaining} ${data.daysRemaining === 1 ? 'день' : 'дн.'}`,
+    html,
+  });
+}
+
+/**
+ * Fired by the trial-expiry cron once the venue's 14-day trial has
+ * lapsed without payment. Lets the venue owner know their cabinet
+ * has rolled back to the free tier and how to restore full access.
+ */
+export async function sendVenueTrialExpiredEmail(data: { toEmail: string; venueName: string; }) {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Триал ПРОМО.ЭИР завершён</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
+    <p>14-дневный пробный период подошёл к концу. Доступ к расширенным функциям сейчас ограничен — заведение работает в бесплатном режиме (1 зона, до 5 плейлистов, базовый каталог треков).</p>
+    <p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:6px;color:#e0e0e0;">Все ваши плейлисты, расписания и настройки сохранены. Чтобы вернуть полный функционал — выберите тариф «Бизнес» (₽9 990/мес) или «Сеть» (₽14 990/мес) в кабинете.</p>
+    <p style="text-align:center;margin:28px 0;">
+      <a href="${SITE_URL}/venue/subscription" style="${buttonStyle}">Выбрать тариф</a>
+    </p>
+    <p style="color:#888;font-size:13px;">Спасибо за то, что попробовали ПРОМО.ЭИР! Если есть вопросы — напишите на info@promofm.ru или в чат поддержки.</p>
+  `);
+  return sendEmail({
+    to: data.toEmail,
+    subject: 'ПРОМО.ЭИР: триал завершён, заведение в бесплатном режиме',
+    html,
+  });
+}
+

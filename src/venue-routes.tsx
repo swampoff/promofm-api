@@ -31,6 +31,7 @@ import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { notifyVenueRequest } from './email-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { applyInitialTrial, getTrialState, expireTrialsOnce } from './venue-trial.tsx';
 
 const app = new Hono();
 
@@ -90,11 +91,14 @@ app.get('/profile', requireAuth, async (c) => {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      await upsertVenueProfile(userId, defaultProfile);
-      return c.json(defaultProfile);
+      const stamped = applyInitialTrial(defaultProfile);
+      await upsertVenueProfile(userId, stamped);
+      // Surface initial trial state to the cabinet so the countdown
+      // can render on the very first GET.
+      return c.json({ ...stamped, trial: getTrialState(stamped) });
     }
 
-    return c.json(profile);
+    return c.json({ ...profile, trial: getTrialState(profile) });
   } catch (error: any) {
     console.error('Error in GET /venue/profile:', error);
     return c.json({ error: 'Internal server error' }, 500);
@@ -109,11 +113,17 @@ app.put('/profile', requireAuth, async (c) => {
     let profile = await getVenueProfile(userId);
 
     if (!profile) {
-      profile = {
+      // Skeleton-on-PUT path (client skipped initial GET). Mirror the
+      // GET /profile default so the trial-expiry mechanic kicks in for
+      // these venues too — without this they'd have no
+      // subscriptionStatus and stay un-trial-able forever.
+      profile = applyInitialTrial({
         id: `venue-${userId}`,
         userId,
+        subscriptionStatus: 'trial',
+        subscriptionPlan: 'start',
         createdAt: new Date().toISOString(),
-      };
+      });
     }
 
     // Обновляем поля
@@ -837,6 +847,34 @@ app.get('/bookings', requireAuth, async (c) => {
   } catch (error: any) {
     console.error('Error fetching venue bookings:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── POST /cron/expire-trials ──────────────────────────────────────
+// Cron endpoint that processes venue 14-day-trial expirations and
+// warnings. Same auth pattern as /subscriptions/charge-recurring:
+// the caller (systemd timer / external scheduler) must send the
+// CRON_SECRET via header `X-Cron-Secret` (or `Authorization: Bearer
+// <secret>`). Without a configured CRON_SECRET env the endpoint
+// refuses requests with 500 — never falls back to "open if no
+// secret set".
+app.post('/cron/expire-trials', async (c) => {
+  const expected = process.env.CRON_SECRET;
+  if (!expected) {
+    console.error('[venue/cron] CRON_SECRET env var not set');
+    return c.json({ success: false, error: 'Server misconfiguration' }, 500);
+  }
+  const provided = c.req.header('X-Cron-Secret') || c.req.header('Authorization')?.replace('Bearer ', '');
+  if (provided !== expected) {
+    return c.json({ success: false, error: 'Unauthorized' }, 401);
+  }
+
+  try {
+    const result = await expireTrialsOnce();
+    return c.json({ success: true, ...result });
+  } catch (err: any) {
+    console.error('[venue/cron] expire-trials failed:', err?.message);
+    return c.json({ success: false, error: safeErrorMessage(err) }, 500);
   }
 });
 
