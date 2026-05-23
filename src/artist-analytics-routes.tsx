@@ -1,94 +1,124 @@
 /**
- * ARTIST ANALYTICS ROUTES - Real data only (NO simulations)
+ * ARTIST ANALYTICS ROUTES - real numbers off native track columns.
  *
- * KV Keys:
- *   artist_analytics:{artistId}   -> cached analytics
+ * After the KV→native migrations (003-007), per-track counts live in
+ * canonical columns: tracks.plays_count, tracks.likes_count,
+ * tracks.moderation_status. The old queries against `data->>'plays'`
+ * / `data->>'artistId'` always returned 0 — the JSONB keys aren't
+ * populated anymore. That's why /artist/settings → tab=analytics
+ * showed every metric as 0 ("не работает совсем").
+ *
+ * COLUMN TYPES (verified against codebase queries, cabinet schema as of
+ * 2026-05-23; see CLAUDE.md → SQL writing pitfalls):
+ *   tracks.user_id            : text   → URL-param compare, no cast
+ *   tracks.moderation_status  : text
+ *   tracks.plays_count        : integer
+ *   tracks.likes_count        : integer
+ *   artist_profiles.user_id   : text   → no cast
+ *   artist_profiles.total_followers : integer
+ *
+ * NOTE: requireOwner('artistId') means the :artistId URL param is the
+ * caller's user_id (JWT-derived), not artist_profiles.id. So we filter
+ * tracks WHERE user_id = $1. Label-on-behalf uploads (where artist_id
+ * ≠ uploader's user_id) won't show up here — that's an accepted gap
+ * for v1; can be solved with a JOIN on artist_profiles later.
  *
  * Endpoints:
- * GET /overview/:artistId   - Real analytics from DB
- * GET /tracks/:artistId     - Real track stats from DB
- * GET /geography/:artistId  - Not yet tracked
- * GET /platforms/:artistId  - Not yet tracked
- * GET /timeline/:artistId   - Not yet tracked
+ *   GET /overview/:artistId   real aggregates over tracks
+ *   GET /timeline/:artistId   not yet tracked → empty []
+ *   GET /tracks/:artistId     real per-track stats
+ *   GET /geography/:artistId  not yet tracked → empty []
+ *   GET /platforms/:artistId  not yet tracked → empty []
  */
 
 import { Hono } from 'hono';
 import { requireAuth, requireOwner } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
-import { getArtistProfile, artistAnalyticsCacheStore } from './db.tsx';
+import { artistAnalyticsCacheStore } from './db.tsx';
 
 const app = new Hono();
 
-// GET /overview/:artistId — Real analytics from tracks table
+// GET /overview/:artistId
 app.get('/overview/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   const artistId = c.req.param('artistId');
   const period = c.req.query('period') || 'month';
 
   try {
-    const cacheKey = `${artistId}:${period}`;
+    // Cache key prefix bumped to v2 so stale entries written by the old
+    // (broken) JSONB-aggregating version are not served. Old entries
+    // expire on their own TTL; we just stop reading them.
+    const cacheKey = `v2:${artistId}:${period}`;
     const cached = await artistAnalyticsCacheStore.get(cacheKey);
     if (cached) {
       return c.json({ success: true, analytics: cached, source: 'cache' });
     }
 
-    // Real data from tracks table
+    // Aggregate from native columns. user_id is TEXT, $1 is TEXT from
+    // URL — direct compare, no cast.
     const tracksResult = await pool.query(
       `SELECT
-        COUNT(*) as track_count,
-        COALESCE(SUM(CASE WHEN data->>'status' = 'approved' THEN 1 ELSE 0 END), 0) as approved_tracks,
-        COALESCE(SUM((data->>'plays')::int), 0) as total_plays,
-        COALESCE(SUM((data->>'likes')::int), 0) as total_likes,
-        COALESCE(SUM((data->>'shares')::int), 0) as total_shares
-      FROM tracks WHERE data->>'artistId' = $1`,
-      [artistId]
+         COUNT(*)::int                                                              AS track_count,
+         COUNT(*) FILTER (WHERE moderation_status IN ('approved','published'))::int AS approved_tracks,
+         COALESCE(SUM(plays_count) FILTER (WHERE moderation_status = 'published'), 0)::bigint AS total_plays,
+         COALESCE(SUM(likes_count) FILTER (WHERE moderation_status = 'published'), 0)::bigint AS total_likes
+       FROM tracks WHERE user_id = $1`,
+      [artistId],
     );
 
     const stats = tracksResult.rows[0] || {};
-    const totalPlays = Number(stats.total_plays) || 0;
-    const totalLikes = Number(stats.total_likes) || 0;
-    const totalShares = Number(stats.total_shares) || 0;
-    const trackCount = Number(stats.track_count) || 0;
+    const totalPlays  = Number(stats.total_plays)  || 0;
+    const totalLikes  = Number(stats.total_likes)  || 0;
+    const trackCount     = Number(stats.track_count)     || 0;
     const approvedTracks = Number(stats.approved_tracks) || 0;
 
-    // Profile data
-    const artistProfile = await getArtistProfile(artistId);
-    const subscribers = (artistProfile as any)?.subscribers || 0;
+    // Followers from artist_profiles (canonical). Same text-to-text
+    // compare; safe to skip if no profile row (returns 0).
+    let followers = 0;
+    try {
+      const { rows } = await pool.query(
+        `SELECT total_followers FROM artist_profiles WHERE user_id = $1 LIMIT 1`,
+        [artistId],
+      );
+      followers = Number(rows[0]?.total_followers ?? 0);
+    } catch { /* keep 0 */ }
 
     const analytics = {
       period,
       totalPlays,
       totalLikes,
-      totalShares,
+      // shares column doesn't exist in tracks schema — explicit 0 instead
+      // of inventing a SELECT for a missing column (CLAUDE.md pitfall #2).
+      totalShares: 0,
       trackCount,
       approvedTracks,
-      followers: subscribers,
+      followers,
       engagementRate: totalPlays > 0 ? +((totalLikes / totalPlays) * 100).toFixed(1) : 0,
-      // Not yet tracked — return null instead of fake data
-      followersGrowth: null,
-      playsGrowth: null,
-      likesGrowth: null,
-      revenueGrowth: null,
-      revenue: null,
-      activeListeners: null,
+      // Not yet tracked — return null so the UI can render "—" rather
+      // than seeding fake numbers that look real.
+      followersGrowth:   null,
+      playsGrowth:       null,
+      likesGrowth:       null,
+      revenueGrowth:     null,
+      revenue:           null,
+      activeListeners:   null,
       avgListenDuration: null,
-      completionRate: null,
-      peakHour: null,
-      platforms: null,
-      geography: null,
-      demographics: null,
-      hourlyActivity: null,
+      completionRate:    null,
+      peakHour:          null,
+      platforms:         null,
+      geography:         null,
+      demographics:      null,
+      hourlyActivity:    null,
     };
 
-    // Cache for 5 minutes
     await artistAnalyticsCacheStore.set(cacheKey, analytics);
-
     return c.json({ success: true, analytics, source: 'db' });
   } catch (err) {
+    console.error('[artist-analytics] /overview failed:', err);
     return c.json({ success: false, error: String(err) }, 500);
   }
 });
 
-// GET /timeline/:artistId — Not yet tracked (no historical data)
+// GET /timeline/:artistId — historical time series not yet tracked.
 app.get('/timeline/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   return c.json({
     success: true,
@@ -98,40 +128,45 @@ app.get('/timeline/:artistId', requireAuth, requireOwner('artistId'), async (c) 
   });
 });
 
-// GET /tracks/:artistId — Real track stats from DB
+// GET /tracks/:artistId
 app.get('/tracks/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   const artistId = c.req.param('artistId');
 
   try {
+    // Native columns only — title/genre/moderation_status are TEXT,
+    // counts are INTEGER, user_id is TEXT for the WHERE.
     const result = await pool.query(
-      `SELECT id, data FROM tracks
-       WHERE data->>'artistId' = $1
-       ORDER BY COALESCE((data->>'plays')::int, 0) DESC
+      `SELECT id, title, genre, moderation_status,
+              COALESCE(plays_count, 0) AS plays_count,
+              COALESCE(likes_count, 0) AS likes_count
+       FROM tracks
+       WHERE user_id = $1
+       ORDER BY plays_count DESC
        LIMIT 50`,
-      [artistId]
+      [artistId],
     );
 
-    const tracks = result.rows.map((row: any) => {
-      const d = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
-      return {
-        id: row.id,
-        title: d.title || 'Без названия',
-        plays: Number(d.plays) || 0,
-        likes: Number(d.likes) || 0,
-        shares: Number(d.shares) || 0,
-        saves: Number(d.saves) || 0,
-        status: d.status || 'pending',
-        genre: d.genre || null,
-        // Not tracked — null instead of fake values
-        completionRate: null,
-        avgListenTime: null,
-        trend: null,
-        trendValue: null,
-      };
-    });
+    const tracks = result.rows.map((row: any) => ({
+      id:     row.id,
+      title:  row.title || 'Без названия',
+      plays:  Number(row.plays_count) || 0,
+      likes:  Number(row.likes_count) || 0,
+      // tracks.shares_count column doesn't exist — fixed 0 keeps the
+      // shape stable for the frontend without inventing a column.
+      shares: 0,
+      saves:  0,
+      status: row.moderation_status || 'pending',
+      genre:  row.genre || null,
+      // Not tracked — explicit null so UI can render "—".
+      completionRate: null,
+      avgListenTime:  null,
+      trend:          null,
+      trendValue:     null,
+    }));
 
     return c.json({ success: true, tracks, source: 'db' });
   } catch (err) {
+    console.error('[artist-analytics] /tracks failed:', err);
     return c.json({ success: false, error: String(err) }, 500);
   }
 });
