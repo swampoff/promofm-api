@@ -189,14 +189,23 @@ app.get('/profile/:artistId', async (c) => {
     if (isUuidParam) {
       const kvProfile = await loadFromKv(artistId);
       if (kvProfile) {
-        // Backfill artistName from SQL when the cached row predates the
-        // artistName field. One indexed query — cheap enough to do on
-        // every hit, since most profile reads are gated by auth anyway.
-        if (!(kvProfile as any).artistName) {
+        // Normalize legacy KV rows that predate certain fields (genres,
+        // socials, artistName, country, etc.). Without this, frontends
+        // that assume canonical shape (`profile.genres[0]`,
+        // `profile.socials?.instagram`) crashed on old cached profiles.
+        // makeProfile fills every required field with a sensible default
+        // while keeping whatever the KV row already had.
+        const normalized = makeProfile({
+          id: artistId,
+          email: kvProfile.email || '',
+          fullName: kvProfile.fullName || '',
+          ...kvProfile,
+        });
+        if (!normalized.artistName) {
           const artistName = await lookupArtistName(artistId);
-          if (artistName) (kvProfile as any).artistName = artistName;
+          if (artistName) normalized.artistName = artistName;
         }
-        return c.json({ success: true, source: 'kv', data: kvProfile });
+        return c.json({ success: true, source: 'kv', data: normalized });
       }
     }
 

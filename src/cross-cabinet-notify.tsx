@@ -17,7 +17,7 @@
  * - admin_action      → Артист ← Админ (действие админ��стратора)
  */
 
-import { getCcnByUser, getCcnUnreadCount, setCcnUnreadCount, upsertCcn } from './db.tsx';
+import { getCcnByUser, upsertCcn } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -144,9 +144,10 @@ export async function notifyCrossCabinet(params: NotifyParams): Promise<CrossCab
   // 1. Сохраняем в KV
   await upsertCcn(params.targetUserId, id, notification);
 
-  // Обновляем индекс непрочитанных
-  const current = await getCcnUnreadCount(params.targetUserId);
-  await setCcnUnreadCount(params.targetUserId, current + 1);
+  // The old KV-counter (ccn_unread_count) was the source of the "9+ but
+  // empty inbox" desync, since markAsRead/markAllAsRead didn't decrement
+  // it. getUnreadCount() now counts directly from the table, so we no
+  // longer maintain this side-channel.
 
   // 2. Emit SSE (если пользователь подключён - доставитс�� мгновенно)
   emitSSE(params.targetUserId, {
@@ -279,10 +280,21 @@ export async function markAllAsRead(userId: string): Promise<number> {
 }
 
 /**
- * Получить количество непрочитанных
+ * Получить количество непрочитанных. Считаем напрямую по таблице,
+ * чтобы счётчик не расходился с реальным состоянием — старый
+ * `ccn_unread_count` KV-кэш инкрементировался при создании уведомления,
+ * но markAsRead/markAllAsRead обновляли только `is_read` колонку и
+ * никогда не декрементировали кэш. В итоге пользователь видел "9+" в
+ * колокольчике, а инбокс был пустой. Источник истины — таблица.
  */
 export async function getUnreadCount(userId: string): Promise<number> {
-  return (await getCcnUnreadCount(userId) as number) || 0;
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT COUNT(*)::int AS cnt FROM cross_cabinet_notifications
+     WHERE (target_user_id = $1 OR recipient_id = $1) AND is_read = false`,
+    [userId],
+  );
+  return (r.rows[0]?.cnt as number) || 0;
 }
 
 // ── SSE event mapping ────────────────────────────────────────────────────────
