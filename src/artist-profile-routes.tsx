@@ -473,7 +473,7 @@ app.get('/profile/:artistId/stats', async (c) => {
     // concerts.artist_id is TEXT in this schema; cast UUID → text to match.
     // Table may not exist on dev envs — swallow the error and return 0.
     const concertAgg = await pool.query(
-      `SELECT COUNT(*)::int AS cnt FROM concerts WHERE artist_id = $1::text`,
+      `SELECT COUNT(*)::int AS cnt FROM concerts WHERE artist_id = $1`,
       [ap.id],
     ).catch(() => ({ rows: [{ cnt: 0 }] }));
 
