@@ -33,6 +33,7 @@ done
 | `005_native_step3.sql` | agent_sessions, curator_reports, track_moderation, payment_withdrawals, production_360_orders |
 | `006_native_step4.sql` | contracts, email_history, notification_campaigns, track_test_all_requests, investor_inquiries |
 | `007_kv_final.sql` | booking_calendar, publish_email_prefs, track_test_expert_stats, payment_webhook_logs |
+| `008_cabinet_email_status_phone.sql` | KV-phase-out Phase 1: добавляет `email`/`is_email_verified`/`account_status`/`phone` во все 6 cabinet-таблиц + бэкфилл из `users`. Подготовка к снятию `vps-userdata.tsx`. |
 
 См. подробности в memory: `kv-to-sql-migration.md`.
 
