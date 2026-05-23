@@ -88,7 +88,11 @@ const PATH_TRAVERSAL_PATTERNS = [
   /\.\.[\/\\]\.\.(?:[\/\\])?/,     // ../../
   /(?:file|php|zip|phar|glob|expect|rar|zlib|data|input|fd):\/\//i,  // PHP wrappers
   /\/(?:proc|dev|sys|run)\/(?!null)/,
-  /[\/\\](?:etc|var|tmp|usr|opt|home|root)[\/\\]/,
+  // Narrowed 2026-05-23: matched any URL with /home/, /var/, /opt/, /usr/
+  // segment — including legit routes like /api/artist-analytics/home/<uuid>
+  // and asset paths /uploads/... that contain /var/www/promofm/uploads in
+  // response payloads. Now only flags KNOWN sensitive filesystem targets.
+  /[\/\\](?:etc|root)[\/\\](?:passwd|shadow|hosts|crontab|\.ssh)/i,
   /%00/,                            // Null byte
   /%0[0aAdD]/,                      // Null / CR / LF
 ];
