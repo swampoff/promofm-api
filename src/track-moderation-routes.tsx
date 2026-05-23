@@ -174,6 +174,18 @@ app.post('/submitTrack', requireAuth, async (c) => {
       triggerAiAnalysis(track.id, audioUrl).catch(() => {});
     }
 
+    // Fire-and-forget: queue Promo.check fingerprint + watermark for
+    // radio-airplay monitoring. The artist's "Мои треки" + home stats
+    // panel reads from promo_check_detections to show real rotation
+    // counts — without this trigger, tracks uploaded via submitTrack
+    // (which is THE form artists use, TrackUploadPage) never enter the
+    // monitoring pipeline. The /api/tracks endpoint already triggers
+    // this; we mirror it here.
+    if (audioUrl) {
+      fetch(`http://127.0.0.1:3000/server/api/promo-check/process/${track.id}`, { method: 'POST' })
+        .catch(() => {}); // non-blocking, monitoring is best-effort
+    }
+
     // Email notification to admin
     notifyTrackUpload({
       title: body.title || '',
