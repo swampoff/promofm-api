@@ -268,6 +268,26 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
       return c.json({ error: 'Track not found' }, 404);
     }
 
+    // State guard. This endpoint moderates fresh submissions only — without
+    // this check a stale admin tab can click «Одобрить» on a row that has
+    // already paid and re-advanced; the write happily downgrades status to
+    // 'approved' and resets data.payment_amount back to PUBLICATION_PRICE
+    // (5000), undoing the payment record. See production incident with
+    // Nadezhda's track e77b1053 — payment_amount went 1 → 5000 and status
+    // upcoming → approved because of exactly this path.
+    if (track.moderation_status !== 'pending') {
+      console.warn(
+        `[manageTrackModeration] BLOCKED action=${action} on trackId=${pendingTrackId}: ` +
+        `current status=${track.moderation_status}, expected 'pending'. ` +
+        `Most likely a stale-UI re-click after payment/auto-advance.`
+      );
+      return c.json({
+        error: 'Track is no longer in pending moderation',
+        currentStatus: track.moderation_status,
+        message: `Трек уже не на модерации (текущий статус: ${track.moderation_status})`,
+      }, 409);
+    }
+
     const now = new Date().toISOString();
 
     if (action === 'approve') {
@@ -569,6 +589,18 @@ app.post('/batchModeration', requireAuth, requireAdmin, async (c) => {
         results.push({ trackId, success: false, message: 'Not found' });
         continue;
       }
+      // Same state guard as /manageTrackModeration — batch path must not
+      // downgrade tracks that have already moved beyond 'pending'. Without
+      // this a bulk re-approve could nuke payment records across many rows
+      // at once.
+      if (track.moderation_status !== 'pending') {
+        results.push({
+          trackId,
+          success: false,
+          message: `Уже не на модерации (${track.moderation_status})`,
+        });
+        continue;
+      }
 
       if (action === 'approve') {
         await typed.updateTrack(trackId, {
@@ -704,6 +736,30 @@ app.post('/reanalyze', requireAuth, requireAdmin, async (c) => {
 
 
 // ─── POST /approve-paid — Админ утверждает оплаченный трек → upcoming (3 дня в "Скоро") ───
+//
+// Production incident on first deploy: Nadezhda's track e77b1053 wound up with
+// status='approved' + payment_amount=5000 after passing through this endpoint.
+// Root cause — two cooperating bugs:
+//
+//   1. JS-side spread on data jsonb:
+//        const track = await getTrackById(...)            // snapshot
+//        update({ data: { ...(track.data||{}), ... } })   // writes snapshot back
+//      If anything else (webhook, /manageTrackModeration race, replica lag)
+//      modified data between the SELECT and the UPDATE, that change is lost.
+//      Webhook had set data.payment_amount=1 just two seconds earlier; the
+//      stale snapshot here put 5000 back.
+//
+//   2. No row-level guard on the UPDATE. We checked `moderation_status==='paid'`
+//      against the snapshot but the UPDATE was unconditional. If a parallel
+//      writer flipped the status between SELECT and UPDATE, we'd happily
+//      stomp them.
+//
+// Fix: a single raw UPDATE statement that
+//   (a) merges new jsonb fields with `data || jsonb_build_object(...)` so the
+//       merge happens against the CURRENT row, not against a JS snapshot, and
+//   (b) carries `WHERE moderation_status = 'paid'` so a concurrent flip
+//       blocks us at the row level instead of racing against a snapshot
+//       guard. The RETURNING row count tells us whether we actually wrote.
 app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
   try {
     const { trackIds } = await c.req.json();
@@ -713,28 +769,63 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
 
     const UPCOMING_DAYS = 3;
     const upcomingUntil = new Date(Date.now() + UPCOMING_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const approvedAt = new Date().toISOString();
+    const nowIso = new Date().toISOString();
     let updated = 0;
+    const skipped: Array<{ trackId: string; reason: string; currentStatus?: string }> = [];
 
     for (const trackId of trackIds) {
-      const track = await typed.getTrackById(trackId);
-      if (!track || track.moderation_status !== 'paid') continue;
+      // Fetch a snapshot purely for the notification payload (title / user_id).
+      // The actual write is row-guarded by WHERE moderation_status='paid', so
+      // even if this snapshot is stale we won't damage anything: the UPDATE
+      // either lands cleanly (rowCount=1) or is a no-op (rowCount=0).
+      const snapshot = await typed.getTrackById(trackId);
+      if (!snapshot) {
+        skipped.push({ trackId, reason: 'not_found' });
+        continue;
+      }
 
-      await typed.updateTrack(trackId, {
-        moderation_status: 'upcoming',
-        is_hidden: false,
-        data: {
-          ...(track.data || {}),
-          upcoming_until: upcomingUntil,
-          approved_for_release_at: new Date().toISOString(),
-        },
-      });
+      const result = await pool.query(
+        `UPDATE tracks
+            SET moderation_status = 'upcoming',
+                is_hidden         = false,
+                data              = COALESCE(data, '{}'::jsonb)
+                                    || jsonb_build_object(
+                                         'upcoming_until', $2::text,
+                                         'approved_for_release_at', $3::text
+                                       ),
+                updated_at        = $4
+          WHERE id = $1
+            AND moderation_status = 'paid'
+          RETURNING moderation_status, data->>'payment_amount' AS amount`,
+        [trackId, upcomingUntil, approvedAt, nowIso]
+      );
+
+      if (result.rowCount === 0) {
+        skipped.push({
+          trackId,
+          reason: 'not_in_paid_state',
+          currentStatus: snapshot.moderation_status,
+        });
+        console.warn(
+          `[approve-paid] skipped trackId=${trackId} — snapshot status=${snapshot.moderation_status}, ` +
+          `expected 'paid'. Possible causes: already advanced, /manageTrackModeration ` +
+          `re-approval race, or webhook never fired.`
+        );
+        continue;
+      }
+
+      console.log(
+        `[approve-paid] OK trackId=${trackId} status: paid → upcoming, ` +
+        `amount=${result.rows[0]?.amount}, upcoming_until=${upcomingUntil}`
+      );
 
       // Notify artist
-      if (track.user_id) {
+      if (snapshot.user_id) {
         const upcomingTitle = 'Трек скоро в эфире!';
-        const upcomingMsg = `"${track.title}" появится в новинках через ${UPCOMING_DAYS} дня`;
+        const upcomingMsg = `"${snapshot.title}" появится в новинках через ${UPCOMING_DAYS} дня`;
         notifyCrossCabinet({
-          targetUserId: track.user_id,
+          targetUserId: snapshot.user_id,
           targetRole: 'artist',
           sourceRole: 'admin',
           type: 'track_upcoming',
@@ -745,13 +836,13 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
 
         // Also write to the persistent inbox so the bell sees it.
         const inboxId = `tn-${crypto.randomUUID()}`;
-        upsertNotification(String(track.user_id), inboxId, {
+        upsertNotification(String(snapshot.user_id), inboxId, {
           id: inboxId,
           type: 'track_upcoming',
           title: upcomingTitle,
           message: upcomingMsg,
           trackId,
-          trackTitle: track.title,
+          trackTitle: snapshot.title,
           link: '/artist/tracks',
           read: false,
           createdAt: new Date().toISOString(),
@@ -761,7 +852,7 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
       updated++;
     }
 
-    return c.json({ success: true, updated, upcomingUntil });
+    return c.json({ success: true, updated, upcomingUntil, skipped });
   } catch (error) {
     console.error('Error in approve-paid:', error);
     return c.json({ error: 'Internal server error' }, 500);

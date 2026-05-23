@@ -403,23 +403,58 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // promotes expired upcoming → 'published'.
   if (session.metadata?.type === 'track_publish' && session.metadata?.trackId) {
     try {
-      const { updateTrack, getTrackById } = await import('./db-typed.tsx');
       const trackId = session.metadata.trackId;
-      const existing = await getTrackById(String(trackId));
-      await updateTrack(trackId, {
-        moderation_status: 'paid',
-        is_hidden: false,
-        is_paid: true,
-        data: {
-          ...(existing?.data || {}),
-          payment_completed: true,
-          payment_amount: session.amount,
-          payment_order_id: session.orderId,
-          payment_gateway: session.gateway,
-          paid_at: now,
-        },
-      });
-      log.info({ trackId, amount: session.amount, orderId: session.orderId }, 'track_payment_received');
+      const { pool: tpPool } = await import('./db-client.tsx');
+
+      // Raw UPDATE with jsonb merge — `data = data || jsonb_build_object(...)`
+      // runs against the CURRENT row, not against a stale JS snapshot. The
+      // earlier `getTrackById + spread + updateTrack` pattern lost concurrent
+      // jsonb writes because the spread used pre-SELECT state (Nadezhda's
+      // track e77b1053 incident: payment_amount overwritten 1 → 5000 after
+      // a parallel /manageTrackModeration call).
+      //
+      // WHERE moderation_status='approved' is a soft guard: webhook should
+      // only fulfil tracks that the artist actually has the right to pay
+      // for (already approved by moderator). If the row is in any other
+      // state — already paid (duplicate webhook), pending (skipped
+      // moderation somehow), upcoming/published (already advanced) — we
+      // skip the write and log loudly. RETURNING tells us which case hit.
+      const result = await tpPool.query(
+        `UPDATE tracks
+            SET moderation_status = 'paid',
+                is_paid           = true,
+                is_hidden         = false,
+                data              = COALESCE(data, '{}'::jsonb)
+                                    || jsonb_build_object(
+                                         'payment_completed', true,
+                                         'payment_amount',   $2::numeric,
+                                         'payment_order_id', $3::text,
+                                         'payment_gateway',  $4::text,
+                                         'paid_at',          $5::text
+                                       ),
+                updated_at        = $6
+          WHERE id = $1
+            AND moderation_status = 'approved'
+          RETURNING data->>'payment_amount' AS amount, moderation_status`,
+        [trackId, session.amount, session.orderId, session.gateway, now, now]
+      );
+
+      if (result.rowCount === 0) {
+        const { getTrackById } = await import('./db-typed.tsx');
+        const current = await getTrackById(String(trackId));
+        log.warn(
+          { trackId, currentStatus: current?.moderation_status, isPaid: current?.is_paid },
+          'track_payment_received_but_state_mismatch'
+        );
+        // Don't bail — payment money is real. Surface the mismatch for
+        // ops to reconcile manually; webhook still 200s to the gateway
+        // so it doesn't retry-storm.
+      } else {
+        log.info(
+          { trackId, amount: session.amount, orderId: session.orderId, storedAmount: result.rows[0]?.amount },
+          'track_payment_received'
+        );
+      }
 
       // SSE fan-out.
       //   artist  — 'track_paid' so their cabinet shows «Оплачено, ждёт публикации»,
