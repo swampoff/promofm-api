@@ -3,8 +3,80 @@ import * as db from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
+import { SUBSCRIPTION_PLANS } from './subscriptions-routes.tsx';
 
 const donationsRoutes = new Hono();
+
+// ── Tier-aware donation commission ─────────────────────────────────────────
+//
+// The pricing matrix on PricingPage.tsx promises tier-based donation
+// commission:
+//   spark (free)   — 10%
+//   start          — 7%
+//   pro            — 5%
+//   elite          — 3%
+//
+// Until this PR the backend hardcoded 0.03 for everyone — Spark
+// freeloaders were paying the Elite rate (revenue leak), and the
+// marketing matrix was lying. This helper resolves the artist's
+// active subscription tier and returns the advertised rate.
+//
+// Defaults: any failure (missing user_id, no active subscription,
+// expired subscription, DB hiccup, unknown tier) → spark rate
+// (0.10). Rationale: spark is the implicit «free» tier for any
+// artist without an explicit subscription, so it's the correct
+// fallback for «we don't know what tier this user is».
+//
+// The platform is the source of truth for the rate, the artist's
+// withdrawal request only includes the amount — the rate is
+// computed server-side. No way for the artist to fake their
+// commission by tampering with the request body.
+
+const DEFAULT_DONATION_COMMISSION = 0.10; // spark / unknown tier
+
+async function resolveDonationCommissionRate(
+  userId: string | null | undefined,
+): Promise<{ rate: number; tier: string }> {
+  if (!userId) return { rate: DEFAULT_DONATION_COMMISSION, tier: 'spark' };
+
+  try {
+    const r = await pool.query(
+      `SELECT data FROM subscriptions WHERE user_id = $1
+       ORDER BY (data->>'updated_at') DESC NULLS LAST,
+                (data->>'created_at') DESC NULLS LAST
+       LIMIT 1`,
+      [userId],
+    );
+    if (r.rows.length === 0) return { rate: DEFAULT_DONATION_COMMISSION, tier: 'spark' };
+
+    const raw = r.rows[0].data;
+    const sub: any = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!sub) return { rate: DEFAULT_DONATION_COMMISSION, tier: 'spark' };
+
+    if (sub.status !== 'active' && sub.status !== 'trial') {
+      return { rate: DEFAULT_DONATION_COMMISSION, tier: 'spark' };
+    }
+    if (sub.expires_at) {
+      const expires = new Date(sub.expires_at).getTime();
+      if (Number.isFinite(expires) && expires < Date.now()) {
+        return { rate: DEFAULT_DONATION_COMMISSION, tier: 'spark' };
+      }
+    }
+
+    const tier = String(sub.tier || sub.planId || 'spark').toLowerCase();
+    const plan = (SUBSCRIPTION_PLANS as any)[tier];
+    if (!plan) return { rate: DEFAULT_DONATION_COMMISSION, tier };
+
+    const rate = Number(plan.donation_fee);
+    if (!Number.isFinite(rate) || rate < 0 || rate > 1) {
+      return { rate: DEFAULT_DONATION_COMMISSION, tier };
+    }
+    return { rate, tier };
+  } catch (err: any) {
+    console.warn('[donations] resolveDonationCommissionRate failed:', err?.message);
+    return { rate: DEFAULT_DONATION_COMMISSION, tier: 'spark' };
+  }
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -54,7 +126,17 @@ donationsRoutes.get('/list', requireAuth, async (c) => {
     const userId = c.get('userId');
     const donations = await db.getDonationsByArtist(userId);
     const balance = await getDonationBalance(userId);
-    return c.json({ success: true, data: donations || [], balance });
+    // Include the artist's current commission rate so the cabinet can
+    // preview «вы получите X ₽ после удержания Y%» before they
+    // submit the withdrawal — without re-deriving the tier logic
+    // client-side.
+    const { rate, tier } = await resolveDonationCommissionRate(String(userId || ''));
+    return c.json({
+      success: true,
+      data: donations || [],
+      balance,
+      commission: { rate, tier },
+    });
   } catch (error) {
     return c.json({ success: true, data: [], balance: 0 });
   }
@@ -67,12 +149,14 @@ donationsRoutes.get('/withdrawals', requireAuth, async (c) => {
     const list = await getWithdrawalsList(userId);
     const donationWds = list.filter((w: any) => w?.source === 'donation');
     const balance = await getDonationBalance(userId);
+    const { rate, tier } = await resolveDonationCommissionRate(String(userId || ''));
     return c.json({
       success: true,
       data: donationWds.sort((a: any, b: any) =>
         String(b?.createdAt || '').localeCompare(String(a?.createdAt || ''))
       ),
       balance,
+      commission: { rate, tier },
     });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -81,7 +165,8 @@ donationsRoutes.get('/withdrawals', requireAuth, async (c) => {
 
 // ── POST /donations/withdrawals — создать заявку на вывод ──
 // body: { amount: number, paymentMethod?: string, paymentDetails?: any }
-// Минимум 1000 ₽, комиссия 3%, проверка баланса.
+// Минимум 1000 ₽. Комиссия зависит от тарифа артиста (10/7/5/3%
+// для spark/start/pro/elite — см. resolveDonationCommissionRate).
 donationsRoutes.post('/withdrawals', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
@@ -104,7 +189,11 @@ donationsRoutes.post('/withdrawals', requireAuth, async (c) => {
       }, 400);
     }
 
-    const commission = Math.round(amount * 0.03 * 100) / 100;
+    // Tier-aware commission. spark=10%, start=7%, pro=5%, elite=3%.
+    // The rate is resolved server-side from the artist's active
+    // subscription — the request body cannot influence it.
+    const { rate: commissionRate, tier } = await resolveDonationCommissionRate(String(userId || ''));
+    const commission = Math.round(amount * commissionRate * 100) / 100;
     const payout = Math.round((amount - commission) * 100) / 100;
     const id = `wd-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
@@ -115,7 +204,8 @@ donationsRoutes.post('/withdrawals', requireAuth, async (c) => {
       userId,
       amount,
       commission,
-      commissionRate: 0.03,
+      commissionRate,
+      commissionTier: tier,
       payout,
       paymentMethod: body.paymentMethod || 'card',
       paymentDetails: body.paymentDetails || null,
