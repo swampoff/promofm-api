@@ -35,7 +35,17 @@ export async function getTracksByUser(userId: string) {
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
   if (error) console.error('[db-typed] getTracksByUser:', error);
-  return data || [];
+  // Expose snake_case columns the artist cabinet expects as camelCase.
+  // Without this, t.isPaid is always undefined and the 'awaiting payment'
+  // banner shows even for tracks marked is_paid=true (e.g. legacy imports
+  // already paid for on the old platform).
+  return (data || []).map((t: any) => ({
+    ...t,
+    isPaid: t.is_paid === true,
+    audioUrl: t.audio_url || '',
+    coverUrl: t.cover_url || '',
+    artistName: t.artist_name || '',
+  }));
 }
 
 export async function getTracksByStatus(status: string) {
