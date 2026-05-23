@@ -95,29 +95,12 @@ async function ensureSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_pitching_submissions_status ON pitching_submissions(status);
       CREATE INDEX IF NOT EXISTS idx_pitching_submissions_target ON pitching_submissions(target_id);
     `);
-    // Seed once if empty so the frontend's first load isn't blank.
-    const pCount = await pool.query(`SELECT COUNT(*)::int AS n FROM pitching_playlists`);
-    if (Number(pCount.rows[0]?.n || 0) === 0) {
-      await pool.query(`
-        INSERT INTO pitching_playlists (id, name, platform, followers, genre) VALUES
-          ('p1', 'New Music Friday', 'Spotify',     5000000, NULL),
-          ('p2', 'Top Hits',         'Apple Music', 3000000, 'Pop'),
-          ('p3', 'Electronic Rising','Spotify',      800000, 'Electronic'),
-          ('p4', 'Indie Radar',      'Deezer',       200000, 'Indie')
-        ON CONFLICT (id) DO NOTHING
-      `);
-    }
-    const sCount = await pool.query(`SELECT COUNT(*)::int AS n FROM pitching_radio_stations`);
-    if (Number(sCount.rows[0]?.n || 0) === 0) {
-      await pool.query(`
-        INSERT INTO pitching_radio_stations (id, name, region, genre) VALUES
-          ('r1', 'Hit FM',           'Global',  'Pop'),
-          ('r2', 'Rock Radio',       'USA',     'Rock'),
-          ('r3', 'Jazz Cafe',        'France',  'Jazz'),
-          ('r4', 'Electronic Waves', 'Germany', 'Electronic')
-        ON CONFLICT (id) DO NOTHING
-      `);
-    }
+    // Seed removed 2026-05-23: pitching_playlists.id is uuid in prod
+    // (legacy schema), hardcoded 'p1'/'p2' strings failed with
+    // "invalid input syntax for type uuid". pitching_radio_stations
+    // is a VIEW with 970 real radio rows backfilled from migration 009 —
+    // seed would no-op anyway (count > 0). Catalog data comes from
+    // admin UI, not bootstrap defaults.
   })();
   return schemaReady;
 }
