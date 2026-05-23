@@ -45,6 +45,12 @@ export async function getTracksByUser(userId: string) {
     audioUrl: t.audio_url || '',
     coverUrl: t.cover_url || '',
     artistName: t.artist_name || '',
+    // Virtual status: paid+approved tracks render as 'published' in the cabinet
+    // so users see "Опубликован" instead of "Ожидает оплаты". Raw
+    // moderation_status stays untouched in the DB row above (via ...t).
+    status: t.is_paid === true && t.moderation_status === 'approved'
+      ? 'published'
+      : (t.moderation_status || 'draft'),
   }));
 }
 
