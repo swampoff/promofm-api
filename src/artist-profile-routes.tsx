@@ -76,29 +76,6 @@ const ALLOWED_UPDATE_FIELDS = new Set([
 // ── Helpers ───────────────────────────────────────────────
 
 /**
- * Fetches the canonical artist_profiles row for a user (by either
- * user_id or profile id). Returns the whole row when present so we
- * can pull live stats / artist_name / sub_genres / etc. without
- * trusting the KV-cached profile blob.
- */
-async function lookupArtistProfileRow(idOrUserId: string): Promise<Record<string, any> | null> {
-  if (!idOrUserId) return null;
-  try {
-    const { pool } = await import('./db-client.tsx');
-    const { rows } = await pool.query(
-      `SELECT * FROM artist_profiles
-       WHERE user_id = $1 OR id = $1
-       LIMIT 1`,
-      [idOrUserId],
-    );
-    return rows[0] || null;
-  } catch (err) {
-    console.warn('[ArtistProfile] lookupArtistProfileRow failed:', err);
-    return null;
-  }
-}
-
-/**
  * Fetches just `artist_profiles.artist_name` for an artist by either
  * user_id or profile id. Returns empty string when no row matches.
  * Used to augment auth-derived profile responses where users.name is a
@@ -106,8 +83,19 @@ async function lookupArtistProfileRow(idOrUserId: string): Promise<Record<string
  * name in artist_profiles.
  */
 async function lookupArtistName(idOrUserId: string): Promise<string> {
-  const row = await lookupArtistProfileRow(idOrUserId);
-  return (row?.artist_name as string) || '';
+  if (!idOrUserId) return '';
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const { rows } = await pool.query(
+      `SELECT artist_name FROM artist_profiles
+       WHERE (user_id = $1 OR id = $1) AND artist_name IS NOT NULL AND artist_name <> ''
+       LIMIT 1`,
+      [idOrUserId],
+    );
+    return (rows[0]?.artist_name as string) || '';
+  } catch {
+    return '';
+  }
 }
 
 const EMPTY_SOCIALS: ArtistSocials = {
@@ -201,37 +189,22 @@ app.get('/profile/:artistId', async (c) => {
     if (isUuidParam) {
       const kvProfile = await loadFromKv(artistId);
       if (kvProfile) {
+        // Normalize legacy KV rows that predate certain fields (genres,
+        // socials, artistName, country, etc.). Without this, frontends
+        // that assume canonical shape (`profile.genres[0]`,
+        // `profile.socials?.instagram`) crashed on old cached profiles.
+        // makeProfile fills every required field with a sensible default
+        // while keeping whatever the KV row already had.
         const normalized = makeProfile({
           id: artistId,
           email: kvProfile.email || '',
           fullName: kvProfile.fullName || '',
           ...kvProfile,
         });
-
-        // Overlay canonical fields from artist_profiles. KV was caching
-        // stats that haven't been recomputed since the row was written —
-        // real artists with 30+ tracks saw "0 прослушиваний / 0 треков"
-        // on their public profile because cached totalPlays was 0.
-        // Pull the live values + the live published-track count.
-        const apRow = await lookupArtistProfileRow(artistId);
-        if (apRow) {
-          if (apRow.artist_name) normalized.artistName = apRow.artist_name as string;
-          if (apRow.total_plays != null) normalized.totalPlays = Number(apRow.total_plays);
-          if (apRow.total_followers != null) normalized.totalFollowers = Number(apRow.total_followers);
-          if (apRow.is_verified) normalized.isVerified = !!apRow.is_verified;
-          if (apRow.rating != null) normalized.rating = Number(apRow.rating);
-
-          try {
-            const { pool } = await import('./db-client.tsx');
-            const { rows } = await pool.query(
-              `SELECT COUNT(*)::int AS cnt FROM tracks
-               WHERE artist_id = $1 AND moderation_status = 'published'`,
-              [apRow.id],
-            );
-            normalized.totalTracks = Number(rows[0]?.cnt ?? 0);
-          } catch { /* keep whatever KV had */ }
+        if (!normalized.artistName) {
+          const artistName = await lookupArtistName(artistId);
+          if (artistName) normalized.artistName = artistName;
         }
-
         return c.json({ success: true, source: 'kv', data: normalized });
       }
     }
@@ -427,61 +400,24 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), async (c) =
  * Лёгкий endpoint только для статистики
  */
 app.get('/profile/:artistId/stats', async (c) => {
-  const artistIdParam = c.req.param('artistId');
+  const artistId = c.req.param('artistId');
 
   try {
-    const { pool } = await import('./db-client.tsx');
-
-    // Resolve any incoming form (id / user_id / slug) to artist_profiles.id.
-    // Same canonical-id resolver pattern as /tracks. The old endpoint read
-    // totalPlays/totalFollowers from the KV-cached profile blob — those
-    // values drift from artist_profiles every time a play/follow lands,
-    // which is why real artists with 30+ tracks were seeing all zeros.
-    const { rows: idRows } = await pool.query(
-      `SELECT id, total_plays, total_followers, rating
-       FROM artist_profiles
-       WHERE id = $1 OR user_id = $1 OR LOWER(slug) = LOWER($1)
-       LIMIT 1`,
-      [artistIdParam],
-    );
-    if (idRows.length === 0) {
-      return c.json({ success: false, error: 'Stats not found' }, 404);
+    // KV profile
+    const profile = await loadFromKv(artistId);
+    if (profile) {
+      return c.json({
+        success: true,
+        data: {
+          totalPlays: profile.totalPlays ?? 0,
+          totalFollowers: profile.totalFollowers ?? 0,
+          totalConcerts: profile.totalConcerts ?? 0,
+          coinsBalance: profile.coinsBalance ?? 0,
+        },
+      });
     }
-    const ap = idRows[0];
 
-    // Live counts off the canonical tables — single source of truth.
-    // SUM(plays_count) over published tracks gives a play count that
-    // can't disagree with what the tracks page shows.
-    const { rows: trackAgg } = await pool.query(
-      `SELECT
-         COUNT(*) FILTER (WHERE moderation_status = 'published')::int AS published_tracks,
-         COALESCE(SUM(plays_count) FILTER (WHERE moderation_status = 'published'), 0)::bigint AS total_plays,
-         COALESCE(SUM(likes_count) FILTER (WHERE moderation_status = 'published'), 0)::bigint AS total_likes
-       FROM tracks WHERE artist_id = $1`,
-      [ap.id],
-    );
-    const { rows: concertAgg } = await pool.query(
-      `SELECT COUNT(*)::int AS cnt FROM concerts WHERE artist_id = $1`,
-      [ap.id],
-    ).catch(() => ({ rows: [{ cnt: 0 }] }));  // table may not exist on some envs
-
-    const liveTotalPlays = Number(trackAgg[0]?.total_plays ?? 0);
-    return c.json({
-      success: true,
-      data: {
-        // Prefer the canonical artist_profiles column when it's been
-        // updated; otherwise fall back to the live SUM. Whichever is
-        // larger wins so per-track increments don't shrink the count
-        // due to async aggregation drift in either direction.
-        totalPlays: Math.max(Number(ap.total_plays ?? 0), liveTotalPlays),
-        totalFollowers: Number(ap.total_followers ?? 0),
-        totalConcerts: Number(concertAgg[0]?.cnt ?? 0),
-        coinsBalance: 0,  // not stored on artist_profiles; legacy field
-        rating: Number(ap.rating ?? 0),
-        publishedTracks: Number(trackAgg[0]?.published_tracks ?? 0),
-        totalLikes: Number(trackAgg[0]?.total_likes ?? 0),
-      },
-    });
+    return c.json({ success: false, error: 'Stats not found' }, 404);
   } catch (error) {
     console.error(`[ArtistProfile] Stats error: ${error}`);
     return c.json({ success: false, error: 'Internal server error' }, 500);
