@@ -30,10 +30,10 @@ DO $$ BEGIN
     UPDATE artist_profiles ap SET
       email             = COALESCE(ap.email,             u.email),
       is_email_verified = COALESCE(ap.is_email_verified, u.is_email_verified),
-      account_status    = COALESCE(ap.account_status,    u.status),
+      account_status    = COALESCE(ap.account_status,    u.status::text),
       phone             = COALESCE(ap.phone,             u.phone)
     FROM users u
-    WHERE u.id = ap.user_id;
+    WHERE u.id::text = ap.user_id;
 
     CREATE INDEX IF NOT EXISTS idx_artist_profiles_email
       ON artist_profiles(LOWER(email)) WHERE email IS NOT NULL;
@@ -55,10 +55,10 @@ DO $$ BEGIN
     UPDATE dj_profiles dp SET
       email             = COALESCE(dp.email,             u.email),
       is_email_verified = COALESCE(dp.is_email_verified, u.is_email_verified),
-      account_status    = COALESCE(dp.account_status,    u.status),
+      account_status    = COALESCE(dp.account_status,    u.status::text),
       phone             = COALESCE(dp.phone,             u.phone)
     FROM users u
-    WHERE u.id = dp.user_id;
+    WHERE u.id::text = dp.user_id;
 
     CREATE INDEX IF NOT EXISTS idx_dj_profiles_email
       ON dj_profiles(LOWER(email)) WHERE email IS NOT NULL;
@@ -80,10 +80,10 @@ DO $$ BEGIN
     UPDATE radio_profiles rp SET
       email             = COALESCE(rp.email,             u.email),
       is_email_verified = COALESCE(rp.is_email_verified, u.is_email_verified),
-      account_status    = COALESCE(rp.account_status,    u.status),
+      account_status    = COALESCE(rp.account_status,    u.status::text),
       phone             = COALESCE(rp.phone,             u.phone)
     FROM users u
-    WHERE u.id = rp.user_id;
+    WHERE u.id::text = rp.user_id;
 
     CREATE INDEX IF NOT EXISTS idx_radio_profiles_email
       ON radio_profiles(LOWER(email)) WHERE email IS NOT NULL;
@@ -105,10 +105,10 @@ DO $$ BEGIN
     UPDATE venue_profiles vp SET
       email             = COALESCE(vp.email,             u.email),
       is_email_verified = COALESCE(vp.is_email_verified, u.is_email_verified),
-      account_status    = COALESCE(vp.account_status,    u.status),
+      account_status    = COALESCE(vp.account_status,    u.status::text),
       phone             = COALESCE(vp.phone,             u.phone)
     FROM users u
-    WHERE u.id = vp.user_id;
+    WHERE u.id::text = vp.user_id;
 
     CREATE INDEX IF NOT EXISTS idx_venue_profiles_email
       ON venue_profiles(LOWER(email)) WHERE email IS NOT NULL;
@@ -130,10 +130,10 @@ DO $$ BEGIN
     UPDATE producer_profiles pp SET
       email             = COALESCE(pp.email,             u.email),
       is_email_verified = COALESCE(pp.is_email_verified, u.is_email_verified),
-      account_status    = COALESCE(pp.account_status,    u.status),
+      account_status    = COALESCE(pp.account_status,    u.status::text),
       phone             = COALESCE(pp.phone,             u.phone)
     FROM users u
-    WHERE u.id = pp.user_id;
+    WHERE u.id::text = pp.user_id;
 
     CREATE INDEX IF NOT EXISTS idx_producer_profiles_email
       ON producer_profiles(LOWER(email)) WHERE email IS NOT NULL;
@@ -155,10 +155,10 @@ DO $$ BEGIN
     UPDATE label_profiles lp SET
       email             = COALESCE(lp.email,             u.email),
       is_email_verified = COALESCE(lp.is_email_verified, u.is_email_verified),
-      account_status    = COALESCE(lp.account_status,    u.status),
+      account_status    = COALESCE(lp.account_status,    u.status::text),
       phone             = COALESCE(lp.phone,             u.phone)
     FROM users u
-    WHERE u.id = lp.user_id;
+    WHERE u.id::text = lp.user_id;
 
     CREATE INDEX IF NOT EXISTS idx_label_profiles_email
       ON label_profiles(LOWER(email)) WHERE email IS NOT NULL;
