@@ -156,6 +156,11 @@ donationsRoutes.post('/', requireAuth, async (c) => {
       return c.json({ success: false, error: 'artistId required' }, 400);
     }
 
+    // Optional per-track donation. Allows the artist's analytics to
+    // surface «доната пришло на этот трек» as a separate line item.
+    // When omitted, donation lives only at artist level (old shape).
+    const trackId: string | null = body.trackId ? String(body.trackId) : null;
+
     const { status: _s, ...safeBody } = body;
 
     const donation: any = {
@@ -163,6 +168,7 @@ donationsRoutes.post('/', requireAuth, async (c) => {
       ...safeBody,
       status: 'pending_payment',
       artistId: body.artistId,
+      trackId,                          // null when no track context
       donorId: userId,
       createdAt: now,
     };
@@ -188,6 +194,7 @@ donationsRoutes.post('/', requireAuth, async (c) => {
           type: 'donation',
           donationId,
           artistId: body.artistId,
+          ...(trackId ? { trackId } : {}),
           donorName: donorLabel,
           isAnonymous: String(body.isAnonymous || false),
         },
@@ -206,6 +213,7 @@ donationsRoutes.post('/', requireAuth, async (c) => {
         metadata: {
           donationId,
           artistId: body.artistId,
+          ...(trackId ? { trackId } : {}),
           donorName: donorLabel,
           isAnonymous: String(body.isAnonymous || false),
         },

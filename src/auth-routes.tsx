@@ -878,6 +878,47 @@ auth.get("/admin/pending-users", requireAuth, requireAdmin, async (c) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────
+// POST /auth/admin/verify-profile
+// Toggles radio_profiles.is_verified / venue_profiles.is_verified.
+// This is a SECOND-LEVEL trust gate, separate from approve-user
+// (which only flips users.status='active'). Verified accounts can
+// download tracks via /tracks/:id/download for broadcast / in-venue
+// play. Newly-registered radio/venue start at is_verified=false.
+//
+// body: { userId: string, role: 'radio_station'|'venue', isVerified: boolean }
+// ──────────────────────────────────────────────────────────────────────
+auth.post("/admin/verify-profile", requireAuth, requireAdmin, async (c) => {
+  try {
+    const { userId, role, isVerified } = await c.req.json();
+    if (!userId) return c.json({ success: false, error: 'userId обязателен' }, 400);
+    if (role !== 'radio_station' && role !== 'venue') {
+      return c.json({ success: false, error: "role должно быть 'radio_station' или 'venue'" }, 400);
+    }
+    if (typeof isVerified !== 'boolean') {
+      return c.json({ success: false, error: 'isVerified должно быть boolean' }, 400);
+    }
+    const table = role === 'radio_station' ? 'radio_profiles' : 'venue_profiles';
+    const result = await sql(
+      `UPDATE ${table}
+          SET is_verified = $1
+        WHERE user_id = $2
+       RETURNING user_id, is_verified`,
+      [isVerified, userId]
+    );
+    if (result.rows.length === 0) {
+      return c.json({ success: false, error: 'Профиль не найден' }, 404);
+    }
+    return c.json({
+      success: true,
+      data: result.rows[0],
+      message: isVerified ? 'Профиль верифицирован' : 'Верификация снята',
+    });
+  } catch (error) {
+    console.error('[admin/verify-profile] error:', error);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
 // POST /auth/admin/approve-user
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/admin/approve-user", requireAuth, requireAdmin, async (c) => {

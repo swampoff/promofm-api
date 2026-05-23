@@ -203,6 +203,113 @@ tracksRoutes.delete('/:id', requireAuth, async (c) => {
   }
 });
 
+// GET /:id/download — universal track download for verified radio/venue
+//
+// Two-stage gate:
+//   1. Account is active — handled implicitly by JWT auth.
+//   2. Profile has is_verified=true (admin trust gate) — checked below
+//      against radio_profiles OR venue_profiles depending on role.
+//
+// Each successful download is logged with a SNAPSHOT of the
+// downloader's city at that moment (radio_profiles.data->>'city' /
+// venue_profiles.data->>'city'). If the profile changes city later
+// historical rows keep their original value — analytics stay
+// faithful to where the track actually went.
+//
+// Track must be in 'upcoming' or 'published' state (publicly live).
+// Other states (paid waiting admin gate, rejected, draft) are not
+// downloadable even by verified accounts.
+tracksRoutes.get('/:id/download', requireAuth, async (c) => {
+  try {
+    const trackId = c.req.param('id');
+    // @ts-ignore — Hono context isn't typed for these custom keys but
+    // they're set by requireAuth middleware (see auth-middleware.tsx).
+    const userId: string = c.get('userId');
+    // @ts-ignore — same as above.
+    const role: string = c.get('userRole') || '';
+
+    if (role !== 'radio_station' && role !== 'venue') {
+      return c.json({
+        success: false,
+        error: 'Скачивать треки могут только радиостанции и заведения',
+      }, 403);
+    }
+
+    // Profile + is_verified check.
+    const profileTable = role === 'radio_station' ? 'radio_profiles' : 'venue_profiles';
+    const profileRes = await pool.query(
+      `SELECT is_verified,
+              data->>'city'        AS city,
+              data->>'stationName' AS station_name,
+              data->>'venueName'   AS venue_name
+         FROM ${profileTable}
+        WHERE user_id = $1
+        LIMIT 1`,
+      [userId]
+    );
+    const profile = profileRes.rows[0];
+    if (!profile) {
+      return c.json({ success: false, error: 'Профиль не найден' }, 404);
+    }
+    if (!profile.is_verified) {
+      return c.json({
+        success: false,
+        error: 'Аккаунт не верифицирован администратором. Скачивание недоступно.',
+      }, 403);
+    }
+
+    // Track lookup + state check.
+    const trackRes = await pool.query(
+      `SELECT id, title, audio_url, moderation_status
+         FROM tracks
+        WHERE id = $1`,
+      [trackId]
+    );
+    const track = trackRes.rows[0];
+    if (!track) {
+      return c.json({ success: false, error: 'Трек не найден' }, 404);
+    }
+    if (!track.audio_url) {
+      return c.json({ success: false, error: 'Аудиофайл недоступен' }, 404);
+    }
+    if (track.moderation_status !== 'upcoming' && track.moderation_status !== 'published') {
+      return c.json({
+        success: false,
+        error: `Трек ещё не опубликован (статус: ${track.moderation_status})`,
+      }, 403);
+    }
+
+    const ipAddr = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '';
+    const userAgent = c.req.header('user-agent') || '';
+
+    if (role === 'radio_station') {
+      await pool.query(
+        `INSERT INTO track_downloads_by_radio
+           (user_id, station_name, track_id, city, weekly_release_id, ip_addr, user_agent)
+         VALUES ($1, $2, $3, $4, NULL, $5, $6)`,
+        [userId, profile.station_name || null, trackId, profile.city || null, ipAddr, userAgent]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO track_downloads_by_venue
+           (user_id, venue_name, track_id, city, ip_addr, user_agent)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [userId, profile.venue_name || null, trackId, profile.city || null, ipAddr, userAgent]
+      );
+    }
+
+    console.log(
+      `[tracks/download] role=${role} userId=${userId} trackId=${trackId} ` +
+      `city=${profile.city || '?'} -> ${track.audio_url}`
+    );
+
+    return c.redirect(track.audio_url, 302);
+  } catch (error) {
+    console.error('[tracks/download] error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 export default tracksRoutes;
 
 // GET /radio-stats — Radio pickup stats for user's tracks (station count + city count)

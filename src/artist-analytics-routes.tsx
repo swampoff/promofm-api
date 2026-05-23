@@ -180,6 +180,145 @@ app.get('/geography/:artistId', requireAuth, requireOwner('artistId'), async (c)
   });
 });
 
+// GET /downloads/:artistId — Aggregated download stats from
+// verified radio stations and venues. Returns:
+//   totals: { radio_downloads, venue_downloads, unique_stations,
+//             unique_venues, unique_cities }
+//   byCity: [{ city, radio_count, venue_count, total }]
+//   topRadio: [{ station_name, count }]
+//   topVenue: [{ venue_name, count }]
+//   perTrack: [{ track_id, title, radio_count, venue_count }]
+// Only counts rows from the two physical tables (track_downloads_
+// _by_radio + track_downloads_by_venue) — no synthetic multipliers,
+// honest zeros when nothing recorded.
+app.get('/downloads/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
+  try {
+    const artistId = c.req.param('artistId');
+
+    // The artistId param is artist_profiles.id (uuid). Tracks join via
+    // tracks.artist_id (uuid). pg-node parses bind-string as uuid — no
+    // ::text cast (see SQL pitfalls in CLAUDE.md).
+    const trackIdsRes = await pool.query(
+      `SELECT id, title FROM tracks WHERE artist_id = $1`,
+      [artistId]
+    );
+    if (trackIdsRes.rows.length === 0) {
+      return c.json({
+        success: true,
+        totals: {
+          radio_downloads: 0, venue_downloads: 0,
+          unique_stations: 0, unique_venues: 0, unique_cities: 0,
+        },
+        byCity: [], topRadio: [], topVenue: [], perTrack: [],
+      });
+    }
+    const trackIds = trackIdsRes.rows.map((r) => r.id);
+
+    const [
+      radioAggRes,
+      venueAggRes,
+      cityBreakdownRes,
+      topRadioRes,
+      topVenueRes,
+      perTrackRes,
+    ] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::int                       AS total_downloads,
+                COUNT(DISTINCT station_name)::int   AS unique_stations,
+                COUNT(DISTINCT city) FILTER (WHERE city IS NOT NULL AND city <> '')::int AS unique_cities
+           FROM track_downloads_by_radio
+          WHERE track_id = ANY($1::uuid[])`,
+        [trackIds]
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int                  AS total_downloads,
+                COUNT(DISTINCT user_id)::int   AS unique_venues,
+                COUNT(DISTINCT city) FILTER (WHERE city IS NOT NULL AND city <> '')::int AS unique_cities
+           FROM track_downloads_by_venue
+          WHERE track_id = ANY($1::uuid[])`,
+        [trackIds]
+      ),
+      pool.query(
+        `WITH all_dl AS (
+           SELECT city, 1 AS r, 0 AS v FROM track_downloads_by_radio WHERE track_id = ANY($1::uuid[])
+           UNION ALL
+           SELECT city, 0 AS r, 1 AS v FROM track_downloads_by_venue WHERE track_id = ANY($1::uuid[])
+         )
+         SELECT COALESCE(NULLIF(city, ''), '(не указан)') AS city,
+                SUM(r)::int AS radio_count,
+                SUM(v)::int AS venue_count,
+                (SUM(r) + SUM(v))::int AS total
+           FROM all_dl
+          GROUP BY COALESCE(NULLIF(city, ''), '(не указан)')
+          ORDER BY total DESC
+          LIMIT 20`,
+        [trackIds]
+      ),
+      pool.query(
+        `SELECT COALESCE(NULLIF(station_name, ''), '(без названия)') AS station_name,
+                COUNT(*)::int AS count
+           FROM track_downloads_by_radio
+          WHERE track_id = ANY($1::uuid[])
+          GROUP BY COALESCE(NULLIF(station_name, ''), '(без названия)')
+          ORDER BY count DESC
+          LIMIT 10`,
+        [trackIds]
+      ),
+      pool.query(
+        `SELECT COALESCE(NULLIF(venue_name, ''), '(без названия)') AS venue_name,
+                COUNT(*)::int AS count
+           FROM track_downloads_by_venue
+          WHERE track_id = ANY($1::uuid[])
+          GROUP BY COALESCE(NULLIF(venue_name, ''), '(без названия)')
+          ORDER BY count DESC
+          LIMIT 10`,
+        [trackIds]
+      ),
+      pool.query(
+        `WITH r AS (
+           SELECT track_id, COUNT(*)::int AS c FROM track_downloads_by_radio
+            WHERE track_id = ANY($1::uuid[]) GROUP BY track_id
+         ),
+         v AS (
+           SELECT track_id, COUNT(*)::int AS c FROM track_downloads_by_venue
+            WHERE track_id = ANY($1::uuid[]) GROUP BY track_id
+         )
+         SELECT t.id AS track_id, t.title,
+                COALESCE(r.c, 0) AS radio_count,
+                COALESCE(v.c, 0) AS venue_count
+           FROM tracks t
+           LEFT JOIN r ON r.track_id = t.id
+           LEFT JOIN v ON v.track_id = t.id
+          WHERE t.id = ANY($1::uuid[])
+          ORDER BY (COALESCE(r.c, 0) + COALESCE(v.c, 0)) DESC`,
+        [trackIds]
+      ),
+    ]);
+
+    const radioRow = radioAggRes.rows[0] || { total_downloads: 0, unique_stations: 0, unique_cities: 0 };
+    const venueRow = venueAggRes.rows[0] || { total_downloads: 0, unique_venues: 0, unique_cities: 0 };
+
+    return c.json({
+      success: true,
+      totals: {
+        radio_downloads: radioRow.total_downloads,
+        venue_downloads: venueRow.total_downloads,
+        unique_stations: radioRow.unique_stations,
+        unique_venues:   venueRow.unique_venues,
+        // unique-cities is a union not a sum; compute via cityBreakdown rows.
+        unique_cities:   cityBreakdownRes.rows.filter((r) => r.city !== '(не указан)').length,
+      },
+      byCity:   cityBreakdownRes.rows,
+      topRadio: topRadioRes.rows,
+      topVenue: topVenueRes.rows,
+      perTrack: perTrackRes.rows,
+    });
+  } catch (error) {
+    console.error('[analytics/downloads] error:', error);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
 // GET /platforms/:artistId — Not yet tracked
 app.get('/platforms/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   return c.json({
