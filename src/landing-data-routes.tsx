@@ -593,8 +593,46 @@ landing.get('/tracks/by-genre/:genre', async (c) => {
 landing.get("/releases/upcoming", async (c) => {
   try {
     const limit = parseInt(c.req.query("limit") || "6");
-    const releases = await typed.getUpcomingReleases(limit);
-    const mapped = releases.map((r: any) => ({
+
+    // Merge two data sources into a single «Скоро» feed:
+    //   1. upcoming_releases — external pre-release announcements (Bon Iver
+    //      and other external artists with Spotify/Apple pre-save links).
+    //   2. tracks WHERE moderation_status='upcoming' — platform tracks that
+    //      passed moderation + payment + admin gate, sitting in the «Скоро»
+    //      bucket until UPCOMING_DAYS expires and cron promotes them to
+    //      'published' (Новинки недели). Surface them on landing alongside
+    //      external releases so they show up in the visible queue, not only
+    //      in admin's tab.
+    //
+    // Shape contract for the frontend:
+    //   { id, title, artist_name, release_date, cover_url, genre,
+    //     release_type, spotify_url, apple_music_url, source }
+    // Platform tracks fill release_date from data.upcoming_until and tag
+    // source='platform' so the frontend can route the click target
+    // (external → pre-save link, platform → play in app).
+    const [externalReleases, platformTracks] = await Promise.all([
+      typed.getUpcomingReleases(limit).catch((e: any) => {
+        console.error('[releases/upcoming] external fetch failed:', e?.message);
+        return [] as any[];
+      }),
+      pool.query(
+        `SELECT id, title, artist_name, genre,
+                cover_url,
+                data->>'upcoming_until' AS upcoming_until
+           FROM tracks
+          WHERE moderation_status = 'upcoming'
+            AND COALESCE(is_hidden, false) = false
+            AND data->>'upcoming_until' IS NOT NULL
+          ORDER BY (data->>'upcoming_until')::timestamptz ASC
+          LIMIT $1`,
+        [limit]
+      ).then((r) => r.rows).catch((e: any) => {
+        console.error('[releases/upcoming] platform fetch failed:', e?.message);
+        return [] as any[];
+      }),
+    ]);
+
+    const externalMapped = externalReleases.map((r: any) => ({
       id: r.id,
       title: r.title || "",
       artist_name: r.artist_name || "",
@@ -604,9 +642,30 @@ landing.get("/releases/upcoming", async (c) => {
       release_type: r.release_type || "album",
       spotify_url: r.spotify_url || "",
       apple_music_url: r.apple_music_url || "",
-      source: r.source || "",
+      source: r.source || "external",
     }));
-    return c.json({ success: true, data: mapped });
+
+    const platformMapped = platformTracks.map((t: any) => ({
+      id: t.id,
+      title: t.title || "",
+      artist_name: t.artist_name || "",
+      release_date: t.upcoming_until || "",
+      cover_url: t.cover_url || "",
+      genre: t.genre || "",
+      release_type: "single",
+      spotify_url: "",
+      apple_music_url: "",
+      source: "platform",
+    }));
+
+    // Combined feed, soonest first. Trimmed to the requested limit so the
+    // payload size stays predictable regardless of how many of each source
+    // exist.
+    const merged = [...externalMapped, ...platformMapped]
+      .sort((a, b) => (a.release_date || '￿').localeCompare(b.release_date || '￿'))
+      .slice(0, limit);
+
+    return c.json({ success: true, data: merged });
   } catch (error) {
     console.error("Error fetching upcoming releases:", error);
     return c.json({ success: true, data: [] });
