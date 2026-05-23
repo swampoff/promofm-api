@@ -31,7 +31,12 @@ import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { notifyVenueRequest } from './email-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
-import { applyInitialTrial, getTrialState, expireTrialsOnce } from './venue-trial.tsx';
+import {
+  getEffectiveVenuePlan,
+  getEffectiveVenueLimits,
+  featureBlocked,
+  quotaExceeded,
+} from './venue-plan-limits.tsx';
 
 const app = new Hono();
 
@@ -91,14 +96,23 @@ app.get('/profile', requireAuth, async (c) => {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      const stamped = applyInitialTrial(defaultProfile);
-      await upsertVenueProfile(userId, stamped);
-      // Surface initial trial state to the cabinet so the countdown
-      // can render on the very first GET.
-      return c.json({ ...stamped, trial: getTrialState(stamped) });
+      await upsertVenueProfile(userId, defaultProfile);
+      return c.json({
+        ...defaultProfile,
+        effectivePlan: getEffectiveVenuePlan(defaultProfile),
+        planLimits: getEffectiveVenueLimits(defaultProfile),
+      });
     }
 
-    return c.json({ ...profile, trial: getTrialState(profile) });
+    // Surface the venue's resolved plan + limits so the cabinet can
+    // gray out / lock features client-side without re-implementing
+    // the entitlement logic. Backend remains the source of truth —
+    // these are purely a hint for the UI.
+    return c.json({
+      ...profile,
+      effectivePlan: getEffectiveVenuePlan(profile),
+      planLimits: getEffectiveVenueLimits(profile),
+    });
   } catch (error: any) {
     console.error('Error in GET /venue/profile:', error);
     return c.json({ error: 'Internal server error' }, 500);
@@ -253,6 +267,9 @@ app.get('/analytics/overview', requireAuth, async (c) => {
         },
       });
     }
+    if (!getEffectiveVenueLimits(profile).analytics) {
+      return c.json(featureBlocked('analytics', profile), 403);
+    }
 
     // Получить аналитику из KV
     const analyticsRaw = await venueAnalyticsStore.get(profile.id);
@@ -308,6 +325,9 @@ app.get('/analytics/campaigns', requireAuth, async (c) => {
     if (!profile) {
       return c.json({ success: true, campaigns: [] });
     }
+    if (!getEffectiveVenueLimits(profile).analytics) {
+      return c.json(featureBlocked('analytics', profile), 403);
+    }
 
     const campaignsRaw = await venueAdCampaignsStore.get(profile.id);
     const campaigns = parse(campaignsRaw) || [];
@@ -327,6 +347,9 @@ app.get('/analytics/spending', requireAuth, async (c) => {
     const profile = await getVenueProfile(userId);
     if (!profile) {
       return c.json({ success: true, period, data: [] });
+    }
+    if (!getEffectiveVenueLimits(profile).analytics) {
+      return c.json(featureBlocked('analytics', profile), 403);
     }
 
     // Получить историю расходов из KV
@@ -348,6 +371,9 @@ app.get('/analytics/roi', requireAuth, async (c) => {
     if (!profile) {
       return c.json({ success: true, data: [] });
     }
+    if (!getEffectiveVenueLimits(profile).analytics) {
+      return c.json(featureBlocked('analytics', profile), 403);
+    }
 
     const roiRaw = await venueAnalyticsStore.get(profile.id);
     const roi = parse(roiRaw) || [];
@@ -367,6 +393,9 @@ app.get('/analytics/radio-compare', requireAuth, async (c) => {
     if (!profile) {
       return c.json({ success: true, data: [] });
     }
+    if (!getEffectiveVenueLimits(profile).analytics) {
+      return c.json(featureBlocked('analytics', profile), 403);
+    }
 
     const compareRaw = await platformStatsStore.get(`venue_radio_compare:${profile.id}`);
     const comparison = parse(compareRaw) || [];
@@ -381,6 +410,12 @@ app.get('/analytics/radio-compare', requireAuth, async (c) => {
 // POST /analytics/export
 app.post('/analytics/export', requireAuth, async (c) => {
   try {
+    const userId = await getUserId(c);
+    const profile = await getVenueProfile(userId);
+    if (!profile || !getEffectiveVenueLimits(profile).analytics) {
+      return c.json(featureBlocked('analytics', profile), 403);
+    }
+
     const body = await c.req.json();
     const { format, period } = body;
 
@@ -469,13 +504,26 @@ app.get('/playlists', requireAuth, async (c) => {
   }
 });
 
-// POST /playlists - Создать плейлист
+// POST /playlists - Создать плейлист (gated by VENUE_PLAN_LIMITS.maxPlaylists)
 app.post('/playlists', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
     const profile = await getVenueProfile(userId);
     if (!profile) {
       return c.json({ error: 'Venue profile not found' }, 404);
+    }
+
+    const raw = await venuePlaylists.get(profile.id);
+    const playlists = parse(raw) || [];
+
+    // Enforce the maxPlaylists quota for the venue's effective plan.
+    // Trial → 'business' (20), Старт/free → 5, Сеть/enterprise → unlimited.
+    const limits = getEffectiveVenueLimits(profile);
+    if (limits.maxPlaylists !== -1 && playlists.length >= limits.maxPlaylists) {
+      return c.json(
+        quotaExceeded('playlists', playlists.length, limits.maxPlaylists, profile),
+        403,
+      );
     }
 
     const body = await c.req.json();
@@ -496,8 +544,6 @@ app.post('/playlists', requireAuth, async (c) => {
       updatedAt: now,
     };
 
-    const raw = await venuePlaylists.get(profile.id);
-    const playlists = parse(raw) || [];
     playlists.push(playlist);
     await venuePlaylists.set(profile.id, playlists);
 
