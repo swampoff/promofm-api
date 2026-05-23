@@ -486,20 +486,24 @@ app.get('/profile/:artistId/tracks', async (c) => {
       const { getDbClient } = await import('./db-client.tsx');
       const dbClient = getDbClient();
 
-      // Resolve slug/user_id/id to actual artist_profiles.id (UUID)
+      // Resolve any incoming form (UUID = either user_id or
+      // artist_profiles.id, or a slug) to the canonical artist_profiles.id.
+      // The previous code only resolved when the param wasn't a UUID, so
+      // /profile/{user_id}/tracks queried tracks.artist_id = user_id and
+      // returned []. That's exactly what was making real artist pages show
+      // "0 треков" even when the profile has 30+ uploads.
       let resolvedId = artistIdParam;
-      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artistIdParam);
-      if (!isUUID) {
-        // Try slug first, then user_id
-        const { data: bySlug } = await dbClient
-          .from('artist_profiles').select('id').eq('slug', artistIdParam.toLowerCase()).maybeSingle();
-        if (bySlug) {
-          resolvedId = bySlug.id;
-        } else {
-          const { data: byUserId } = await dbClient
-            .from('artist_profiles').select('id').eq('user_id', artistIdParam).maybeSingle();
-          if (byUserId) resolvedId = byUserId.id;
-        }
+      try {
+        const { pool } = await import('./db-client.tsx');
+        const { rows } = await pool.query(
+          `SELECT id FROM artist_profiles
+           WHERE id = $1 OR user_id = $1 OR LOWER(slug) = LOWER($1)
+           LIMIT 1`,
+          [artistIdParam],
+        );
+        if (rows[0]?.id) resolvedId = rows[0].id;
+      } catch (resolveErr) {
+        console.warn('[ArtistProfile/tracks] resolve failed, using raw param:', resolveErr);
       }
 
       const { data: tracks } = await dbClient
