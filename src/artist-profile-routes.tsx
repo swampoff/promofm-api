@@ -76,6 +76,33 @@ const ALLOWED_UPDATE_FIELDS = new Set([
 // ── Helpers ───────────────────────────────────────────────
 
 /**
+ * Fetches the canonical artist_profiles row for a user (by either
+ * user_id, profile id, or slug). Returns null when no row matches.
+ *
+ * NOTE on casts: `artist_profiles.id` is UUID, `artist_profiles.user_id`
+ * is TEXT, and the URL-param `$1` arrives as TEXT. Comparing TEXT to
+ * UUID without `::text` cast fails on production — same pitfall that
+ * forced a revert of an earlier version of this helper. Always cast
+ * the UUID side to TEXT when matching against a string param.
+ */
+async function lookupArtistProfileRow(idOrUserId: string): Promise<Record<string, any> | null> {
+  if (!idOrUserId) return null;
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const { rows } = await pool.query(
+      `SELECT * FROM artist_profiles
+       WHERE id::text = $1 OR user_id = $1
+       LIMIT 1`,
+      [idOrUserId],
+    );
+    return rows[0] || null;
+  } catch (err) {
+    console.warn('[ArtistProfile] lookupArtistProfileRow failed:', err);
+    return null;
+  }
+}
+
+/**
  * Fetches just `artist_profiles.artist_name` for an artist by either
  * user_id or profile id. Returns empty string when no row matches.
  * Used to augment auth-derived profile responses where users.name is a
@@ -83,19 +110,9 @@ const ALLOWED_UPDATE_FIELDS = new Set([
  * name in artist_profiles.
  */
 async function lookupArtistName(idOrUserId: string): Promise<string> {
-  if (!idOrUserId) return '';
-  try {
-    const { pool } = await import('./db-client.tsx');
-    const { rows } = await pool.query(
-      `SELECT artist_name FROM artist_profiles
-       WHERE (user_id = $1 OR id = $1) AND artist_name IS NOT NULL AND artist_name <> ''
-       LIMIT 1`,
-      [idOrUserId],
-    );
-    return (rows[0]?.artist_name as string) || '';
-  } catch {
-    return '';
-  }
+  const row = await lookupArtistProfileRow(idOrUserId);
+  const name = row?.artist_name as string | null | undefined;
+  return name && name.trim() ? name : '';
 }
 
 const EMPTY_SOCIALS: ArtistSocials = {
@@ -189,22 +206,41 @@ app.get('/profile/:artistId', async (c) => {
     if (isUuidParam) {
       const kvProfile = await loadFromKv(artistId);
       if (kvProfile) {
-        // Normalize legacy KV rows that predate certain fields (genres,
-        // socials, artistName, country, etc.). Without this, frontends
-        // that assume canonical shape (`profile.genres[0]`,
-        // `profile.socials?.instagram`) crashed on old cached profiles.
-        // makeProfile fills every required field with a sensible default
-        // while keeping whatever the KV row already had.
+        // Normalize legacy KV rows that predate certain fields.
         const normalized = makeProfile({
           id: artistId,
           email: kvProfile.email || '',
           fullName: kvProfile.fullName || '',
           ...kvProfile,
         });
-        if (!normalized.artistName) {
-          const artistName = await lookupArtistName(artistId);
-          if (artistName) normalized.artistName = artistName;
+
+        // Overlay canonical fields from artist_profiles. KV was caching
+        // stats that haven't been recomputed since the row was written —
+        // real artists with 30+ tracks saw "0 прослушиваний / 0 треков"
+        // on their public profile because cached totalPlays was 0.
+        // Pull live values + live published-track count.
+        const apRow = await lookupArtistProfileRow(artistId);
+        if (apRow) {
+          if (apRow.artist_name) normalized.artistName = apRow.artist_name as string;
+          if (apRow.total_plays != null) normalized.totalPlays = Number(apRow.total_plays);
+          if (apRow.total_followers != null) normalized.totalFollowers = Number(apRow.total_followers);
+          if (apRow.is_verified) normalized.isVerified = !!apRow.is_verified;
+          if (apRow.rating != null) normalized.rating = Number(apRow.rating);
+
+          try {
+            const { pool } = await import('./db-client.tsx');
+            // tracks.artist_id is UUID FK on artist_profiles.id — apRow.id
+            // comes back from PG as a UUID-typed value so no cast needed
+            // (matches existing path 3 query just below).
+            const { rows } = await pool.query(
+              `SELECT COUNT(*)::int AS cnt FROM tracks
+               WHERE artist_id = $1 AND moderation_status = 'published'`,
+              [apRow.id],
+            );
+            normalized.totalTracks = Number(rows[0]?.cnt ?? 0);
+          } catch { /* keep whatever KV had */ }
         }
+
         return c.json({ success: true, source: 'kv', data: normalized });
       }
     }
@@ -400,24 +436,63 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), async (c) =
  * Лёгкий endpoint только для статистики
  */
 app.get('/profile/:artistId/stats', async (c) => {
-  const artistId = c.req.param('artistId');
+  const artistIdParam = c.req.param('artistId');
 
   try {
-    // KV profile
-    const profile = await loadFromKv(artistId);
-    if (profile) {
-      return c.json({
-        success: true,
-        data: {
-          totalPlays: profile.totalPlays ?? 0,
-          totalFollowers: profile.totalFollowers ?? 0,
-          totalConcerts: profile.totalConcerts ?? 0,
-          coinsBalance: profile.coinsBalance ?? 0,
-        },
-      });
-    }
+    const { pool } = await import('./db-client.tsx');
 
-    return c.json({ success: false, error: 'Stats not found' }, 404);
+    // Resolve any incoming form (id / user_id / slug) to artist_profiles.id.
+    // Same cast-aware resolver pattern as the /tracks endpoint.
+    //   artist_profiles.id      = UUID  → cast UUID side to TEXT
+    //   artist_profiles.user_id = TEXT  → direct compare works
+    //   slug                    = TEXT  → direct compare works
+    const { rows: idRows } = await pool.query(
+      `SELECT id, total_plays, total_followers, rating
+       FROM artist_profiles
+       WHERE id::text = $1 OR user_id = $1 OR LOWER(slug) = LOWER($1)
+       LIMIT 1`,
+      [artistIdParam],
+    );
+    if (idRows.length === 0) {
+      return c.json({ success: false, error: 'Stats not found' }, 404);
+    }
+    const ap = idRows[0];
+
+    // Live counts from canonical tables — single source of truth.
+    // tracks.artist_id is UUID FK on artist_profiles.id; ap.id is UUID
+    // from pg so no cast needed for that join.
+    const { rows: trackAgg } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE moderation_status = 'published')::int AS published_tracks,
+         COALESCE(SUM(plays_count) FILTER (WHERE moderation_status = 'published'), 0)::bigint AS total_plays,
+         COALESCE(SUM(likes_count) FILTER (WHERE moderation_status = 'published'), 0)::bigint AS total_likes
+       FROM tracks WHERE artist_id = $1`,
+      [ap.id],
+    );
+
+    // concerts.artist_id is TEXT in this schema; cast UUID → text to match.
+    // Table may not exist on dev envs — swallow the error and return 0.
+    const concertAgg = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM concerts WHERE artist_id = $1::text`,
+      [ap.id],
+    ).catch(() => ({ rows: [{ cnt: 0 }] }));
+
+    const liveTotalPlays = Number(trackAgg[0]?.total_plays ?? 0);
+    return c.json({
+      success: true,
+      data: {
+        // Whichever is larger between the cached column and the live SUM
+        // wins, so per-track increments don't shrink the displayed total
+        // due to async aggregation drift in either direction.
+        totalPlays: Math.max(Number(ap.total_plays ?? 0), liveTotalPlays),
+        totalFollowers: Number(ap.total_followers ?? 0),
+        totalConcerts: Number(concertAgg.rows[0]?.cnt ?? 0),
+        coinsBalance: 0,  // not stored on artist_profiles; legacy field
+        rating: Number(ap.rating ?? 0),
+        publishedTracks: Number(trackAgg[0]?.published_tracks ?? 0),
+        totalLikes: Number(trackAgg[0]?.total_likes ?? 0),
+      },
+    });
   } catch (error) {
     console.error(`[ArtistProfile] Stats error: ${error}`);
     return c.json({ success: false, error: 'Internal server error' }, 500);
@@ -486,20 +561,31 @@ app.get('/profile/:artistId/tracks', async (c) => {
       const { getDbClient } = await import('./db-client.tsx');
       const dbClient = getDbClient();
 
-      // Resolve slug/user_id/id to actual artist_profiles.id (UUID)
+      // Resolve any incoming form (id / user_id / slug) to the canonical
+      // artist_profiles.id. The previous code only resolved for non-UUID
+      // params, so /profile/{user_id}/tracks queried
+      // `tracks.artist_id = user_id` (with no match) and returned [] —
+      // why real artists with 30+ tracks saw "0 треков" publicly.
+      //
+      // CAST RULES on artist_profiles:
+      //   id      = UUID  → cast UUID side to TEXT for string compare
+      //   user_id = TEXT  → direct compare
+      //   slug    = TEXT  → direct compare
+      // (Without the `id::text` cast Postgres throws on real prod
+      // because PG won't implicit-cast TEXT param to UUID; reverted
+      // commit 3e280ad got bitten by exactly this.)
       let resolvedId = artistIdParam;
-      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artistIdParam);
-      if (!isUUID) {
-        // Try slug first, then user_id
-        const { data: bySlug } = await dbClient
-          .from('artist_profiles').select('id').eq('slug', artistIdParam.toLowerCase()).maybeSingle();
-        if (bySlug) {
-          resolvedId = bySlug.id;
-        } else {
-          const { data: byUserId } = await dbClient
-            .from('artist_profiles').select('id').eq('user_id', artistIdParam).maybeSingle();
-          if (byUserId) resolvedId = byUserId.id;
-        }
+      try {
+        const { pool } = await import('./db-client.tsx');
+        const { rows } = await pool.query(
+          `SELECT id FROM artist_profiles
+           WHERE id::text = $1 OR user_id = $1 OR LOWER(slug) = LOWER($1)
+           LIMIT 1`,
+          [artistIdParam],
+        );
+        if (rows[0]?.id) resolvedId = rows[0].id;
+      } catch (resolveErr) {
+        console.warn('[ArtistProfile/tracks] resolve failed, using raw param:', resolveErr);
       }
 
       const { data: tracks } = await dbClient
