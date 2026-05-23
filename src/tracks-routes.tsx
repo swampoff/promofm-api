@@ -9,6 +9,7 @@ import { getDbClient, pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
+import { scheduleAiCheck } from './ai-check.tsx';
 import { notifyTrackUpload } from './email-helper.tsx';
 
 const tracksRoutes = new Hono();
@@ -121,6 +122,11 @@ tracksRoutes.post('/', requireAuth, async (c) => {
       fetch(`http://127.0.0.1:3000/server/api/promo-check/process/${track.id}`, { method: 'POST' })
         .catch(() => {}); // non-blocking
     }
+
+    // Fire-and-forget: AI-detector verdict (audio file → /analyze on :8085).
+    // Result lands in track_moderation.ai_check_status + data->aiCheckResult.
+    // ~15s analyzer runtime, must NOT block the artist's upload response.
+    scheduleAiCheck(track.id, track.audio_url || null);
 
     // Notify admin (email + Telegram). Resolve email/name from users so
     // admins see a real identity instead of "anonymous". Fire-and-forget —

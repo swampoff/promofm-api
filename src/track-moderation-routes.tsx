@@ -9,8 +9,9 @@ import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { upsertNotification } from './db.tsx';
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { scheduleAiCheck, backfillAiCheck } from './ai-check.tsx';
 import * as typed from './db-typed.tsx';
-import { getDbClient } from './db-client.tsx';
+import { getDbClient, pool } from "./db-client.tsx";
 
 const app = new Hono();
 
@@ -917,6 +918,34 @@ app.post('/send-payment-reminders', async (c) => {
   } catch (err: any) {
     return c.json({ success: false, error: err?.message || 'Internal error' }, 500);
   }
+});
+
+
+// ─── AI-check admin endpoints ────────────────────────────────────────────────
+
+// POST /ai-check/run/:trackId — re-run analyzer on a single track
+app.post('/ai-check/run/:trackId', requireAuth, requireAdmin, async (c) => {
+  const trackId = c.req.param('trackId');
+  const { rows } = await pool.query<{ audio_url: string }>(
+    'SELECT audio_url FROM tracks WHERE id = $1',
+    [trackId],
+  );
+  if (!rows[0]) {
+    return c.json({ success: false, error: 'Track not found' }, 404);
+  }
+  if (!rows[0].audio_url) {
+    return c.json({ success: false, error: 'Track has no audio_url' }, 422);
+  }
+  scheduleAiCheck(trackId, rows[0].audio_url);
+  return c.json({ success: true, status: 'queued', trackId });
+});
+
+// POST /ai-check/backfill — enqueue all unchecked tracks (default 50, max 500)
+app.post('/ai-check/backfill', requireAuth, requireAdmin, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const limit = Math.min(Math.max(Number(body.limit) || 50, 1), 500);
+  const queued = await backfillAiCheck(limit);
+  return c.json({ success: true, queued, limit });
 });
 
 export default app;
