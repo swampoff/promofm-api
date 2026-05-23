@@ -48,6 +48,8 @@ BEGIN;
 -- This is conservative: dead streams shouldn't be in the rotation
 -- silently spinning the monitor's wheels.
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_promo_check_monitoring_station ON promo_check_monitoring(station_name);
+
 INSERT INTO promo_check_monitoring
   (station_name, stream_url, active, error_count, last_error)
 VALUES
