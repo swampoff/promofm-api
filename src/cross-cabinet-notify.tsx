@@ -67,6 +67,48 @@ interface NotifyParams {
   message: string;
   link?: string;
   metadata?: Record<string, any>;
+  /**
+   * Skip the dedup-window check and always write a fresh notification.
+   * Default false — the same (target, type, title) triple inside the
+   * window is dropped to stop multi-step flows (track moderation,
+   * subscription webhooks) from flooding a single inbox with near-
+   * duplicates.
+   */
+  bypassDedup?: boolean;
+}
+
+// ── Dedup cache ──────────────────────────────────────────────────────────────
+
+/**
+ * Identical notifications within DEDUP_WINDOW_MS are silently dropped.
+ * The same artist getting "Трек одобрен!" twice in five minutes was the
+ * main source of the "9+ unread, what's going on" complaints.
+ *
+ * In-memory only — losing the cache on restart is acceptable: worst
+ * case a single duplicate slips through right after a deploy.
+ */
+const DEDUP_WINDOW_MS = 5 * 60 * 1000;
+const DEDUP_CACHE_MAX = 5000;
+const recentNotifications = new Map<string, number>();
+
+function dedupFingerprint(p: NotifyParams): string {
+  return `${p.targetUserId}|${p.type}|${p.title}`;
+}
+
+function isRecentDuplicate(fp: string): boolean {
+  const now = Date.now();
+
+  // Opportunistic eviction so the map can't grow without bound.
+  if (recentNotifications.size > DEDUP_CACHE_MAX) {
+    for (const [k, t] of recentNotifications) {
+      if (now - t > DEDUP_WINDOW_MS) recentNotifications.delete(k);
+    }
+  }
+
+  const prev = recentNotifications.get(fp);
+  if (prev !== undefined && now - prev < DEDUP_WINDOW_MS) return true;
+  recentNotifications.set(fp, now);
+  return false;
 }
 
 // ── Main function ─────���──────────────────────────────────────────────────────
@@ -75,9 +117,14 @@ interface NotifyParams {
  * Отправить cross-cabinet уведомление:
  * 1) Сохраняет в хранилище
  * 2) Пушит через SSE (если пользователь онлайн)
- * 3) Возвращает созданное уведомление
+ * 3) Возвращает созданное уведомление, или null если оно подавлено
+ *    дедупом (см. NotifyParams.bypassDedup)
  */
-export async function notifyCrossCabinet(params: NotifyParams): Promise<CrossCabinetNotification> {
+export async function notifyCrossCabinet(params: NotifyParams): Promise<CrossCabinetNotification | null> {
+  if (!params.bypassDedup && isRecentDuplicate(dedupFingerprint(params))) {
+    return null;
+  }
+
   const id = `ccn-${crypto.randomUUID()}`;
 
   const notification: CrossCabinetNotification = {
@@ -133,7 +180,7 @@ export async function notifyMultiple(
       targetUserId: target.userId,
       targetRole: target.role,
     });
-    results.push(notif);
+    if (notif) results.push(notif);  // dedup-suppressed entries are null
   }
   return results;
 }
