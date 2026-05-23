@@ -147,7 +147,15 @@ app.post('/submitTrack', requireAuth, async (c) => {
       // Optional artist shoutout — short voice greeting played before the
       // track on partner radio. Lives in the JSONB `data` blob so we don't
       // need a column migration for an opt-in field.
-      data: body.shoutout_url ? { shoutout_url: String(body.shoutout_url) } : {},
+      // Description is also opt-in — shown on the public artist profile.
+      // Trimmed to 1000 chars defensively in case the frontend cap is
+      // bypassed (curl, label admins, future on-behalf flows).
+      data: {
+        ...(body.shoutout_url ? { shoutout_url: String(body.shoutout_url) } : {}),
+        ...(body.description && String(body.description).trim()
+          ? { description: String(body.description).trim().slice(0, 1000) }
+          : {}),
+      },
     });
 
     if (!track) {

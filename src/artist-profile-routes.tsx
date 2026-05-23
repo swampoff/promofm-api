@@ -26,7 +26,21 @@ interface ArtistProfile {
   id: string;
   email: string;
   username: string;
+  /**
+   * Legal/passport name from the users table (signup). For most artists
+   * this matches their stage name, but for Russian-speaking artists who
+   * signed up with a Latin transliteration (e.g. "Nadezhda Guskova") the
+   * stage name lives in `artistName` instead and should be preferred for
+   * display in artist-facing surfaces.
+   */
   fullName: string;
+  /**
+   * Stage / artist name from `artist_profiles.artist_name`. Optional —
+   * empty when the artist hasn't claimed an artist profile yet. The
+   * frontend prefers this over fullName wherever a public-facing
+   * identity is shown (sidebar avatar, track "Исполнитель", etc.).
+   */
+  artistName: string;
   bio: string;
   avatarUrl: string;
   coverUrl: string;
@@ -54,12 +68,35 @@ interface ArtistProfile {
 
 // Допустимые поля для обновления через PUT
 const ALLOWED_UPDATE_FIELDS = new Set([
-  'fullName', 'bio', 'avatarUrl', 'coverUrl', 'location', 'city', 'country',
-  'website', 'phone', 'genres', 'label', 'manager', 'bookingEmail',
-  'careerStart', 'languages', 'username', 'email', 'socials',
+  'fullName', 'artistName', 'bio', 'avatarUrl', 'coverUrl', 'location',
+  'city', 'country', 'website', 'phone', 'genres', 'label', 'manager',
+  'bookingEmail', 'careerStart', 'languages', 'username', 'email', 'socials',
 ]);
 
 // ── Helpers ───────────────────────────────────────────────
+
+/**
+ * Fetches just `artist_profiles.artist_name` for an artist by either
+ * user_id or profile id. Returns empty string when no row matches.
+ * Used to augment auth-derived profile responses where users.name is a
+ * Latin transliteration but the artist has registered a Cyrillic stage
+ * name in artist_profiles.
+ */
+async function lookupArtistName(idOrUserId: string): Promise<string> {
+  if (!idOrUserId) return '';
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const { rows } = await pool.query(
+      `SELECT artist_name FROM artist_profiles
+       WHERE (user_id = $1 OR id = $1) AND artist_name IS NOT NULL AND artist_name <> ''
+       LIMIT 1`,
+      [idOrUserId],
+    );
+    return (rows[0]?.artist_name as string) || '';
+  } catch {
+    return '';
+  }
+}
 
 const EMPTY_SOCIALS: ArtistSocials = {
   instagram: '', twitter: '', facebook: '',
@@ -69,6 +106,7 @@ const EMPTY_SOCIALS: ArtistSocials = {
 function makeProfile(overrides: Partial<ArtistProfile> & { id: string; email: string; fullName: string }): ArtistProfile {
   return {
     username: '',
+    artistName: '',
     bio: '',
     avatarUrl: '',
     coverUrl: '',
@@ -151,6 +189,13 @@ app.get('/profile/:artistId', async (c) => {
     if (isUuidParam) {
       const kvProfile = await loadFromKv(artistId);
       if (kvProfile) {
+        // Backfill artistName from SQL when the cached row predates the
+        // artistName field. One indexed query — cheap enough to do on
+        // every hit, since most profile reads are gated by auth anyway.
+        if (!(kvProfile as any).artistName) {
+          const artistName = await lookupArtistName(artistId);
+          if (artistName) (kvProfile as any).artistName = artistName;
+        }
         return c.json({ success: true, source: 'kv', data: kvProfile });
       }
     }
@@ -162,10 +207,12 @@ app.get('/profile/:artistId', async (c) => {
       if (authProfile && typeof authProfile === 'object') {
         const ap = authProfile as Record<string, unknown>;
         const fullName = (ap.name as string) || (ap.email as string)?.split('@')[0] || 'Артист';
+        const artistName = await lookupArtistName(artistId);
         const newProfile = makeProfile({
           id: artistId,
           email: (ap.email as string) || '',
           fullName,
+          artistName,
           bio: (ap.bio as string) || '',
           avatarUrl: (ap.avatar as string) || '',
           city: (ap.city as string) || '',
@@ -249,6 +296,7 @@ app.get('/profile/:artistId', async (c) => {
           id: apRow.user_id || apRow.id,
           email: apRow.data?.email || '',
           fullName: apRow.artist_name || '',
+          artistName: apRow.artist_name || '',
           bio: apRow.bio || '',
           avatarUrl: apRow.avatar_url || '',
           coverUrl: apRow.data?.coverUrl || '',
