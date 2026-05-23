@@ -187,7 +187,12 @@ export async function getTrackModerationStats() {
   return {
     total: tracks.length,
     pending: tracks.filter((t: any) => t.moderation_status === 'pending').length,
+    // 'approved' is the legacy roll-up the old admin UI showed. Keep it for
+    // back-compat (covers the whole post-moderation funnel) but also break
+    // out 'paid' and 'upcoming' so the new admin tabs have their own counts.
     approved: tracks.filter((t: any) => ['approved', 'paid', 'upcoming', 'published'].includes(t.moderation_status)).length,
+    paid: tracks.filter((t: any) => t.moderation_status === 'paid').length,
+    upcoming: tracks.filter((t: any) => t.moderation_status === 'upcoming').length,
     rejected: tracks.filter((t: any) => t.moderation_status === 'rejected').length,
   };
 }

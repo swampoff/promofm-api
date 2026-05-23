@@ -631,7 +631,7 @@ app.get('/stats', requireAuth, requireAdmin, async (c) => {
     return c.json(stats);
   } catch (error) {
     console.error('Error in stats:', error);
-    return c.json({ total: 0, pending: 0, approved: 0, rejected: 0 });
+    return c.json({ total: 0, pending: 0, approved: 0, paid: 0, upcoming: 0, rejected: 0 });
   }
 });
 
