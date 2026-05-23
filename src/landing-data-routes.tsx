@@ -2023,15 +2023,23 @@ export default landing;
 // ── Admin Users ──
 landing.get("/admin/users", requireAuth, requireAdmin, async (c) => {
   try {
+    // is_verified surfaced for the admin verify-profile UI. A user is
+    // either radio_station or venue (mutually exclusive per role enum),
+    // so the COALESCE picks whichever profile row exists. For all
+    // other roles both joins miss and is_verified falls to false —
+    // the admin UI hides the badge anyway when role isn't a partner.
     const res = await pool.query(`
       SELECT u.id, u.email, u.full_name as name, u.role,
              u.avatar_url as avatar_url, u.status,
              u.is_email_verified, u.created_at, u.last_login_at as last_sign_in_at,
              p.genre, p.city, p.country,
+             COALESCE(rp.is_verified, vp.is_verified, false) AS is_verified,
              (SELECT COUNT(*)::int FROM tracks t WHERE t.artist_id = u.id) as tracks_count,
              (SELECT COUNT(*)::int FROM videos v WHERE v.artist_id = u.id) as videos_count
       FROM users u
-      LEFT JOIN profiles p ON p.user_id = u.id::text
+      LEFT JOIN profiles p        ON p.user_id  = u.id::text
+      LEFT JOIN radio_profiles rp ON rp.user_id = u.id::text
+      LEFT JOIN venue_profiles vp ON vp.user_id = u.id::text
       ORDER BY u.created_at DESC
       LIMIT 1000
     `);
