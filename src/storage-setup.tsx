@@ -53,7 +53,11 @@ const BUCKET_CONFIGS: Record<string, BucketConfig> = {
   'track-audio': {
     name: 'track-audio', subdir: 'track-audio', public: true,
     fileSizeLimit: 100 * 1024 * 1024, // 100MB
-    allowedMimeTypes: ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/flac', 'audio/ogg', 'audio/aac'],
+    allowedMimeTypes: [
+      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav',
+      'audio/flac', 'audio/x-flac', 'audio/ogg', 'audio/aac',
+      'audio/mp4', 'audio/x-m4a', 'audio/m4a',
+    ],
   },
   'video-files': {
     name: 'video-files', subdir: 'video-files', public: true,
@@ -100,7 +104,7 @@ export function validateFileType(filename: string, allowedTypes: string[]): bool
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
     '.webp': 'image/webp', '.gif': 'image/gif',
     '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.flac': 'audio/flac',
-    '.ogg': 'audio/ogg', '.aac': 'audio/aac',
+    '.ogg': 'audio/ogg', '.aac': 'audio/aac', '.m4a': 'audio/mp4',
     '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
     '.pdf': 'application/pdf', '.zip': 'application/zip',
   };

@@ -106,6 +106,10 @@ app.post('/submitTrack', requireAuth, async (c) => {
       uploaded_by_email: c.get('userEmail') || body.uploaded_by_email || body.contact_email || body.email || '',
       user_id: c.get('userId') || null,  // ALWAYS from JWT — requireAuth guarantees this
       moderation_status: 'pending',
+      // Optional artist shoutout — short voice greeting played before the
+      // track on partner radio. Lives in the JSONB `data` blob so we don't
+      // need a column migration for an opt-in field.
+      data: body.shoutout_url ? { shoutout_url: String(body.shoutout_url) } : {},
     });
 
     if (!track) {
