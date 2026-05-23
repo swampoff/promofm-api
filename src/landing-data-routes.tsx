@@ -312,15 +312,23 @@ landing.get('/new-releases', async (c) => {
     const tids = latestRelease.rows[0].track_ids;
     const releaseDate = latestRelease.rows[0].release_date;
 
+    // DISTINCT ON requires ORDER BY t.id (to pick the verified profile),
+    // so we wrap the dedup in a subquery and sort by created_at on the outside —
+    // keeps everything in SQL, no JS post-processing.
     const tracksResult = await pool.query(
-      `SELECT DISTINCT ON (t.id) t.id, t.title, t.artist_name, t.genre, t.duration,
-              t.audio_url, t.cover_url, t.likes_count, t.plays_count, t.created_at,
-              COALESCE(ap2.slug, ap.slug) as artist_slug, COALESCE(ap2.is_verified, ap.is_verified) as is_verified
-       FROM tracks t
-       LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
-       LEFT JOIN artist_profiles ap2 ON LOWER(ap2.artist_name) = LOWER(t.artist_name)
-       WHERE t.id = ANY($1)
-       ORDER BY t.id, COALESCE(ap2.is_verified, ap.is_verified) DESC NULLS LAST`,
+      `SELECT * FROM (
+         SELECT DISTINCT ON (t.id)
+           t.id, t.title, t.artist_name, t.genre, t.duration,
+           t.audio_url, t.cover_url, t.likes_count, t.plays_count, t.created_at,
+           COALESCE(ap2.slug, ap.slug) AS artist_slug,
+           COALESCE(ap2.is_verified, ap.is_verified) AS is_verified
+         FROM tracks t
+         LEFT JOIN artist_profiles ap  ON ap.id = t.artist_id
+         LEFT JOIN artist_profiles ap2 ON LOWER(ap2.artist_name) = LOWER(t.artist_name)
+         WHERE t.id = ANY($1)
+         ORDER BY t.id, COALESCE(ap2.is_verified, ap.is_verified) DESC NULLS LAST
+       ) deduped
+       ORDER BY created_at DESC NULLS LAST`,
       [tids]
     );
 
@@ -342,9 +350,6 @@ landing.get('/new-releases', async (c) => {
         stations: row.stations || [],
       };
     }
-
-    // Re-sort by created_at DESC (DISTINCT ON requires ORDER BY id, so we sort here)
-    tracksResult.rows.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
 
     const tracks = tracksResult.rows.map((t: any, idx: number) => ({
       position: idx + 1,
