@@ -144,16 +144,20 @@ app.post('/submitTrack', requireAuth, async (c) => {
       uploaded_by_email: c.get('userEmail') || body.uploaded_by_email || body.contact_email || body.email || '',
       user_id: userId,  // owner / payer (label for on-behalf, artist otherwise)
       moderation_status: 'pending',
-      // Optional artist shoutout — short voice greeting played before the
-      // track on partner radio. Lives in the JSONB `data` blob so we don't
-      // need a column migration for an opt-in field.
-      // Description is also opt-in — shown on the public artist profile.
-      // Trimmed to 1000 chars defensively in case the frontend cap is
-      // bypassed (curl, label admins, future on-behalf flows).
+      // Opt-in metadata stored in the JSONB `data` blob — no column
+      // migration needed for each new optional field. Server-side
+      // trim/slice as a safety net: the frontend caps these, but
+      // curl / label admin tooling / future on-behalf flows might not.
       data: {
         ...(body.shoutout_url ? { shoutout_url: String(body.shoutout_url) } : {}),
         ...(body.description && String(body.description).trim()
           ? { description: String(body.description).trim().slice(0, 1000) }
+          : {}),
+        ...(body.music_composer && String(body.music_composer).trim()
+          ? { music_composer: String(body.music_composer).trim().slice(0, 200) }
+          : {}),
+        ...(body.lyricist && String(body.lyricist).trim()
+          ? { lyricist: String(body.lyricist).trim().slice(0, 200) }
           : {}),
       },
     });
