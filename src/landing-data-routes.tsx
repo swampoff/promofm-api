@@ -168,8 +168,12 @@ landing.get('/artists/:idOrSlug', async (c) => {
       artistTracks = tracksByUser || [];
     }
 
+    // Public artist profile lists every post-moderation state, including
+    // 'upcoming' (in «Скоро»). Keep 'approved' too (legacy rows before the
+    // paid→upcoming pipeline existed). 'paid' is intentionally excluded:
+    // money received but admin hasn't approved release yet → not public.
     const publishedTracks = (artistTracks || [])
-      .filter((t: any) => ['approved', 'published'].includes(t.moderation_status))
+      .filter((t: any) => ['approved', 'upcoming', 'published'].includes(t.moderation_status))
       .map((t: any) => ({
         id: t.id,
         title: t.title,
@@ -527,7 +531,7 @@ landing.get('/tracks/ai', async (c) => {
               plays_count, likes_count, user_id, artist_id, created_at
        FROM tracks
        WHERE is_ai_generated = true
-         AND moderation_status IN ('approved', 'published')
+         AND moderation_status IN ('approved', 'upcoming', 'published')
        ORDER BY created_at DESC
        LIMIT $1`,
       [limit]

@@ -69,8 +69,12 @@ export async function getAllTracksForModeration(filters?: { status?: string; gen
 
   if (filters?.status && filters.status !== 'all') {
     if (filters.status === 'published') {
-      // 'Одобрено' tab: show both approved (awaiting payment) and published (paid)
-      q = q.in('moderation_status', ['approved', 'published']);
+      // 'Одобрено' tab is a roll-up of every post-moderation state the
+      // pipeline can be in: approved (awaiting payment), paid (admin must
+      // click «Опубликовать»), upcoming (counting down in «Скоро»),
+      // published (live in Новинки). 'paid' and 'upcoming' also get their
+      // own dedicated filter tabs in the admin UI for action triage.
+      q = q.in('moderation_status', ['approved', 'paid', 'upcoming', 'published']);
     } else {
       q = q.eq('moderation_status', filters.status);
     }

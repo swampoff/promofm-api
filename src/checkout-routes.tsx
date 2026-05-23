@@ -391,15 +391,27 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
 
 
 
-  // ─── Fulfill track_publish payment (moderation → published) ───
+  // ─── Fulfill track_publish payment (moderation → paid, awaits admin gate) ───
+  // Prior behaviour: webhook flipped moderation_status straight to 'published',
+  // dumping the track into Новинки недели the moment money cleared. That
+  // bypassed two stages the rest of the codebase was built around:
+  //   • 'paid'      — money received, admin gate not yet passed
+  //   • 'upcoming'  — admin approved, sitting in «Скоро» for UPCOMING_DAYS
+  // (see track-moderation-routes.tsx /approve-paid + /promote-upcoming).
+  // Webhook now lands on 'paid' only; admin clicks «Опубликовать» which calls
+  // /approve-paid → 'upcoming', then a VPS cron hitting /promote-upcoming
+  // promotes expired upcoming → 'published'.
   if (session.metadata?.type === 'track_publish' && session.metadata?.trackId) {
     try {
-      const { updateTrack } = await import('./db-typed.tsx');
+      const { updateTrack, getTrackById } = await import('./db-typed.tsx');
       const trackId = session.metadata.trackId;
+      const existing = await getTrackById(String(trackId));
       await updateTrack(trackId, {
-        moderation_status: 'published',
+        moderation_status: 'paid',
         is_hidden: false,
+        is_paid: true,
         data: {
+          ...(existing?.data || {}),
           payment_completed: true,
           payment_amount: session.amount,
           payment_order_id: session.orderId,
@@ -409,11 +421,15 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       });
       log.info({ trackId, amount: session.amount, orderId: session.orderId }, 'track_payment_received');
 
-      // Notify via SSE
+      // SSE fan-out.
+      //   artist  — 'track_paid' so their cabinet shows «Оплачено, ждёт публикации»,
+      //             not the old «Опубликован» which was a lie until admin acted.
+      //   admin   — 'track_paid' so the admin bell lights up with a NEW action
+      //             item (call /approve-paid) instead of a passive «published» FYI.
       try {
         const { emitSSE } = await import('./sse-routes.tsx');
         emitSSE(session.userId, {
-          type: 'track_published',
+          type: 'track_paid',
           data: {
             trackId,
             trackTitle: session.metadata.trackTitle || '',
@@ -421,7 +437,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           },
         });
         emitSSE('admin', {
-          type: 'track_published',
+          type: 'track_paid',
           data: {
             trackId,
             trackTitle: session.metadata.trackTitle || '',
@@ -429,14 +445,10 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             amount: session.amount,
           },
         });
-        // Label-on-behalf: if the order's metadata or the track's own data
-        // points to a linked artist's user_id, push a duplicate notification
-        // to that artist's bell too. Managed-artist case has no user_id, so
-        // this branch is a no-op there.
         const actingUserId = session.metadata?.actingForArtistUserId as string | undefined;
         if (actingUserId && actingUserId !== session.userId) {
           emitSSE(actingUserId, {
-            type: 'track_published',
+            type: 'track_paid',
             data: {
               trackId,
               trackTitle: session.metadata.trackTitle || '',
