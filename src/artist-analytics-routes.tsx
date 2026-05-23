@@ -189,4 +189,149 @@ app.get('/platforms/:artistId', requireAuth, requireOwner('artistId'), async (c)
   });
 });
 
+// GET /home/:artistId
+//
+// Stats panel for the artist home page. Single endpoint that rolls up
+// every metric the home page renders so we don't make N parallel calls.
+//
+// COLUMN TYPES (verified against codebase queries; see CLAUDE.md cheat sheet):
+//   tracks.user_id                          : text     → text=text, no cast
+//   tracks.moderation_status                : text
+//   tracks.plays_count / likes_count        : integer
+//   tracks.id                               : uuid
+//   artist_profiles.user_id                 : text
+//   artist_profiles.total_followers         : integer
+//   artist_profiles.monthly_listeners       : integer
+//   track_radio_pickups.track_id            : uuid (FK → tracks.id, no cast on JOIN)
+//   track_radio_pickups.report_status       : text
+//   track_radio_pickups.rotation_count      : integer
+//   pitching_submissions.user_id            : text
+//   pitching_submissions.status             : text
+//
+// What's NOT here (audit found no SQL source):
+//   - venue rotations  → no per-artist play log table exists, only
+//     venueAdCampaignsStore (KV, keyed by venue_id). Reporting honest
+//     null so the UI can show "Скоро" instead of inventing a number.
+app.get('/home/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
+  const artistId = c.req.param('artistId');
+
+  try {
+    // ── 1. Track aggregates (plays / likes / counts by status) ──
+    const tracksAgg = await pool.query(
+      `SELECT
+         COUNT(*)::int                                                  AS total_tracks,
+         COUNT(*) FILTER (WHERE moderation_status = 'published')::int   AS published_tracks,
+         COUNT(*) FILTER (WHERE moderation_status = 'pending')::int     AS pending_tracks,
+         COUNT(*) FILTER (WHERE moderation_status = 'approved')::int    AS approved_tracks,
+         COALESCE(SUM(plays_count) FILTER (WHERE moderation_status = 'published'), 0)::bigint AS total_plays,
+         COALESCE(SUM(likes_count) FILTER (WHERE moderation_status = 'published'), 0)::bigint AS total_likes
+       FROM tracks WHERE user_id = $1`,
+      [artistId],
+    );
+    const tAgg = tracksAgg.rows[0] || {};
+
+    // ── 2. Profile rollup (followers / monthly listeners / rating) ──
+    let followers = 0;
+    let monthlyListeners: number | null = null;
+    let rating: number | null = null;
+    try {
+      const { rows } = await pool.query(
+        `SELECT total_followers, monthly_listeners, rating
+         FROM artist_profiles WHERE user_id = $1 LIMIT 1`,
+        [artistId],
+      );
+      if (rows[0]) {
+        followers        = Number(rows[0].total_followers ?? 0);
+        monthlyListeners = rows[0].monthly_listeners != null ? Number(rows[0].monthly_listeners) : null;
+        rating           = rows[0].rating != null ? Number(rows[0].rating) : null;
+      }
+    } catch (err) {
+      console.warn('[home-stats] artist_profiles read failed:', err);
+    }
+
+    // ── 3. Radio rotations (only confirmed pickups for this artist's tracks) ──
+    // JOIN by track_id; rp.track_id and tracks.id are both uuid → no cast.
+    // Filter by tracks.user_id (text) = $1 (text from URL). Manual-confirmed
+    // only — pending/rejected pickups don't count as real rotations.
+    let radioRotations = 0;
+    let radioStationsCount = 0;
+    try {
+      const { rows } = await pool.query(
+        `SELECT
+           COALESCE(SUM(rp.rotation_count), 0)::bigint AS rotations,
+           COUNT(DISTINCT rp.station_name)::int        AS stations
+         FROM track_radio_pickups rp
+         JOIN tracks t ON t.id = rp.track_id
+         WHERE t.user_id = $1 AND rp.report_status = 'confirmed'`,
+        [artistId],
+      );
+      radioRotations     = Number(rows[0]?.rotations ?? 0);
+      radioStationsCount = Number(rows[0]?.stations  ?? 0);
+    } catch (err) {
+      // Table may not exist in some envs — return 0s and warn.
+      console.warn('[home-stats] radio_pickups read failed:', err);
+    }
+
+    // ── 4. Pitching submissions breakdown ──
+    // pitching_submissions.user_id is text → direct compare.
+    let pitchingTotal = 0;
+    let pitchingPending = 0;
+    let pitchingAccepted = 0;
+    let pitchingRejected = 0;
+    try {
+      const { rows } = await pool.query(
+        `SELECT status, COUNT(*)::int AS cnt
+         FROM pitching_submissions
+         WHERE user_id = $1
+         GROUP BY status`,
+        [artistId],
+      );
+      for (const r of rows) {
+        const cnt = Number(r.cnt) || 0;
+        pitchingTotal += cnt;
+        if (r.status === 'pending')  pitchingPending  = cnt;
+        if (r.status === 'accepted') pitchingAccepted = cnt;
+        if (r.status === 'rejected') pitchingRejected = cnt;
+      }
+    } catch (err) {
+      console.warn('[home-stats] pitching_submissions read failed:', err);
+    }
+
+    return c.json({
+      success: true,
+      data: {
+        plays:      Number(tAgg.total_plays) || 0,
+        likes:      Number(tAgg.total_likes) || 0,
+        followers,
+        monthlyListeners,
+        rating,
+        tracks: {
+          total:     Number(tAgg.total_tracks) || 0,
+          published: Number(tAgg.published_tracks) || 0,
+          pending:   Number(tAgg.pending_tracks)   || 0,
+          approved:  Number(tAgg.approved_tracks)  || 0,
+        },
+        radio: {
+          rotations: radioRotations,
+          stations:  radioStationsCount,
+        },
+        // No SQL source for per-artist venue plays today — explicit null
+        // so the UI can show "Скоро" or a placeholder instead of 0
+        // (which would falsely suggest the artist's tracks have never
+        // been played at a venue).
+        venue: null,
+        pitching: {
+          total:    pitchingTotal,
+          pending:  pitchingPending,
+          accepted: pitchingAccepted,
+          rejected: pitchingRejected,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('[home-stats] failed:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
 export default app;
