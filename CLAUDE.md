@@ -47,3 +47,104 @@ npx tsx src/index.ts            # Run dev server
 - Only the project's own VPS — no external BaaS, no serverless platforms
 - All data stays on own VPS (PostgreSQL + Node.js + JWT)
 - Quality > Speed — always do it right, never cut corners
+
+## SQL writing pitfalls (READ BEFORE WRITING ANY QUERY)
+
+These caused two production reverts on 2026-05-23. CI has no integration
+tests on schema, so type mismatches and missing columns only blow up at
+runtime in prod. Before adding a new SELECT/UPDATE/JOIN, walk through
+the checklist below.
+
+### Column-type cheat sheet (verified as of 2026-05-23)
+
+| Table | Column | Type |
+|---|---|---|
+| `users` | `id` | `uuid` |
+| `users` | `status` | enum `user_status` (NOT text) |
+| `artist_profiles` | `id` | `uuid` |
+| `artist_profiles` | `user_id` | `text` ← FK is text, not uuid |
+| `dj_profiles`, `radio_profiles`, `venue_profiles`, `producer_profiles`, `label_profiles` | `user_id` | `text` |
+| `tracks` | `id` | `uuid` |
+| `tracks` | `artist_id` | `uuid` (FK to artist_profiles.id) |
+| `tracks` | `user_id` | `text` |
+| `concerts` | `artist_id` | `uuid` |
+| **All `:artistId` / `:userId` URL params** | arrive as | `text` |
+
+Anything else: verify with `\d <table>` or
+`SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '<t>'`
+*before* writing the code, not after the revert.
+
+### Cast rules
+
+- `WHERE id = $1` where `id` is `uuid` and `$1` is a URL-param string →
+  use `WHERE id::text = $1`. Postgres does NOT implicit-cast uuid to text.
+- `WHERE user_id = $1` where `user_id` is `text` → **no cast needed**,
+  text=text just works.
+- `WHERE artist_id = $1` where `artist_id` is `uuid` and `$1` is from
+  pg-node parameter binding (JS string of UUID shape) → **no cast**,
+  pg-node parses it correctly. **Adding `$1::text` BREAKS it** (forces
+  text-on-uuid compare). This is the exact trap that took down PR
+  37a399f's concerts query.
+- `COALESCE(x, u.status)` where `x` is `text` and `u.status` is
+  `user_status` enum → cast the enum side: `COALESCE(x, u.status::text)`.
+  Otherwise: `COALESCE types text and user_status cannot be matched`.
+
+### Don't invent columns
+
+The TypeScript `ArtistProfile` interface shape DOES NOT match the SQL
+schema 1:1. The interface lists `rating`, `careerStart`, `coinsBalance`,
+`bookingEmail`, `languages` — most of these are NOT columns. They live
+in `data jsonb` or just nowhere.
+
+Before `SELECT <col>` from any cabinet table — verify the column
+exists. If you need a field that isn't there:
+1. Add `ALTER TABLE … ADD COLUMN IF NOT EXISTS …` migration in the
+   same PR
+2. Note `MANUAL DEPLOY STEPS` in the commit body
+
+### Migrations don't auto-run
+
+`src/migration-runner.tsx` is a stub. Files in `src/migrations/*.sql`
+are NOT applied on `systemctl restart promofm-api`. If your code
+expects new columns, you MUST:
+1. Land the migration file `src/migrations/NNN_xxx.sql` in the same PR
+2. Put `MANUAL DEPLOY STEPS` block in the commit message:
+   ```
+   sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 \
+     -f /opt/promofm-api/src/migrations/NNN_xxx.sql
+   ```
+3. Specify that migration is applied BEFORE the code restart.
+
+### Pre-flight (mandatory for cloud sessions that can't ssh prod)
+
+The cloud Claude session does NOT have ssh to the VPS. Local Claude
+(laptop) does. For any backend PR touching SQL:
+
+1. Cloud: write the SQL, commit, push to a feature branch
+2. Cloud: in the PR description, explicitly list every column referenced
+   in every new query and which table it's from
+3. Laptop: runs `\d <table>` + `BEGIN; <SQL>; ROLLBACK;` against prod
+4. Laptop: merges or sends back fixes
+
+If cloud session ships SQL without that loop and it hits prod —
+expect a revert. See 5bfc665, 3e280ad reverts on 2026-05-23 for the
+template.
+
+### Things that look right but break
+
+- `WHERE artist_id = $1::text` against uuid column — looks defensive,
+  is actually a type error.
+- `SELECT rating FROM artist_profiles` without first checking the
+  column exists — TS interface lies about schema.
+- Migration in PR with no manual-deploy note → applied code restart,
+  no columns, runtime crash.
+- Restoring `src/supabase-client.tsx` symlink in a branch that forked
+  before its deletion — `git rm` it before pushing.
+
+### Frontend cache races (not a backend bug, common symptom)
+
+After raw SQL UPDATE on prod, an open settings tab can write its
+cached state back via PUT and undo the manual change. Tell the user
+to Cmd+Shift+R before touching settings. Same goes for stale
+lazy-chunk JS files after deploy — that's a deploy-pipeline concern,
+not an API bug.
