@@ -27,6 +27,54 @@ const PUBLICATION_PRICE = 5000; // 5000 RUB for track publication
 const AI_DETECTOR_URL = 'http://127.0.0.1:8085';
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/var/www/promofm/uploads';
 
+/**
+ * Resolve the publication price for a track being approved.
+ *
+ * Honours the "Первый трек — бесплатно" promise that lives on the
+ * landing (SunoMainContent.tsx:623 / FloatingCtaBar.tsx:96). An artist
+ * whose first track is being approved gets price=0 and skips the
+ * payment step entirely. Any subsequent track is the normal
+ * PUBLICATION_PRICE.
+ *
+ * "Used the quota" = the artist already has at least one track that
+ * either (a) advanced past the approved/payment gate via a real
+ * payment (status in 'upcoming'|'published' with payment_amount>0),
+ * or (b) was itself marked as the free-quota grant
+ * (first_track_free_applied=true). The trackId currently being
+ * approved is excluded so re-approving the same row stays consistent.
+ *
+ * Race-safe at the level we need: even if two pending tracks reach
+ * this function near-simultaneously, the LAST one wins normal price
+ * — the first quota grant marks `first_track_free_applied` and
+ * causes the second call to short-circuit to PUBLICATION_PRICE.
+ */
+async function resolveTrackPublicationPrice(userId: string, currentTrackId: string): Promise<number> {
+  if (!userId) return PUBLICATION_PRICE;
+  try {
+    const r = await pool.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM tracks
+          WHERE user_id = $1
+            AND id::text <> $2
+            AND (
+              (moderation_status IN ('upcoming', 'published')
+                AND COALESCE(NULLIF(data->>'payment_amount', '')::numeric, 0) > 0)
+              OR (data->>'first_track_free_applied' = 'true')
+            )
+       )::int AS used_quota`,
+      [userId, currentTrackId]
+    );
+    const used = Number(r.rows[0]?.used_quota || 0) > 0;
+    return used ? PUBLICATION_PRICE : 0;
+  } catch (e: any) {
+    // On query failure default to charging — safer for revenue than
+    // accidentally granting free publication to every artist on the
+    // platform until the next deploy.
+    console.warn('[track-moderation] resolveTrackPublicationPrice failed:', e?.message);
+    return PUBLICATION_PRICE;
+  }
+}
+
 // Fire-and-forget AI analysis for uploaded track
 async function triggerAiAnalysis(trackId: string, audioUrl: string) {
   try {
@@ -291,30 +339,47 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
     const now = new Date().toISOString();
 
     if (action === 'approve') {
-      // Модерация одобрена -> статус approved (ожидает оплаты 5000 RUB)
-      // После оплаты -> upcoming (раздел Скоро) -> затем published
+      // Модерация одобрена. Цена публикации зависит от того, использовал
+      // ли артист бесплатную квоту первого трека («Первый трек — бесплатно»
+      // на лендинге). Если price=0 — трек проскакивает payment-шаг и идёт
+      // напрямую в 'upcoming' (раздел Скоро), is_hidden=false.
       const aiWarning = (track.ai_score && track.ai_score > 60)
         ? ` AI: ${track.ai_score}% (${track.ai_verdict})`
         : '';
 
+      const userIdStr = String(track.user_id || '');
+      // AI-tracks go through the separate AI-catalog flow with its own pricing
+      // (see AI email branch below) — they don't draw from the first-track-free
+      // quota. The next non-AI track from this artist still gets the free slot.
+      const publicationPrice = (is_ai_track === true)
+        ? PUBLICATION_PRICE
+        : await resolveTrackPublicationPrice(userIdStr, String(pendingTrackId));
+      const isFirstFree = publicationPrice === 0;
+
       await typed.updateTrack(pendingTrackId, {
-        moderation_status: 'approved',
-        moderation_comment: moderator_notes || 'Трек одобрен',
+        moderation_status: isFirstFree ? 'upcoming' : 'approved',
+        moderation_comment: moderator_notes || (isFirstFree ? 'Трек одобрен (первый трек — бесплатно)' : 'Трек одобрен'),
         moderated_at: now,
-        is_hidden: true,
+        is_hidden: !isFirstFree,
         is_ai_track: is_ai_track === true || false,
         data: {
           ...(track.data || {}),
           overall_score: overall_score || null,
-          requires_payment: true,
-          payment_amount: PUBLICATION_PRICE,
+          requires_payment: !isFirstFree,
+          payment_amount: publicationPrice,
+          first_track_free_applied: isFirstFree,
+          paid_at: isFirstFree ? now : (track.data?.paid_at || null),
           ai_flagged: is_ai_track === true || (track.ai_score && track.ai_score > 60) || false,
           is_ai_track: is_ai_track === true || false,
           ai_category: is_ai_track ? 'ai_music' : 'original',
         },
       });
 
-      console.log(`[moderation] Track ${pendingTrackId} approved. Awaiting payment ${PUBLICATION_PRICE} RUB.` + aiWarning);
+      if (isFirstFree) {
+        console.log(`[moderation] Track ${pendingTrackId} approved + auto-published (first-track-free quota).` + aiWarning);
+      } else {
+        console.log(`[moderation] Track ${pendingTrackId} approved. Awaiting payment ${publicationPrice} RUB.` + aiWarning);
+      }
 
       // Notify artist: email + in-app
       // Fallback chain: uploaded_by_email → users.email lookup (may be empty for VK/SSO users without email contact)
@@ -363,8 +428,18 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '</div>'
             + '</div>';
         } else {
-          // Normal track — standard approval email
-          emailSubject = 'Трек одобрен — ' + track.title;
+          // Normal track — standard approval email. Copy branches on whether
+          // the artist's first-track-free quota covered this publication.
+          emailSubject = isFirstFree
+            ? 'Трек опубликован — ' + track.title
+            : 'Трек одобрен — ' + track.title;
+          const statusBlock = isFirstFree
+            ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Это ваш <strong>первый трек на платформе — публикация бесплатна</strong> по акции «Первый трек без оплаты». Трек уже опубликован в раздел «Скоро».</p>'
+            : '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽</strong></p>';
+          const ctaButton = isFirstFree
+            ? '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/artist/tracks" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#10B981,#059669);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Посмотреть в кабинете</a></p>'
+            : '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/artist/tracks" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>';
+
           emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
             + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
             + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
@@ -374,10 +449,10 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<p>Добрый день!</p>'
             + '<p>Благодарим вас за отправку трека на платформу Промо.Музыка. Мы внимательно прослушали вашу работу и с радостью сообщаем, что она прошла модерацию.</p>'
             + '<p>Ваш трек <strong>«' + track.title + '»</strong> одобрен к размещению, и мы будем рады представить его нашей аудитории.</p>'
-            + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽</strong></p>'
+            + statusBlock
             + '<p>Спасибо за ваше творчество и доверие к нашей платформе — это действительно ценно для нас.</p>'
             + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + moderator_notes + '</p>' : '')
-            + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/artist/tracks" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
+            + ctaButton
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
             + '</div>'
             + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
@@ -395,13 +470,18 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
 
 
       if (track.user_id) {
-        // Notification copy depends on whether the track was flagged as AI.
+        // Notification copy depends on (a) whether the track was flagged as AI
+        // and (b) whether the first-track-free quota covered this publication.
         const notifTitle = is_ai_track
           ? `«${track.title}» определён как AI-трек`
-          : `Трек «${track.title}» одобрен!`;
+          : isFirstFree
+            ? `Трек «${track.title}» опубликован!`
+            : `Трек «${track.title}» одобрен!`;
         const notifMessage = is_ai_track
           ? `Композиция «${track.title}» определена как AI-трек. Предлагаем размещение в разделе AI-музыки за ${PUBLICATION_PRICE.toLocaleString('ru-RU')} руб.`
-          : `Трек «${track.title}» одобрен. Для публикации оплатите ${PUBLICATION_PRICE.toLocaleString('ru-RU')} ₽.`;
+          : isFirstFree
+            ? `Трек «${track.title}» опубликован бесплатно по акции «Первый трек без оплаты». Он уже в разделе «Скоро».`
+            : `Трек «${track.title}» одобрен. Для публикации оплатите ${PUBLICATION_PRICE.toLocaleString('ru-RU')} ₽.`;
 
         // Cross-cabinet event (admin → artist surface). Writes to the
         // cross_cabinet_notifications table and emits SSE — keeps
@@ -429,7 +509,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           message: notifMessage,
           trackId: pendingTrackId,
           trackTitle: track.title,
-          newStatus: 'approved',
+          newStatus: isFirstFree ? 'upcoming' : 'approved',
           link: '/artist/tracks',
           read: false,
           createdAt: now,
@@ -438,7 +518,11 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
 
       return c.json({
         success: true,
-        message: is_ai_track ? 'Трек одобрен как ИИ-трек. Ожидает оплаты.' : 'Трек одобрен. Ожидает оплаты.',
+        message: is_ai_track
+          ? 'Трек одобрен как ИИ-трек. Ожидает оплаты.'
+          : isFirstFree
+            ? 'Трек одобрен и опубликован бесплатно (первый трек по акции).'
+            : 'Трек одобрен. Ожидает оплаты.',
         trackId: pendingTrackId,
         paymentRequired: true,
         paymentAmount: PUBLICATION_PRICE,
@@ -603,14 +687,23 @@ app.post('/batchModeration', requireAuth, requireAdmin, async (c) => {
       }
 
       if (action === 'approve') {
+        // Same first-track-free quota check as the single-approve handler.
+        // Batch ops don't carry an is_ai_track flag, so AI gating only
+        // applies via /manageTrackModeration — batch always honours the quota.
+        const batchUserId = String(track.user_id || '');
+        const batchPrice = await resolveTrackPublicationPrice(batchUserId, String(trackId));
+        const batchIsFirstFree = batchPrice === 0;
+
         await typed.updateTrack(trackId, {
-          moderation_status: 'approved',
+          moderation_status: batchIsFirstFree ? 'upcoming' : 'approved',
           moderated_at: now,
-          is_hidden: true,
+          is_hidden: !batchIsFirstFree,
           data: {
             ...(track.data || {}),
-            requires_payment: true,
-            payment_amount: PUBLICATION_PRICE,
+            requires_payment: !batchIsFirstFree,
+            payment_amount: batchPrice,
+            first_track_free_applied: batchIsFirstFree,
+            paid_at: batchIsFirstFree ? now : (track.data?.paid_at || null),
           },
         });
       } else {
