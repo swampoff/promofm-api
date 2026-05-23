@@ -68,6 +68,8 @@ the checklist below.
 | `tracks` | `artist_id` | `uuid` (FK to artist_profiles.id) |
 | `tracks` | `user_id` | `text` |
 | `concerts` | `artist_id` | `uuid` |
+| `notifications` | `id` | `text` (legacy composite ids like `notif_1779…`) |
+| `notifications` | `user_id` | `uuid` (pg-node implicit-casts string→uuid here; explicit `::text` not needed) |
 | **All `:artistId` / `:userId` URL params** | arrive as | `text` |
 
 Anything else: verify with `\d <table>` or

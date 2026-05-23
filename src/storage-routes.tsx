@@ -186,18 +186,53 @@ storage.post('/upload', requireAuth, async (c) => {
       }, 400);
     }
     
-    // Validate file content (magic bytes) — defense-in-depth
+    // Validate file content (magic bytes) — defense-in-depth.
+    //
+    // The `file-type` library normalizes MIME to its own canonical set,
+    // which doesn't always match what we list in allowedMimeTypes. For
+    // WAV specifically, file-type returns `audio/vnd.wave` while our
+    // bucket whitelist has `audio/wav` / `audio/x-wav` (the de-facto
+    // forms browsers send). A strict mime-only compare rejected legit
+    // uploads with "File content does not match declared type" — the
+    // exact toast artists were hitting on WAV submissions.
+    //
+    // Accept the file if EITHER side matches: canonical mime OR the
+    // detected extension lands in the allowed-extensions set derived
+    // from the whitelist. Still blocks real mismatches (e.g. a PNG
+    // renamed to .wav — file-type would detect ext=png, no match).
     const fileData = Buffer.from(await file.arrayBuffer());
     const fileType = await import("file-type");
     const fromBuf = fileType.fileTypeFromBuffer || fileType.fromBuffer || fileType.default?.fromBuffer;
     const detectedType = fromBuf ? await fromBuf(fileData) : null;
     if (detectedType && bucketConfig.allowedMimeTypes.length > 0 && !bucketConfig.allowedMimeTypes.includes('*')) {
-      const allowedExts = bucketConfig.allowedMimeTypes.map((m: string) => m.split('/')[1]);
-      const detectedExt = detectedType.ext;
-      // Block if detected content doesn't match any allowed type
+      // Normalize MIME subtype → file extension. `audio/mpeg` → `mp3`,
+      // `audio/x-wav` → `wav`, `audio/x-m4a` → `m4a` etc. file-type's
+      // detected.ext uses the canonical extension form, so without this
+      // mapping a perfectly valid WAV got rejected because the subtype
+      // in the whitelist (`x-wav` / `vnd.wave`) didn't equal the ext.
+      const MIME_SUBTYPE_TO_EXT: Record<string, string> = {
+        'mpeg':     'mp3',
+        'vnd.wave': 'wav',
+        'wave':     'wav',
+      };
+      const allowedExts = bucketConfig.allowedMimeTypes
+        .map((m: string) => m.split('/').pop() || '')
+        .map((s: string) => s.replace(/^x-/, ''))
+        .map((s: string) => MIME_SUBTYPE_TO_EXT[s] || s)
+        .filter(Boolean);
+
       const mimeMatch = bucketConfig.allowedMimeTypes.includes(detectedType.mime);
-      if (!mimeMatch) {
-        console.warn('[storage] Magic bytes mismatch:', { claimed: file.type, detected: detectedType.mime, filename: file.name });
+      const extMatch  = !!detectedType.ext && allowedExts.includes(detectedType.ext);
+
+      if (!mimeMatch && !extMatch) {
+        console.warn('[storage] Magic bytes mismatch:', {
+          claimed:   file.type,
+          detected:  detectedType.mime,
+          ext:       detectedType.ext,
+          filename:  file.name,
+          bucket:    bucketName,
+          allowedExts,
+        });
         return c.json({ success: false, error: 'File content does not match declared type' }, 400);
       }
     }

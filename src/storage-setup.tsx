@@ -52,9 +52,17 @@ const BUCKET_CONFIGS: Record<string, BucketConfig> = {
   'track-audio': {
     name: 'track-audio', subdir: 'track-audio', public: true,
     fileSizeLimit: 100 * 1024 * 1024, // 100MB
+    // file-type returns `audio/vnd.wave` for WAV magic bytes (newer
+    // versions of the lib) while browsers send `audio/wav` /
+    // `audio/x-wav`. Listing all variants here covers the direct-MIME
+    // compare path; the ext-fallback in storage-routes.tsx handles
+    // anything still missed.
     allowedMimeTypes: [
-      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav',
-      'audio/flac', 'audio/x-flac', 'audio/ogg', 'audio/aac',
+      'audio/mpeg', 'audio/mp3',
+      'audio/wav', 'audio/x-wav', 'audio/vnd.wave', 'audio/wave',
+      'audio/flac', 'audio/x-flac',
+      'audio/ogg', 'audio/oga',
+      'audio/aac',
       'audio/mp4', 'audio/x-m4a', 'audio/m4a',
     ],
   },
