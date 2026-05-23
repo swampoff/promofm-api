@@ -6,6 +6,7 @@
 
 import { notifyTrackUpload, sendEmail } from './email-helper.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
+import { upsertNotification } from './db.tsx';
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as typed from './db-typed.tsx';
@@ -361,27 +362,45 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
 
 
       if (track.user_id) {
-        if (is_ai_track) {
-          notifyCrossCabinet({
-            targetUserId: track.user_id,
-            targetRole: 'artist',
-            sourceRole: 'admin',
-            type: 'track_moderation',
-            title: 'Результат модерации',
-            message: 'Композиция «' + track.title + '» определена как AI-трек. Предлагаем размещение в разделе AI-музыки за ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' руб.',
-            link: '/artist/tracks',
-          }).catch(() => {});
-        } else {
-          notifyCrossCabinet({
-            targetUserId: track.user_id,
-            targetRole: 'artist',
-            sourceRole: 'admin',
-            type: 'track_moderation',
-            title: 'Трек одобрен!',
-            message: 'Трек «' + track.title + '» одобрен. Для публикации оплатите ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽.',
-            link: '/artist/tracks',
-          }).catch(() => {});
-        }
+        // Notification copy depends on whether the track was flagged as AI.
+        const notifTitle = is_ai_track
+          ? `«${track.title}» определён как AI-трек`
+          : `Трек «${track.title}» одобрен!`;
+        const notifMessage = is_ai_track
+          ? `Композиция «${track.title}» определена как AI-трек. Предлагаем размещение в разделе AI-музыки за ${PUBLICATION_PRICE.toLocaleString('ru-RU')} руб.`
+          : `Трек «${track.title}» одобрен. Для публикации оплатите ${PUBLICATION_PRICE.toLocaleString('ru-RU')} ₽.`;
+
+        // Cross-cabinet event (admin → artist surface). Writes to the
+        // cross_cabinet_notifications table and emits SSE — keeps
+        // dashboards / admin-aware UI in sync.
+        notifyCrossCabinet({
+          targetUserId: track.user_id,
+          targetRole: 'artist',
+          sourceRole: 'admin',
+          type: 'track_moderation',
+          title: notifTitle,
+          message: notifMessage,
+          link: '/artist/tracks',
+        }).catch(() => {});
+
+        // Persistent inbox notification. The artist's bell / history
+        // page reads from the `notifications` table (publish-routes
+        // /notifications/:userId), NOT from cross_cabinet_notifications.
+        // Without this write, "трек одобрен" never appears in the bell
+        // — exactly what artists reported after this approval flow.
+        const notifId = `tn-${crypto.randomUUID()}`;
+        upsertNotification(String(track.user_id), notifId, {
+          id: notifId,
+          type: 'track_moderation',
+          title: notifTitle,
+          message: notifMessage,
+          trackId: pendingTrackId,
+          trackTitle: track.title,
+          newStatus: 'approved',
+          link: '/artist/tracks',
+          read: false,
+          createdAt: now,
+        }).catch((err: any) => console.error('[moderation] inbox notif failed:', err?.message || err));
       }
 
       return c.json({
@@ -475,18 +494,37 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
       }
 
       if (track.user_id) {
+        const rejectTitle = `Трек «${track.title}» отклонён`;
         const rejectMsg = rejection_type === 'profanity'
           ? 'Трек «' + track.title + '» отклонён: ненормативная лексика. Примем clean version.'
           : 'Трек «' + track.title + '» отклонён. ' + (reason !== 'Не указана' ? reason : 'Не соответствует формату платформы.');
+
         notifyCrossCabinet({
           targetUserId: track.user_id,
           targetRole: 'artist',
           sourceRole: 'admin',
           type: 'track_moderation',
-          title: 'Результат модерации',
+          title: rejectTitle,
           message: rejectMsg,
           link: '/artist/tracks',
         }).catch(() => {});
+
+        // Persistent inbox row — same reason as the approve branch:
+        // the bell reads `notifications`, not `cross_cabinet_notifications`.
+        const notifId = `tn-${crypto.randomUUID()}`;
+        upsertNotification(String(track.user_id), notifId, {
+          id: notifId,
+          type: 'track_moderation',
+          title: rejectTitle,
+          message: rejectMsg,
+          trackId: pendingTrackId,
+          trackTitle: track.title,
+          newStatus: 'rejected',
+          rejectionReason: reason || '',
+          link: '/artist/tracks',
+          read: false,
+          createdAt: now,
+        }).catch((err: any) => console.error('[moderation] inbox notif failed:', err?.message || err));
       }
 
       return c.json({
@@ -680,15 +718,31 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
 
       // Notify artist
       if (track.user_id) {
+        const upcomingTitle = 'Трек скоро в эфире!';
+        const upcomingMsg = `"${track.title}" появится в новинках через ${UPCOMING_DAYS} дня`;
         notifyCrossCabinet({
           targetUserId: track.user_id,
           targetRole: 'artist',
           sourceRole: 'admin',
           type: 'track_upcoming',
-          title: 'Трек скоро в эфире!',
-          message: `"${track.title}" появится в новинках через ${UPCOMING_DAYS} дня`,
+          title: upcomingTitle,
+          message: upcomingMsg,
           link: '/artist/tracks',
         }).catch(() => {});
+
+        // Also write to the persistent inbox so the bell sees it.
+        const inboxId = `tn-${crypto.randomUUID()}`;
+        upsertNotification(String(track.user_id), inboxId, {
+          id: inboxId,
+          type: 'track_upcoming',
+          title: upcomingTitle,
+          message: upcomingMsg,
+          trackId,
+          trackTitle: track.title,
+          link: '/artist/tracks',
+          read: false,
+          createdAt: new Date().toISOString(),
+        }).catch((err: any) => console.error('[approve-paid] inbox notif failed:', err?.message || err));
       }
 
       updated++;
@@ -732,15 +786,32 @@ app.post('/promote-upcoming', async (c) => {
 
       // Notify artist
       if (track.user_id) {
+        const pubTitle = 'Трек опубликован!';
+        const pubMsg = `"${track.title}" теперь в новинках недели`;
         notifyCrossCabinet({
           targetUserId: track.user_id,
           targetRole: 'artist',
           sourceRole: 'system',
           type: 'track_published',
-          title: 'Трек опубликован!',
-          message: `"${track.title}" теперь в новинках недели`,
+          title: pubTitle,
+          message: pubMsg,
           link: '/artist/tracks',
         }).catch(() => {});
+
+        // Persistent inbox row — bell reads `notifications` not
+        // `cross_cabinet_notifications`.
+        const inboxId = `tn-${crypto.randomUUID()}`;
+        upsertNotification(String(track.user_id), inboxId, {
+          id: inboxId,
+          type: 'track_published',
+          title: pubTitle,
+          message: pubMsg,
+          trackId: track.id,
+          trackTitle: track.title,
+          link: '/artist/tracks',
+          read: false,
+          createdAt: new Date().toISOString(),
+        }).catch((err: any) => console.error('[promote-upcoming] inbox notif failed:', err?.message || err));
       }
 
       promoted++;
