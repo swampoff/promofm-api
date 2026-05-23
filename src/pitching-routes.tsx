@@ -61,22 +61,12 @@ async function ensureSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_pitching_playlists_status ON pitching_playlists(status);
       CREATE INDEX IF NOT EXISTS idx_pitching_playlists_platform ON pitching_playlists(platform);
     `);
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS pitching_radio_stations (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        region TEXT,
-        country TEXT,
-        genre TEXT,
-        website TEXT,
-        contact_email TEXT,
-        status TEXT NOT NULL DEFAULT 'active',
-        created_by TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS idx_pitching_radio_status ON pitching_radio_stations(status);
-    `);
+    // pitching_radio_stations is provisioned as a VIEW over pitching_radio
+    // by migration 009_pitching_schema_bridge.sql (970 legacy radio rows).
+    // CREATE TABLE here used to throw "is not a table" at runtime, which
+    // crashed every pitching endpoint via the lazy ensureSchema promise.
+    // The migration is the canonical source; ensureSchema must not own
+    // the schema for this name.
     await pool.query(`
       CREATE TABLE IF NOT EXISTS pitching_submissions (
         id TEXT PRIMARY KEY,
