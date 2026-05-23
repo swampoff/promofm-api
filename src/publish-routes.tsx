@@ -235,6 +235,32 @@ const STATUS_LABELS_RU: Record<string, string> = {
   published: 'опубликована',
 };
 
+/**
+ * Dedup cache for publish-status notifications. Webhook retries and
+ * multi-step transitions (paid → published twice in 30s) were producing
+ * runs of identical notifications — real artists ended up with 250+
+ * "Публикация" rows for the same handful of orders. Same in-memory
+ * approach as cross-cabinet-notify: simple Map keyed by user|order|status,
+ * 5-min window, restart-safe (worst case one duplicate slips through).
+ */
+const PUBLISH_NOTIF_DEDUP_WINDOW_MS = 5 * 60 * 1000;
+const PUBLISH_NOTIF_DEDUP_MAX = 5000;
+const recentPublishNotifs = new Map<string, number>();
+
+function isRecentPublishNotif(userId: string, orderId: string, newStatus: string): boolean {
+  const fp = `${userId}|${orderId}|${newStatus}`;
+  const now = Date.now();
+  if (recentPublishNotifs.size > PUBLISH_NOTIF_DEDUP_MAX) {
+    for (const [k, t] of recentPublishNotifs) {
+      if (now - t > PUBLISH_NOTIF_DEDUP_WINDOW_MS) recentPublishNotifs.delete(k);
+    }
+  }
+  const prev = recentPublishNotifs.get(fp);
+  if (prev !== undefined && now - prev < PUBLISH_NOTIF_DEDUP_WINDOW_MS) return true;
+  recentPublishNotifs.set(fp, now);
+  return false;
+}
+
 export async function createArtistNotification(
   userId: string,
   orderId: string,
@@ -243,6 +269,12 @@ export async function createArtistNotification(
   comment?: string,
 ) {
   try {
+    // Drop rapid re-fires of the same status transition. Real flows
+    // generated 250+ rows for the same handful of orders — see the
+    // recentPublishNotifs cache + isRecentPublishNotif above.
+    if (isRecentPublishNotif(userId, orderId, newStatus)) {
+      return;
+    }
     const statusLabel = STATUS_LABELS_RU[newStatus] || newStatus;
     const notifId = `pn-${crypto.randomUUID()}`;
     const notification = {
@@ -1085,6 +1117,35 @@ app.put('/notifications/:userId/read', requireAuth, async (c) => {
     return c.json({ success: true });
   } catch (error: any) {
     console.error('Error marking notifications as read:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── DELETE /notifications/:userId/clear ──────────────────
+// Bulk-removes all of the artist's publish notifications. Used by the
+// "Очистить все" button on the notification history page — real
+// artists had 250+ legacy rows from per-status-change webhooks that
+// predated the dedup cache, and no per-row UI to clean them up.
+
+app.delete('/notifications/:userId/clear', requireAuth, async (c) => {
+  try {
+    const userId = c.req.param('userId');
+    if (userId !== c.get('userId')) return c.json({ success: false, error: 'Access denied' }, 403);
+
+    const { deleteNotification } = await import('./db.tsx');
+    const notifications: any[] = await getNotificationsByUser(userId);
+    let deleted = 0;
+    for (const n of notifications) {
+      try {
+        await deleteNotification(userId, n.id);
+        deleted += 1;
+      } catch (e) {
+        console.error(`[notifications/clear] failed to delete ${n.id}:`, e);
+      }
+    }
+    return c.json({ success: true, deleted });
+  } catch (error: any) {
+    console.error('Error clearing notifications:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
