@@ -4,6 +4,9 @@ import { paymentTransactionsStore, trackTestAllRequestsStore, trackTestExpertsSt
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { quickLLM, getLLMStatus } from './llm-router.tsx';
+import { applySubscriptionDiscount } from './subscription-pricing.tsx';
+
+const TRACK_TEST_BASE_PRICE = 3000;
 
 const app = new Hono();
 
@@ -116,6 +119,11 @@ app.post('/submit', requireAuth, async (c) => {
     const requestId = crypto.randomUUID();
     const now = new Date().toISOString();
 
+    // Apply subscriber-tier discount (pro=10%, elite=20%). Guests
+    // (no user_id) and free Spark subscribers pay full TRACK_TEST_BASE_PRICE.
+    const priced = await applySubscriptionDiscount(user_id || null, 'track_test', TRACK_TEST_BASE_PRICE);
+    const paymentAmount = priced.finalPrice;
+
     const trackTestRequest: TrackTestRequest = {
       id: requestId,
       user_id: user_id || null,
@@ -129,7 +137,7 @@ app.post('/submit', requireAuth, async (c) => {
       genre,
       status: 'pending_payment',
       payment_status: 'pending',
-      payment_amount: 3000,
+      payment_amount: paymentAmount,
       required_expert_count: 5, // по умолчанию 5 экспертов
       completed_reviews_count: 0,
       assigned_experts: [],
@@ -152,13 +160,16 @@ app.post('/submit', requireAuth, async (c) => {
     allRequests.unshift(requestId);
     await trackTestAllRequestsStore.set('singleton', allRequests);
 
-    console.log(`Track test request created: ${requestId}`);
+    console.log(`Track test request created: ${requestId} (price ${paymentAmount} RUB, tier=${priced.tier ?? 'guest/none'}, discount=${priced.discount})`);
 
     return c.json({
       success: true,
       request_id: requestId,
       status: 'pending_payment',
-      payment_amount: 3000,
+      payment_amount: paymentAmount,
+      base_price: TRACK_TEST_BASE_PRICE,
+      discount: priced.discount,
+      tier: priced.tier,
       message: 'Track test request created. Please proceed with payment.'
     });
 

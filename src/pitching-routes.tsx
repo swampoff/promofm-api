@@ -28,6 +28,7 @@ import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { notifyAllAdmins, notifyCrossCabinet } from './cross-cabinet-notify.tsx';
+import { applySubscriptionDiscount } from './subscription-pricing.tsx';
 
 const app = new Hono();
 
@@ -568,6 +569,11 @@ app.post('/submit', requireAuth, async (c) => {
       await client.query('BEGIN');
       for (const n of normalized) {
         const cat = catalog[n.category].get(n.targetId)!;
+        // Apply subscriber discount per row (subscription tier from
+        // SUBSCRIPTION_PLANS.discounts.pitching: spark=0, start=5%,
+        // pro=10%, elite=15%). Failure to look up the subscription
+        // returns full price — never under-charges.
+        const priced = await applySubscriptionDiscount(userId, 'pitching', cat.price_rub);
         const id = generateId('pit');
         await client.query(
           `INSERT INTO pitching_submissions
@@ -583,12 +589,12 @@ app.post('/submit', requireAuth, async (c) => {
             n.trackId,
             n.videoId,
             n.message,
-            cat.price_rub,
+            priced.finalPrice,
             orderId,
           ]
         );
         submissionIds.push(id);
-        total += cat.price_rub;
+        total += priced.finalPrice;
       }
       await client.query('COMMIT');
     } catch (e) {

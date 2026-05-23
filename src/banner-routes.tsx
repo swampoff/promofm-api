@@ -8,6 +8,7 @@ import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { applySubscriptionDiscount } from './subscription-pricing.tsx';
 
 const app = new Hono();
 
@@ -156,11 +157,19 @@ app.post('/:id/activate', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Banner must be approved before activation' }, 400);
     }
 
-    const cost = body.cost || banner.price || 100;
+    const baseCost = body.cost || banner.price || 100;
     const days = body.days || banner.duration_days || 7;
 
+    // Apply subscriber-tier discount (start=5%, pro=10%, elite=15%).
+    // Banners are paid in coins, not rubles — discount applies the same way.
+    const priced = await applySubscriptionDiscount(String(userId), 'banners', baseCost);
+    const cost = priced.finalPrice;
+    const description = priced.discountApplied
+      ? `Баннер "${banner.title}" — ${days} дн. (скидка ${Math.round(priced.discount * 100)}% по подписке ${priced.tier})`
+      : `Баннер "${banner.title}" — ${days} дней`;
+
     // Deduct coins
-    const result = await typed.deductCoins(userId, cost, `Баннер "${banner.title}" — ${days} дней`);
+    const result = await typed.deductCoins(userId, cost, description);
     if (result && 'error' in result) {
       return c.json({ success: false, error: result.error, balance: result.balance }, 400);
     }
