@@ -415,7 +415,28 @@ export async function getNotificationsByUser(userId: string) {
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
   if (error) console.error('[db] getNotificationsByUser:', error);
-  return (data || []).map((r: any) => r.data || r);
+  // Normalize each row to the camelCase shape the frontend expects.
+  // Two row variants live in this table:
+  //   - new rows: native columns only (no `data` jsonb), so `r.data` is
+  //     null and we'd previously fall back to the raw row, leaking
+  //     `created_at` / `notification_type` / `is_read` snake_case fields
+  //     that the UI doesn't read → "Invalid Date" + "без конкретики".
+  //   - legacy rows: rich `data` jsonb with the full notification object
+  //     (orderTitle, newStatus, comment, createdAt camelCase, etc.)
+  // Merge: jsonb supplies rich fields, native columns are the source of
+  // truth for primitives that the trigger keeps in sync.
+  return (data || []).map((r: any) => {
+    const rich = r.data && typeof r.data === 'object' ? r.data : null;
+    return {
+      ...(rich || {}),
+      id: r.id,
+      type: r.notification_type || rich?.type || 'info',
+      title: r.title || rich?.title || '',
+      message: r.message || rich?.message || '',
+      read: r.is_read ?? rich?.read ?? false,
+      createdAt: rich?.createdAt || r.created_at || '',
+    };
+  });
 }
 
 export async function getNotification(userId: string, notifId: string) {
@@ -429,6 +450,11 @@ export async function getNotification(userId: string, notifId: string) {
 }
 
 export async function upsertNotification(userId: string, notifId: string, notif: Record<string, any>) {
+  // Persist the full notification object into `data` jsonb so rich
+  // fields (orderTitle, newStatus, createdAt, comment, etc.) survive
+  // the round-trip. Previously only the 4 primitive columns were
+  // stored — anything the caller passed got dropped, which is why
+  // history rows came back without dates and with empty titles.
   const row = {
     id: notifId,
     user_id: userId,
@@ -437,6 +463,7 @@ export async function upsertNotification(userId: string, notifId: string, notif:
     message: notif.message || '',
     status: notif.read ? 'read' : 'unread',
     is_read: notif.read || false,
+    data: notif,
   };
   const { error } = await db()
     .from('notifications')
@@ -445,11 +472,37 @@ export async function upsertNotification(userId: string, notifId: string, notif:
 }
 
 export async function deleteNotification(userId: string, notifId: string) {
+  // Scope by user_id too — single-row delete shouldn't blow away
+  // someone else's notification if id collides (defense in depth;
+  // ids are uuid-shaped so this isn't a real risk today).
   const { error } = await db()
     .from('notifications')
     .delete()
-    .eq('id', notifId);
+    .eq('id', notifId)
+    .eq('user_id', userId);
   if (error) console.error('[db] deleteNotification:', error);
+}
+
+/**
+ * Bulk-delete all of a user's notifications in one query. Used by the
+ * "Очистить все" button. Returns the number of rows removed.
+ *
+ * Previously the route iterated deleteNotification per row, which
+ * (a) silently skipped rows whose stored id didn't match the returned
+ * id format (legacy composite `${userId}:${notifId}` survivors) and
+ * (b) sent N queries when one would do. Real users had 16+ rows hang
+ * after clicking the button — that loop never finished cleaning up.
+ *
+ * notifications.user_id is text (verified via existing .eq() queries
+ * in this file); $1 from the route arrives as text. text=text, no cast.
+ */
+export async function deleteAllNotifications(userId: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const { rowCount } = await pool.query(
+    `DELETE FROM notifications WHERE user_id = $1`,
+    [userId],
+  );
+  return rowCount || 0;
 }
 
 // ─── Notification Settings ───

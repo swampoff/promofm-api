@@ -277,9 +277,16 @@ export async function createArtistNotification(
     }
     const statusLabel = STATUS_LABELS_RU[newStatus] || newStatus;
     const notifId = `pn-${crypto.randomUUID()}`;
+    // Concrete title so the inbox doesn't show empty rows ("без
+    // конкретики"). orderTitle gets the headline slot; the verbose
+    // sentence stays in `message` for the detail view.
+    const titleText = orderTitle
+      ? `«${orderTitle}» — ${statusLabel}`
+      : `Публикация — ${statusLabel}`;
     const notification = {
       id: notifId,
       type: 'publish_status_change',
+      title: titleText,
       orderId,
       orderTitle,
       newStatus,
@@ -1132,17 +1139,11 @@ app.delete('/notifications/:userId/clear', requireAuth, async (c) => {
     const userId = c.req.param('userId');
     if (userId !== c.get('userId')) return c.json({ success: false, error: 'Access denied' }, 403);
 
-    const { deleteNotification } = await import('./db.tsx');
-    const notifications: any[] = await getNotificationsByUser(userId);
-    let deleted = 0;
-    for (const n of notifications) {
-      try {
-        await deleteNotification(userId, n.id);
-        deleted += 1;
-      } catch (e) {
-        console.error(`[notifications/clear] failed to delete ${n.id}:`, e);
-      }
-    }
+    // Single DELETE WHERE user_id = $1 — avoids the per-row loop that
+    // silently skipped legacy composite-id rows. notifications.user_id
+    // is text, $1 is text from the URL, no cast needed.
+    const { deleteAllNotifications } = await import('./db.tsx');
+    const deleted = await deleteAllNotifications(userId);
     return c.json({ success: true, deleted });
   } catch (error: any) {
     console.error('Error clearing notifications:', error);
