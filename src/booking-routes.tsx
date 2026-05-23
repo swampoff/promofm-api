@@ -28,6 +28,8 @@ import { requireAuth, requireRole } from './auth-middleware.tsx';
 import { getArtistProfile, getBooking, getBookingsByUser, getDjProfile, getVenueProfile, upsertBooking, upsertNotification, bookingCalendarStore, getPaymentSession } from './db.tsx';
 import { notifyBookingRequest } from './email-helper.tsx';
 import { emitSSE } from './sse-routes.tsx';
+import { getDjPlanLimits } from './dj-studio-routes.tsx';
+import { pool } from './db-client.tsx';
 
 const app = new Hono();
 const dbClient = getDbClient();
@@ -196,10 +198,44 @@ app.post('/create', requireAuth, async (c) => {
     }
 
     if (durationHours < performer.minimumBookingHours) {
-      return c.json({ 
+      return c.json({
         error: `Minimum booking is ${performer.minimumBookingHours} hours`,
         minimumHours: performer.minimumBookingHours
       }, 400);
+    }
+
+    // Enforce DJ-plan «букингов/мес» quota (Starter=5, Pro/Premium=-1).
+    // Counts bookings for the same DJ in the SAME calendar month as the
+    // requested eventDate, excluding rejected/cancelled. Honours the
+    // «До 5 букингов/мес» promise that has lived on ForDJsPage without
+    // any backend gate since the marketplace launched.
+    if (performerType === 'dj' && performerId) {
+      const limits = await getDjPlanLimits(String(performerId));
+      if (limits.events !== -1) {
+        const monthStart = new Date(eventDate);
+        monthStart.setUTCDate(1);
+        monthStart.setUTCHours(0, 0, 0, 0);
+        const monthEnd = new Date(monthStart);
+        monthEnd.setUTCMonth(monthEnd.getUTCMonth() + 1);
+
+        const cnt = await pool.query(
+          `SELECT COUNT(*)::int AS n FROM bookings
+            WHERE performer_id = $1
+              AND (data->>'eventDate')::timestamptz >= $2
+              AND (data->>'eventDate')::timestamptz <  $3
+              AND COALESCE(data->>'status', 'pending') NOT IN ('rejected', 'cancelled')`,
+          [String(performerId), monthStart.toISOString(), monthEnd.toISOString()]
+        );
+        const existing = Number(cnt.rows[0]?.n) || 0;
+        if (existing >= limits.events) {
+          return c.json({
+            success: false,
+            error: `У этого DJ исчерпан месячный лимит букингов (${existing}/${limits.events}) на текущем тарифе. Попробуйте другую дату или другого исполнителя.`,
+            limit: limits.events,
+            current: existing,
+          }, 409);
+        }
+      }
     }
 
     // Расчет цен

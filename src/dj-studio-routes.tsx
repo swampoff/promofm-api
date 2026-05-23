@@ -597,11 +597,11 @@ const DJ_PLANS = [
     description: 'Базовый бесплатный план для начинающих DJ',
     features: [
       'Профиль на маркетплейсе',
-      'До 3 промо-миксов',
+      'До 5 промо-миксов',
+      'До 5 букингов/мес',
       'Базовая аналитика',
-      'Приём букингов',
     ],
-    limits: { mixes: 3, events: 5, analytics: 'basic' },
+    limits: { mixes: 5, events: 5, analytics: 'basic' },
     popular: false,
     color: 'slate',
   },
@@ -1469,11 +1469,57 @@ app.get('/mixes', requireAuth, requireDjRole, async (c) => {
   }
 });
 
+/**
+ * Resolve current DJ-plan limits ({ mixes, events, analytics }).
+ * Defaults to starter (DJ_PLANS[0]) when the DJ has no record in
+ * djSubscriptionsStore. `mixes` / `events` of -1 means unlimited.
+ *
+ * Exported because booking-routes.tsx also enforces the events quota
+ * when a venue creates a booking against a DJ-performer.
+ */
+export async function getDjPlanLimits(djId: string): Promise<{ mixes: number; events: number; analytics: string }> {
+  try {
+    const sub: any = await djSubscriptionsStore.get(djId);
+    if (sub?.limits && typeof sub.limits === 'object') {
+      return {
+        mixes: Number(sub.limits.mixes) || DJ_PLANS[0].limits.mixes,
+        events: Number(sub.limits.events) || DJ_PLANS[0].limits.events,
+        analytics: String(sub.limits.analytics || DJ_PLANS[0].limits.analytics),
+      };
+    }
+  } catch (e: any) {
+    console.warn('[dj-studio] getDjPlanLimits failed:', e?.message);
+  }
+  return { ...DJ_PLANS[0].limits } as any;
+}
+
 // POST /mixes — загрузить новый микс (multipart: audio, cover, title, genre…)
 app.post('/mixes', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     await ensureDjMixesSchema();
+
+    // Enforce the per-plan mix quota. Starter = 5, Pro/Premium = -1
+    // (unlimited). The landing has long shown «До 5 миксов» on Starter
+    // without anything in the backend stopping a DJ from uploading the
+    // 50th — this check finally honours that.
+    const limits = await getDjPlanLimits(String(userId));
+    if (limits.mixes !== -1) {
+      const cnt = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM dj_mixes WHERE dj_id = $1`,
+        [String(userId)],
+      );
+      const existing = Number(cnt.rows[0]?.n) || 0;
+      if (existing >= limits.mixes) {
+        return c.json({
+          success: false,
+          error: `Достигнут лимит миксов для текущего тарифа (${existing}/${limits.mixes}). Обновите подписку, чтобы загрузить больше.`,
+          limit: limits.mixes,
+          current: existing,
+        }, 403);
+      }
+    }
+
     const body = await c.req.parseBody();
     const audio = body.audio as File | undefined;
     const cover = body.cover as File | undefined;
