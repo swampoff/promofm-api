@@ -298,10 +298,15 @@ async function showStatus() {
 
 
 // ── Auto-add new tracks to radio_library (ПРОМО.ЭИР) ──
+import { mkdirSync as _fmkdirSync, copyFileSync as _fcopyFileSync, existsSync as _fexistsSync } from 'node:fs';
+import { join as _fjoin } from 'node:path';
+import { execSync as _fexecSync } from 'node:child_process';
+
 async function addToRadioLibrary(weekNumber, year) {
-  const fs = require('fs');
-  const path = require('path');
-  const { execSync } = require('child_process');
+  // ESM-safe: используем module-level imports вместо require()
+  const fs = { mkdirSync: _fmkdirSync, copyFileSync: _fcopyFileSync, existsSync: _fexistsSync };
+  const path = { join: _fjoin };
+  const execSync = _fexecSync;
   const TARGET_DIR = '/mnt/data/promofm-music/tracks';
   try { fs.mkdirSync(TARGET_DIR, { recursive: true }); } catch {}
 
