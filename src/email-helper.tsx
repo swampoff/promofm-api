@@ -460,7 +460,22 @@ export async function notifyChatNewSession(data: { sessionId: string; guestName?
       <a href="${link}" style="${buttonStyle}">Открыть live-чат</a>
     </p>
   `);
-  notifyAdminTelegram(`💬 <b>Новый live-чат на сайте</b>\n\nОт: ${stripHtml(who)}${data.guestEmail ? `\nEmail: ${stripHtml(data.guestEmail)}` : ''}${data.firstMessage ? `\n\n${stripHtml(data.firstMessage).slice(0, 500)}` : ''}\n\n→ <a href="${link}">Открыть в админке</a>`).catch(() => {});
+  // Embed `[session:UUID]` marker in the TG message so the
+  // /webhook/telegram handler can map admin's Reply-to-message back
+  // to a chat_sessions row. Plain-text, monospaced so the marker is
+  // greppable but doesn't dominate the visual. Reply-route flow:
+  // admin presses Reply → sends "ответ" → bot parses
+  // update.message.reply_to_message.text → finds [session:UUID] →
+  // inserts chat_messages with sender_type='admin' + emits SSE to
+  // the guest's stream.
+  notifyAdminTelegram(
+    `💬 <b>Новый live-чат на сайте</b>\n\n`
+    + `От: ${stripHtml(who)}${data.guestEmail ? `\nEmail: ${stripHtml(data.guestEmail)}` : ''}`
+    + `${data.firstMessage ? `\n\n${stripHtml(data.firstMessage).slice(0, 500)}` : ''}\n\n`
+    + `<i>Чтобы ответить — нажмите Reply на это сообщение и отправьте текст.</i>\n`
+    + `<code>[session:${data.sessionId}]</code>\n\n`
+    + `→ <a href="${link}">Открыть в админке</a>`
+  ).catch(() => {});
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Новый чат — ${who}`, html });
 }
 
