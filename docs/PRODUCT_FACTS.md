@@ -98,6 +98,74 @@ submit.
 
 ---
 
+## Distribution (DSP — Yandex Music / VK / Spotify / Apple Music)
+
+**Source:** `src/distribution-routes.tsx` + `src/migrations/013_distribution_orders.sql`.
+
+Manual fulfilment today (admin uploads track to DSP and pastes
+URL/ID back). Schema explicitly carries `dsp_track_id`,
+`submitted_at`, `live_at`, `stats_last_fetched_at` — all columns
+a future API-integration worker will write directly, so the
+endpoints serve both manual and automated modes without UI
+changes when integrations land.
+
+### Base prices (per-DSP, before subscription discount)
+
+`distribution-routes.tsx` `DISTRIBUTION_BASE_PRICES`:
+
+| DSP          | Base price |
+|--------------|------------|
+| yandex_music | 2 000 ₽    |
+| vk_music     | 1 500 ₽    |
+| spotify      | 5 000 ₽    |
+| apple_music  | 4 000 ₽    |
+| soundcloud   | 1 500 ₽    |
+| other        | 3 000 ₽    |
+
+Subscription discount: **'promotion' category** (5/10/15% by
+tier). Applied at order creation, stored in `discount_pct` for audit.
+
+### Order lifecycle
+
+```
+pending → paid → submitted → live
+         ↓                ↓
+      cancelled         rejected
+```
+
+- `pending` — created by artist, awaiting payment
+- `paid` — checkout webhook flipped on payment.succeeded (TODO
+  wire: checkout-routes.tsx needs `itemType='distribution'` branch)
+- `submitted` — admin pushed to DSP, `submitted_at` stamped
+- `live` — DSP confirmed public, `live_at` stamped + `dsp_track_url`
+- `rejected` — DSP refused; `rejected_reason` populated
+- `cancelled` — artist cancelled before payment
+
+### Stats
+
+`stats_plays`, `stats_saves`, `stats_playlist_adds` — last-known
+snapshot. Admin updates via `POST /admin/:orderId/update`. Each
+update also writes a row to `distribution_stats_history` (time-series
+for future charts).
+
+### Endpoints
+
+Artist:
+- `POST   /server/api/distribution/`               — create order
+- `GET    /server/api/distribution/user/:userId`   — list own orders
+- `GET    /server/api/distribution/track/:trackId` — per-track
+- `POST   /server/api/distribution/:orderId/cancel`— cancel pending
+
+Admin (requireAdmin):
+- `GET    /server/api/distribution/admin/queue`            — pending/paid/submitted
+- `POST   /server/api/distribution/admin/:orderId/update`  — status + stats
+- `POST   /server/api/distribution/admin/:orderId/note`    — append admin note
+
+Public:
+- `GET    /server/api/distribution/pricing`        — base-price list
+
+---
+
 ## Tracks
 
 ### Publication price flow
