@@ -1,0 +1,37 @@
+[Unit]
+# Stream-player tick — hits the local API endpoint that resolves
+# "what should be playing right now" for every venue and writes
+# the result to `stream_player_state`. See src/stream-player-routes.tsx.
+#
+# This is the polling MVP. A future ffmpeg playout worker will read
+# `stream_player_state` and push audio to Icecast/HLS.
+Description=PromoFM stream-player tick (resolves & records current playlist per venue/zone)
+After=network.target promofm-api.service
+Requires=promofm-api.service
+
+[Service]
+Type=oneshot
+# CRON_SECRET is sourced from /opt/promofm-api/.env (same file the
+# main service uses). curl just needs to read the value; the env
+# variable is interpolated via systemd's EnvironmentFile.
+EnvironmentFile=/opt/promofm-api/.env
+
+# Timeout 30s: the tick should complete in <2s on a typical fleet,
+# 30s is a safety ceiling — if it ever hangs we want the unit to
+# fail visibly instead of stacking up.
+TimeoutStartSec=30
+
+ExecStart=/usr/bin/curl -fsS \
+  --max-time 25 \
+  -X POST \
+  -H "X-Cron-Secret: ${CRON_SECRET}" \
+  http://127.0.0.1:3000/server/api/stream-player/cron/tick
+
+# Failures are visible in `journalctl -u promofm-stream-player.service`.
+# Don't restart on failure — the timer fires again in 60s anyway.
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
