@@ -358,6 +358,16 @@ Enforced in `venue-branding-routes.tsx` (mounted at
   third-party widgets. Only public-safe fields exposed (colors,
   logo, title, favicon, hide_promo_credit). No user_id, no
   timestamps, no custom_css.
+- `POST /upload-logo` — multipart/form-data, gated by
+  `limits.customBranding`. Constraints: PNG/JPEG/WebP/SVG/GIF,
+  5 MiB max, filename re-issued as
+  `<venue_id>-<8-hex>.<ext>` (no path traversal possible, free
+  cache-busting per upload). Writes to
+  `/opt/promofm-api/uploads/venue-logos/` and returns the public
+  URL. Caller MUST follow up with `PUT /` carrying the new
+  `logoUrl` to persist on the branding row.
+  Served at `/server/uploads/venue-logos/<filename>` (added to
+  `STATIC_UPLOAD_SUBDIRS` in `src/index.ts`).
 
 Branding schema (`src/migrations/018_venue_branding.sql`):
 `(venue_id text PK, user_id text, primary_color text, accent_color

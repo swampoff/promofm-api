@@ -278,13 +278,17 @@ app.get('/server/uploads/venue-content/*', async (c) => {
 });
 
 // DJ cabinet uploads: avatars, covers, mixes, mix covers, videos, portfolio
-const DJ_UPLOAD_SUBDIRS = ['dj-avatars', 'dj-covers', 'dj-mixes', 'dj-mix-covers', 'dj-videos', 'dj-portfolio'];
+// Subdirs served as static files at /server/uploads/<subdir>/<filename>.
+// Originally DJ-only; venue-logos joined the list when the branding
+// upload endpoint shipped. Each subdir's writer is in its own routes
+// module — this block is only the read/serve side.
+const STATIC_UPLOAD_SUBDIRS = ['dj-avatars', 'dj-covers', 'dj-mixes', 'dj-mix-covers', 'dj-videos', 'dj-portfolio', 'venue-logos'];
 const MIME_BY_EXT: Record<string, string> = {
-  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif',
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', svg: 'image/svg+xml',
   mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac',
   mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/mp4',
 };
-for (const subdir of DJ_UPLOAD_SUBDIRS) {
+for (const subdir of STATIC_UPLOAD_SUBDIRS) {
   app.get(`/server/uploads/${subdir}/*`, async (c) => {
     const filename = decodeURIComponent(c.req.path.replace(`/server/uploads/${subdir}/`, ''));
     if (filename.includes('..') || filename.includes('/')) return c.text('Forbidden', 403);

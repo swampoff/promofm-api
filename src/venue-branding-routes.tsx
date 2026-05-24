@@ -20,6 +20,9 @@
  */
 
 import { Hono } from 'hono';
+import crypto from 'crypto';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { pool } from './db-client.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { getVenueProfile as dbGetVenueProfile } from './db.tsx';
@@ -277,6 +280,99 @@ app.get('/public/:venueId', async (c) => {
     });
   } catch (error: any) {
     console.error('GET /venue-branding/public/:venueId:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────
+// POST /upload-logo — accept FormData, write to uploads/venue-logos/
+// ──────────────────────────────────────────────────────────────────
+//
+// Companion to PUT / so venues don't have to host their logo elsewhere
+// and paste a URL. Returns the new logo URL — the caller still has to
+// PUT / to persist it on the branding row.
+//
+// Constraints (mirrored client-side; server is the source of truth):
+//   - MIME: PNG / JPEG / WebP / SVG / GIF only.
+//   - Size: 5 MiB max.
+//   - Filename: re-issued as `<venue_id>-<8 random hex>.<ext>` so the
+//     uploader can't path-traverse via crafted names and we get
+//     cache-busting for free on every re-upload.
+//   - Written to /opt/promofm-api/uploads/venue-logos/, served by the
+//     static handler in src/index.ts (STATIC_UPLOAD_SUBDIRS).
+//
+// Gated by limits.customBranding so non-Бизнес venues hit 403 just
+// like PUT / does.
+const VENUE_LOGOS_DIR = '/opt/promofm-api/uploads/venue-logos';
+const MAX_LOGO_BYTES = 5 * 1024 * 1024;
+const ALLOWED_LOGO_MIME: Record<string, string> = {
+  'image/png':     'png',
+  'image/jpeg':    'jpg',
+  'image/webp':    'webp',
+  'image/svg+xml': 'svg',
+  'image/gif':     'gif',
+};
+
+app.post('/upload-logo', requireAuth, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const profile = await loadVenueProfile(userId);
+    if (!profile) {
+      return c.json({ success: false, error: 'Venue profile not found' }, 404);
+    }
+
+    const limits = getEffectiveVenueLimits(profile);
+    if (!limits.customBranding) {
+      return c.json(featureBlocked('customBranding', profile), 403);
+    }
+
+    const body = await c.req.parseBody().catch(() => null);
+    const file = body?.file as File | undefined;
+    if (!file || typeof (file as any).arrayBuffer !== 'function') {
+      return c.json({ success: false, error: 'file is required (multipart/form-data)' }, 400);
+    }
+
+    const ext = ALLOWED_LOGO_MIME[file.type];
+    if (!ext) {
+      return c.json({
+        success: false,
+        error: `Unsupported file type. Allowed: ${Object.keys(ALLOWED_LOGO_MIME).join(', ')}`,
+      }, 400);
+    }
+
+    const buf = Buffer.from(await file.arrayBuffer());
+    if (buf.byteLength === 0) {
+      return c.json({ success: false, error: 'File is empty' }, 400);
+    }
+    if (buf.byteLength > MAX_LOGO_BYTES) {
+      return c.json({
+        success: false,
+        error: `File too large (${Math.round(buf.byteLength / 1024)}KB). Max 5MB.`,
+      }, 413);
+    }
+
+    if (!existsSync(VENUE_LOGOS_DIR)) {
+      mkdirSync(VENUE_LOGOS_DIR, { recursive: true });
+    }
+
+    const filename = `${profile.id}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+    const filePath = join(VENUE_LOGOS_DIR, filename);
+    writeFileSync(filePath, buf);
+
+    // Public URL — matches the static-serve route in src/index.ts.
+    // Caller persists this by including it in the next PUT / payload's
+    // `logoUrl` field.
+    const baseUrl = process.env.PUBLIC_BASE_URL || '';
+    const publicUrl = `${baseUrl}/server/uploads/venue-logos/${filename}`;
+
+    return c.json({
+      success: true,
+      logoUrl: publicUrl,
+      bytes: buf.byteLength,
+      mime: file.type,
+    });
+  } catch (error: any) {
+    console.error('POST /venue-branding/upload-logo:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
