@@ -1,0 +1,18 @@
+[Unit]
+Description=Run PromoFM stream-player tick every 60 seconds
+
+[Timer]
+# Fire 30s after boot to let the API settle, then every 60s.
+OnBootSec=30s
+OnUnitActiveSec=60s
+# AccuracySec=1s keeps drift tight — without this systemd may
+# coalesce timers within a 1-minute window for power-saving and the
+# music could flip 30s late. We always want minute-accurate.
+AccuracySec=1s
+# Persistent=false: if the box was off for 6 hours we DON'T want
+# 360 catch-up ticks queued. Just resume normal cadence.
+Persistent=false
+Unit=promofm-stream-player.service
+
+[Install]
+WantedBy=timers.target

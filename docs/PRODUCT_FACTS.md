@@ -345,6 +345,42 @@ prioritized): `maxTracks`. apiAccess + customBranding shipped
 `planLimits` so the cabinet can grey out locked features without
 hitting a 403 first.
 
+### Stream-player state (cron poller)
+
+**Source:** `src/stream-player-routes.tsx` + `src/migrations/020_stream_player_state.sql` + `systemd/promofm-stream-player.{service,timer}`.
+
+MVP playout-oracle that resolves "what should be playing right now"
+for every venue + zone every 60 seconds and writes the result to
+`stream_player_state`. A future ffmpeg playout worker will read
+this table to push audio; for now the value is observability —
+operators can verify scheduling actually fires.
+
+Tick:
+- systemd timer `promofm-stream-player.timer` fires every 60s.
+- Service unit calls `POST /server/api/stream-player/cron/tick`
+  with `X-Cron-Secret: ${CRON_SECRET}` (same secret as venue-trial cron).
+- Tick iterates venues that have ≥1 schedule OR ≥1 zone, resolves
+  per-zone (zone-specific override → venue-wide fallback) + a
+  synthetic «venue-wide» row (zone_id NULL).
+- UPSERT semantics: `last_tick_at` bumped every tick (liveness),
+  `last_change_at` bumped only when `current_playlist_id` flipped.
+
+Schema (`stream_player_state`):
+`(id uuid PK, venue_id text, user_id text, zone_id text NULL,
+current_schedule_id text, current_playlist_id text, status
+'idle'|'playing'|'error', error_text, last_tick_at, last_change_at,
+created_at)`. Partial unique indexes enforce one row per
+(venue, zone) and one venue-wide row per venue.
+
+Pre-019 compatibility: if `venue_schedules.zone_id` column doesn't
+exist yet (migration 019 not deployed), the resolver falls back to
+the pre-zone-link query and serves the same venue-wide row for
+every zone target. Column presence is detected once and cached.
+
+Endpoints:
+- `POST /server/api/stream-player/cron/tick` — CRON_SECRET-protected
+- `GET  /server/api/stream-player/me` — auth'd venue reads its own state
+
 ---
 
 ## DJ cabinet
