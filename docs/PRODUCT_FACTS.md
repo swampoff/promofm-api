@@ -61,9 +61,15 @@ Wired callsites:
 - **promotion (via 'pitching' alias):** `pitching-routes.tsx` `/submit` (per-row inside the batch loop)
 - **track_test:** `track-test-routes.tsx` `/submit` (single charge)
 - **banners:** `banner-routes.tsx` `/:id/activate` (coin deduction)
-- **promotion (distribution & marketing):** to be wired in
-  `checkout-routes.tsx` when `metadata.itemType IN ('marketing',
-  'distribution')` — currently pending the distribution flow PR.
+- **promotion (distribution):** `distribution-routes.tsx` `POST /` —
+  discount applied to `basePrice` at order creation. The checkout
+  webhook (`checkout-routes.tsx:369`) flips the row pending→paid on
+  `metadata.itemType='distribution' + metadata.orderId` and is
+  idempotent (`WHERE status='pending'`).
+- **marketing:** no canonical endpoint exists yet. When a unified
+  marketing surface lands (campaigns / autoposts / mailings under
+  one button), wire `applySubscriptionDiscount(userId, 'promotion', …)`
+  there too.
 
 | Tier  | promotion | track_test | banners |
 |-------|-----------|------------|---------|
@@ -142,8 +148,9 @@ pending → paid → submitted → live
 ```
 
 - `pending` — created by artist, awaiting payment
-- `paid` — checkout webhook flipped on payment.succeeded (TODO
-  wire: checkout-routes.tsx needs `itemType='distribution'` branch)
+- `paid` — checkout webhook (`checkout-routes.tsx:369`) flips
+  pending→paid on `metadata.itemType='distribution' + orderId`.
+  Idempotent (`WHERE status='pending'`).
 - `submitted` — admin pushed to DSP, `submitted_at` stamped
 - `live` — DSP confirmed public, `live_at` stamped + `dsp_track_url`
 - `rejected` — DSP refused; `rejected_reason` populated
