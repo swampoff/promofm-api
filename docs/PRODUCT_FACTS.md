@@ -412,6 +412,69 @@ Endpoints:
 - `POST /server/api/stream-player/cron/tick` — CRON_SECRET-protected
 - `GET  /server/api/stream-player/me` — auth'd venue reads its own state
 
+### Venue station — onboarding + provisioning (per-venue dedicated radio)
+
+**Source:** `src/venue-station-routes.tsx` + `src/migrations/021_venue_station.sql` + email templates in `email-helper.tsx`.
+
+The «promo.fm-style» per-venue stream pipeline. NOT the same as
+`venue-radio-routes.tsx` (which is the legacy subscription to the
+common ПРОМО.ЭИР). This is the dedicated, per-venue radio with
+real hosts and music sourced from artists who pitch through the
+platform.
+
+**Internal note for devs:** the hosts run on Gemini + voice
+synthesis (template borrowed from promo.fm). This is
+intentionally invisible in every user-facing string — venue
+copy / cabinet labels / emails refer to «ведущие эфира» /
+«радиоведущие» without naming the tech.
+
+**Two tables:**
+- `venue_station_requests` — venue's onboarding submission
+  (music_preferences, jingles, ai_host_config jsonb). One open
+  request per venue at a time (partial unique index).
+- `venue_station_streams` — provisioned stream + pairing code for
+  the Android APK. One row per (venue, location).
+
+**Lifecycle:**
+```
+request:  pending_admin → in_setup → provisioned → live
+                                  ↓
+                        rejected / changes_requested
+stream:   in_setup → provisioned → live → paused → dead
+```
+
+**Endpoints under `/server/api/venue-station`:**
+
+Venue (JWT):
+- `GET    /me`                          — own request + streams (UI uses for lock-overlay vs «my radio»)
+- `POST   /`                            — submit onboarding wizard (409 if open request exists)
+- `PUT    /`                            — update preferences; auto-bumps status back to `pending_admin`
+- `POST   /me/regenerate-pairing`       — fresh 24h code when replacing in-venue device
+
+Admin (requireAuth + requireAdmin):
+- `GET    /admin/queue`                            — sorted by status priority + venue profile joined
+- `GET    /admin/:requestId`                       — full detail + streams + venue_profile
+- `POST   /admin/:requestId/take`                  — assign to self
+- `POST   /admin/:requestId/reject`                — `{ reason }` required
+- `POST   /admin/:requestId/request-changes`       — `{ message }` shown to venue, status → changes_requested
+- `POST   /admin/:requestId/provision`             — `{ streamUrl, vpsHost?, bearerTokenId?, locationId?, geminiConfig? }`, creates stream row + 24h pairing code
+- `POST   /admin/streams/:streamId/pause|resume|mark-live`
+
+APK (no auth, single-use code):
+- `POST   /pair  { code, deviceInfo? }`            — returns `streamUrl + venueId + streamId`. Single-use: subsequent attempts → 410.
+
+**Pairing code format:** `XXX-XXX` (6 chars, base32 sans 0/O/1/I/L
+ambiguity). 24h TTL. Generated at provision; replaceable via
+regenerate-pairing if venue lost it / changes device.
+
+**Email cadence (in `email-helper.tsx`):**
+- `sendVenueRadioWelcomeEmail` — day 0, frames the trial + next steps
+- `sendVenueTrialEndingEmail` — existing, T-3 days
+- `sendVenueTrialLastDayEmail` — NEW, T-1 day, last-chance nudge
+- `sendVenueTrialExpiredEmail` — existing, day 14
+- `sendVenueRadioReadyEmail` — sent when admin provisions; carries the pairing code
+- `sendVenueRadioChangesRequestedEmail` — sent on admin request-changes; carries the message and brings them back to the wizard
+
 ---
 
 ## DJ cabinet

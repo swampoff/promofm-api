@@ -552,3 +552,116 @@ export async function sendVenueTrialExpiredEmail(data: { toEmail: string; venueN
   });
 }
 
+/**
+ * Welcome email fired right after venue signup. Sets expectations
+ * for the 14-day trial: «заполните анкету → админ соберёт эфир →
+ * вы получите код для устройства». Deliberately frames the radio
+ * as «свой эфир с ведущими» without mentioning any technology
+ * (per product positioning).
+ */
+export async function sendVenueRadioWelcomeEmail(data: { toEmail: string; venueName: string; trialDaysRemaining?: number; }) {
+  const days = data.trialDaysRemaining ?? 14;
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 22px;">Добро пожаловать на ПРОМО.ЭИР!</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
+    <p>Вы получили <strong>${days} дней бесплатного доступа</strong> к собственному радио для вашего заведения — без привязки карты.</p>
+    <p style="padding:14px;background:#1a1a2e;border-left:3px solid #6366f1;border-radius:6px;color:#e0e0e0;">
+      <strong>Что дальше:</strong><br>
+      1. Зайдите в кабинет и заполните анкету — какая музыка нужна, какие джинглы, какой стиль ведущих.<br>
+      2. Наш редактор соберёт ваш эфир под запрос (обычно за 1-2 рабочих дня).<br>
+      3. Вы получите 6-значный код и приложение для Android-устройства в заведении.<br>
+      4. Подключаете устройство к колонкам — и эфир играет.
+    </p>
+    <p style="text-align:center;margin:28px 0;">
+      <a href="${SITE_URL}/venue/onboarding" style="${buttonStyle}">Заполнить анкету</a>
+    </p>
+    <p style="color:#888;font-size:13px;">Вопросы? Напишите в чат поддержки прямо из кабинета или на info@promofm.ru — отвечаем в рабочие часы.</p>
+  `);
+  return sendEmail({
+    to: data.toEmail,
+    subject: `Добро пожаловать на ПРОМО.ЭИР — ${days} дней бесплатно`,
+    html,
+  });
+}
+
+/**
+ * T-1 day reminder — fired the day before trial expiry by the
+ * existing venue-trial cron. Complements sendVenueTrialEndingEmail
+ * which fires at T-3 days; this one is the «last chance» nudge.
+ */
+export async function sendVenueTrialLastDayEmail(data: { toEmail: string; venueName: string; expiresAtIso: string; }) {
+  const expiresHuman = new Date(data.expiresAtIso).toLocaleDateString('ru-RU', {
+    day: '2-digit', month: 'long',
+  });
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Завтра последний день триала</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
+    <p>Ваш пробный период на ПРОМО.ЭИР заканчивается <strong>${escapeHtml(expiresHuman)}</strong>. Это последний день, когда эфир работает без оплаты.</p>
+    <p style="padding:12px;background:#2a1818;border-left:3px solid #EF4444;border-radius:6px;color:#fde0e0;">
+      Если карта не привязана к концу дня — эфир в заведении приостановится. Все настройки сохранятся, реактивация занимает минуту после оплаты.
+    </p>
+    <p style="text-align:center;margin:28px 0;">
+      <a href="${SITE_URL}/venue/subscription" style="${buttonStyle}">Выбрать тариф и продолжить</a>
+    </p>
+    <p style="color:#888;font-size:13px;">Тарифы: «Бизнес» ₽9 990/мес — до 4 зон, расширенная аналитика, расписание. «Сеть» ₽14 990/мес — несколько точек, API.</p>
+  `);
+  return sendEmail({
+    to: data.toEmail,
+    subject: 'ПРОМО.ЭИР: завтра последний день триала',
+    html,
+  });
+}
+
+/**
+ * Notify the venue that admin has provisioned their radio — stream
+ * is ready and the 6-character pairing code is in their cabinet.
+ */
+export async function sendVenueRadioReadyEmail(data: { toEmail: string; venueName: string; pairingCode: string; }) {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 22px;">Ваше радио готово к запуску</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
+    <p>Эфир собран и готов транслироваться в заведении. Чтобы подключить — зайдите в кабинет и используйте код ниже.</p>
+    <p style="text-align:center;margin:24px 0;">
+      <span style="display:inline-block;padding:14px 28px;background:#0f0f1e;border:1px solid #6366f1;border-radius:12px;color:#a5b4fc;font-family:monospace;font-size:28px;letter-spacing:3px;font-weight:bold;">${escapeHtml(data.pairingCode)}</span>
+    </p>
+    <p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:6px;color:#e0e0e0;">
+      <strong>Как подключить:</strong><br>
+      1. Установите наше приложение на Android-устройство в заведении (ссылка в кабинете).<br>
+      2. Откройте приложение, введите код выше.<br>
+      3. Подключите устройство к колонкам — эфир начнёт играть.
+    </p>
+    <p style="text-align:center;margin:24px 0;">
+      <a href="${SITE_URL}/venue/apk" style="${buttonStyle}">Открыть кабинет</a>
+    </p>
+    <p style="color:#888;font-size:13px;">Код действует 24 часа. Если не успеете подключить — сгенерируйте новый в кабинете.</p>
+  `);
+  return sendEmail({
+    to: data.toEmail,
+    subject: 'ПРОМО.ЭИР: ваше радио готово, код подключения внутри',
+    html,
+  });
+}
+
+/**
+ * Notify the venue when admin requests changes to their onboarding
+ * submission («жанры противоречивые, уточните» / «частота джинглов
+ * выглядит слишком большой» и т.п.). Brings them back to the wizard.
+ */
+export async function sendVenueRadioChangesRequestedEmail(data: { toEmail: string; venueName: string; message: string; }) {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Нужно уточнить анкету</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
+    <p>Наш редактор начал собирать ваш эфир и хочет уточнить пару моментов:</p>
+    <p style="padding:14px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:6px;color:#e0e0e0;">${escapeHtml(data.message)}</p>
+    <p style="text-align:center;margin:24px 0;">
+      <a href="${SITE_URL}/venue/onboarding" style="${buttonStyle}">Открыть анкету</a>
+    </p>
+    <p style="color:#888;font-size:13px;">После сохранения изменений анкета снова уйдёт редактору — обычно эфир запускается за 1 рабочий день.</p>
+  `);
+  return sendEmail({
+    to: data.toEmail,
+    subject: 'ПРОМО.ЭИР: уточните анкету для эфира',
+    html,
+  });
+}
+
