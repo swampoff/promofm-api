@@ -4,9 +4,85 @@ import { paymentTransactionsStore, trackTestAllRequestsStore, trackTestExpertsSt
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { quickLLM, getLLMStatus } from './llm-router.tsx';
-import { applySubscriptionDiscount } from './subscription-pricing.tsx';
+import { pool } from './db-client.tsx';
 
 const TRACK_TEST_BASE_PRICE = 3000;
+
+/**
+ * Resolve the artist's PromoLab test quota for the current calendar
+ * month: how many tests are INCLUDED in their subscription, and how
+ * many they've already used since the 1st of this month.
+ *
+ * Quota schedule (SUBSCRIPTION_PLANS.tests_per_month — see
+ * subscriptions-routes.tsx):
+ *     spark = 0    start = 1    pro = 3    elite = 10
+ *
+ * Over-quota submissions pay the flat TRACK_TEST_BASE_PRICE (3000 ₽).
+ *
+ * Returns { quota, used, available } where available = max(quota - used, 0).
+ * On any failure (missing user, DB error, unknown tier) → quota=0,
+ * available=0 so the artist falls through to the paid flow.
+ */
+async function getMonthlyTestQuotaState(userId: string | null | undefined): Promise<{ quota: number; used: number; available: number; tier: string | null }> {
+  const fallback = { quota: 0, used: 0, available: 0, tier: null as string | null };
+  if (!userId) return fallback;
+
+  let quota = 0;
+  let tier: string | null = null;
+  try {
+    const sr = await pool.query(
+      `SELECT data FROM subscriptions WHERE user_id = $1
+       ORDER BY (data->>'updated_at') DESC NULLS LAST, (data->>'created_at') DESC NULLS LAST
+       LIMIT 1`,
+      [userId],
+    );
+    if (sr.rows.length > 0) {
+      const raw = sr.rows[0].data;
+      const sub: any = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (sub) {
+        // Active = ('active' or 'trial') AND (no expires_at OR not expired)
+        const statusOk = sub.status === 'active' || sub.status === 'trial';
+        const expiresOk = !sub.expires_at || new Date(sub.expires_at).getTime() > Date.now();
+        if (statusOk && expiresOk) {
+          tier = String(sub.tier || sub.planId || '').toLowerCase();
+          quota = Number(sub.tests_per_month) || 0;
+        }
+      }
+    }
+  } catch (e: any) {
+    console.warn('[track-test] quota lookup failed:', e?.message);
+  }
+
+  if (quota <= 0) return { ...fallback, tier };
+
+  // Count usage this calendar month — iterate the user's request IDs
+  // and check each one's `created_at` against month-start. Spark has 0
+  // quota and short-circuits above, so this only runs for paid tiers
+  // which typically have a handful of tests; OK to do in JS.
+  let used = 0;
+  try {
+    const userRequests = await trackTestUserRequestsStore.get(userId) || [];
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    for (const reqId of userRequests as string[]) {
+      const req = await trackTestRequestsStore.get(reqId);
+      if (!req) continue;
+      const created = req.created_at ? new Date(req.created_at) : null;
+      if (!created || Number.isNaN(created.getTime())) continue;
+      if (created < monthStart) continue;
+      // Cancelled / refunded requests don't count.
+      if (req.payment_status === 'refunded') continue;
+      // Subscription-quota grants (payment_amount=0 from this code path)
+      // count toward quota — that's the whole point.
+      used++;
+    }
+  } catch (e: any) {
+    console.warn('[track-test] usage count failed:', e?.message);
+  }
+
+  const available = Math.max(quota - used, 0);
+  return { quota, used, available, tier };
+}
 
 const app = new Hono();
 
@@ -119,10 +195,20 @@ app.post('/submit', requireAuth, async (c) => {
     const requestId = crypto.randomUUID();
     const now = new Date().toISOString();
 
-    // Apply subscriber-tier discount (pro=10%, elite=20%). Guests
-    // (no user_id) and free Spark subscribers pay full TRACK_TEST_BASE_PRICE.
-    const priced = await applySubscriptionDiscount(user_id || null, 'track_test', TRACK_TEST_BASE_PRICE);
-    const paymentAmount = priced.finalPrice;
+    // Tests are now part of the subscription quota (2026-05-25 product
+    // decision). Each subscription tier includes N tests per calendar
+    // month — see SUBSCRIPTION_PLANS.tests_per_month. Over-quota
+    // submissions fall back to flat TRACK_TEST_BASE_PRICE (₽3000),
+    // same for guests (no user_id → can't draw from a subscription).
+    const quotaState = await getMonthlyTestQuotaState(user_id || null);
+    const withinQuota = quotaState.available > 0;
+
+    const paymentAmount = withinQuota ? 0 : TRACK_TEST_BASE_PRICE;
+    // When inside subscription quota: skip the payment gate entirely —
+    // the test is "paid" by the active subscription. Otherwise route
+    // through pending_payment → YooKassa as before.
+    const initialStatus = withinQuota ? 'payment_succeeded' : 'pending_payment';
+    const initialPaymentStatus = withinQuota ? 'completed' : 'pending';
 
     const trackTestRequest: TrackTestRequest = {
       id: requestId,
@@ -135,8 +221,8 @@ app.post('/submit', requireAuth, async (c) => {
       track_title,
       artist_name,
       genre,
-      status: 'pending_payment',
-      payment_status: 'pending',
+      status: initialStatus,
+      payment_status: initialPaymentStatus,
       payment_amount: paymentAmount,
       required_expert_count: 5, // по умолчанию 5 экспертов
       completed_reviews_count: 0,
@@ -160,17 +246,27 @@ app.post('/submit', requireAuth, async (c) => {
     allRequests.unshift(requestId);
     await trackTestAllRequestsStore.set('singleton', allRequests);
 
-    console.log(`Track test request created: ${requestId} (price ${paymentAmount} RUB, tier=${priced.tier ?? 'guest/none'}, discount=${priced.discount})`);
+    console.log(
+      withinQuota
+        ? `Track test request created: ${requestId} (subscription-quota, tier=${quotaState.tier}, used ${quotaState.used + 1}/${quotaState.quota})`
+        : `Track test request created: ${requestId} (over-quota or guest, paying ${paymentAmount} RUB)`
+    );
 
     return c.json({
       success: true,
       request_id: requestId,
-      status: 'pending_payment',
+      status: initialStatus,
+      withinQuota,
+      quota: {
+        included_per_month: quotaState.quota,
+        used_this_month: quotaState.used + (withinQuota ? 1 : 0),
+        tier: quotaState.tier,
+      },
       payment_amount: paymentAmount,
       base_price: TRACK_TEST_BASE_PRICE,
-      discount: priced.discount,
-      tier: priced.tier,
-      message: 'Track test request created. Please proceed with payment.'
+      message: withinQuota
+        ? 'Тест трека создан в рамках вашей подписки. Оплата не требуется.'
+        : 'Тест трека создан. Перейдите к оплате.',
     });
 
   } catch (error) {
@@ -1322,6 +1418,32 @@ app.get('/expert/my-reviews', requireAuth, async (c) => {
   } catch (error) {
     console.error('Error fetching my reviews:', error);
     return c.json({ error: 'Failed to fetch reviews' }, 500);
+  }
+});
+
+// ── GET /quota/:userId — read current month's quota state ─────────
+//
+// Used by the artist cabinet to show «использовано X из Y тестов в
+// этом месяце» before they hit /submit. Owner or admin only.
+app.get('/quota/:userId', requireAuth, async (c) => {
+  try {
+    const userId = c.req.param('userId');
+    const authUserId = (c as any).get('userId');
+    const authRole = (c as any).get('userRole');
+    if (userId !== authUserId && authRole !== 'admin' && authRole !== 'superadmin') {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+    const state = await getMonthlyTestQuotaState(userId);
+    return c.json({
+      success: true,
+      tier: state.tier,
+      quota: state.quota,
+      used: state.used,
+      available: state.available,
+      basePrice: TRACK_TEST_BASE_PRICE,
+    });
+  } catch (err: any) {
+    return c.json({ success: false, error: err?.message || String(err) }, 500);
   }
 });
 

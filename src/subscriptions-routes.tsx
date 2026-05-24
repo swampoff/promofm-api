@@ -28,12 +28,22 @@ const SUBSCRIPTION_PREFIX = 'subscription:';
  * | pro    | Про         | 39 990 ₽  | 399 900 ₽   | 3        | 4 000 ₽       |
  * | elite  | Бизнес      | 149 990 ₽ | 1 499 900 ₽ | 10       | 3 000 ₽       |
  */
+// `tests_per_month` (added 2026-05-25 product decision) — quota of
+// PromoLab track-tests included in each subscription. Was: separate
+// product with 3 fake tiers (Express ₽990 / Pro ₽2990 / Premium ₽7990)
+// on the landing and a hardcoded ₽3000 flat in track-test-routes
+// regardless of which tier the artist "chose". Now: tests are a
+// quota in the main subscription (like `credits_per_month` for
+// mailings). Over-quota — flat 3000 ₽ (no track_test discount —
+// the tier benefit is the quota itself, not a price discount on
+// over-quota tests).
 export const SUBSCRIPTION_PLANS = {
   spark: {
     name: 'Тест-драйв',
     price_month: 0,
     price_year: 0,
     credits_per_month: 0,
+    tests_per_month: 0,
     extra_mailing_price: 7000,
     discounts: {
       // 'promotion' covers both pitching and marketing (release distribution
@@ -43,7 +53,6 @@ export const SUBSCRIPTION_PLANS = {
       // Code keeps backward-compat reads (subscription-pricing.tsx) for
       // existing subscription rows in DB that still carry the old keys.
       promotion: 0,
-      track_test: 0,
       banners: 0,
     },
     donation_fee: 0.10,
@@ -55,45 +64,45 @@ export const SUBSCRIPTION_PLANS = {
     price_month: 8990,
     price_year: 89900,
     credits_per_month: 1,
+    tests_per_month: 1,
     extra_mailing_price: 5000,
     discounts: {
       promotion: 0.05,
-      track_test: 0,
       banners: 0.05,
     },
     donation_fee: 0.07,
     coins_bonus: 0.05,
-    description: 'Для старта и редких релизов. 1 рассылка в месяц + скидки на продвижение.',
+    description: 'Для старта и редких релизов. 1 рассылка + 1 тест трека/мес + скидки на продвижение.',
   },
   pro: {
     name: 'Про',
     price_month: 39990,
     price_year: 399900,
     credits_per_month: 3,
+    tests_per_month: 3,
     extra_mailing_price: 4000,
     discounts: {
       promotion: 0.10,
-      track_test: 0.10,
       banners: 0.10,
     },
     donation_fee: 0.05,
     coins_bonus: 0.15,
-    description: 'Для активных артистов. 3 рассылки в месяц, лучшая цена за рассылку.',
+    description: 'Для активных артистов. 3 рассылки + 3 теста трека/мес.',
   },
   elite: {
     name: 'Бизнес',
     price_month: 149990,
     price_year: 1499900,
     credits_per_month: 10,
+    tests_per_month: 10,
     extra_mailing_price: 3000,
     discounts: {
       promotion: 0.15,
-      track_test: 0.20,
       banners: 0.15,
     },
     donation_fee: 0.03,
     coins_bonus: 0.25,
-    description: 'Для лейблов, менеджеров и агентств. 10 рассылок, максимальные скидки на продвижение.',
+    description: 'Для лейблов, менеджеров и агентств. 10 рассылок + 10 тестов трека/мес.',
   },
 };
 
@@ -112,6 +121,7 @@ subscriptions.get('/plans', async (c) => {
         currency: 'RUB',
         interval: 'month',
         credits_per_month: 0,
+        tests_per_month: 0,
         extra_mailing_price: 7000,
         features: [
           'Профиль артиста',
@@ -130,11 +140,12 @@ subscriptions.get('/plans', async (c) => {
         currency: 'RUB',
         interval: 'month',
         credits_per_month: 1,
+        tests_per_month: 1,
         extra_mailing_price: 5000,
         features: [
           '1 рассылка/мес (экономия 28%)',
-          'Скидка 5% на питчинг',
-          'Скидка 5% на маркетинг',
+          '1 тест трека/мес включён',
+          'Скидка 5% на продвижение',
           'Скидка 5% на баннеры',
           'Комиссия 7% на донаты',
           '+5% бонусных коинов',
@@ -150,12 +161,12 @@ subscriptions.get('/plans', async (c) => {
         currency: 'RUB',
         interval: 'month',
         credits_per_month: 3,
+        tests_per_month: 3,
         extra_mailing_price: 4000,
         features: [
           '3 рассылки/мес (экономия 43%)',
-          'Скидка 10% на питчинг',
-          'Скидка 15% на маркетинг',
-          'Скидка 10% на тест трека',
+          '3 теста трека/мес включено',
+          'Скидка 10% на продвижение',
           'Скидка 10% на баннеры',
           'Комиссия 5% на донаты',
           '+15% бонусных коинов',
@@ -172,12 +183,12 @@ subscriptions.get('/plans', async (c) => {
         currency: 'RUB',
         interval: 'month',
         credits_per_month: 10,
+        tests_per_month: 10,
         extra_mailing_price: 3000,
         features: [
           '10 рассылок/мес (экономия 57%)',
-          'Скидка 15% на питчинг',
-          'Скидка 25% на маркетинг',
-          'Скидка 20% на тест трека',
+          '10 тестов трека/мес включено',
+          'Скидка 15% на продвижение',
           'Скидка 15% на баннеры',
           'Комиссия 3% на донаты',
           '+25% бонусных коинов',

@@ -21,12 +21,20 @@ file:line.
 
 **Source of truth:** `src/subscriptions-routes.tsx:31` `SUBSCRIPTION_PLANS`
 
-| Tier  | Price/mo  | Price/yr   | Mailings/mo | Extra mailing | donation_fee | coins_bonus |
-|-------|-----------|------------|-------------|---------------|--------------|-------------|
-| spark | 0         | 0          | 0           | 7 000         | 10%          | 0           |
-| start | 8 990     | 89 900     | 1           | 5 000         | 7%           | +5%         |
-| pro   | 39 990    | 399 900    | 3           | 4 000         | 5%           | +15%        |
-| elite | 149 990   | 1 499 900  | 10          | 3 000         | 3%           | +25%        |
+| Tier  | Price/mo  | Price/yr   | Mailings/mo | Tests/mo | Extra mailing | donation_fee | coins_bonus |
+|-------|-----------|------------|-------------|----------|---------------|--------------|-------------|
+| spark | 0         | 0          | 0           | 0        | 7 000         | 10%          | 0           |
+| start | 8 990     | 89 900     | 1           | 1        | 5 000         | 7%           | +5%         |
+| pro   | 39 990    | 399 900    | 3           | 3        | 4 000         | 5%           | +15%        |
+| elite | 149 990   | 1 499 900  | 10          | 10       | 3 000         | 3%           | +25%        |
+
+**Tests/mo (PromoLab quota)** added 2026-05-25 — was a separate
+paid product (3 fake tiers Express ₽990 / Pro ₽2990 / Premium
+₽7990 that backend silently flattened to ₽3000). Now: included
+in the main subscription. Quota resets on the 1st of each
+calendar month. Over-quota submissions = flat ₽3000 (no further
+tier discount; the tier benefit IS the quota). Guests
+(no user_id) always pay full ₽3000.
 
 Activation: `POST /server/subscriptions/subscribe` → YooKassa session
 → webhook `checkout-routes.tsx:115` writes the subscription row.
