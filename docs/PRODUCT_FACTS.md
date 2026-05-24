@@ -349,10 +349,58 @@ Admin endpoints (requireAuth + requireAdmin):
 - `GET  /admin/stream` (broadcast SSE — see Phase 4 note)
 
 Notifications:
-- New session → `notifyChatNewSession()` (admin email + @Promomusicalbot)
+- New session → `notifyChatNewSession()` (admin email + @Promomusicalbot).
+  TG-сообщение содержит `[session:<UUID>]` маркер для bridge ниже.
 - Admin reply when guest SSE not connected →
   `sendChatGuestReplyEmail()` with email return-link
   `${SITE_URL}/?chat=<id>&t=<token>`
+
+### Telegram-мост (admin replies в TG → chat_messages)
+
+**Endpoint:** `POST /server/api/chat-support/webhook/telegram/:secret`
+(secret = `process.env.TELEGRAM_WEBHOOK_SECRET`).
+
+**Flow:**
+1. Гость пишет → `notifyChatNewSession` шлёт TG-сообщение админу
+   с маркером `[session:UUID]` и инструкцией «нажмите Reply».
+2. Админ делает Reply в Telegram + пишет ответ → Telegram POSTит
+   update на webhook.
+3. Handler:
+   - Парсит `update.message.reply_to_message.text` через
+     `/\[session:([0-9a-f-]{36})\]/`
+   - Валидирует что сессия существует и не `closed`
+   - INSERT chat_messages (sender_type='admin', sender_name = TG
+     user's first+last name)
+   - На `status='open'` → auto-flip to `'assigned'`
+   - `emitSSE(guest:<token>, ...)` — мгновенная доставка в виджет
+   - Если гость оффлайн + есть guest_email → `sendChatGuestReplyEmail`
+   - ACK админу в TG: «✅ Ответ доставлен»
+4. Спец-команда `/start` → bot отвечает приветствием.
+
+**Deploy steps (manual, runs ONCE per bot):**
+```bash
+# 1. Set env vars
+TELEGRAM_BOT_TOKEN=<from-BotFather>
+TELEGRAM_WEBHOOK_SECRET=<random-string>
+
+# 2. Register webhook URL with Telegram
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://promo-music.ru/server/api/chat-support/webhook/telegram/'"$TELEGRAM_WEBHOOK_SECRET"'",
+    "allowed_updates": ["message"]
+  }'
+
+# 3. Smoke-test: open bot in TG, send /start → expect "Bot моста активен"
+```
+
+**Limitations:**
+- Каждый TG-Reply создаёт ровно одно сообщение в чате. Media
+  (фото/файлы) игнорируется — только текст.
+- `sender_id` всегда NULL (не маппим TG user_id → platform admin
+  user_id). `sender_name` = first_name + last_name из TG.
+- Если админ ответит на старое уведомление с давно закрытой
+  сессией — бот вернёт `⚠️ Чат завершён, ответ не доставлен`.
 
 ---
 

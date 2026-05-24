@@ -642,4 +642,206 @@ app.get('/admin/stream', requireAuth, requireAdmin, async (c) => {
   });
 });
 
+// ── POST /webhook/telegram — admin's reply-in-TG → chat_messages ─
+//
+// Bridge admin Telegram replies back into the chat. The new-session
+// notification (notifyChatNewSession in email-helper.tsx) embeds
+// `[session:<UUID>]` into the TG message. When admin presses Reply
+// in Telegram on that message and sends text — Telegram invokes
+// this webhook with update.message.reply_to_message.text containing
+// the original text (including the marker). We extract the session_id,
+// insert a chat_messages row with sender_type='admin', and push it
+// into the guest's SSE stream.
+//
+// Auth: shared secret in URL path (the webhook URL itself is the
+// secret). Telegram supports setWebhook with a `secret_token` header,
+// but path-secret is the most reliable cross-version pattern. The
+// webhook path is `/webhook/telegram/:secret` where :secret matches
+// process.env.TELEGRAM_WEBHOOK_SECRET; the same secret must be
+// configured via setWebhook on the bot side (manual deploy step).
+//
+// No DB schema change required — we reuse `chat_messages` and
+// `chat_sessions` tables shipped in migration 012.
+
+const SESSION_TAG_RE = /\[session:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/i;
+
+async function telegramReply(chatId: number | string, text: string): Promise<void> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+    });
+  } catch (e: any) {
+    console.warn('[chat-support/tg-bridge] sendMessage failed:', e?.message);
+  }
+}
+
+app.post('/webhook/telegram/:secret', async (c) => {
+  try {
+    const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
+    if (!expected) {
+      console.error('[chat-support/tg-bridge] TELEGRAM_WEBHOOK_SECRET not configured');
+      return c.json({ ok: false }, 500);
+    }
+    if (c.req.param('secret') !== expected) {
+      // Don't leak — quiet 200 OK so attackers can't fingerprint
+      // (Telegram itself ignores response body).
+      return c.json({ ok: true });
+    }
+
+    const update: any = await c.req.json().catch(() => null);
+    if (!update?.message) {
+      // Other update types (callback_query, edited_message, etc.) — ignore.
+      return c.json({ ok: true });
+    }
+
+    const msg = update.message;
+    const replyTo = msg.reply_to_message;
+    const fromChatId = msg.chat?.id;
+
+    // Special command: /start — gentle ack so the admin knows the
+    // webhook is wired.
+    if (typeof msg.text === 'string' && msg.text.trim() === '/start') {
+      if (fromChatId) {
+        await telegramReply(fromChatId,
+          '👋 Бот моста live-чат ↔ Telegram активен.\n\n'
+          + 'Когда придёт уведомление «Новый live-чат на сайте» — нажмите '
+          + '<b>Reply</b> на него и пришлите текст. Ответ доставится посетителю.'
+        );
+      }
+      return c.json({ ok: true });
+    }
+
+    // Must be a reply to a previous bot message containing the session tag.
+    if (!replyTo || typeof replyTo.text !== 'string') {
+      if (fromChatId) {
+        await telegramReply(fromChatId,
+          '⚠️ Чтобы доставить ответ — сделайте <b>Reply</b> на уведомление '
+          + '«Новый live-чат на сайте». Без Reply бот не знает в какую сессию слать.'
+        );
+      }
+      return c.json({ ok: true });
+    }
+
+    const m = replyTo.text.match(SESSION_TAG_RE);
+    if (!m) {
+      if (fromChatId) {
+        await telegramReply(fromChatId,
+          '⚠️ В исходном сообщении нет метки сессии. Ответьте на свежее '
+          + 'уведомление «Новый live-чат на сайте» — там должна быть строка '
+          + '<code>[session:UUID]</code>.'
+        );
+      }
+      return c.json({ ok: true });
+    }
+    const sessionId = m[1];
+
+    const replyText: string = String(msg.text || '').trim();
+    if (!replyText) {
+      // Media-only replies — skip silently.
+      return c.json({ ok: true });
+    }
+    if (replyText.length > 4000) {
+      if (fromChatId) {
+        await telegramReply(fromChatId, '⚠️ Слишком длинный ответ (>4000 символов), не доставлен.');
+      }
+      return c.json({ ok: true });
+    }
+
+    // Verify session is still active.
+    const sr = await pool.query(
+      `SELECT id::text AS id, guest_token, guest_email, guest_name, status
+         FROM chat_sessions WHERE id::text = $1`,
+      [sessionId],
+    );
+    if (sr.rows.length === 0) {
+      if (fromChatId) {
+        await telegramReply(fromChatId, `⚠️ Сессия <code>${sessionId.slice(0, 8)}…</code> не найдена.`);
+      }
+      return c.json({ ok: true });
+    }
+    const session = sr.rows[0];
+    if (session.status === 'closed') {
+      if (fromChatId) {
+        await telegramReply(fromChatId,
+          `⚠️ Чат <code>${sessionId.slice(0, 8)}…</code> завершён, ответ не доставлен.`
+        );
+      }
+      return c.json({ ok: true });
+    }
+
+    // Admin display name — fall back to «Поддержка» since we don't
+    // have a clean way to map TG user → platform admin user_id yet.
+    // Future: if the bot stores TG user_id ↔ platform user_id in a
+    // mapping table, we can use the real admin name here.
+    const adminName = msg.from?.first_name
+      ? `${msg.from.first_name}${msg.from.last_name ? ' ' + msg.from.last_name : ''}`
+      : 'Поддержка';
+
+    const ins = await pool.query(
+      `INSERT INTO chat_messages (session_id, sender_type, sender_id, sender_name, body)
+       VALUES ($1, 'admin', NULL, $2, $3)
+       RETURNING id::text AS id, created_at`,
+      [sessionId, adminName, replyText],
+    );
+    const newMsg = ins.rows[0];
+
+    // Auto-assign on first TG reply (status='open' → 'assigned')
+    if (session.status === 'open') {
+      await pool.query(
+        `UPDATE chat_sessions
+            SET status = 'assigned', updated_at = NOW()
+          WHERE id::text = $1`,
+        [sessionId],
+      );
+    }
+
+    const payload = {
+      id: newMsg.id,
+      sessionId,
+      sender_type: 'admin',
+      sender_name: adminName,
+      body: replyText,
+      created_at: newMsg.created_at,
+    };
+
+    // Push to guest's SSE stream
+    emitSSE(GUEST_SSE_PREFIX + session.guest_token, { type: 'chat_message_new', data: payload });
+    // Also fan-out to admin dashboard so other admins watching see it
+    emitSSE(ADMIN_BROADCAST_KEY, { type: 'chat_message_new', data: payload });
+
+    // Email-back fallback: if guest isn't connected via SSE, send email
+    if (session.guest_email && !hasActiveGuestStream(session.guest_token)) {
+      sendChatGuestReplyEmail({
+        toEmail: session.guest_email,
+        toName: session.guest_name || undefined,
+        adminName,
+        body: replyText,
+        sessionId,
+        guestToken: session.guest_token,
+      }).catch((e) => console.warn('[chat-support/tg-bridge] guest email fallback failed:', safeErr(e)));
+    }
+
+    // ACK to the admin in TG
+    if (fromChatId) {
+      await telegramReply(fromChatId,
+        `✅ Ответ доставлен посетителю.\n`
+        + (session.guest_email && !hasActiveGuestStream(session.guest_token)
+            ? `(дублировано на email ${session.guest_email})`
+            : '(посетитель в чате прямо сейчас)')
+      );
+    }
+
+    return c.json({ ok: true });
+  } catch (err: any) {
+    console.error('[chat-support/tg-bridge] webhook error:', err);
+    // Always respond 200 to Telegram so they don't retry-spam — internal
+    // failures are logged for our side.
+    return c.json({ ok: false, error: safeErr(err) }, 200);
+  }
+});
+
 export default app;
