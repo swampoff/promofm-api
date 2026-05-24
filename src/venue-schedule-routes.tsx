@@ -99,11 +99,29 @@ function rowToSchedule(r: any) {
     startMinute: r.start_minute,
     endMinute: r.end_minute,
     playlistId: r.playlist_id,
+    // NULL zone_id = venue-wide schedule (applies to every zone
+    // that has no zone-specific schedule for that minute).
+    zoneId: r.zone_id ?? null,
     priority: r.priority,
     isActive: r.is_active,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
+}
+
+// Resolve an incoming `zoneId` payload to a value safe for the DB:
+//   - undefined → null (legacy callers don't send the field)
+//   - null / '' → null (UI's «все зоны» option)
+//   - string    → verify it belongs to this venue → return as-is
+//                 OR 'INVALID' sentinel so the caller can 400
+async function resolveZoneId(raw: unknown, userId: string, venueId: string): Promise<string | null | 'INVALID'> {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const id = String(raw);
+  const r = await pool.query(
+    `SELECT 1 FROM venue_zones WHERE id::text = $1 AND user_id = $2 AND venue_id = $3`,
+    [id, userId, venueId]
+  );
+  return r.rowCount && r.rowCount > 0 ? id : 'INVALID';
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -164,15 +182,22 @@ app.post('/', requireAuth, async (c) => {
     const name = String(body.name).trim();
     const priority = Number.isInteger(body.priority) ? body.priority : 0;
     const isActive = body.isActive === false ? false : true;
+    // zoneId is optional. Empty string is treated as NULL (UI sends ''
+    // from the «все зоны» option). When non-null, we verify the zone
+    // belongs to this venue so callers can't link to someone else's row.
+    const zoneId = await resolveZoneId(body.zoneId ?? body.zone_id, userId, profile.id);
+    if (zoneId === 'INVALID') {
+      return c.json({ success: false, error: 'zoneId does not belong to this venue' }, 400);
+    }
 
     const r = await pool.query(
       `INSERT INTO venue_schedules
          (user_id, venue_id, name, day_of_week, start_minute, end_minute,
-          playlist_id, priority, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          playlist_id, priority, is_active, zone_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [userId, profile.id, name, dayOfWeek, startMinute, endMinute,
-       playlistId, priority, isActive]
+       playlistId, priority, isActive, zoneId]
     );
 
     return c.json({ success: true, schedule: rowToSchedule(r.rows[0]) });
@@ -226,6 +251,18 @@ app.put('/:id', requireAuth, async (c) => {
     const v = validatePayload(merged);
     if (!v.ok) return c.json({ success: false, error: v.error }, 400);
 
+    // zoneId: present-in-body OR keep current. Empty/null clears it.
+    let nextZoneId: string | null;
+    if ('zoneId' in body || 'zone_id' in body) {
+      const resolved = await resolveZoneId(body.zoneId ?? body.zone_id, userId, profile.id);
+      if (resolved === 'INVALID') {
+        return c.json({ success: false, error: 'zoneId does not belong to this venue' }, 400);
+      }
+      nextZoneId = resolved;
+    } else {
+      nextZoneId = cur.zone_id ?? null;
+    }
+
     const r = await pool.query(
       `UPDATE venue_schedules
           SET name         = $1,
@@ -235,12 +272,13 @@ app.put('/:id', requireAuth, async (c) => {
               playlist_id  = $5,
               priority     = $6,
               is_active    = $7,
+              zone_id      = $8,
               updated_at   = NOW()
-        WHERE id::text = $8 AND user_id = $9
+        WHERE id::text = $9 AND user_id = $10
         RETURNING *`,
       [merged.name, merged.dayOfWeek, merged.startMinute, merged.endMinute,
        merged.playlistId, merged.priority, merged.isActive,
-       scheduleId, userId]
+       nextZoneId, scheduleId, userId]
     );
 
     if (r.rowCount === 0) {
@@ -282,9 +320,19 @@ app.delete('/:id', requireAuth, async (c) => {
 // ──────────────────────────────────────────────────────────────────
 // GET /active-now — what schedule is currently active for the
 // authenticated venue. The stream-server hits this once a minute to
-// decide which playlist to broadcast. Returns the highest-priority
-// active schedule covering the current minute-of-day in Moscow time
-// (the only supported tz for now), or null if nothing matches.
+// decide which playlist to broadcast.
+//
+// Query params:
+//   ?zoneId=<uuid>  — resolve for that specific zone (preferred for
+//                     multi-zone venues; the worker iterates zones)
+//   (no param)      — back-compat: returns the highest-priority
+//                     schedule for the venue, preferring rows where
+//                     zone_id IS NULL (legacy / venue-wide).
+//
+// Resolution rule per zone:
+//   1. Prefer rows whose `zone_id = :zoneId` (zone-specific override)
+//   2. Fall back to rows where `zone_id IS NULL` (venue-wide default)
+//   3. Within either bucket: highest priority, lowest start_minute.
 // ──────────────────────────────────────────────────────────────────
 app.get('/active-now', requireAuth, async (c) => {
   try {
@@ -303,23 +351,47 @@ app.get('/active-now', requireAuth, async (c) => {
     const dayOfWeek = (dayUtc + 6) % 7;             // convert to 0=Mon..6=Sun
     const minuteOfDay = moscow.getUTCHours() * 60 + moscow.getUTCMinutes();
 
-    const r = await pool.query(
-      `SELECT * FROM venue_schedules
-        WHERE user_id = $1
-          AND venue_id = $2
-          AND is_active = TRUE
-          AND day_of_week = $3
-          AND start_minute <= $4
-          AND end_minute   >  $4
-        ORDER BY priority DESC, start_minute ASC
-        LIMIT 1`,
-      [userId, profile.id, dayOfWeek, minuteOfDay]
-    );
+    const zoneIdParam = c.req.query('zoneId') || null;
+
+    // The CASE in the ORDER BY ranks zone-specific (= zoneIdParam) above
+    // venue-wide (IS NULL) so a one-off zone override beats the default.
+    // When zoneIdParam is null, the CASE collapses to (0 if NULL, NULL
+    // otherwise) and we filter zone_id IS NULL to preserve legacy
+    // behaviour (no zone arg → ignore zone-specific rows entirely).
+    const r = zoneIdParam
+      ? await pool.query(
+          `SELECT *,
+                  CASE WHEN zone_id = $5 THEN 0 ELSE 1 END AS zone_rank
+             FROM venue_schedules
+            WHERE user_id = $1
+              AND venue_id = $2
+              AND is_active = TRUE
+              AND day_of_week = $3
+              AND start_minute <= $4
+              AND end_minute   >  $4
+              AND (zone_id = $5 OR zone_id IS NULL)
+            ORDER BY zone_rank ASC, priority DESC, start_minute ASC
+            LIMIT 1`,
+          [userId, profile.id, dayOfWeek, minuteOfDay, zoneIdParam]
+        )
+      : await pool.query(
+          `SELECT * FROM venue_schedules
+            WHERE user_id = $1
+              AND venue_id = $2
+              AND is_active = TRUE
+              AND day_of_week = $3
+              AND start_minute <= $4
+              AND end_minute   >  $4
+              AND zone_id IS NULL
+            ORDER BY priority DESC, start_minute ASC
+            LIMIT 1`,
+          [userId, profile.id, dayOfWeek, minuteOfDay]
+        );
 
     return c.json({
       success: true,
       active: r.rows[0] ? rowToSchedule(r.rows[0]) : null,
-      now: { dayOfWeek, minuteOfDay, tz: 'Europe/Moscow' },
+      now: { dayOfWeek, minuteOfDay, tz: 'Europe/Moscow', zoneId: zoneIdParam },
     });
   } catch (error: any) {
     console.error('GET /venue-schedule/active-now:', error);

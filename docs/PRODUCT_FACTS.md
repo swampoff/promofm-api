@@ -284,6 +284,33 @@ Currently enforced endpoints (`venue-routes.tsx`):
 - `POST /venue/playlists` — `maxPlaylists` quota
 - `GET /venue/analytics/*` (5 endpoints) + `POST /venue/analytics/export` — `features.analytics` flag
 
+Enforced in `venue-schedule-routes.tsx` (mounted at `/server/api/venue-schedule`):
+- `POST /`, `PUT /:id` — gated by `limits.scheduling` (business+).
+  Times stored as minutes-since-midnight (0..1440) in Europe/Moscow.
+  Overlap resolution: highest `priority` wins, ties broken by
+  lowest `start_minute`.
+- `GET /` — list, returns `featureEnabled` hint for the UI lock-screen.
+- `GET /active-now?zoneId=<id>` — stream-server poll. Resolution
+  per zone: prefer schedules with `zone_id = :zoneId` (zone-specific
+  override), fall back to `zone_id IS NULL` (venue-wide default).
+  Without the param it returns only `zone_id IS NULL` rows (legacy
+  single-zone behaviour).
+
+Schedule schema (`src/migrations/014_venue_schedules.sql` +
+`019_venue_schedules_zone_link.sql`):
+`(id uuid, user_id text, venue_id text, name text, day_of_week int
+0-6, start_minute int 0-1439, end_minute int 1-1440, playlist_id text,
+zone_id text NULL, priority int default 0, is_active boolean,
+created_at, updated_at)`.
+
+`zone_id` is NULLABLE — NULL means «applies to all zones». The active-
+now CASE-ranked query returns zone-specific rows before venue-wide
+fallbacks so a focused override beats the default.
+
+No hard FK on `zone_id` → `venue_zones(id)` (uuid vs text mismatch).
+Orphaned schedules after zone deletion silently never match — the
+query filters by existing zones.
+
 Enforced in `venue-zones-routes.tsx` (mounted at `/server/api/venue-zones`):
 - `POST /` (create zone) — `limits.zones` cap via `quotaExceeded(...)`.
   free/start = 1, business = 4, network/enterprise = -1 (unlimited).
