@@ -309,8 +309,32 @@ notes text, created_at, updated_at)`. Partial unique index
 `uq_venue_locations_one_primary` guarantees exactly-one
 `is_primary=TRUE` per venue.
 
+Enforced in `venue-branding-routes.tsx` (mounted at
+`/server/api/venue-branding`):
+- `GET /` — fetch with sensible defaults if no row exists (returns
+  200, never 404). Surfaces `customBrandingEnabled` for the UI.
+- `PUT /` — upsert; gated by `limits.customBranding` (business+).
+- `DELETE /` — drop the row → defaults restored; gated.
+- `GET /public/:venueId` — anonymous read for embed players /
+  third-party widgets. Only public-safe fields exposed (colors,
+  logo, title, favicon, hide_promo_credit). No user_id, no
+  timestamps, no custom_css.
+
+Branding schema (`src/migrations/018_venue_branding.sql`):
+`(venue_id text PK, user_id text, primary_color text, accent_color
+text, background_color text, text_color text, logo_url text,
+favicon_url text, player_title text, player_subtitle text,
+hide_promo_credit boolean, custom_css text, created_at, updated_at)`.
+Hex CHECK constraints on the four color columns (`#RGB` or
+`#RRGGBB`, case-insensitive). URLs validated app-side: must start
+with `https://` or `data:image/`, max 2048 chars (blocks
+`javascript:` / `file:` schemes).
+
+Numbered 018 because 017_venue_api_tokens.sql ships in parallel.
+
 Not yet enforced (helpers ready, endpoints don't exist or aren't
-prioritized): `apiAccess`, `customBranding`, `maxTracks`.
+prioritized): `maxTracks`. apiAccess + customBranding shipped
+2026-05-25 (see sections above).
 
 `GET /venue/profile` enriches the response with `effectivePlan` +
 `planLimits` so the cabinet can grey out locked features without
