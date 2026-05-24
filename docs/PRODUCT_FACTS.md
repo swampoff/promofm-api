@@ -281,35 +281,19 @@ Plan limits table (mirrors frontend `src/venue/constants/subscription-plans.ts`)
 `-1` = unlimited.
 
 Currently enforced endpoints (`venue-routes.tsx`):
-- `POST /venue/playlists` — `maxPlaylists` quota
+- `POST /venue/playlists` — `maxPlaylists` quota (playlist count)
+  AND `maxTracks` quota (total tracks across all playlists, including
+  the new playlist's `contentItems`).
+- `PUT  /venue/playlists/:id` — `maxTracks` quota. When the update
+  changes `contentItems`, we count (sum of every OTHER playlist's
+  length + new length) and reject if it breaches the cap. Also keeps
+  the per-playlist `trackCount` in sync with the actual array length.
 - `GET /venue/analytics/*` (5 endpoints) + `POST /venue/analytics/export` — `features.analytics` flag
 
-Enforced in `venue-schedule-routes.tsx` (mounted at `/server/api/venue-schedule`):
-- `POST /`, `PUT /:id` — gated by `limits.scheduling` (business+).
-  Times stored as minutes-since-midnight (0..1440) in Europe/Moscow.
-  Overlap resolution: highest `priority` wins, ties broken by
-  lowest `start_minute`.
-- `GET /` — list, returns `featureEnabled` hint for the UI lock-screen.
-- `GET /active-now?zoneId=<id>` — stream-server poll. Resolution
-  per zone: prefer schedules with `zone_id = :zoneId` (zone-specific
-  override), fall back to `zone_id IS NULL` (venue-wide default).
-  Without the param it returns only `zone_id IS NULL` rows (legacy
-  single-zone behaviour).
-
-Schedule schema (`src/migrations/014_venue_schedules.sql` +
-`019_venue_schedules_zone_link.sql`):
-`(id uuid, user_id text, venue_id text, name text, day_of_week int
-0-6, start_minute int 0-1439, end_minute int 1-1440, playlist_id text,
-zone_id text NULL, priority int default 0, is_active boolean,
-created_at, updated_at)`.
-
-`zone_id` is NULLABLE — NULL means «applies to all zones». The active-
-now CASE-ranked query returns zone-specific rows before venue-wide
-fallbacks so a focused override beats the default.
-
-No hard FK on `zone_id` → `venue_zones(id)` (uuid vs text mismatch).
-Orphaned schedules after zone deletion silently never match — the
-query filters by existing zones.
+`maxTracks` caps:
+- free/start → 500
+- business / trial → 2000
+- network / enterprise → -1 (unlimited)
 
 Enforced in `venue-zones-routes.tsx` (mounted at `/server/api/venue-zones`):
 - `POST /` (create zone) — `limits.zones` cap via `quotaExceeded(...)`.
@@ -381,9 +365,12 @@ with `https://` or `data:image/`, max 2048 chars (blocks
 
 Numbered 018 because 017_venue_api_tokens.sql ships in parallel.
 
-Not yet enforced (helpers ready, endpoints don't exist or aren't
-prioritized): `maxTracks`. apiAccess + customBranding shipped
-2026-05-25 (see sections above).
+Not yet enforced: none. All `VENUE_PLAN_LIMITS` flags
+(zones / maxPlaylists / maxTracks / analytics / scheduling /
+multiLocation / apiAccess / customBranding) have route gating as of
+2026-05-25. `libraryAccess` ('basic' / 'full' / 'premium') is a
+helper ladder reserved for future catalog endpoints — no
+consumer yet.
 
 `GET /venue/profile` enriches the response with `effectivePlan` +
 `planLimits` so the cabinet can grey out locked features without
