@@ -181,9 +181,23 @@ Currently enforced endpoints (`venue-routes.tsx`):
 - `POST /venue/playlists` — `maxPlaylists` quota
 - `GET /venue/analytics/*` (5 endpoints) + `POST /venue/analytics/export` — `features.analytics` flag
 
+Enforced in `venue-schedule-routes.tsx` (mounted at `/server/api/venue-schedule`):
+- `POST /` (create schedule), `PUT /:id` (update) — `features.scheduling` flag.
+  Старт/free hit 403 with `featureBlocked('scheduling', profile)`.
+- `GET /` (list) — no gate, returns `featureEnabled` hint so the
+  cabinet can render a lock-screen instead of a 403.
+- `GET /active-now` — stream-server poll for current-minute playlist.
+  Times stored as minutes-since-midnight (0..1440) in Europe/Moscow.
+
+Schedule schema (`src/migrations/014_venue_schedules.sql`):
+`(id uuid, user_id text, venue_id text, name text, day_of_week int 0-6,
+start_minute int 0-1439, end_minute int 1-1440, playlist_id text,
+priority int default 0, is_active boolean default true)`. Overlap
+resolution: highest priority wins; ties broken by lowest start_minute.
+
 Not yet enforced (helpers ready, endpoints don't exist or aren't
-prioritized): `zones`, `scheduling`, `multiLocation`, `apiAccess`,
-`customBranding`, `maxTracks`.
+prioritized): `zones`, `multiLocation`, `apiAccess`, `customBranding`,
+`maxTracks`.
 
 `GET /venue/profile` enriches the response with `effectivePlan` +
 `planLimits` so the cabinet can grey out locked features without
