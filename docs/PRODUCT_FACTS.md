@@ -277,23 +277,22 @@ Currently enforced endpoints (`venue-routes.tsx`):
 - `POST /venue/playlists` — `maxPlaylists` quota
 - `GET /venue/analytics/*` (5 endpoints) + `POST /venue/analytics/export` — `features.analytics` flag
 
-Enforced in `venue-schedule-routes.tsx` (mounted at `/server/api/venue-schedule`):
-- `POST /` (create schedule), `PUT /:id` (update) — `features.scheduling` flag.
-  Старт/free hit 403 with `featureBlocked('scheduling', profile)`.
-- `GET /` (list) — no gate, returns `featureEnabled` hint so the
-  cabinet can render a lock-screen instead of a 403.
-- `GET /active-now` — stream-server poll for current-minute playlist.
-  Times stored as minutes-since-midnight (0..1440) in Europe/Moscow.
+Enforced in `venue-zones-routes.tsx` (mounted at `/server/api/venue-zones`):
+- `POST /` (create zone) — `limits.zones` cap via `quotaExceeded(...)`.
+  free/start = 1, business = 4, network/enterprise = -1 (unlimited).
+- `GET /` — auto-seeds «Основная зона» on first call so every venue
+  starts with ≥1 zone. Returns `maxZones` + `canAddMore` for the UI.
+- `PUT /:id`, `PUT /:id/playlist`, `DELETE /:id` — owner-scoped CRUD.
+  DELETE refuses when only one zone remains.
 
-Schedule schema (`src/migrations/014_venue_schedules.sql`):
-`(id uuid, user_id text, venue_id text, name text, day_of_week int 0-6,
-start_minute int 0-1439, end_minute int 1-1440, playlist_id text,
-priority int default 0, is_active boolean default true)`. Overlap
-resolution: highest priority wins; ties broken by lowest start_minute.
+Zone schema (`src/migrations/015_venue_zones.sql`):
+`(id uuid, user_id text, venue_id text, name text, description text,
+current_playlist_id text, is_active boolean, sort_order int,
+created_at, updated_at)`. `current_playlist_id` references items
+inside the `venue_playlists.data` jsonb (no FK — jsonb store).
 
 Not yet enforced (helpers ready, endpoints don't exist or aren't
-prioritized): `zones`, `multiLocation`, `apiAccess`, `customBranding`,
-`maxTracks`.
+prioritized): `multiLocation`, `apiAccess`, `customBranding`, `maxTracks`.
 
 `GET /venue/profile` enriches the response with `effectivePlan` +
 `planLimits` so the cabinet can grey out locked features without
