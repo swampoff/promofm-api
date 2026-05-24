@@ -353,6 +353,41 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         }
       }
 
+      // ── Fulfill distribution order — flip pending → paid ──────
+      //
+      // Order rows are created upfront via POST /server/api/distribution/
+      // with status='pending'. When the artist pays through YooKassa
+      // with metadata.itemType='distribution' + metadata.orderId, this
+      // webhook flips the row to 'paid' so admin's queue picks it up
+      // (idx_distribution_orders_admin_queue filters on status IN
+      // ('pending', 'paid', 'submitted')).
+      //
+      // The order's payment_session_id is back-filled with session.orderId
+      // for audit/reconciliation. Idempotent via WHERE status='pending'
+      // — a duplicate webhook for the same order is a no-op.
+      if (itemType === 'distribution' && session.metadata.orderId) {
+        const { pool: distPool } = await import('./db-client.tsx');
+        const orderId = String(session.metadata.orderId);
+        const r = await distPool.query(
+          `UPDATE distribution_orders
+              SET status = 'paid',
+                  payment_session_id = $2
+            WHERE id::text = $1
+              AND status = 'pending'
+            RETURNING id::text AS id, track_id::text AS "trackId", target_dsp AS "targetDsp", user_id AS "userId"`,
+          [orderId, session.orderId],
+        );
+        if (r.rowCount && r.rowCount > 0) {
+          log.info({ orderId, trackId: r.rows[0].trackId, targetDsp: r.rows[0].targetDsp, amount: session.amount }, 'distribution_order_paid');
+        } else {
+          // Order missing OR already past 'pending' (re-delivered webhook,
+          // manual admin advance). Logged so we can spot reconciliation
+          // mismatches in the field; not thrown — there's nothing to
+          // recover here.
+          log.warn({ orderId, sessionOrderId: session.orderId }, 'distribution_order_paid_noop');
+        }
+      }
+
 } catch (err) {
       // Surface to the caller so the webhook handler can revert the session
       // back to 'pending' and let the gateway retry. Previously this catch
