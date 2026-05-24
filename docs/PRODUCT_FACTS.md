@@ -291,8 +291,26 @@ current_playlist_id text, is_active boolean, sort_order int,
 created_at, updated_at)`. `current_playlist_id` references items
 inside the `venue_playlists.data` jsonb (no FK — jsonb store).
 
+Enforced in `venue-locations-routes.tsx` (mounted at
+`/server/api/venue-locations`):
+- `POST /` (create), `PUT /:id` non-primary (edit), `POST /:id/make-primary`
+  — gated by `limits.multiLocation` boolean. network/enterprise = true,
+  business/start/free = false. Editing the PRIMARY row is allowed on
+  every tier so a single-location venue can still fix its own address.
+- `GET /` — auto-seeds primary from `venue_profiles.address` on first
+  call (every venue starts with ≥1 location). Returns `multiLocationEnabled`.
+- `DELETE /:id` — refuses primary + last-remaining.
+
+Location schema (`src/migrations/016_venue_locations.sql`):
+`(id uuid, user_id text, venue_id text, name text, address text,
+city text, country text, timezone text, contact_phone, contact_email,
+capacity int, is_primary boolean, is_active boolean, sort_order int,
+notes text, created_at, updated_at)`. Partial unique index
+`uq_venue_locations_one_primary` guarantees exactly-one
+`is_primary=TRUE` per venue.
+
 Not yet enforced (helpers ready, endpoints don't exist or aren't
-prioritized): `multiLocation`, `apiAccess`, `customBranding`, `maxTracks`.
+prioritized): `apiAccess`, `customBranding`, `maxTracks`.
 
 `GET /venue/profile` enriches the response with `effectivePlan` +
 `planLimits` so the cabinet can grey out locked features without
