@@ -181,9 +181,22 @@ Currently enforced endpoints (`venue-routes.tsx`):
 - `POST /venue/playlists` — `maxPlaylists` quota
 - `GET /venue/analytics/*` (5 endpoints) + `POST /venue/analytics/export` — `features.analytics` flag
 
+Enforced in `venue-zones-routes.tsx` (mounted at `/server/api/venue-zones`):
+- `POST /` (create zone) — `limits.zones` cap via `quotaExceeded(...)`.
+  free/start = 1, business = 4, network/enterprise = -1 (unlimited).
+- `GET /` — auto-seeds «Основная зона» on first call so every venue
+  starts with ≥1 zone. Returns `maxZones` + `canAddMore` for the UI.
+- `PUT /:id`, `PUT /:id/playlist`, `DELETE /:id` — owner-scoped CRUD.
+  DELETE refuses when only one zone remains.
+
+Zone schema (`src/migrations/015_venue_zones.sql`):
+`(id uuid, user_id text, venue_id text, name text, description text,
+current_playlist_id text, is_active boolean, sort_order int,
+created_at, updated_at)`. `current_playlist_id` references items
+inside the `venue_playlists.data` jsonb (no FK — jsonb store).
+
 Not yet enforced (helpers ready, endpoints don't exist or aren't
-prioritized): `zones`, `scheduling`, `multiLocation`, `apiAccess`,
-`customBranding`, `maxTracks`.
+prioritized): `multiLocation`, `apiAccess`, `customBranding`, `maxTracks`.
 
 `GET /venue/profile` enriches the response with `effectivePlan` +
 `planLimits` so the cabinet can grey out locked features without
