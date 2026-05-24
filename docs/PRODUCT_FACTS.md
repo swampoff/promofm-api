@@ -274,8 +274,19 @@ Plan limits table (mirrors frontend `src/venue/constants/subscription-plans.ts`)
 `-1` = unlimited.
 
 Currently enforced endpoints (`venue-routes.tsx`):
-- `POST /venue/playlists` — `maxPlaylists` quota
+- `POST /venue/playlists` — `maxPlaylists` quota (playlist count)
+  AND `maxTracks` quota (total tracks across all playlists, including
+  the new playlist's `contentItems`).
+- `PUT  /venue/playlists/:id` — `maxTracks` quota. When the update
+  changes `contentItems`, we count (sum of every OTHER playlist's
+  length + new length) and reject if it breaches the cap. Also keeps
+  the per-playlist `trackCount` in sync with the actual array length.
 - `GET /venue/analytics/*` (5 endpoints) + `POST /venue/analytics/export` — `features.analytics` flag
+
+`maxTracks` caps:
+- free/start → 500
+- business / trial → 2000
+- network / enterprise → -1 (unlimited)
 
 Enforced in `venue-zones-routes.tsx` (mounted at `/server/api/venue-zones`):
 - `POST /` (create zone) — `limits.zones` cap via `quotaExceeded(...)`.
@@ -337,9 +348,12 @@ with `https://` or `data:image/`, max 2048 chars (blocks
 
 Numbered 018 because 017_venue_api_tokens.sql ships in parallel.
 
-Not yet enforced (helpers ready, endpoints don't exist or aren't
-prioritized): `maxTracks`. apiAccess + customBranding shipped
-2026-05-25 (see sections above).
+Not yet enforced: none. All `VENUE_PLAN_LIMITS` flags
+(zones / maxPlaylists / maxTracks / analytics / scheduling /
+multiLocation / apiAccess / customBranding) have route gating as of
+2026-05-25. `libraryAccess` ('basic' / 'full' / 'premium') is a
+helper ladder reserved for future catalog endpoints — no
+consumer yet.
 
 `GET /venue/profile` enriches the response with `effectivePlan` +
 `planLimits` so the cabinet can grey out locked features without

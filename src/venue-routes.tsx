@@ -504,6 +504,16 @@ app.get('/playlists', requireAuth, async (c) => {
   }
 });
 
+// Sum of contentItems.length across every playlist for a venue —
+// used to enforce VENUE_PLAN_LIMITS.maxTracks. The `trackCount` field
+// stored on each playlist is best-effort metadata (UI hint); we count
+// the actual array length so we can't be fooled by a stale or
+// hand-set value.
+function countTotalTracks(playlists: any[]): number {
+  return playlists.reduce((sum, p) =>
+    sum + (Array.isArray(p?.contentItems) ? p.contentItems.length : 0), 0);
+}
+
 // POST /playlists - Создать плейлист (gated by VENUE_PLAN_LIMITS.maxPlaylists)
 app.post('/playlists', requireAuth, async (c) => {
   try {
@@ -527,6 +537,21 @@ app.post('/playlists', requireAuth, async (c) => {
     }
 
     const body = await c.req.json();
+    const contentItems = Array.isArray(body.contentItems) ? body.contentItems : [];
+
+    // Enforce maxTracks BEFORE inserting — count the would-be total
+    // across the existing playlists + this new one's items. Free/Старт
+    // = 500, Бизнес = 2000, Сеть/Enterprise = -1 (unlimited).
+    if (limits.maxTracks !== -1 && contentItems.length > 0) {
+      const wouldBeTotal = countTotalTracks(playlists) + contentItems.length;
+      if (wouldBeTotal > limits.maxTracks) {
+        return c.json(
+          quotaExceeded('tracks', wouldBeTotal, limits.maxTracks, profile),
+          403,
+        );
+      }
+    }
+
     const now = new Date().toISOString();
     const playlist = {
       id: `pl-${crypto.randomUUID()}`,
@@ -535,8 +560,8 @@ app.post('/playlists', requireAuth, async (c) => {
       title: body.title || 'Новый плейлист',
       description: body.description || null,
       coverImageUrl: body.coverImageUrl || null,
-      contentItems: body.contentItems || [],
-      trackCount: body.trackCount || 0,
+      contentItems,
+      trackCount: contentItems.length,
       totalDuration: body.totalDuration || 0,
       isPublic: body.isPublic ?? true,
       status: body.status || 'draft',
@@ -573,7 +598,30 @@ app.put('/playlists/:id', requireAuth, async (c) => {
       return c.json({ error: 'Playlist not found' }, 404);
     }
 
-    playlists[idx] = { ...playlists[idx], ...body, updatedAt: new Date().toISOString() };
+    // Enforce maxTracks if the update changes contentItems. We count
+    // the would-be total across every playlist (this one's NEW length
+    // + every OTHER playlist's existing length) and reject if it
+    // breaches the cap.
+    const limits = getEffectiveVenueLimits(profile);
+    if (limits.maxTracks !== -1 && Array.isArray(body.contentItems)) {
+      const otherTotal = playlists.reduce((sum, p, i) =>
+        i === idx ? sum : sum + (Array.isArray(p?.contentItems) ? p.contentItems.length : 0), 0);
+      const wouldBeTotal = otherTotal + body.contentItems.length;
+      if (wouldBeTotal > limits.maxTracks) {
+        return c.json(
+          quotaExceeded('tracks', wouldBeTotal, limits.maxTracks, profile),
+          403,
+        );
+      }
+    }
+
+    const merged = { ...playlists[idx], ...body, updatedAt: new Date().toISOString() };
+    // Keep trackCount in sync with contentItems.length so the UI
+    // doesn't show a stale figure.
+    if (Array.isArray(merged.contentItems)) {
+      merged.trackCount = merged.contentItems.length;
+    }
+    playlists[idx] = merged;
     await venuePlaylists.set(profile.id, playlists);
 
     return c.json({ success: true, playlist: playlists[idx] });
