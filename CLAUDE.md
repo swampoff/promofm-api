@@ -1,5 +1,22 @@
 # PromoFM API — Claude Code Configuration
 
+## ⚡ Read first, every session
+
+Before responding to ANY task, open these two files — they carry
+context the user can't repeat in chat every time:
+
+1. **[docs/OPERATIONS_LOG.md](docs/OPERATIONS_LOG.md)** — manual
+   prod interventions (SQL fixes, account repairs, admin actions).
+   The git log doesn't capture these; this log does.
+2. **[docs/PRODUCT_FACTS.md](docs/PRODUCT_FACTS.md)** — verified
+   reality of how features actually work in code. Don't paraphrase
+   from memory — cite the file:line from here.
+
+When you make a manual prod intervention (or the user tells you
+about one) — append to OPERATIONS_LOG.md in the same PR. When you
+ship a code change that changes how a feature works (pricing,
+gating, mechanic) — update PRODUCT_FACTS.md in the same PR.
+
 ## Project
 
 PromoFM API — бэкенд платформы promo-music.ru.
