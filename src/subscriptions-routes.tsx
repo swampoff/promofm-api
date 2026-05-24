@@ -36,8 +36,13 @@ export const SUBSCRIPTION_PLANS = {
     credits_per_month: 0,
     extra_mailing_price: 7000,
     discounts: {
-      pitching: 0,
-      marketing: 0,
+      // 'promotion' covers both pitching and marketing (release distribution
+      // to playlists/curators + future DSP API integration). Was: two
+      // separate keys `pitching` (5/10/15%) and `marketing` (5/15/25%);
+      // merged 2026-05-25 to single bucket per product decision.
+      // Code keeps backward-compat reads (subscription-pricing.tsx) for
+      // existing subscription rows in DB that still carry the old keys.
+      promotion: 0,
       track_test: 0,
       banners: 0,
     },
@@ -52,14 +57,13 @@ export const SUBSCRIPTION_PLANS = {
     credits_per_month: 1,
     extra_mailing_price: 5000,
     discounts: {
-      pitching: 0.05,
-      marketing: 0.05,
+      promotion: 0.05,
       track_test: 0,
       banners: 0.05,
     },
     donation_fee: 0.07,
     coins_bonus: 0.05,
-    description: 'Для старта и редких релизов. 1 рассылка в месяц + скидки на услуги.',
+    description: 'Для старта и редких релизов. 1 рассылка в месяц + скидки на продвижение.',
   },
   pro: {
     name: 'Про',
@@ -68,8 +72,7 @@ export const SUBSCRIPTION_PLANS = {
     credits_per_month: 3,
     extra_mailing_price: 4000,
     discounts: {
-      pitching: 0.10,
-      marketing: 0.15,
+      promotion: 0.10,
       track_test: 0.10,
       banners: 0.10,
     },
@@ -84,14 +87,13 @@ export const SUBSCRIPTION_PLANS = {
     credits_per_month: 10,
     extra_mailing_price: 3000,
     discounts: {
-      pitching: 0.15,
-      marketing: 0.25,
+      promotion: 0.15,
       track_test: 0.20,
       banners: 0.15,
     },
     donation_fee: 0.03,
     coins_bonus: 0.25,
-    description: 'Для лейблов, менеджеров и агентств. 10 рассылок, максимальные скидки.',
+    description: 'Для лейблов, менеджеров и агентств. 10 рассылок, максимальные скидки на продвижение.',
   },
 };
 

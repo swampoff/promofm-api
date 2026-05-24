@@ -40,18 +40,38 @@ downgrades to spark.
 
 **Source:** `src/subscription-pricing.tsx` — `applySubscriptionDiscount(userId, category, basePrice)`.
 
+Categories (merged 2026-05-25 — was 4, now 3):
+- **promotion** — питчинг (плейлисты/радио/инфлюенсеры/медиа) +
+  marketing-кампания + дистрибуция в стриминги. Single bucket per
+  product decision; legacy `pitching` / `marketing` accepted as
+  aliases by `normalizeCategory()` so older call sites work without
+  rename.
+- **track_test** — PromoLab оценка треков экспертами.
+- **banners** — рекламные баннеры на платформе (оплата коинами).
+
 Wired callsites:
-- **pitching:** `pitching-routes.tsx` `/submit` (per-row inside the batch loop)
+- **promotion (via 'pitching' alias):** `pitching-routes.tsx` `/submit` (per-row inside the batch loop)
 - **track_test:** `track-test-routes.tsx` `/submit` (single charge)
 - **banners:** `banner-routes.tsx` `/:id/activate` (coin deduction)
-- **marketing:** declared in SUBSCRIPTION_PLANS but **NOT wired** — no canonical "marketing" endpoint exists yet (mailings, autoposts and banners all live in different routes). When a unified marketing surface lands, wire it here.
+- **promotion (distribution & marketing):** to be wired in
+  `checkout-routes.tsx` when `metadata.itemType IN ('marketing',
+  'distribution')` — currently pending the distribution flow PR.
 
-| Tier  | pitching | marketing | track_test | banners |
-|-------|----------|-----------|------------|---------|
-| spark | 0%       | 0%        | 0%         | 0%      |
-| start | 5%       | 5%        | 0%         | 5%      |
-| pro   | 10%      | 15%       | 10%        | 10%     |
-| elite | 15%      | 25%       | 20%        | 15%     |
+| Tier  | promotion | track_test | banners |
+|-------|-----------|------------|---------|
+| spark | 0%        | 0%         | 0%      |
+| start | 5%        | 0%         | 5%      |
+| pro   | 10%       | 10%        | 10%     |
+| elite | 15%       | 20%        | 15%     |
+
+Backwards compat: existing subscription rows in DB still carry
+`discounts.pitching` / `discounts.marketing` legacy keys until the
+next renewal/upgrade overwrites them via the checkout webhook
+PLANS table (also updated 2026-05-25). The helper reads
+`plan.discounts.promotion` first, then falls back to MAX(stored
+.pitching, stored.marketing) for old rows. Net effect: every
+existing subscriber gets at least the higher of the two old
+discounts on every charge — no one is downgraded by the merge.
 
 Defensive default: any failure (no user_id, no active subscription,
 expired sub, DB hiccup, unknown tier) → discount=0, basePrice unchanged.

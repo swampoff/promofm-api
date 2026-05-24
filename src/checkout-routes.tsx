@@ -114,11 +114,19 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // ─── Activate subscription ───
   if (session.type === 'subscription' && session.metadata?.planKey) {
     try {
+      // NOTE: shape merged 2026-05-25 — `discounts.pitching` +
+      // `discounts.marketing` consolidated into single
+      // `discounts.promotion`. Source-of-truth lives in
+      // src/subscriptions-routes.tsx SUBSCRIPTION_PLANS; this table
+      // duplicates it for the webhook's offline activation path
+      // (we don't import to avoid pulling the Hono app graph here).
+      // Values 5/10/15% chosen per product decision (lower of two
+      // pre-merge sets, was pitching=5/10/15 vs marketing=5/15/25).
       const PLANS: Record<string, any> = {
-        spark:  { name: 'Тест-драйв', price_month: 0,      credits_per_month: 0,  extra_mailing_price: 7000, discounts: { pitching: 0, marketing: 0, track_test: 0, banners: 0 }, donation_fee: 0.10, coins_bonus: 0 },
-        start:  { name: 'Старт',       price_month: 8990,   credits_per_month: 1,  extra_mailing_price: 5000, discounts: { pitching: 0.05, marketing: 0.05, track_test: 0, banners: 0.05 }, donation_fee: 0.07, coins_bonus: 0.05 },
-        pro:    { name: 'Про',         price_month: 39990,  credits_per_month: 3,  extra_mailing_price: 4000, discounts: { pitching: 0.10, marketing: 0.15, track_test: 0.10, banners: 0.10 }, donation_fee: 0.05, coins_bonus: 0.15 },
-        elite:  { name: 'Бизнес',     price_month: 149990, credits_per_month: 10, extra_mailing_price: 3000, discounts: { pitching: 0.15, marketing: 0.25, track_test: 0.20, banners: 0.15 }, donation_fee: 0.03, coins_bonus: 0.25 },
+        spark:  { name: 'Тест-драйв', price_month: 0,      credits_per_month: 0,  extra_mailing_price: 7000, discounts: { promotion: 0,    track_test: 0,    banners: 0    }, donation_fee: 0.10, coins_bonus: 0 },
+        start:  { name: 'Старт',       price_month: 8990,   credits_per_month: 1,  extra_mailing_price: 5000, discounts: { promotion: 0.05, track_test: 0,    banners: 0.05 }, donation_fee: 0.07, coins_bonus: 0.05 },
+        pro:    { name: 'Про',         price_month: 39990,  credits_per_month: 3,  extra_mailing_price: 4000, discounts: { promotion: 0.10, track_test: 0.10, banners: 0.10 }, donation_fee: 0.05, coins_bonus: 0.15 },
+        elite:  { name: 'Бизнес',     price_month: 149990, credits_per_month: 10, extra_mailing_price: 3000, discounts: { promotion: 0.15, track_test: 0.20, banners: 0.15 }, donation_fee: 0.03, coins_bonus: 0.25 },
       };
       const planKey = session.metadata.planKey;
       const plan = PLANS[planKey];

@@ -29,7 +29,24 @@
 import { pool } from './db-client.tsx';
 import { SUBSCRIPTION_PLANS } from './subscriptions-routes.tsx';
 
-export type DiscountCategory = 'pitching' | 'marketing' | 'track_test' | 'banners';
+/**
+ * Canonical categories: 'promotion' (питчинг + маркетинг + дистрибуция в
+ * стриминги), 'track_test' (PromoLab оценка), 'banners' (рекламные
+ * баннеры на платформе).
+ *
+ * Legacy `'pitching'` and `'marketing'` are accepted by callers as
+ * aliases for `'promotion'` (see normalizeCategory below) so existing
+ * call sites in pitching-routes.tsx don't need synchronous renaming.
+ * New code should use 'promotion'.
+ */
+export type DiscountCategory = 'promotion' | 'pitching' | 'marketing' | 'track_test' | 'banners';
+
+type CanonicalCategory = 'promotion' | 'track_test' | 'banners';
+
+function normalizeCategory(category: DiscountCategory): CanonicalCategory {
+  if (category === 'pitching' || category === 'marketing' || category === 'promotion') return 'promotion';
+  return category;
+}
 
 export interface PricingResult {
   basePrice: number;
@@ -81,8 +98,26 @@ export async function applySubscriptionDiscount(
     const plan = (SUBSCRIPTION_PLANS as any)[tier];
     if (!plan?.discounts) return { ...fallback, tier: tier || null };
 
-    const discount = Number(plan.discounts[category]) || 0;
-    if (discount <= 0) {
+    const canonical = normalizeCategory(category);
+
+    // First check the canonical key on the IN-MEMORY plan (always uses the
+    // post-merge shape with `promotion`). Then for backward-compat fall
+    // back to whatever the user's stored subscription row carries — old
+    // rows still have `pitching` / `marketing` legacy keys until the
+    // next subscription renewal/upgrade overwrites them with the new
+    // shape via the checkout webhook PLANS table.
+    let discount = Number(plan.discounts[canonical]);
+    if (!Number.isFinite(discount) || discount <= 0) {
+      if (canonical === 'promotion' && sub.discounts) {
+        const legacy = Math.max(
+          Number(sub.discounts.promotion) || 0,
+          Number(sub.discounts.pitching) || 0,
+          Number(sub.discounts.marketing) || 0,
+        );
+        if (legacy > 0) discount = legacy;
+      }
+    }
+    if (!Number.isFinite(discount) || discount <= 0) {
       return { ...fallback, tier };
     }
 
