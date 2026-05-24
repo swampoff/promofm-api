@@ -291,8 +291,32 @@ current_playlist_id text, is_active boolean, sort_order int,
 created_at, updated_at)`. `current_playlist_id` references items
 inside the `venue_playlists.data` jsonb (no FK — jsonb store).
 
+Enforced in `venue-api-routes.tsx` — two surfaces:
+- `/server/api/venue-api/tokens` (JWT auth) — issue/list/update/
+  revoke/delete API tokens. `POST /` gated by `limits.apiAccess`
+  (network/enterprise = true). Returns plaintext token ONCE in
+  response body — never again. Stores SHA-256 hash + first-12-char
+  prefix for display.
+- `/server/api/venue-public/*` (Bearer-token auth) — third-party
+  read/write surface scoped to the token's venue. Endpoints:
+  `GET /me`, `GET /zones`, `GET /zones/:id`, `GET /zones/:id/current`,
+  `PUT /zones/:id/playlist`, `GET /playlists`, `GET /playlists/:id`,
+  `GET /now-playing`. Each endpoint requires a scope from
+  `read:zones | write:zones | read:locations | read:playlists | read:now`.
+  Expired (`expires_at < NOW()`) and revoked (`revoked_at NOT NULL`)
+  tokens hit 401. `last_used_at` touched fire-and-forget on every
+  authenticated request.
+
+Token schema (`src/migrations/017_venue_api_tokens.sql`):
+`(id uuid, user_id text, venue_id text, name text, token_hash text
+UNIQUE, token_prefix text, scopes jsonb, last_used_at, expires_at,
+revoked_at, created_at)`. Format: `vpfm_` + 64 hex chars (32 random
+bytes). `vpfm_` prefix is intentional — log scrubbers / GitHub
+secret-scanning can detect leaks.
+
 Not yet enforced (helpers ready, endpoints don't exist or aren't
-prioritized): `multiLocation`, `apiAccess`, `customBranding`, `maxTracks`.
+prioritized): `customBranding`, `maxTracks`. `multiLocation`
+shipped 2026-05-25 (see «venue-locations-routes.tsx» section above).
 
 `GET /venue/profile` enriches the response with `effectivePlan` +
 `planLimits` so the cabinet can grey out locked features without
