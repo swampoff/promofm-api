@@ -996,15 +996,19 @@ export async function getVenueProfile(userId: string) {
 }
 
 export async function upsertVenueProfile(userId: string, profile: Record<string, any>) {
+  // ЗЕРКАЛО фикса 8652379 (upsertDjProfile): не пинаем `id` (PK
+  // auto-uuid), а ресолвим conflict по UNIQUE(user_id). Иначе если
+  // existing строка имеет id ≠ userId — UPSERT идёт в INSERT path,
+  // UNIQUE на user_id ловит дубль, ошибка тихо логируется.
+  // Migration 027 добавляет UNIQUE индекс на user_id.
   const row = {
-    id: userId,
     user_id: userId,
     data: profile,
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()
     .from('venue_profiles')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertVenueProfile:', error);
 }
 
@@ -1021,15 +1025,16 @@ export async function getRadioProfile(userId: string) {
 }
 
 export async function upsertRadioProfile(userId: string, profile: Record<string, any>) {
+  // Зеркало фикса 8652379 — см. upsertVenueProfile выше.
+  // Migration 027 добавляет UNIQUE на user_id.
   const row = {
-    id: userId,
     user_id: userId,
     data: profile,
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()
     .from('radio_profiles')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertRadioProfile:', error);
 }
 
@@ -1046,15 +1051,16 @@ export async function getProducerProfile(userId: string) {
 }
 
 export async function upsertProducerProfile(userId: string, profile: Record<string, any>) {
+  // Зеркало фикса 8652379 — см. upsertVenueProfile выше.
+  // Migration 027 добавляет UNIQUE на user_id.
   const row = {
-    id: userId,
     user_id: userId,
     data: profile,
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()
     .from('producer_profiles')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertProducerProfile:', error);
 }
 
