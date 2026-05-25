@@ -127,6 +127,47 @@ function ensureDjMixesSchema(): Promise<void> {
 // PROFILE
 // ════════════════════════════════════════
 
+// Wrap a flat-shape blob into the editor's nested envelope so the
+// frontend (`DjProfileEditor.tsx`) finds `data.profile.djName`,
+// `data.profile.bio`, etc. on first load. Two reasons this matters:
+//
+//   1. Legacy rows in `dj_profiles.data` that were saved before
+//      2026-05-25 may carry the flat shape because the old
+//      upsertDjProfile() didn't preserve a nested envelope.
+//   2. SQL-seeded accounts (e.g. /tmp/create_test_dj.sql QA seed)
+//      stored fields flat — `{ djName, openForBookings, ... }` —
+//      and the editor rendered «Имя ещё не задано» because it
+//      reads `d.profile.djName` only.
+//
+// Idempotent: when `blob.profile` is already present we trust it
+// and return as-is.
+function ensureNestedDjEnvelope(blob: any): any {
+  if (!blob || typeof blob !== 'object') return blob;
+  if (blob.profile && typeof blob.profile === 'object') return blob;
+
+  // Common editor-side keys; anything else stays where it is.
+  const editorProfileKeys = new Set([
+    'djName', 'dj_name', 'stageName',
+    'bio', 'about',
+    'avatarUrl', 'avatar_url', 'coverUrl',
+    'city', 'country', 'location',
+    'genres', 'tags', 'specializations',
+    'hourlyRate', 'ratePerHour', 'ratePerEvent', 'priceFrom',
+    'openForBookings', 'isAvailable',
+    'experienceYears', 'completedGigs', 'rating',
+    'photo', 'photo_url',
+  ]);
+  const profileBucket: Record<string, any> = {};
+  const rest: Record<string, any> = {};
+  for (const [k, v] of Object.entries(blob)) {
+    if (editorProfileKeys.has(k)) profileBucket[k] = v;
+    else rest[k] = v;
+  }
+  return Object.keys(profileBucket).length > 0
+    ? { ...rest, profile: profileBucket }
+    : blob;
+}
+
 // GET /profile - загрузить профиль DJ
 app.get('/profile', requireAuth, requireDjRole, async (c) => {
   try {
@@ -138,7 +179,7 @@ app.get('/profile', requireAuth, requireDjRole, async (c) => {
       return c.json({ success: true, data: null });
     }
 
-    return c.json({ success: true, data });
+    return c.json({ success: true, data: ensureNestedDjEnvelope(data) });
   } catch (error) {
     console.error('Error loading DJ profile:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
