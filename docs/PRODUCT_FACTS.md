@@ -559,6 +559,53 @@ helper resolves the user's email + display name from the `users`
 table for the venue-station emails (welcome already has the values
 at signup time).
 
+### Venue APK (Android player) — release metadata + download (Level 3 pilot)
+
+**Source:** `src/venue-apk-routes.tsx` + `system_config` jsonb store
+(key `venue_apk_release`) + `/server/uploads/apk/<filename>` static
+serving (added `'apk'` to `STATIC_UPLOAD_SUBDIRS` in index.ts).
+
+The actual `.apk` file is built in a separate repo. This module is
+the metadata + delivery layer on our side. Admin uploads a build via
+`POST /admin/upload` (multipart/form-data: `file` + `version` +
+`versionCode` + `minAndroidSdk` + `releaseNotes`); backend hashes
+the file (sha256), writes it to `/opt/promofm-api/uploads/apk/
+promofm-venue-player.apk` (stable filename so URLs don't churn),
+and stores metadata in the `system_config` jsonb store.
+
+Endpoints under `/server/api/venue-apk`:
+- `GET    /info`                       (JWT) — current release metadata
+- `GET    /public-info`                (no auth) — same, for the
+  Android device itself to check on first boot
+- `POST   /admin/upload`               (requireAdmin, multipart)
+  — upload + replace current release. Sanity-checks ZIP magic
+  (PK\x03\x04 at offset 0) so HTML/garbage uploads are rejected.
+  Max 200 MiB. Version must match `^\d+\.\d+(\.\d+)?$`.
+- `PUT    /admin/info`                 (requireAdmin) — update
+  metadata without re-uploading (typo fix in release notes etc.)
+- `DELETE /admin/release`              (requireAdmin) — wipe file +
+  flip available=false. For rollback / debug.
+- `GET    /admin/connected-devices`    (requireAdmin) — list every
+  paired venue device with last-seen timestamp + venue context.
+  Built on top of existing `venue_station_streams.paired_*` columns
+  — no new schema.
+
+Metadata shape (from `system_config.data` jsonb):
+```ts
+{
+  available: boolean,             // false when no APK uploaded yet
+  filename, version, versionCode,
+  sha256, bytes,
+  minAndroidSdk,                  // default 24 (Android 7.0)
+  releaseNotes, releasedAt,
+  downloadUrl,                    // /server/uploads/apk/<filename>
+}
+```
+
+Cabinet `/venue/apk` page (frontend) reads `/info`, renders the
+download button + pairing code (pulled from `venue-station/me`).
+When `available=false` → «скоро будет» banner instead of dead link.
+
 ---
 
 ## DJ cabinet

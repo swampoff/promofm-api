@@ -58,6 +58,7 @@ import venueLocationsRoutes from './venue-locations-routes.tsx';
 import venueBrandingRoutes from './venue-branding-routes.tsx';
 import streamPlayerRoutes from './stream-player-routes.tsx';
 import venueStationRoutes from './venue-station-routes.tsx';
+import venueApkRoutes from './venue-apk-routes.tsx';
 import promoGuideRoutes from './promo-guide-routes.tsx';
 import aiAgent from './ai-agent.ts';
 import djMarketplaceRoutes from './dj-marketplace-routes.tsx';
@@ -284,11 +285,12 @@ app.get('/server/uploads/venue-content/*', async (c) => {
 // Originally DJ-only; venue-logos joined the list when the branding
 // upload endpoint shipped. Each subdir's writer is in its own routes
 // module — this block is only the read/serve side.
-const STATIC_UPLOAD_SUBDIRS = ['dj-avatars', 'dj-covers', 'dj-mixes', 'dj-mix-covers', 'dj-videos', 'dj-portfolio', 'venue-logos'];
+const STATIC_UPLOAD_SUBDIRS = ['dj-avatars', 'dj-covers', 'dj-mixes', 'dj-mix-covers', 'dj-videos', 'dj-portfolio', 'venue-logos', 'apk'];
 const MIME_BY_EXT: Record<string, string> = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', svg: 'image/svg+xml',
   mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac',
   mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/mp4',
+  apk: 'application/vnd.android.package-archive',
 };
 for (const subdir of STATIC_UPLOAD_SUBDIRS) {
   app.get(`/server/uploads/${subdir}/*`, async (c) => {
@@ -341,6 +343,7 @@ app.route('/server/api/venue-locations', venueLocationsRoutes);
 app.route('/server/api/venue-branding', venueBrandingRoutes);
 app.route('/server/api/stream-player', streamPlayerRoutes);
 app.route('/server/api/venue-station', venueStationRoutes);
+app.route('/server/api/venue-apk', venueApkRoutes);
 app.route('/server/api/venue-billing', venueBillingRoutes);
 app.route('/server', promoGuideRoutes);
 app.route('/server/api/ai-agent', aiAgent);
