@@ -901,10 +901,15 @@ export async function getDjProfiles() {
 }
 
 export async function getDjProfile(djId: string) {
+  // Callers pass user_id (the platform identity), not the auto-generated
+  // dj_profiles.id uuid. Same identity-model the upsert side uses now —
+  // see commit 8652379 for the matching writer fix. Looking up by id
+  // returns null for every freshly-onboarded DJ and the editor renders
+  // empty even though the row exists in jsonb.
   const { data, error } = await db()
     .from('dj_profiles')
     .select('*')
-    .eq('id', djId)
+    .eq('user_id', djId)
     .maybeSingle();
   if (error) console.error('[db] getDjProfile:', error);
   return data ? (data.data || data) : null;
