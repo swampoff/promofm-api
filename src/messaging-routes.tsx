@@ -55,7 +55,7 @@ const app = new Hono();
 
 // ── Types ──
 
-type CabinetRole = 'artist' | 'producer' | 'dj' | 'admin' | 'radio' | 'venue';
+type CabinetRole = 'artist' | 'producer' | 'dj' | 'admin' | 'radio' | 'venue' | 'engineer' | 'label';
 
 interface Participant {
   userId: string;
@@ -65,14 +65,38 @@ interface Participant {
 }
 
 // ── Communication Rules ──
-
+//
+// All cabinet roles are mutually addressable — this is the
+// in-platform DM surface (the «соцсеть внутри платформы») that
+// lets a DJ pitch a label, an artist DM a mastering engineer,
+// a radio station reach out to a venue directly, etc.
+//
+// Two rounds of fixes on 2026-05-25:
+//   1. `engineer` and `label` were missing from `CabinetRole`
+//      entirely — `roles.tsx` knows them, the messaging surface
+//      didn't, so they were dropped by the role allowlist on
+//      `/search-contacts`.
+//   2. `radio` was deliberately narrow («только admin + venue»,
+//      rationale: radio↔creator goes through pitching) — but
+//      product decision is that radio should also be reachable
+//      from any cabinet and vice versa. Pitching is a structured
+//      submission flow, not a substitute for a chat.
+//
+// Anything new: add the role to `CabinetRole` AND to every row
+// below (it's a symmetric graph). The three FE declarations of
+// `CabinetRole` must agree — see PRODUCT_FACTS.md.
+const ALL_CABINET_ROLES: CabinetRole[] = [
+  'artist', 'producer', 'dj', 'engineer', 'label', 'venue', 'radio', 'admin',
+];
 const ALLOWED_CONTACTS: Record<CabinetRole, CabinetRole[]> = {
-  artist:   ['artist', 'producer', 'dj', 'admin', 'venue'],
-  producer: ['artist', 'producer', 'dj', 'admin', 'venue'],
-  dj:       ['artist', 'producer', 'dj', 'admin', 'venue'],
-  admin:    ['artist', 'producer', 'dj', 'radio', 'venue'],
-  radio:    ['admin', 'venue'],
-  venue:    ['artist', 'producer', 'dj', 'admin', 'radio'],
+  artist:   ALL_CABINET_ROLES,
+  producer: ALL_CABINET_ROLES,
+  dj:       ALL_CABINET_ROLES,
+  engineer: ALL_CABINET_ROLES,
+  label:    ALL_CABINET_ROLES,
+  venue:    ALL_CABINET_ROLES,
+  radio:    ALL_CABINET_ROLES,
+  admin:    ALL_CABINET_ROLES,
 };
 
 function canCommunicate(roleA: CabinetRole, roleB: CabinetRole): boolean {
@@ -90,6 +114,8 @@ const ROLE_LABELS: Record<CabinetRole, string> = {
   admin: 'Платформа',
   radio: 'Радио',
   venue: 'Заведение',
+  engineer: 'Инженер',
+  label: 'Лейбл',
 };
 
 // Map role from DB enum to client-facing role
