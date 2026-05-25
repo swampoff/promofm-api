@@ -281,6 +281,9 @@ app.get('/conversations/:userId', requireAuth, async (c) => {
           participants,
           source: row.data?.source || 'direct',
           collabOfferId: row.data?.collabOfferId,
+          isGroup: Boolean(row.data?.isGroup) || (participants.length > 2),
+          title: row.data?.title || null,
+          creatorId: row.data?.creatorId || null,
           lastMessage: row.last_message_text || undefined,
           lastMessageAt: row.last_message_at?.toISOString?.() || row.last_message_at,
           createdAt: row.created_at?.toISOString?.() || row.created_at,
@@ -300,10 +303,11 @@ app.get('/conversations/:userId', requireAuth, async (c) => {
 
 app.post('/conversations', requireAuth, async (c) => {
   try {
-    const { participants, source, collabOfferId } = await c.req.json() as {
+    const { participants, source, collabOfferId, title } = await c.req.json() as {
       participants: Participant[];
       source?: 'direct' | 'collab' | 'support';
       collabOfferId?: string;
+      title?: string;
     };
 
     if (!participants || participants.length < 2) {
@@ -315,69 +319,123 @@ app.post('/conversations', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Access denied: you must be a participant' }, 403);
     }
 
-    const p1 = participants[0];
-    const p2 = participants[1];
+    // Two-party conversation: keep the deterministic «userA::userB»
+    // ID so repeated creates collapse to the same row, the original
+    // behaviour. Three-or-more participants → group chat, gets a
+    // fresh UUID per creation (groups aren't deduplicated by member
+    // set — calling «create group» twice with the same people
+    // makes two distinct groups, matching every other messenger).
+    const isGroup = participants.length > 2;
+    const groupTitle = isGroup ? String(title || '').slice(0, 120).trim() || undefined : undefined;
 
-    // Block guard. Either side blocking the other denies new
-    // conversations (existing convs stay readable). 403, neutral
-    // error — don't leak which side did the blocking.
-    const blockState = await getBlockedPair(p1.userId, p2.userId);
-    if (blockState.a_blocks_b || blockState.b_blocks_a) {
-      return c.json({
-        success: false,
-        error: 'Невозможно начать переписку с этим пользователем.',
-        code: 'BLOCKED',
-      }, 403);
+    // Every pair must be allowed to communicate. For 2-party this
+    // is one check; for groups every initiator↔member pair gates.
+    // Returns the FIRST offending pair so the FE can surface a
+    // useful message.
+    //
+    // Block-list checks live in the chat-blocks branch
+    // (`getBlockedPair` / `getBlocksTouching`) — when both branches
+    // are on main the check applies here too. For groups it's
+    // intentionally not applied between two non-initiator members
+    // (X+Y+Z is allowed if the initiator X hasn't blocked Y or Z,
+    // even if Y has blocked Z — Y just stays quiet), matching
+    // Telegram/WhatsApp group semantics.
+    for (let i = 0; i < participants.length; i++) {
+      const a = participants[i];
+      for (let j = i + 1; j < participants.length; j++) {
+        const b = participants[j];
+        if (!canCommunicate(a.role, b.role)) {
+          const labelA = ROLE_LABELS[a.role] || a.role;
+          const labelB = ROLE_LABELS[b.role] || b.role;
+          return c.json({
+            success: false,
+            error: `${labelA} не может отправлять сообщения роли ${labelB}`,
+            code: 'COMMUNICATION_RESTRICTED',
+          }, 403);
+        }
+      }
     }
 
-    if (!canCommunicate(p1.role, p2.role)) {
-      const label1 = ROLE_LABELS[p1.role] || p1.role;
-      const label2 = ROLE_LABELS[p2.role] || p2.role;
-      return c.json({
-        success: false,
-        error: `${label1} не может отправлять сообщения роли ${label2}`,
-        code: 'COMMUNICATION_RESTRICTED',
-      }, 403);
-    }
-
-    const convId = makeConvId(p1.userId, p2.userId);
     const participantIds = participants.map(p => p.userId);
 
-    // Try insert; if exists, return existing
-    const existing = await pool.query(
-      `SELECT id, participant_ids, last_message_text, last_message_at, data, created_at
-       FROM dm_conversations WHERE id = $1`,
-      [convId]
-    );
-    if (existing.rows.length > 0) {
-      const row = existing.rows[0];
+    if (!isGroup) {
+      // 2-party: deterministic ID, dedupe via existing-row check.
+      const convId = makeConvId(participants[0].userId, participants[1].userId);
+      const existing = await pool.query(
+        `SELECT id, participant_ids, last_message_text, last_message_at, data, created_at
+         FROM dm_conversations WHERE id = $1`,
+        [convId]
+      );
+      if (existing.rows.length > 0) {
+        const row = existing.rows[0];
+        return c.json({
+          success: true,
+          conversation: {
+            id: row.id, participants,
+            source: row.data?.source || 'direct',
+            collabOfferId: row.data?.collabOfferId,
+            lastMessage: row.last_message_text,
+            lastMessageAt: row.last_message_at,
+            createdAt: row.created_at,
+            isGroup: false,
+          },
+          created: false,
+        });
+      }
+
+      const dataJson = JSON.stringify({ source: source || 'direct', collabOfferId });
+      await pool.query(
+        `INSERT INTO dm_conversations (id, participant_ids, last_message_text, last_message_at, data, created_at)
+         VALUES ($1, $2, '', NOW(), $3::jsonb, NOW())`,
+        [convId, participantIds, dataJson]
+      );
+
       return c.json({
         success: true,
         conversation: {
-          id: row.id, participants,
-          source: row.data?.source || 'direct',
-          collabOfferId: row.data?.collabOfferId,
-          lastMessage: row.last_message_text,
-          lastMessageAt: row.last_message_at,
-          createdAt: row.created_at,
+          id: convId, participants,
+          source: source || 'direct', collabOfferId,
+          createdAt: new Date().toISOString(),
+          isGroup: false,
         },
-        created: false,
+        created: true,
       });
     }
 
-    const dataJson = JSON.stringify({ source: source || 'direct', collabOfferId });
+    // Group chat: fresh UUID, store title in `data` jsonb. Cap at 50
+    // participants — generous default, prevents pathological invites
+    // until we ship proper invite-link infra.
+    if (participants.length > 50) {
+      return c.json({
+        success: false,
+        error: 'Группа не может содержать более 50 участников',
+      }, 400);
+    }
+    const groupId = crypto.randomUUID();
+    const groupData = {
+      source: source || 'direct',
+      collabOfferId,
+      isGroup: true,
+      title: groupTitle || null,
+      creatorId: authUserId,
+    };
     await pool.query(
       `INSERT INTO dm_conversations (id, participant_ids, last_message_text, last_message_at, data, created_at)
        VALUES ($1, $2, '', NOW(), $3::jsonb, NOW())`,
-      [convId, participantIds, dataJson]
+      [groupId, participantIds, JSON.stringify(groupData)]
     );
+    log.info({ groupId, creatorId: authUserId, count: participants.length }, 'dm_group_created');
 
     return c.json({
       success: true,
       conversation: {
-        id: convId, participants,
-        source: source || 'direct', collabOfferId,
+        id: groupId, participants,
+        source: source || 'direct',
+        collabOfferId,
         createdAt: new Date().toISOString(),
+        isGroup: true,
+        title: groupTitle || null,
+        creatorId: authUserId,
       },
       created: true,
     });
