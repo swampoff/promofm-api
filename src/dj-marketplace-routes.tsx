@@ -139,8 +139,17 @@ app.get('/djs/:id', async (c) => {
 app.get('/djs/:id/mixes', async (c) => {
   try {
     const id = c.req.param('id');
+    // dj_mixes.dj_id хранится как user_id, но публичный URL может содержать
+    // dj_profiles.id (uuid). Резолвим через подзапрос — принимаем оба варианта.
     const { rows } = await pool.query(
-      `SELECT id, title, genre, duration, plays_count as plays, data FROM dj_mixes WHERE dj_id = $1 ORDER BY created_at DESC`,
+      `SELECT m.id, m.title, m.genre, m.duration, m.plays_count as plays,
+              m.audio_url, m.cover_url, m.description, m.bpm_range, m.data, m.status
+         FROM dj_mixes m
+         WHERE (m.dj_id = $1 OR m.dj_id = (
+                SELECT user_id FROM dj_profiles
+                 WHERE id::text = $1 OR user_id = $1 LIMIT 1))
+           AND (m.status IS NULL OR m.status = 'published')
+         ORDER BY m.created_at DESC`,
       [id]
     );
     const mixes = rows.map((r: any) => ({
@@ -148,8 +157,15 @@ app.get('/djs/:id/mixes', async (c) => {
       title: r.title || '',
       genre: r.genre || '',
       duration: r.duration ? `${Math.floor(r.duration / 60)}:${String(r.duration % 60).padStart(2, '0')}` : '',
+      durationSec: r.duration || 0,
       plays: r.plays || 0,
       likes: r.data?.likes || 0,
+      audioUrl: r.audio_url || '',
+      coverUrl: r.cover_url || '',
+      description: r.description || '',
+      bpmRange: r.bpm_range || '',
+      isPremium: !!r.data?.isPremium,
+      price: Number(r.data?.price) || 0,
     }));
     return c.json({ success: true, data: mixes });
   } catch (err: any) {
@@ -164,7 +180,12 @@ app.get('/djs/:id/reviews', async (c) => {
   try {
     const id = c.req.param('id');
     const { rows } = await pool.query(
-      `SELECT id, reviewer_name, rating, comment, created_at, data FROM dj_reviews WHERE dj_id = $1 ORDER BY created_at DESC`,
+      `SELECT r.id, r.reviewer_name, r.rating, r.comment, r.created_at, r.data
+         FROM dj_reviews r
+         WHERE r.dj_id = $1 OR r.dj_id = (
+                SELECT user_id FROM dj_profiles
+                 WHERE id::text = $1 OR user_id = $1 LIMIT 1)
+         ORDER BY r.created_at DESC`,
       [id]
     );
     const reviews = rows.map((r: any) => ({
@@ -190,8 +211,11 @@ app.get('/djs/:id/calendar', async (c) => {
     // Check for booked dates from bookings table
     const { rows: bookings } = await pool.query(
       `SELECT event_date FROM bookings
-       WHERE performer_id = $1 AND status IN ('confirmed', 'deposit_paid', 'completed')
-       AND event_date >= CURRENT_DATE`,
+        WHERE (performer_id = $1 OR performer_id = (
+               SELECT user_id FROM dj_profiles
+                WHERE id::text = $1 OR user_id = $1 LIMIT 1))
+          AND status IN ('confirmed', 'deposit_paid', 'completed')
+          AND event_date >= CURRENT_DATE`,
       [id]
     ).catch(() => ({ rows: [] }));
 
