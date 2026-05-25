@@ -30,6 +30,7 @@ import { getPaymentBalance, upsertPaymentBalance } from './db.tsx';
 import { getDbClient } from "./db-client.tsx";
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { saveUpload, IMAGE_EXTS, MAX_IMAGE_BYTES } from './cabinet-uploads.tsx';
 
 const app = new Hono();
 
@@ -894,5 +895,70 @@ app.delete('/calendar/delete/:sessionId', requireAuth, async (c) => {
 // ════════════════════════════════════════
 // DEMO DATA SEEDING
 // ════════════════════════════════════════
+
+// ────────────────────────────────────────
+// Profile image uploads
+// ────────────────────────────────────────
+//
+// Producer cabinet (Promomusicfigma/src/app/ProducerApp.tsx
+// `ProfileTab`) didn't ship with avatar / cover upload — the
+// header was a static gradient with the first letter of the
+// producer's name. These two endpoints add the missing surface.
+//
+// Producer data has two stores:
+//   1. `producer_profile_edit` (jsonb-per-user, used by the editor)
+//   2. `producer_profiles` (jsonb in `data` column, consumed by
+//      cross-cabinet listings)
+// Both get the new URL via the helper below so a freshly-uploaded
+// avatar shows up in BOTH the producer's own editor (next load)
+// AND any public/cross-cabinet card that hits getProducerProfile.
+
+async function persistProducerImage(producerId: string, field: 'avatarUrl' | 'coverUrl', url: string) {
+  // Edit store (what the producer sees in their cabinet)
+  const editExisting = (await producerProfileEditStore.get(producerId)) || {};
+  await producerProfileEditStore.set(producerId, {
+    ...(editExisting as any),
+    [field]: url,
+    updatedAt: nowIso(),
+  });
+  // Public producer_profiles row (what other cabinets read)
+  const pubExisting = (await db.getProducerProfile(producerId)) || {};
+  await db.upsertProducerProfile(producerId, {
+    ...(pubExisting as any),
+    [field]: url,
+  });
+}
+
+app.post('/profile/avatar', requireAuth, async (c) => {
+  try {
+    const producerId = c.get('userId') as string;
+    if (!producerId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+    const uploaded = await saveUpload(file, 'producer-avatars', `avatar-${producerId}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+    await persistProducerImage(producerId, 'avatarUrl', uploaded.url);
+    return c.json({ success: true, data: { url: uploaded.url } });
+  } catch (error: any) {
+    console.error('Producer avatar upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
+  }
+});
+
+app.post('/profile/cover', requireAuth, async (c) => {
+  try {
+    const producerId = c.get('userId') as string;
+    if (!producerId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+    const uploaded = await saveUpload(file, 'producer-covers', `cover-${producerId}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+    await persistProducerImage(producerId, 'coverUrl', uploaded.url);
+    return c.json({ success: true, data: { url: uploaded.url } });
+  } catch (error: any) {
+    console.error('Producer cover upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
+  }
+});
 
 export default app;
