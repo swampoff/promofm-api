@@ -941,8 +941,13 @@ export async function upsertDjProfile(djId: string, profile: Record<string, any>
     ? { ...profile, ...profile.profile }   // nested envelope wins for editor-side fields
     : profile;
 
+  // Don't pin `id`: callers pass djId === user_id, but dj_profiles.id is
+  // a separate uuid (auto-generated) and user_id carries the UNIQUE
+  // constraint. Passing id=user_id makes UPSERT try to INSERT a new row
+  // with id matching some other row's user_id — fails with
+  // dj_profiles_user_id_key duplicate. Letting the DB keep its own id and
+  // resolving the conflict on user_id is the correct identity model.
   const row: Record<string, any> = {
-    id: djId,
     user_id: inner.userId || djId,
     dj_name: inner.djName || inner.dj_name || inner.stageName || null,
     genres: inner.genres || [],
@@ -969,7 +974,7 @@ export async function upsertDjProfile(djId: string, profile: Record<string, any>
   };
   const { error } = await db()
     .from('dj_profiles')
-    .upsert(row, { onConflict: 'id' });
+    .upsert(row, { onConflict: 'user_id' });
   if (error) console.error('[db] upsertDjProfile:', error);
 }
 
