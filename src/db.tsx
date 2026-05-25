@@ -1057,6 +1057,65 @@ export async function getAllProducerProfiles() {
   return (data || []).map((r: any) => r.data || r);
 }
 
+// ─── Engineer Profiles ─── (migration 025)
+
+export async function getEngineerProfile(userId: string) {
+  const { data, error } = await db()
+    .from('engineer_profiles')
+    .select('*')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error) console.error('[db] getEngineerProfile:', error);
+  return data ? (data.data || data) : null;
+}
+
+export async function upsertEngineerProfile(userId: string, profile: Record<string, any>) {
+  // Source-of-truth shape from the engineer profile editor is NESTED
+  // (mirrors DJ/producer):
+  //
+  //   { profile: { fullName, bio, avatarUrl, specializations, ... },
+  //     services: [...], portfolio: [...], … }
+  //
+  // POST /engineer/profile/avatar и /cover пишут именно в
+  // nested `data.profile.avatarUrl`. Денормализуем верхнеуровневые
+  // колонки чтобы public-маркетплейс мог фильтровать без распаковки
+  // jsonb (тот же паттерн что у upsertDjProfile / upsertProducerProfile).
+  const inner: Record<string, any> = (profile?.profile && typeof profile.profile === 'object')
+    ? { ...profile, ...profile.profile }
+    : profile;
+
+  const row: Record<string, any> = {
+    user_id: userId,
+    full_name: inner.fullName || inner.full_name || inner.name || null,
+    city: inner.city || null,
+    country: inner.country || null,
+    avatar_url: inner.avatarUrl || inner.avatar_url || null,
+    cover_url: inner.coverUrl || inner.cover_url || null,
+    bio: inner.bio || inner.about || null,
+    specializations: inner.specializations || inner.tags || [],
+    hourly_rate: inner.hourlyRate || inner.hourly_rate || 0,
+    is_available: inner.isAvailable !== undefined
+      ? inner.isAvailable
+      : (inner.openForOrders !== undefined ? inner.openForOrders : true),
+    data: profile,
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await db()
+    .from('engineer_profiles')
+    .upsert(row, { onConflict: 'user_id' });
+  if (error) console.error('[db] upsertEngineerProfile:', error);
+}
+
+export async function getAllEngineerProfiles() {
+  const { data, error } = await db()
+    .from('engineer_profiles')
+    .select('*')
+    .eq('is_available', true)
+    .order('rating', { ascending: false });
+  if (error) console.error('[db] getAllEngineerProfiles:', error);
+  return (data || []).map((r: any) => r.data || r);
+}
+
 // ─── Collaboration ───
 
 export async function getCollabOffers(userId: string, role: 'artist' | 'producer') {
