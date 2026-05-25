@@ -7,8 +7,9 @@
  *   dm_conversations (id, participant_ids text[], last_message_text, last_message_at, data jsonb)
  *   dm_messages (id, conversation_id, sender_id, content, message_type, is_read, read_at, created_at)
  *   dm_unread (user_id, conversation_id, unread_count, updated_at)
+ *   dm_message_reactions (message_id, user_id, emoji, created_at)  — migration 024
  *
- * Endpoints (без изменений):
+ * Endpoints:
  *   GET    /conversations/:userId
  *   POST   /conversations
  *   GET    /messages/:conversationId
@@ -22,6 +23,7 @@
  *   GET    /rules
  *   POST   /presence
  *   GET    /search-contacts
+ *   POST   /messages/:messageId/reactions             — toggle emoji
  */
 
 import { Hono } from 'hono';
@@ -293,7 +295,26 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
 
     const msgs = await pool.query(
       `SELECT m.id, m.conversation_id, m.sender_id, m.content, m.message_type, m.is_read, m.created_at,
-              u.full_name as sender_name, u.role::text as sender_role
+              u.full_name as sender_name, u.role::text as sender_role,
+              -- Aggregate reactions per emoji into the shape the FE
+              -- already expects (Message.reactions on messages-page.tsx):
+              --   [{ emoji, count, users: [userId, ...] }]
+              -- LEFT JOIN + json_agg keeps the query plan flat; at
+              -- typical message volumes (<5k per conv) the overhead
+              -- is single-digit ms.
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'emoji', re.emoji,
+                  'count', re.cnt,
+                  'users', re.users
+                ))
+                FROM (
+                  SELECT emoji, COUNT(*)::int AS cnt, json_agg(user_id) AS users
+                    FROM dm_message_reactions
+                   WHERE message_id = m.id::text
+                  GROUP BY emoji
+                ) re
+              ), '[]'::json) AS reactions
        FROM dm_messages m
        LEFT JOIN users u ON u.id::text = m.sender_id
        WHERE m.conversation_id = $1
@@ -311,6 +332,7 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
       type: m.message_type,
       isRead: m.is_read,
       createdAt: m.created_at?.toISOString?.() || m.created_at,
+      reactions: m.reactions || [],
     }));
 
     return c.json({ success: true, messages });
@@ -609,6 +631,102 @@ app.get('/search-contacts', requireAuth, async (c) => {
     console.error('search-contacts error:', err);
   }
   return c.json({ success: true, contacts });
+});
+
+// ── Message reactions ──
+//
+// Schema in migration 024. Reactions are toggled per (message,
+// user, emoji): POSTing the same emoji twice on the same message
+// removes it (Telegram/WA behaviour). The full emoji set is open
+// — backend accepts anything ≤16 chars (covers ZWJ sequences like
+// 👨‍🦰 which can hit ~14 bytes). FE pickers gate the menu down to
+// a curated set.
+
+// POST /messages/:messageId/reactions — toggle one emoji.
+// Body: { emoji }
+//
+// Verifies the caller is a participant of the message's
+// conversation before accepting the reaction (no «reacting from
+// outside»).
+app.post('/messages/:messageId/reactions', requireAuth, async (c) => {
+  const messageId = c.req.param('messageId');
+  try {
+    const authUserId = String(c.get('userId'));
+    const { emoji } = await c.req.json() as { emoji: string };
+    if (typeof emoji !== 'string' || emoji.length === 0 || emoji.length > 16) {
+      return c.json({ success: false, error: 'Invalid emoji' }, 400);
+    }
+
+    // 1. Find the message + its conv to verify access.
+    const m = await pool.query(
+      `SELECT m.id::text AS id, m.conversation_id, c.participant_ids
+         FROM dm_messages m
+         JOIN dm_conversations c ON c.id = m.conversation_id
+        WHERE m.id::text = $1
+        LIMIT 1`,
+      [messageId]
+    );
+    if (m.rows.length === 0) {
+      return c.json({ success: false, error: 'Message not found' }, 404);
+    }
+    const participantIds: string[] = m.rows[0].participant_ids || [];
+    if (!participantIds.includes(authUserId)) {
+      return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
+    }
+    const conversationId = m.rows[0].conversation_id;
+    const normMessageId = m.rows[0].id;
+
+    // 2. Toggle: DELETE returns count, INSERT only if nothing
+    //    deleted. Two round-trips but each is sub-ms.
+    const del = await pool.query(
+      `DELETE FROM dm_message_reactions
+        WHERE message_id = $1 AND user_id = $2 AND emoji = $3`,
+      [normMessageId, authUserId, emoji]
+    );
+    let action: 'added' | 'removed';
+    if (del.rowCount && del.rowCount > 0) {
+      action = 'removed';
+    } else {
+      await pool.query(
+        `INSERT INTO dm_message_reactions (message_id, user_id, emoji)
+         VALUES ($1, $2, $3)
+         ON CONFLICT DO NOTHING`,
+        [normMessageId, authUserId, emoji]
+      );
+      action = 'added';
+    }
+
+    // 3. Re-aggregate this message's reactions so the FE can hot-
+    //    swap without re-fetching the entire message list.
+    const agg = await pool.query(
+      `SELECT json_agg(json_build_object(
+                'emoji', emoji, 'count', cnt, 'users', users
+              )) AS reactions
+         FROM (
+           SELECT emoji, COUNT(*)::int AS cnt, json_agg(user_id) AS users
+             FROM dm_message_reactions
+            WHERE message_id = $1
+           GROUP BY emoji
+         ) re`,
+      [normMessageId]
+    );
+    const reactions = agg.rows[0]?.reactions || [];
+
+    log.info({ messageId: normMessageId, userId: authUserId, emoji, action }, 'dm_reaction_toggled');
+
+    // 4. Push SSE so other tabs / participants see the bump live.
+    for (const pid of participantIds) {
+      emitSSE(pid, {
+        type: 'dm_reaction_updated',
+        data: { conversationId, messageId: normMessageId, reactions },
+      });
+    }
+
+    return c.json({ success: true, action, reactions });
+  } catch (err: any) {
+    log.error({ err, messageId }, 'reaction_toggle_failed');
+    return c.json({ success: false, error: 'Не удалось сохранить реакцию' }, 500);
+  }
 });
 
 export default app;
