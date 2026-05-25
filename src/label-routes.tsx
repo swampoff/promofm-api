@@ -28,6 +28,7 @@ import { pool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { sendLabelInvitationEmail } from './email-helper.tsx';
+import { saveUpload, IMAGE_EXTS, MAX_IMAGE_BYTES } from './cabinet-uploads.tsx';
 
 const app = new Hono();
 
@@ -1127,6 +1128,57 @@ app.get('/analytics/overview', requireAuth, async (c) => {
     });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── Profile image uploads ──
+//
+// Label profile editor (Promomusicfigma/src/app/components/label/
+// LabelProfilePage.tsx) historically only let users paste an avatar
+// URL into a text field. These endpoints add a proper file-upload
+// path matching the DJ profile editor's UX. Files land in shared
+// `label-avatars` / `label-covers` subdirs under UPLOADS_BASE; the
+// public URL is written into the existing `avatar_url` / `cover_url`
+// columns on `label_profiles`.
+//
+// IMAGE_EXTS / MAX_IMAGE_BYTES (8 MB) come from cabinet-uploads.tsx
+// — same contract as future cabinets.
+
+app.post('/profile/avatar', requireAuth, async (c) => {
+  try {
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+    const uploaded = await saveUpload(file, 'label-avatars', `avatar-${gate.userId}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+    await pool.query(
+      `UPDATE label_profiles SET avatar_url = $1, updated_at = NOW() WHERE user_id = $2`,
+      [uploaded.url, gate.userId]
+    );
+    return c.json({ success: true, data: { url: uploaded.url } });
+  } catch (error: any) {
+    console.error('Label avatar upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
+  }
+});
+
+app.post('/profile/cover', requireAuth, async (c) => {
+  try {
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+    const uploaded = await saveUpload(file, 'label-covers', `cover-${gate.userId}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+    await pool.query(
+      `UPDATE label_profiles SET cover_url = $1, updated_at = NOW() WHERE user_id = $2`,
+      [uploaded.url, gate.userId]
+    );
+    return c.json({ success: true, data: { url: uploaded.url } });
+  } catch (error: any) {
+    console.error('Label cover upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
   }
 });
 
