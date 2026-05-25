@@ -5,8 +5,10 @@
  */
 
 import { Hono } from 'hono';
+import { pool } from './db-client.tsx';
 import { getRadioProfile, upsertRadioProfile } from './db.tsx';
 import { requireAuth } from './auth-middleware.tsx';
+import { saveUpload, IMAGE_EXTS, MAX_IMAGE_BYTES } from './cabinet-uploads.tsx';
 
 const app = new Hono();
 
@@ -215,6 +217,80 @@ app.get('/profile/:radioId/stats', async (c) => {
   } catch (error) {
     console.error(`[RadioProfile] Stats error: ${error}`);
     return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// ── Logo / cover uploads ────────────────────────────────────────
+//
+// Радио до миграции 026 единственный кабинет без logo поля в БД.
+// Эти endpoint-ы используют тот же shared `cabinet-uploads.tsx`
+// что dj-studio / producer-studio / label / engineer. Файлы в
+// subdir-ах `radio-logos` / `radio-covers` под UPLOADS_BASE,
+// nginx раздаёт через `/server/uploads/` alias.
+//
+// Gate: requireAuth + сравнение userId с user_id строки radio_profiles
+// (admin'у разрешено для модерации).
+
+async function ownsRadioProfile(c: any, radioId: string): Promise<boolean> {
+  const userId = String(c.get('userId') || '');
+  const role = String(c.get('userRole') || '');
+  if (role === 'admin' || role === 'superadmin') return true;
+  if (!userId) return false;
+  const r = await pool.query(
+    `SELECT 1 FROM radio_profiles WHERE id::text = $1 AND user_id = $2 LIMIT 1`,
+    [radioId, userId],
+  );
+  return r.rows.length > 0;
+}
+
+// Атомарно обновить и native колонку (для маркетплейса / cross-cabinet),
+// и jsonb data (для editor-rehydration через `getRadioProfile`).
+// Без второго update GET /profile вернёт jsonb без logoUrl потому
+// что parseKvProfile читает только из data.
+async function persistRadioImage(radioId: string, field: 'logoUrl' | 'coverUrl', url: string) {
+  const column = field === 'logoUrl' ? 'logo_url' : 'cover_url';
+  await pool.query(
+    `UPDATE radio_profiles SET ${column} = $1, updated_at = NOW() WHERE id::text = $2`,
+    [url, radioId],
+  );
+  // Merge в data jsonb тоже — editor / GET читают именно оттуда.
+  const existing = (await getRadioProfile(radioId)) as any || {};
+  await upsertRadioProfile(radioId, { ...existing, [field]: url });
+}
+
+app.post('/profile/:radioId/logo', requireAuth, async (c) => {
+  const radioId = c.req.param('radioId');
+  try {
+    if (!(await ownsRadioProfile(c, radioId))) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+    const uploaded = await saveUpload(file, 'radio-logos', `logo-${radioId}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+    await persistRadioImage(radioId, 'logoUrl', uploaded.url);
+    return c.json({ success: true, data: { url: uploaded.url } });
+  } catch (error: any) {
+    console.error('Radio logo upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
+  }
+});
+
+app.post('/profile/:radioId/cover', requireAuth, async (c) => {
+  const radioId = c.req.param('radioId');
+  try {
+    if (!(await ownsRadioProfile(c, radioId))) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+    const uploaded = await saveUpload(file, 'radio-covers', `cover-${radioId}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+    await persistRadioImage(radioId, 'coverUrl', uploaded.url);
+    return c.json({ success: true, data: { url: uploaded.url } });
+  } catch (error: any) {
+    console.error('Radio cover upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
   }
 });
 
