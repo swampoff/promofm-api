@@ -7,8 +7,10 @@
  *   dm_conversations (id, participant_ids text[], last_message_text, last_message_at, data jsonb)
  *   dm_messages (id, conversation_id, sender_id, content, message_type, is_read, read_at, created_at)
  *   dm_unread (user_id, conversation_id, unread_count, updated_at)
+ *   dm_blocks (blocker_id, blocked_id, reason, created_at) — migration 022
+ *   dm_reports (id, reporter_id, reported_id, message_id, category, details, status, ...) — migration 022
  *
- * Endpoints (без изменений):
+ * Endpoints:
  *   GET    /conversations/:userId
  *   POST   /conversations
  *   GET    /messages/:conversationId
@@ -21,7 +23,12 @@
  *   GET    /presence/:userId
  *   GET    /rules
  *   POST   /presence
- *   GET    /search-contacts
+ *   GET    /search-contacts                   — radio out of graph,
+ *                                                blocked users hidden
+ *   GET    /blocks                            — list my blocks
+ *   POST   /blocks/:userId                    — block (idempotent)
+ *   DELETE /blocks/:userId                    — unblock
+ *   POST   /reports                           — file abuse report
  */
 
 import { Hono } from 'hono';
@@ -155,6 +162,55 @@ async function getParticipantInfo(userId: string): Promise<Participant> {
   return { userId, userName: userId, role: 'artist' };
 }
 
+// ── Block lookups ──
+//
+// `dm_blocks` shape (migration 022): (blocker_id, blocked_id, reason,
+// created_at). The block is one-directional in DB but applied
+// symmetrically by every consumer — if A→B exists, neither side can
+// initiate to the other or appear in each other's search results.
+// Existing conversations remain readable so neither side loses
+// history. See migration file for the full contract.
+
+async function getBlockedPair(userA: string, userB: string): Promise<{ a_blocks_b: boolean; b_blocks_a: boolean }> {
+  try {
+    const r = await pool.query(
+      `SELECT blocker_id, blocked_id FROM dm_blocks
+        WHERE (blocker_id = $1 AND blocked_id = $2)
+           OR (blocker_id = $2 AND blocked_id = $1)`,
+      [userA, userB]
+    );
+    let a_blocks_b = false;
+    let b_blocks_a = false;
+    for (const row of r.rows) {
+      if (row.blocker_id === userA) a_blocks_b = true;
+      if (row.blocker_id === userB) b_blocks_a = true;
+    }
+    return { a_blocks_b, b_blocks_a };
+  } catch (err) {
+    log.error({ err, userA, userB }, 'block_lookup_failed');
+    // Fail-open on DB hiccup; the alternative is blocking everyone
+    // mid-outage. Worst case is one message reaches a blocked user.
+    return { a_blocks_b: false, b_blocks_a: false };
+  }
+}
+
+async function getBlocksTouching(userId: string): Promise<Set<string>> {
+  // Returns every counterparty userId such that EITHER user blocked
+  // the other. Used to filter search results in one pass.
+  try {
+    const r = await pool.query(
+      `SELECT CASE WHEN blocker_id = $1 THEN blocked_id ELSE blocker_id END AS other
+         FROM dm_blocks
+        WHERE blocker_id = $1 OR blocked_id = $1`,
+      [userId]
+    );
+    return new Set(r.rows.map((row: any) => String(row.other)));
+  } catch (err) {
+    log.error({ err, userId }, 'blocks_touching_lookup_failed');
+    return new Set();
+  }
+}
+
 // ── GET /conversations/:userId ──
 
 app.get('/conversations/:userId', requireAuth, async (c) => {
@@ -221,6 +277,19 @@ app.post('/conversations', requireAuth, async (c) => {
 
     const p1 = participants[0];
     const p2 = participants[1];
+
+    // Block guard. Either side blocking the other denies new
+    // conversations (existing convs stay readable). 403, neutral
+    // error — don't leak which side did the blocking.
+    const blockState = await getBlockedPair(p1.userId, p2.userId);
+    if (blockState.a_blocks_b || blockState.b_blocks_a) {
+      return c.json({
+        success: false,
+        error: 'Невозможно начать переписку с этим пользователем.',
+        code: 'BLOCKED',
+      }, 403);
+    }
+
     if (!canCommunicate(p1.role, p2.role)) {
       const label1 = ROLE_LABELS[p1.role] || p1.role;
       const label2 = ROLE_LABELS[p2.role] || p2.role;
@@ -344,6 +413,26 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
     const participantIds: string[] = conv.rows[0].participant_ids || [];
     if (!participantIds.includes(authUserId)) {
       return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
+    }
+
+    // Block guard for ongoing convs. Either side blocking the
+    // other refuses new outbound messages (existing history stays
+    // readable on both sides). Only checks the OTHER participant
+    // — self-blocks are impossible by CHECK constraint, and group
+    // chats (>2) skip this check since block semantics for groups
+    // are ambiguous (block one, drop everyone?).
+    if (participantIds.length === 2) {
+      const otherId = participantIds.find(id => id !== authUserId);
+      if (otherId) {
+        const blockState = await getBlockedPair(authUserId, otherId);
+        if (blockState.a_blocks_b || blockState.b_blocks_a) {
+          return c.json({
+            success: false,
+            error: 'Невозможно отправить сообщение в эту переписку.',
+            code: 'BLOCKED',
+          }, 403);
+        }
+      }
     }
 
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
@@ -578,6 +667,7 @@ app.get('/search-contacts', requireAuth, async (c) => {
   const q = (c.req.query('q') || '').trim().toLowerCase();
   const role = c.req.query('role') || '';
   const authRole = c.get('userRole');
+  const authUserId = c.get('userId');
   if (!q) return c.json({ success: true, contacts: [] });
 
   const contacts: Participant[] = [];
@@ -609,7 +699,15 @@ app.get('/search-contacts', requireAuth, async (c) => {
        FROM users u WHERE ${where} AND u.status = 'active' LIMIT 25`,
       params
     );
+
+    // Drop users who either blocked the searcher or were blocked by
+    // them. Done in JS after the SELECT to keep the query plain — at
+    // LIMIT 25 the post-filter is cheap; if results ever start
+    // exceeding 100 rows we'd move this to a NOT EXISTS join.
+    const blockedSet = await getBlocksTouching(String(authUserId));
+
     for (const u of r.rows) {
+      if (blockedSet.has(String(u.id))) continue;
       contacts.push({
         userId: u.id,
         userName: u.full_name || u.id,
@@ -621,6 +719,128 @@ app.get('/search-contacts', requireAuth, async (c) => {
     console.error('search-contacts error:', err);
   }
   return c.json({ success: true, contacts });
+});
+
+// ── Blocks ──
+//
+// Schema in migration 022. Block semantics:
+//   - One row per (blocker_id, blocked_id) pair (DB-level PK).
+//   - Applied symmetrically by every consumer (search, create, send).
+//   - History remains readable on both sides — `GET /conversations`
+//     and `GET /messages/:id` still serve previously exchanged
+//     messages. New outbound is what's gated.
+//
+// «Reports» (POST /reports) is intentionally separate: a user may
+// want to file a report without blocking (e.g. flag a public
+// figure), or block without escalating to admin.
+
+// GET /blocks — list everyone the auth user has blocked.
+app.get('/blocks', requireAuth, async (c) => {
+  try {
+    const authUserId = c.get('userId');
+    const r = await pool.query(
+      `SELECT blocked_id, reason, created_at
+         FROM dm_blocks WHERE blocker_id = $1
+        ORDER BY created_at DESC`,
+      [String(authUserId)]
+    );
+    const blocks = await Promise.all(
+      r.rows.map(async (row: any) => ({
+        ...(await getParticipantInfo(String(row.blocked_id))),
+        reason: row.reason || null,
+        createdAt: row.created_at?.toISOString?.() || row.created_at,
+      }))
+    );
+    return c.json({ success: true, blocks });
+  } catch (err: any) {
+    log.error({ err }, 'blocks_list_failed');
+    return c.json({ success: false, error: 'Не удалось загрузить список блокировок' }, 500);
+  }
+});
+
+// POST /blocks/:userId — block a counterparty. Idempotent.
+app.post('/blocks/:userId', requireAuth, async (c) => {
+  try {
+    const authUserId = String(c.get('userId'));
+    const blockedId = c.req.param('userId');
+    if (!blockedId || blockedId === authUserId) {
+      return c.json({ success: false, error: 'Нельзя заблокировать самого себя' }, 400);
+    }
+    const { reason } = await c.req.json().catch(() => ({})) as { reason?: string };
+    await pool.query(
+      `INSERT INTO dm_blocks (blocker_id, blocked_id, reason)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (blocker_id, blocked_id) DO UPDATE
+         SET reason = COALESCE(EXCLUDED.reason, dm_blocks.reason)`,
+      [authUserId, blockedId, reason || null]
+    );
+    log.info({ blockerId: authUserId, blockedId }, 'dm_block_created');
+    return c.json({ success: true });
+  } catch (err: any) {
+    log.error({ err }, 'block_create_failed');
+    return c.json({ success: false, error: 'Не удалось заблокировать' }, 500);
+  }
+});
+
+// DELETE /blocks/:userId — unblock. Idempotent (no row → still 200).
+app.delete('/blocks/:userId', requireAuth, async (c) => {
+  try {
+    const authUserId = String(c.get('userId'));
+    const blockedId = c.req.param('userId');
+    await pool.query(
+      `DELETE FROM dm_blocks WHERE blocker_id = $1 AND blocked_id = $2`,
+      [authUserId, blockedId]
+    );
+    log.info({ blockerId: authUserId, blockedId }, 'dm_block_removed');
+    return c.json({ success: true });
+  } catch (err: any) {
+    log.error({ err }, 'block_delete_failed');
+    return c.json({ success: false, error: 'Не удалось снять блокировку' }, 500);
+  }
+});
+
+// POST /reports — file an abuse report for admin review.
+// Body: { reportedId, category?, details?, messageId? }
+// Per-reporter rate limit: max 20 reports/hour.
+app.post('/reports', requireAuth, async (c) => {
+  try {
+    const authUserId = String(c.get('userId'));
+    const { reportedId, category, details, messageId } = await c.req.json() as {
+      reportedId: string;
+      category?: string;
+      details?: string;
+      messageId?: string;
+    };
+    if (!reportedId || reportedId === authUserId) {
+      return c.json({ success: false, error: 'Некорректный отчёт' }, 400);
+    }
+    const allowedCategories = new Set(['spam', 'abuse', 'impersonation', 'other']);
+    const cat = allowedCategories.has(String(category)) ? String(category) : 'other';
+
+    // Rate limit — 20 reports per rolling hour
+    const recent = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM dm_reports
+        WHERE reporter_id = $1 AND created_at > NOW() - INTERVAL '1 hour'`,
+      [authUserId]
+    );
+    if (Number(recent.rows[0]?.n) >= 20) {
+      return c.json({ success: false, error: 'Слишком много жалоб за последний час' }, 429);
+    }
+
+    const ins = await pool.query(
+      `INSERT INTO dm_reports (reporter_id, reported_id, message_id, category, details)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
+      [authUserId, reportedId, messageId || null, cat, (details || '').slice(0, 2000) || null]
+    );
+    log.info({ reporterId: authUserId, reportedId, category: cat }, 'dm_report_filed');
+    return c.json({
+      success: true,
+      report: { id: ins.rows[0].id, createdAt: ins.rows[0].created_at },
+    });
+  } catch (err: any) {
+    log.error({ err }, 'report_create_failed');
+    return c.json({ success: false, error: 'Не удалось отправить жалобу' }, 500);
+  }
 });
 
 export default app;
