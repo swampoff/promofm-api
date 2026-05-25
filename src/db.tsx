@@ -911,25 +911,59 @@ export async function getDjProfile(djId: string) {
 }
 
 export async function upsertDjProfile(djId: string, profile: Record<string, any>) {
+  // Source-of-truth shape from the DJ profile editor (frontend
+  // `gatherAllData()` in `src/dj/components/DjProfileEditor.tsx:164`)
+  // is NESTED:
+  //
+  //   {
+  //     profile: { djName, bio, avatarUrl, city, genres, ... },
+  //     booking: {...}, contacts: {...}, contactPersons: [...],
+  //     equipmentList: [...], pricingRules: [...], ...
+  //   }
+  //
+  // POST /profile/avatar and POST /profile/cover also write the
+  // nested form (`data.profile.avatarUrl = url`). For two years
+  // this function looked at the TOP LEVEL only — so every native
+  // column (`dj_name`, `bio`, `avatar_url`, ...) ended up NULL while
+  // the JSONB `data` column quietly carried the real values.
+  //
+  // The cabinet itself worked (it re-reads from `data` jsonb), but
+  // every consumer that joins on native columns was broken:
+  //   - /dj-marketplace cards (public DJ listing) — no name, no avatar
+  //   - search filters / sort by rating — never matched
+  //   - admin queues filtering by location / genre
+  //
+  // Fix: unwrap the nested envelope when present, keep accepting
+  // flat input for legacy callers. Discovered 2026-05-25 when a
+  // fresh QA DJ kept seeing «Имя ещё не задано» on the public side
+  // even after saving everything in the editor.
+  const inner: Record<string, any> = (profile?.profile && typeof profile.profile === 'object')
+    ? { ...profile, ...profile.profile }   // nested envelope wins for editor-side fields
+    : profile;
+
   const row: Record<string, any> = {
     id: djId,
-    user_id: profile.userId || djId,
-    dj_name: profile.djName || profile.dj_name || null,
-    genres: profile.genres || [],
-    bio: profile.bio || null,
-    avatar_url: profile.avatarUrl || profile.avatar_url || null,
-    location: profile.city || profile.location || null,
-    hourly_rate: profile.hourlyRate || profile.hourly_rate || profile.ratePerHour || 0,
-    experience_years: profile.experienceYears || profile.experience_years || 0,
-    equipment: profile.equipment || null,
-    is_available: profile.isAvailable !== undefined ? profile.isAvailable : (profile.openForBookings !== undefined ? profile.openForBookings : true),
-    rating: profile.rating || 0,
-    total_reviews: profile.totalReviews || profile.total_reviews || 0,
-    is_verified: profile.verified || profile.is_verified || false,
-    completed_gigs: profile.completedGigs || profile.completed_gigs || 0,
-    tags: profile.tags || profile.specializations || [],
-    price_from: profile.priceFrom || profile.price_from || profile.ratePerHour || profile.ratePerEvent || 0,
-    photo_url: profile.photo || profile.photo_url || profile.avatarUrl || null,
+    user_id: inner.userId || djId,
+    dj_name: inner.djName || inner.dj_name || inner.stageName || null,
+    genres: inner.genres || [],
+    bio: inner.bio || inner.about || null,
+    avatar_url: inner.avatarUrl || inner.avatar_url || null,
+    location: inner.city || inner.location || null,
+    hourly_rate: inner.hourlyRate || inner.hourly_rate || inner.ratePerHour || 0,
+    experience_years: inner.experienceYears || inner.experience_years || 0,
+    equipment: inner.equipment || null,
+    is_available: inner.isAvailable !== undefined
+      ? inner.isAvailable
+      : (inner.openForBookings !== undefined ? inner.openForBookings : true),
+    rating: inner.rating || 0,
+    total_reviews: inner.totalReviews || inner.total_reviews || 0,
+    is_verified: inner.verified || inner.is_verified || false,
+    completed_gigs: inner.completedGigs || inner.completed_gigs || 0,
+    tags: inner.tags || inner.specializations || [],
+    price_from: inner.priceFrom || inner.price_from || inner.ratePerHour || inner.ratePerEvent || 0,
+    photo_url: inner.photo || inner.photo_url || inner.avatarUrl || null,
+    // Preserve the ORIGINAL payload shape in jsonb so the cabinet's
+    // own editor can rehydrate via getDjProfile() unchanged.
     data: profile,
     updated_at: new Date().toISOString(),
   };

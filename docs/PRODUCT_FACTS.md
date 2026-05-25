@@ -673,6 +673,40 @@ Subscription activation:
   artist subscriptions and venue subscriptions). Keep in sync when
   prices change.
 
+### Profile envelope shape (FE ↔ BE)
+
+The editor `DjProfileEditor.tsx:164` (`gatherAllData()`) sends a
+**nested** payload to `PUT /dj-studio/profile`:
+
+```
+{
+  profile: { djName, bio, avatarUrl, city, country, genres,
+             specializations, verified, ... },
+  booking: { openForBookings, ratePerHour, minBookingHours, ... },
+  contacts: {...}, contactPersons: [...], equipmentList: [...],
+  portfolioCategories: [...], pricingRules: [...], addonsList: [...],
+  faqList: [...]
+}
+```
+
+Backend `upsertDjProfile()` (`src/db.tsx:913`) extracts native
+column values (`dj_name`, `bio`, `avatar_url`, `location`,
+`hourly_rate`, etc.) FROM `payload.profile.*` first, falling back
+to top-level keys for legacy callers. JSONB `data` column stores
+the original nested envelope unchanged so the editor rehydrates
+verbatim. `POST /profile/avatar` and `POST /profile/cover` also
+write the nested shape (`data.profile.avatarUrl = url`).
+
+`GET /profile` runs `ensureNestedDjEnvelope()` so flat/legacy rows
+(pre-fix saves, SQL-seeded QA accounts) are coerced into the
+nested envelope on read — the editor never sees a flat row.
+
+**Bug fixed 2026-05-25**: `upsertDjProfile` previously read only
+top-level keys, so every native column was nulled out on save.
+Public marketplace (`dj-marketplace-routes.tsx:mapRow`) consequently
+showed empty cards (no name, no avatar, no bio) even though the
+cabinet looked fine (it rehydrates from the JSONB `data` column).
+
 ---
 
 ## Live chat (support)
