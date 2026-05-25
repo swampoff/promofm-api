@@ -8,9 +8,11 @@
  *   dm_messages (id, conversation_id, sender_id, content, message_type, is_read, read_at, created_at)
  *   dm_unread (user_id, conversation_id, unread_count, updated_at)
  *
- * Endpoints (без изменений):
+ * Endpoints:
  *   GET    /conversations/:userId
  *   POST   /conversations
+ *   PUT    /conversations/:id                          — rename group (creator)
+ *   DELETE /conversations/:id/participants/me         — leave group
  *   GET    /messages/:conversationId
  *   POST   /messages/:conversationId
  *   PUT    /messages/:conversationId/read
@@ -22,12 +24,14 @@
  *   GET    /rules
  *   POST   /presence
  *   GET    /search-contacts
+ *   GET    /admin/reports                              — admin queue
+ *   POST   /admin/reports/:id/resolve                  — admin close
  */
 
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { createLogger } from './logger.tsx';
 
 const log = createLogger('messaging');
@@ -609,6 +613,231 @@ app.get('/search-contacts', requireAuth, async (c) => {
     console.error('search-contacts error:', err);
   }
   return c.json({ success: true, contacts });
+});
+
+// ── Group chat polish ──
+//
+// After 2026-05-25 chat-groups shipped, three things were missing:
+// the ability to leave a group, the ability to rename one, and an
+// admin endpoint to read the `dm_reports` table that
+// chat-blocks created. All three close here.
+
+// PUT /conversations/:id — rename a group (creator only). Body
+// `{ title }`. For 1:1 convs there's no title concept, returns 400.
+app.put('/conversations/:id', requireAuth, async (c) => {
+  const conversationId = c.req.param('id');
+  try {
+    const authUserId = String(c.get('userId'));
+    const body = await c.req.json().catch(() => ({}));
+    const title = String((body as any)?.title || '').slice(0, 120).trim();
+
+    const conv = await pool.query(
+      `SELECT participant_ids, data FROM dm_conversations WHERE id = $1`,
+      [conversationId]
+    );
+    if (conv.rows.length === 0) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    const participantIds: string[] = conv.rows[0].participant_ids || [];
+    if (!participantIds.includes(authUserId)) {
+      return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
+    }
+    const data = conv.rows[0].data || {};
+    if (!data.isGroup) {
+      return c.json({ success: false, error: 'Title only applies to group chats' }, 400);
+    }
+    if (data.creatorId && data.creatorId !== authUserId) {
+      return c.json({ success: false, error: 'Только создатель группы может её переименовать' }, 403);
+    }
+
+    const newData = { ...data, title: title || null };
+    await pool.query(
+      `UPDATE dm_conversations SET data = $1::jsonb WHERE id = $2`,
+      [JSON.stringify(newData), conversationId]
+    );
+
+    log.info({ conversationId, by: authUserId, title }, 'dm_group_renamed');
+
+    // Notify every participant so other tabs see the new title live.
+    for (const pid of participantIds) {
+      emitSSE(pid, {
+        type: 'dm_conversation_updated',
+        data: { conversationId, title: title || null },
+      });
+    }
+
+    return c.json({ success: true, title: title || null });
+  } catch (err: any) {
+    log.error({ err, conversationId }, 'rename_conversation_failed');
+    return c.json({ success: false, error: 'Не удалось переименовать' }, 500);
+  }
+});
+
+// DELETE /conversations/:id/participants/me — leave a group. Refuses
+// for 1:1 convs (use «archive» or «block» for those). The group keeps
+// existing for the others; if the LAST member leaves, the row stays
+// (history isn't auto-purged — manual admin cleanup later).
+//
+// If the creator leaves, the «creatorId» on data is reassigned to
+// the next remaining participant so the «rename» privilege doesn't
+// orphan. Picks lexicographically smallest remaining id — stable.
+app.delete('/conversations/:id/participants/me', requireAuth, async (c) => {
+  const conversationId = c.req.param('id');
+  try {
+    const authUserId = String(c.get('userId'));
+    const conv = await pool.query(
+      `SELECT participant_ids, data FROM dm_conversations WHERE id = $1`,
+      [conversationId]
+    );
+    if (conv.rows.length === 0) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    const participantIds: string[] = conv.rows[0].participant_ids || [];
+    if (!participantIds.includes(authUserId)) {
+      return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
+    }
+    const data = conv.rows[0].data || {};
+    if (!data.isGroup && participantIds.length === 2) {
+      return c.json({
+        success: false,
+        error: 'Личные переписки нельзя «покинуть» — используйте архив или блокировку.',
+        code: 'NOT_A_GROUP',
+      }, 400);
+    }
+
+    const remaining = participantIds.filter(p => p !== authUserId);
+    let newData = data;
+    if (data.creatorId === authUserId && remaining.length > 0) {
+      // Reassign creator to the lexicographically smallest remaining
+      // participant. Stable, deterministic, doesn't require a UI
+      // election flow.
+      const newCreator = [...remaining].sort()[0];
+      newData = { ...data, creatorId: newCreator };
+    }
+    await pool.query(
+      `UPDATE dm_conversations SET participant_ids = $1, data = $2::jsonb WHERE id = $3`,
+      [remaining, JSON.stringify(newData), conversationId]
+    );
+    // Clean up unread row for the leaver — they won't see this conv
+    // anymore.
+    await pool.query(
+      `DELETE FROM dm_unread WHERE conversation_id = $1 AND user_id = $2`,
+      [conversationId, authUserId]
+    );
+    // System message into the group so others see why count dropped.
+    // Best-effort — failures are logged but don't roll back the leave.
+    try {
+      const senderRow = await pool.query(
+        `SELECT full_name FROM users WHERE id::text = $1 LIMIT 1`,
+        [authUserId]
+      );
+      const leaverName = senderRow.rows[0]?.full_name || 'Участник';
+      await pool.query(
+        `INSERT INTO dm_messages (conversation_id, sender_id, content, message_type, is_read, created_at)
+         VALUES ($1, $2, $3, 'system', false, NOW())`,
+        [conversationId, authUserId, `${leaverName} покинул(а) группу`]
+      );
+    } catch (sysErr) {
+      log.warn({ err: sysErr, conversationId }, 'leave_system_message_failed');
+    }
+
+    log.info({ conversationId, leaverId: authUserId, remaining: remaining.length }, 'dm_group_leave');
+
+    for (const pid of remaining) {
+      emitSSE(pid, {
+        type: 'dm_participant_left',
+        data: { conversationId, userId: authUserId },
+      });
+    }
+
+    return c.json({ success: true });
+  } catch (err: any) {
+    log.error({ err, conversationId }, 'leave_conversation_failed');
+    return c.json({ success: false, error: 'Не удалось покинуть группу' }, 500);
+  }
+});
+
+// ── Admin: dm_reports queue ──
+//
+// `dm_reports` was created by chat-blocks (migration 022) but no
+// admin had a way to see what users were reporting. These two
+// endpoints expose the queue + a resolve action.
+
+// GET /admin/reports — list reports. Query: `status` filter
+// (default 'pending'), `limit` (default 50, max 200).
+// Hydrates reporter + reported with name + role for quick triage.
+app.get('/admin/reports', requireAuth, requireAdmin, async (c) => {
+  try {
+    const status = String(c.req.query('status') || 'pending');
+    const limit = Math.min(200, Math.max(1, parseInt(c.req.query('limit') || '50', 10)));
+    const allowedStatuses = new Set(['pending', 'reviewed', 'rejected', 'actioned']);
+    if (!allowedStatuses.has(status)) {
+      return c.json({ success: false, error: 'Invalid status filter' }, 400);
+    }
+    const r = await pool.query(
+      `SELECT id, reporter_id, reported_id, message_id, category, details, status,
+              reviewer_id, reviewed_at, resolution, created_at
+         FROM dm_reports
+        WHERE status = $1
+        ORDER BY created_at DESC
+        LIMIT $2`,
+      [status, limit]
+    );
+    const reports = await Promise.all(r.rows.map(async (row: any) => ({
+      id: row.id,
+      reporter: await getParticipantInfo(String(row.reporter_id)),
+      reported: await getParticipantInfo(String(row.reported_id)),
+      messageId: row.message_id,
+      category: row.category,
+      details: row.details,
+      status: row.status,
+      reviewerId: row.reviewer_id,
+      reviewedAt: row.reviewed_at?.toISOString?.() || row.reviewed_at,
+      resolution: row.resolution,
+      createdAt: row.created_at?.toISOString?.() || row.created_at,
+    })));
+    return c.json({ success: true, reports });
+  } catch (err: any) {
+    log.error({ err }, 'admin_reports_list_failed');
+    return c.json({ success: false, error: 'Не удалось загрузить очередь' }, 500);
+  }
+});
+
+// POST /admin/reports/:id/resolve — admin closes a report.
+// Body `{ status: 'reviewed'|'rejected'|'actioned', resolution? }`.
+// Stamps reviewer_id + reviewed_at. Idempotent on already-closed
+// reports (returns the existing state without an UPDATE).
+app.post('/admin/reports/:id/resolve', requireAuth, requireAdmin, async (c) => {
+  const reportId = c.req.param('id');
+  try {
+    const adminId = String(c.get('userId'));
+    const { status, resolution } = await c.req.json() as { status: string; resolution?: string };
+    const allowedTerminal = new Set(['reviewed', 'rejected', 'actioned']);
+    if (!allowedTerminal.has(status)) {
+      return c.json({ success: false, error: 'Status must be one of: reviewed, rejected, actioned' }, 400);
+    }
+    const existing = await pool.query(`SELECT status FROM dm_reports WHERE id = $1`, [reportId]);
+    if (existing.rows.length === 0) {
+      return c.json({ success: false, error: 'Report not found' }, 404);
+    }
+    if (existing.rows[0].status !== 'pending') {
+      return c.json({ success: false, error: 'Report already closed', current: existing.rows[0].status }, 409);
+    }
+    await pool.query(
+      `UPDATE dm_reports
+          SET status = $1,
+              reviewer_id = $2,
+              reviewed_at = NOW(),
+              resolution = $3
+        WHERE id = $4`,
+      [status, adminId, (resolution || '').slice(0, 2000) || null, reportId]
+    );
+    log.info({ reportId, status, adminId }, 'dm_report_resolved');
+    return c.json({ success: true });
+  } catch (err: any) {
+    log.error({ err, reportId }, 'admin_report_resolve_failed');
+    return c.json({ success: false, error: 'Не удалось закрыть' }, 500);
+  }
 });
 
 export default app;
