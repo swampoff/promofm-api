@@ -55,7 +55,7 @@ const app = new Hono();
 
 // ── Types ──
 
-type CabinetRole = 'artist' | 'producer' | 'dj' | 'admin' | 'radio' | 'venue';
+type CabinetRole = 'artist' | 'producer' | 'dj' | 'admin' | 'radio' | 'venue' | 'engineer' | 'label';
 
 interface Participant {
   userId: string;
@@ -65,14 +65,25 @@ interface Participant {
 }
 
 // ── Communication Rules ──
-
+//
+// Music-supply-chain roles (artist / producer / dj / engineer /
+// label / venue / admin) are all mutually addressable — this is
+// the in-platform DM surface that lets a DJ pitch a label, an
+// artist DM a mastering engineer, etc. Engineer + label were
+// missing here when the messaging surface first shipped; added
+// 2026-05-25 after the QA DJ couldn't find them in the new-contact
+// search. The 'radio' role stays narrow (admin + venue only)
+// because radio communication with creators flows through the
+// pitching pipeline, not raw DMs.
 const ALLOWED_CONTACTS: Record<CabinetRole, CabinetRole[]> = {
-  artist:   ['artist', 'producer', 'dj', 'admin', 'venue'],
-  producer: ['artist', 'producer', 'dj', 'admin', 'venue'],
-  dj:       ['artist', 'producer', 'dj', 'admin', 'venue'],
-  admin:    ['artist', 'producer', 'dj', 'radio', 'venue'],
+  artist:   ['artist', 'producer', 'dj', 'admin', 'venue', 'engineer', 'label'],
+  producer: ['artist', 'producer', 'dj', 'admin', 'venue', 'engineer', 'label'],
+  dj:       ['artist', 'producer', 'dj', 'admin', 'venue', 'engineer', 'label'],
+  engineer: ['artist', 'producer', 'dj', 'admin', 'venue', 'engineer', 'label'],
+  label:    ['artist', 'producer', 'dj', 'admin', 'venue', 'engineer', 'label'],
+  venue:    ['artist', 'producer', 'dj', 'admin', 'radio', 'engineer', 'label'],
+  admin:    ['artist', 'producer', 'dj', 'radio', 'venue', 'engineer', 'label'],
   radio:    ['admin', 'venue'],
-  venue:    ['artist', 'producer', 'dj', 'admin', 'radio'],
 };
 
 function canCommunicate(roleA: CabinetRole, roleB: CabinetRole): boolean {
@@ -90,6 +101,8 @@ const ROLE_LABELS: Record<CabinetRole, string> = {
   admin: 'Платформа',
   radio: 'Радио',
   venue: 'Заведение',
+  engineer: 'Инженер',
+  label: 'Лейбл',
 };
 
 // Map role from DB enum to client-facing role
