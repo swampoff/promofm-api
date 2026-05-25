@@ -66,37 +66,41 @@ interface Participant {
 
 // ── Communication Rules ──
 //
-// All cabinet roles are mutually addressable — this is the
-// in-platform DM surface (the «соцсеть внутри платформы») that
-// lets a DJ pitch a label, an artist DM a mastering engineer,
-// a radio station reach out to a venue directly, etc.
+// All music-supply-chain cabinet roles are mutually addressable
+// (artist ↔ producer ↔ dj ↔ engineer ↔ label ↔ venue ↔ admin).
+// The DM surface is the «соцсеть внутри платформы».
 //
-// Two rounds of fixes on 2026-05-25:
-//   1. `engineer` and `label` were missing from `CabinetRole`
-//      entirely — `roles.tsx` knows them, the messaging surface
-//      didn't, so they were dropped by the role allowlist on
-//      `/search-contacts`.
-//   2. `radio` was deliberately narrow («только admin + venue»,
-//      rationale: radio↔creator goes through pitching) — but
-//      product decision is that radio should also be reachable
-//      from any cabinet and vice versa. Pitching is a structured
-//      submission flow, not a substitute for a chat.
+// **Radio is intentionally NOT in the DM graph.** Radio-station
+// communication with creators flows through the pitching pipeline
+// (`pitching-routes.tsx`), which carries the track + cover + rate
+// + structured reply state — a proper submission flow, not a raw
+// chat. Radio users still have an inbox for legacy threads, but
+// new conversations involving radio cannot be created and radio
+// users cannot find anyone in `/search-contacts`.
 //
-// Anything new: add the role to `CabinetRole` AND to every row
-// below (it's a symmetric graph). The three FE declarations of
-// `CabinetRole` must agree — see PRODUCT_FACTS.md.
-const ALL_CABINET_ROLES: CabinetRole[] = [
-  'artist', 'producer', 'dj', 'engineer', 'label', 'venue', 'radio', 'admin',
+// History of this rule:
+//   1. Initial launch: `radio: ['admin', 'venue']`, others didn't
+//      list radio.
+//   2. 2026-05-25 morning: opened radio fully ('симметричная
+//      соцсеть') under a misread of the brief.
+//   3. 2026-05-25 evening (this commit): reverted — radio fully
+//      out of the graph per explicit product direction
+//      («Радио — НЕ в графе»).
+const DM_GRAPH_ROLES: CabinetRole[] = [
+  'artist', 'producer', 'dj', 'engineer', 'label', 'venue', 'admin',
 ];
 const ALLOWED_CONTACTS: Record<CabinetRole, CabinetRole[]> = {
-  artist:   ALL_CABINET_ROLES,
-  producer: ALL_CABINET_ROLES,
-  dj:       ALL_CABINET_ROLES,
-  engineer: ALL_CABINET_ROLES,
-  label:    ALL_CABINET_ROLES,
-  venue:    ALL_CABINET_ROLES,
-  radio:    ALL_CABINET_ROLES,
-  admin:    ALL_CABINET_ROLES,
+  artist:   DM_GRAPH_ROLES,
+  producer: DM_GRAPH_ROLES,
+  dj:       DM_GRAPH_ROLES,
+  engineer: DM_GRAPH_ROLES,
+  label:    DM_GRAPH_ROLES,
+  venue:    DM_GRAPH_ROLES,
+  admin:    DM_GRAPH_ROLES,
+  // Empty list = radio cannot initiate new DMs and is filtered
+  // out of every other role's allowed set. The pitching pipeline
+  // is the supported channel for radio↔creator communication.
+  radio:    [],
 };
 
 function canCommunicate(roleA: CabinetRole, roleB: CabinetRole): boolean {
@@ -579,18 +583,26 @@ app.get('/search-contacts', requireAuth, async (c) => {
   const contacts: Participant[] = [];
   try {
     const allowed = ALLOWED_CONTACTS[mapRole(authRole)] || [];
+    // Empty allowlist (currently: radio) → return nothing instead
+    // of falling through to a name-only LIKE that would expose every
+    // user on the platform. Caught when radio was reverted out of
+    // the DM graph on 2026-05-25 — the old code had no else-branch
+    // for the empty case.
+    if (allowed.length === 0) {
+      return c.json({ success: true, contacts: [] });
+    }
     const params: any[] = [`%${q}%`];
     let where = `(LOWER(u.full_name) LIKE $1 OR LOWER(u.email) LIKE $1)`;
     if (role && allowed.includes(role as CabinetRole)) {
       where += ` AND u.role::text = $2`;
       params.push(role === 'radio' ? 'radio_station' : role);
     } else {
-      // Restrict to allowed roles
+      // Restrict to allowed roles. Always emit the ANY($2) filter so
+      // a searcher who hasn't picked a role chip still can't see
+      // anyone outside their allowed set.
       const dbRoles = allowed.map(r => r === 'radio' ? 'radio_station' : r);
-      if (dbRoles.length > 0) {
-        where += ` AND u.role::text = ANY($2)`;
-        params.push(dbRoles);
-      }
+      where += ` AND u.role::text = ANY($2)`;
+      params.push(dbRoles);
     }
     const r = await pool.query(
       `SELECT u.id, u.full_name, u.role::text, u.avatar_url
