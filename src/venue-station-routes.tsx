@@ -34,6 +34,7 @@ import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { getVenueProfile as dbGetVenueProfile } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { sendVenueRadioReadyEmail, sendVenueRadioChangesRequestedEmail } from './email-helper.tsx';
 
 const app = new Hono();
 
@@ -54,6 +55,26 @@ function parse(data: any): any {
 async function loadVenueProfile(userId: string): Promise<any | null> {
   const data = await dbGetVenueProfile(userId);
   return parse(data);
+}
+
+// Look up the user's email + display name for notification emails.
+// Returns null when the user row is gone (extremely rare — would mean
+// the venue was deleted but a request still references the user_id).
+async function loadVenueContact(userId: string): Promise<{ email: string; name: string } | null> {
+  try {
+    const r = await pool.query(
+      `SELECT email, COALESCE(full_name, username, email) AS name
+         FROM users
+        WHERE id::text = $1
+        LIMIT 1`,
+      [userId]
+    );
+    if (r.rowCount === 0 || !r.rows[0].email) return null;
+    return { email: r.rows[0].email, name: r.rows[0].name || 'Заведение' };
+  } catch (err) {
+    console.error('[venue-station] loadVenueContact failed:', err);
+    return null;
+  }
 }
 
 function rowToRequest(r: any) {
@@ -471,6 +492,20 @@ app.post('/admin/:requestId/request-changes', requireAuth, requireAdmin, async (
     if (r.rowCount === 0) {
       return c.json({ success: false, error: 'Request not found or not in editable state' }, 404);
     }
+
+    // Notify venue — fire-and-forget so email outage doesn't block
+    // the admin action.
+    const venueRow = r.rows[0];
+    loadVenueContact(venueRow.user_id).then((contact) => {
+      if (contact) {
+        return sendVenueRadioChangesRequestedEmail({
+          toEmail: contact.email,
+          venueName: contact.name,
+          message,
+        });
+      }
+    }).catch((err) => console.error('[venue-station] changes_requested email failed:', err?.message));
+
     return c.json({ success: true, request: rowToRequest(r.rows[0]) });
   } catch (error: any) {
     console.error('POST /venue-station/admin/:requestId/request-changes:', error);
@@ -534,6 +569,19 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
         RETURNING *`,
       [req.id]
     );
+
+    // Notify venue with the pairing code — this is the critical
+    // moment in the funnel: admin's done, venue sees the code in
+    // their inbox and in the cabinet at the same time.
+    loadVenueContact(req.user_id).then((contact) => {
+      if (contact) {
+        return sendVenueRadioReadyEmail({
+          toEmail: contact.email,
+          venueName: contact.name,
+          pairingCode: code,
+        });
+      }
+    }).catch((err) => console.error('[venue-station] ready email failed:', err?.message));
 
     return c.json({
       success: true,

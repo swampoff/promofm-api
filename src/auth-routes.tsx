@@ -10,7 +10,7 @@ import bcrypt from 'bcryptjs';
 import { Pool } from 'pg';
 import { upsertNotification } from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsStoreToken, vpsGetToken, vpsUseToken } from './vps-userdata.tsx';
-import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail } from "./email-helper.tsx";
+import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendVenueRadioWelcomeEmail } from "./email-helper.tsx";
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { isValidRole } from './roles.tsx';
 import {
@@ -214,6 +214,15 @@ auth.post("/signup", async (c) => {
     const verificationToken = crypto.randomUUID();
     await vpsStoreToken(userId, verificationToken, "email_verify", 24);
     sendVerificationEmail(email, userName, verificationToken).catch((e) => log.warn({ err: e, email }, "verification_email_failed"));
+
+    // Venue-specific welcome — fires alongside the standard
+    // verification email so the new venue understands the 14-day trial
+    // + next steps (onboarding wizard → admin queue → pairing code).
+    // Other roles get only the verification email.
+    if (userRole === 'venue') {
+      sendVenueRadioWelcomeEmail({ toEmail: email, venueName: userName })
+        .catch((e) => log.warn({ err: e, email }, 'venue_welcome_email_failed'));
+    }
 
     return c.json({
       success: true, emailVerificationRequired: true,

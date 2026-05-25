@@ -467,13 +467,22 @@ APK (no auth, single-use code):
 ambiguity). 24h TTL. Generated at provision; replaceable via
 regenerate-pairing if venue lost it / changes device.
 
-**Email cadence (in `email-helper.tsx`):**
-- `sendVenueRadioWelcomeEmail` — day 0, frames the trial + next steps
-- `sendVenueTrialEndingEmail` — existing, T-3 days
-- `sendVenueTrialLastDayEmail` — NEW, T-1 day, last-chance nudge
-- `sendVenueTrialExpiredEmail` — existing, day 14
-- `sendVenueRadioReadyEmail` — sent when admin provisions; carries the pairing code
-- `sendVenueRadioChangesRequestedEmail` — sent on admin request-changes; carries the message and brings them back to the wizard
+**Email cadence — fully wired as of Level 1 (2026-05-25):**
+
+| Email | Trigger | Idempotency guard |
+|---|---|---|
+| `sendVenueRadioWelcomeEmail` | `auth-routes.tsx` POST `/auth/signup` when `userRole === 'venue'` | None (single signup event) |
+| `sendVenueTrialEndingEmail` (T-3) | `expireTrialsOnce` cron when `daysRemaining ∈ (0..3]` | `data.trial_warning_sent_at` |
+| `sendVenueTrialLastDayEmail` (T-1) | `expireTrialsOnce` cron when `daysRemaining === 1` | `data.trial_last_day_sent_at` (separate flag so T-1 fires even after T-3 already did) |
+| `sendVenueTrialExpiredEmail` | `expireTrialsOnce` cron when `daysRemaining <= 0` | `status` flips to `expired` (terminal) |
+| `sendVenueRadioReadyEmail` | `venue-station-routes` POST `/admin/:id/provision` — carries the fresh pairing code | New row per provision; admin can re-provision if needed |
+| `sendVenueRadioChangesRequestedEmail` | `venue-station-routes` POST `/admin/:id/request-changes` — carries admin's message | None (admin can re-send if needed) |
+
+All triggers use fire-and-forget: email outage logs a warning but
+never blocks the user/admin action. `loadVenueContact(userId)`
+helper resolves the user's email + display name from the `users`
+table for the venue-station emails (welcome already has the values
+at signup time).
 
 ---
 

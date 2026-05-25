@@ -42,10 +42,14 @@
 
 import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
-import { sendVenueTrialEndingEmail, sendVenueTrialExpiredEmail } from './email-helper.tsx';
+import { sendVenueTrialEndingEmail, sendVenueTrialExpiredEmail, sendVenueTrialLastDayEmail } from './email-helper.tsx';
 
 export const TRIAL_PERIOD_DAYS = 14;
 export const TRIAL_WARNING_DAYS = 3;
+// T-1 reminder fires when daysRemaining === 1 (the last full day
+// before expiry). Guarded by data.trial_last_day_sent_at so a
+// re-run of the cron same day is a no-op.
+export const TRIAL_LAST_DAY_DAYS = 1;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -208,6 +212,36 @@ export async function expireTrialsOnce(): Promise<CronResult> {
         }
         result.expired++;
         continue;
+      }
+
+      // T-1 last-day reminder. Fires when daysRemaining === 1, with
+       // its own idempotency flag so it doesn't conflict with the
+       // earlier T-3 warning that may have already sent.
+      if (state.isTrialing && state.daysRemaining === TRIAL_LAST_DAY_DAYS) {
+        const alreadySent = !!row.data?.trial_last_day_sent_at;
+        if (!alreadySent) {
+          const nextData = {
+            ...row.data,
+            trial_last_day_sent_at: new Date(now).toISOString(),
+            updatedAt: new Date(now).toISOString(),
+          };
+          await pool.query(
+            `UPDATE venue_profiles
+                SET data = $1::jsonb,
+                    updated_at = NOW()
+              WHERE user_id = $2`,
+            [JSON.stringify(nextData), row.user_id]
+          );
+          if (row.email && state.expiresAtIso) {
+            await sendVenueTrialLastDayEmail({
+              toEmail: row.email,
+              venueName: row.venue_name || 'ваше заведение',
+              expiresAtIso: state.expiresAtIso,
+            }).catch((e) => console.warn('[venue-trial] last-day email failed:', e?.message));
+          }
+          result.warned++;
+          continue;
+        }
       }
 
       if (state.isTrialing && state.daysRemaining > 0 && state.daysRemaining <= TRIAL_WARNING_DAYS) {
