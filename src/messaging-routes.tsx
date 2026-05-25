@@ -29,8 +29,53 @@ import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { createLogger } from './logger.tsx';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import crypto from 'node:crypto';
 
 const log = createLogger('messaging');
+
+// ── Attachment storage ──
+//
+// Uploaded files land under /opt/promofm-api/uploads/dm/{convId}/
+// (configurable via UPLOADS_DIR), exposed as
+// https://promo-music.ru/server/uploads/dm/{convId}/{file}.
+//
+// Per-conversation folder so the admin can spot which thread an
+// orphan file belongs to without scanning the DB.
+const DM_UPLOADS_BASE = process.env.UPLOADS_DIR || '/opt/promofm-api/uploads';
+const DM_PUBLIC_BASE  = process.env.PUBLIC_UPLOADS_BASE_URL || 'https://promo-music.ru/server/uploads';
+const DM_MAX_FILE_BYTES  = 50 * 1024 * 1024;   // 50 MiB — generous for audio + small video
+const DM_MAX_VOICE_BYTES = 10 * 1024 * 1024;   // 10 MiB for voice (≈10 min webm/opus)
+const DM_ALLOWED_MIME_PREFIXES = [
+  'image/', 'audio/', 'video/', 'application/pdf',
+  'application/zip', 'application/x-zip',
+  'application/vnd.openxmlformats-officedocument',
+  'application/msword', 'text/plain',
+];
+
+function pickExt(filename: string, mime: string): string {
+  const m = /\.([A-Za-z0-9]{1,8})$/.exec(filename || '');
+  if (m) return m[1].toLowerCase();
+  // Fallbacks by MIME for files that arrived without a sane name
+  // (looking at MediaRecorder blobs especially).
+  if (mime === 'audio/webm') return 'webm';
+  if (mime === 'audio/mp4' || mime === 'audio/aac') return 'm4a';
+  if (mime === 'audio/ogg') return 'ogg';
+  if (mime === 'image/jpeg') return 'jpg';
+  if (mime === 'image/png') return 'png';
+  if (mime === 'image/webp') return 'webp';
+  if (mime === 'application/pdf') return 'pdf';
+  return 'bin';
+}
+
+function classifyMessageType(mime: string, isVoice: boolean): string {
+  if (isVoice) return 'voice';
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('audio/')) return 'audio';
+  if (mime.startsWith('video/')) return 'video';
+  return 'file';
+}
 
 // ── Telegram forwarding for admin messages ──
 const TG_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
@@ -293,6 +338,7 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
 
     const msgs = await pool.query(
       `SELECT m.id, m.conversation_id, m.sender_id, m.content, m.message_type, m.is_read, m.created_at,
+              m.attachment_url, m.attachment_name, m.attachment_size, m.attachment_mime, m.attachment_meta,
               u.full_name as sender_name, u.role::text as sender_role
        FROM dm_messages m
        LEFT JOIN users u ON u.id::text = m.sender_id
@@ -311,6 +357,14 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
       type: m.message_type,
       isRead: m.is_read,
       createdAt: m.created_at?.toISOString?.() || m.created_at,
+      // Attachment payload — null for plain text messages.
+      attachment: m.attachment_url ? {
+        url: m.attachment_url,
+        name: m.attachment_name,
+        size: m.attachment_size != null ? Number(m.attachment_size) : null,
+        mime: m.attachment_mime,
+        meta: m.attachment_meta,
+      } : null,
     }));
 
     return c.json({ success: true, messages });
@@ -609,6 +663,180 @@ app.get('/search-contacts', requireAuth, async (c) => {
     console.error('search-contacts error:', err);
   }
   return c.json({ success: true, contacts });
+});
+
+// ── POST /messages/:conversationId/attachment ──
+//
+// Multipart upload that creates a `dm_messages` row with attachment
+// columns populated. Single round-trip — client gets the full
+// hydrated message back so the optimistic UI can swap its
+// local-blob preview for the real URL without a second fetch.
+//
+// Body (multipart/form-data):
+//   file        — the actual file blob (required)
+//   isVoice     — '1' / 'true' when the upload is a voice memo
+//                  (recorded via MediaRecorder on the client)
+//   durationMs  — voice memo duration in milliseconds (optional,
+//                  surfaces in attachment_meta.durationMs)
+//   width, height — optional image/video dimensions for the
+//                  attachment_meta (avoids a second decode round)
+//   replyToId   — optional message id this attachment replies to
+//
+// Responds with `{ success: true, message: { ...same shape as
+// /messages/:convId entries } }` so the FE can append it to the
+// list immediately.
+app.post('/messages/:conversationId/attachment', requireAuth, async (c) => {
+  const conversationId = c.req.param('conversationId');
+  try {
+    const authUserId = c.get('userId');
+
+    // 1. Validate conv membership BEFORE touching the filesystem.
+    const conv = await pool.query(
+      `SELECT participant_ids, data FROM dm_conversations WHERE id = $1`,
+      [conversationId]
+    );
+    if (conv.rows.length === 0) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    const participantIds: string[] = conv.rows[0].participant_ids || [];
+    if (!participantIds.includes(String(authUserId))) {
+      return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
+    }
+
+    // 2. Parse multipart.
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) {
+      return c.json({ success: false, error: 'Файл не передан' }, 400);
+    }
+    const isVoice = String(body.isVoice || '').toLowerCase() === 'true' || String(body.isVoice || '') === '1';
+    const sizeLimit = isVoice ? DM_MAX_VOICE_BYTES : DM_MAX_FILE_BYTES;
+    if (file.size > sizeLimit) {
+      return c.json({
+        success: false,
+        error: `Файл слишком большой (макс. ${Math.round(sizeLimit / 1024 / 1024)} МБ)`,
+      }, 413);
+    }
+    const mime = file.type || 'application/octet-stream';
+    if (!DM_ALLOWED_MIME_PREFIXES.some(p => mime.startsWith(p))) {
+      return c.json({
+        success: false,
+        error: `Тип файла не поддерживается: ${mime}`,
+      }, 415);
+    }
+
+    // 3. Write to disk. Per-conversation folder makes orphan cleanup
+    //    trivial (delete folder on conv archive/purge).
+    const ext = pickExt(file.name, mime);
+    const dir = path.join(DM_UPLOADS_BASE, 'dm', conversationId);
+    await fs.mkdir(dir, { recursive: true });
+    const filename = `${crypto.randomUUID()}.${ext}`;
+    const buf = Buffer.from(await file.arrayBuffer());
+    await fs.writeFile(path.join(dir, filename), buf);
+    const url = `${DM_PUBLIC_BASE}/dm/${conversationId}/${filename}`;
+
+    // 4. Build attachment_meta from optional form fields.
+    const meta: Record<string, any> = {};
+    const durationMs = Number(body.durationMs);
+    if (Number.isFinite(durationMs) && durationMs > 0) meta.durationMs = durationMs;
+    const width = Number(body.width);
+    const height = Number(body.height);
+    if (Number.isFinite(width) && width > 0) meta.width = width;
+    if (Number.isFinite(height) && height > 0) meta.height = height;
+
+    const messageType = classifyMessageType(mime, isVoice);
+    // The `content` column carries a short description used by
+    // /conversations preview («📎 файл», «🎤 голосовое»). The full
+    // attachment lives in the new columns.
+    const previewText = isVoice
+      ? '🎤 Голосовое сообщение'
+      : mime.startsWith('image/')
+        ? '🖼 Изображение'
+        : mime.startsWith('video/')
+          ? '🎬 Видео'
+          : mime.startsWith('audio/')
+            ? '🎵 Аудио'
+            : `📎 ${file.name || 'Файл'}`;
+
+    // 5. Insert dm_messages row.
+    const ins = await pool.query(
+      `INSERT INTO dm_messages
+         (conversation_id, sender_id, content, message_type, is_read, created_at,
+          attachment_url, attachment_name, attachment_size, attachment_mime, attachment_meta)
+       VALUES ($1, $2, $3, $4, false, NOW(), $5, $6, $7, $8, $9::jsonb)
+       RETURNING id, created_at`,
+      [
+        conversationId,
+        String(authUserId),
+        previewText,
+        messageType,
+        url,
+        file.name || null,
+        file.size,
+        mime,
+        Object.keys(meta).length > 0 ? JSON.stringify(meta) : null,
+      ]
+    );
+    const msgId = ins.rows[0].id;
+    const createdAt = ins.rows[0].created_at;
+
+    // 6. Bump conv preview + ensure unread for other participants.
+    await pool.query(
+      `UPDATE dm_conversations SET last_message_text = $1, last_message_at = NOW() WHERE id = $2`,
+      [previewText.slice(0, 500), conversationId]
+    );
+    for (const pid of participantIds) {
+      if (pid === String(authUserId)) continue;
+      await pool.query(
+        `INSERT INTO dm_unread (user_id, conversation_id, unread_count, updated_at)
+         VALUES ($1, $2, 1, NOW())
+         ON CONFLICT (user_id, conversation_id) DO UPDATE
+           SET unread_count = dm_unread.unread_count + 1, updated_at = NOW()`,
+        [pid, conversationId]
+      );
+    }
+
+    // 7. Hydrate sender + build response in same shape as
+    //    /messages/:convId rows so the FE can append directly.
+    const senderRow = await pool.query(
+      `SELECT full_name, role::text AS role FROM users WHERE id::text = $1 LIMIT 1`,
+      [String(authUserId)]
+    );
+    const senderName = senderRow.rows[0]?.full_name || String(authUserId);
+    const senderRole = mapRole(senderRow.rows[0]?.role || 'artist');
+
+    const message = {
+      id: msgId,
+      conversationId,
+      senderId: String(authUserId),
+      senderName,
+      senderRole,
+      text: previewText,
+      type: messageType,
+      isRead: false,
+      createdAt: createdAt?.toISOString?.() || createdAt,
+      attachment: {
+        url,
+        name: file.name || null,
+        size: file.size,
+        mime,
+        meta: Object.keys(meta).length > 0 ? meta : null,
+      },
+    };
+
+    // 8. Push SSE to recipients so other tabs see the message live
+    //    without polling.
+    for (const pid of participantIds) {
+      if (pid === String(authUserId)) continue;
+      emitSSE(pid, { type: 'dm_message', data: { conversationId, message } });
+    }
+
+    log.info({ conversationId, messageId: msgId, mime, bytes: file.size, voice: isVoice }, 'dm_attachment_uploaded');
+    return c.json({ success: true, message });
+  } catch (err: any) {
+    log.error({ err, conversationId }, 'attachment_upload_failed');
+    return c.json({ success: false, error: err?.message || 'Upload failed' }, 500);
+  }
 });
 
 export default app;
