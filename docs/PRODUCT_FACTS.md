@@ -610,22 +610,41 @@ When `available=false` → «скоро будет» banner instead of dead link
 
 ## DJ cabinet
 
-**Source:** `src/dj-studio-routes.tsx` `DJ_PLANS`.
+**Source:** `src/dj-studio-routes.tsx` `DJ_PLANS` (line 623+).
 
-| Plan      | mixes | events | analytics |
-|-----------|-------|--------|-----------|
-| starter   | 5     | 5      | basic     |
-| pro       | -1    | -1     | extended  |
-| premium   | -1    | -1     | full      |
+| Plan      | Price/mo | Price/yr | mixes | events/mo | analytics |
+|-----------|----------|----------|-------|-----------|-----------|
+| starter   | 0        | 0        | 5     | 5         | basic     |
+| pro       | 990      | 9 900    | 20    | 50        | advanced  |
+| agency    | 2 990    | 29 900   | -1    | -1        | full      |
 
-Resolver: `getDjPlanLimits(djId)` — reads `djSubscriptionsStore`,
-default to starter when no record.
+`-1` = unlimited. Resolver: `getDjPlanLimits(djId)` — reads
+`djSubscriptionsStore`, defaults to starter when no record.
 
-Enforced endpoints:
+Enforced endpoints (audit pass 2026-05-25 closed two gaps):
 - `POST /dj-studio/mixes` — `limits.mixes` (count vs cap)
+- `POST /dj-studio/events` — `limits.events` per-month (counts
+  non-cancelled events in the same calendar month as the requested
+  date; fires 403 with `{ limit, current }` envelope). NEW in this
+  audit pass — comment at line 1477 had promised it for a while.
 - `POST /booking/create` — `limits.events` (only when
   `performerType === 'dj'`); counts non-rejected non-cancelled
-  bookings in the same calendar month as eventDate
+  bookings in the same calendar month as eventDate.
+
+Subscription activation:
+- **Free plan (`starter`)** — direct `POST /dj-studio/subscription/:djId/change`
+  upserts row in `djSubscriptionsStore`.
+- **Paid plans (`pro`, `agency`)** — frontend redirects to YooKassa
+  via `redirectToPayment({ type: 'subscription', metadata: { planId,
+  interval, djId, role: 'dj' } })`. Webhook in
+  `checkout-routes.tsx` branch `session.type === 'subscription' &&
+  session.metadata.role === 'dj'` activates the subscription on
+  payment.succeeded. Audit caught this branch was missing (DJ paid
+  990₽ → stayed on Starter); fixed in this pass.
+- DJ_PLANS table is duplicated in checkout-routes.tsx webhook
+  handler for offline activation path (same pattern as
+  artist subscriptions and venue subscriptions). Keep in sync when
+  prices change.
 
 ---
 

@@ -248,6 +248,72 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill DJ subscription ───
+  //
+  // DJ paid plans (Pro 990₽, Agency 2990₽). Frontend sends
+  // `type: 'subscription' + metadata.role: 'dj' + metadata.planId`
+  // (NOT `metadata.planKey` — that's the artist surface). Without
+  // this branch, paid DJ subscriptions used to silently fail:
+  // YooKassa took the money, webhook hit, neither artist nor venue
+  // branch matched, DJ stayed on Starter. Discovered in the DJ
+  // pipeline audit on 2026-05-25.
+  //
+  // Source-of-truth for DJ_PLANS lives in
+  // src/dj-studio-routes.tsx; this table duplicates the minimum
+  // fields the webhook needs to avoid pulling the Hono app graph.
+  if (
+    session.type === 'subscription' &&
+    session.metadata?.role === 'dj' &&
+    session.metadata?.planId
+  ) {
+    try {
+      const DJ_PLANS_LOCAL: Record<string, {
+        name: string; price: number; priceYear: number;
+        limits: { mixes: number; events: number; analytics: string };
+      }> = {
+        starter: { name: 'Starter', price: 0,    priceYear: 0,     limits: { mixes: 5,  events: 5,  analytics: 'basic' } },
+        pro:     { name: 'Pro',     price: 990,  priceYear: 9900,  limits: { mixes: 20, events: 50, analytics: 'advanced' } },
+        agency:  { name: 'Agency',  price: 2990, priceYear: 29900, limits: { mixes: -1, events: -1, analytics: 'full' } },
+      };
+      const planId = String(session.metadata.planId);
+      const plan = DJ_PLANS_LOCAL[planId];
+      if (plan) {
+        const interval = session.metadata.interval === 'year' ? 'year' : 'month';
+        const djId = String(session.metadata.djId || session.userId);
+        const start = new Date(now);
+        const end = new Date(start);
+        if (interval === 'year') end.setFullYear(end.getFullYear() + 1);
+        else end.setMonth(end.getMonth() + 1);
+
+        const subscription = {
+          djId,
+          planId,
+          planName: plan.name,
+          status: 'active',
+          price: interval === 'year' ? plan.priceYear : plan.price,
+          currency: 'RUB',
+          interval,
+          startDate: start.toISOString(),
+          endDate: end.toISOString(),
+          limits: plan.limits,
+          gateway: session.gateway,
+          gatewayPaymentId: session.gatewayPaymentId,
+        };
+
+        // jsonbStore upsert — same shape as POST /dj-studio/subscription/:djId/change
+        const { djSubscriptionsStore } = await import('./db.tsx');
+        await djSubscriptionsStore.set(djId, subscription);
+
+        log.info({ djId, planId, interval, endDate: end.toISOString() }, 'dj_subscription_activated');
+      } else {
+        log.warn({ planId, djId: session.metadata.djId }, 'dj_subscription_unknown_plan');
+      }
+    } catch (err) {
+      log.error({ err, djId: session.metadata?.djId, orderId: session.orderId }, 'dj_subscription_activation_error');
+      throw err;
+    }
+  }
+
 
   // ─── Fulfill marketplace purchase ───
   if (session.type === 'purchase' && session.metadata?.itemType) {

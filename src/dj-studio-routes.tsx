@@ -197,6 +197,39 @@ app.post('/events', requireAuth, requireDjRole, async (c) => {
     if (!body?.title || typeof body.title !== 'string' || !body.title.trim()) {
       return c.json({ success: false, error: 'title обязателен' }, 400);
     }
+
+    // Enforce DJ-plan «events» quota (Starter=5/mo, Pro=50/mo,
+    // Agency=-1 unlimited). Matches the mix quota pattern at the
+    // bottom of this file. Counts events in the SAME calendar month
+    // as the requested date (or current month if no date set), so
+    // upcoming + completed in that month both count toward the cap.
+    const limits = await getDjPlanLimits(String(userId));
+    if (limits.events !== -1) {
+      const requestedDate = body.date ? new Date(body.date) : new Date();
+      const monthStart = new Date(requestedDate);
+      monthStart.setUTCDate(1);
+      monthStart.setUTCHours(0, 0, 0, 0);
+      const monthEnd = new Date(monthStart);
+      monthEnd.setUTCMonth(monthEnd.getUTCMonth() + 1);
+
+      const existingList: any[] = (await djEventsStore.get(String(userId))) || [];
+      const sameMonth = existingList.filter((e) => {
+        if (!e?.date) return false;
+        const d = new Date(e.date);
+        if (Number.isNaN(d.getTime())) return false;
+        if (e.status === 'cancelled') return false;
+        return d >= monthStart && d < monthEnd;
+      });
+      if (sameMonth.length >= limits.events) {
+        return c.json({
+          success: false,
+          error: `Достигнут лимит событий (${sameMonth.length}/${limits.events}) на текущем тарифе. Обновите подписку или дождитесь следующего месяца.`,
+          limit: limits.events,
+          current: sameMonth.length,
+        }, 403);
+      }
+    }
+
     const id = generateId('ev');
     const now = new Date().toISOString();
     const allowedStatuses = new Set(['upcoming', 'confirmed', 'completed', 'cancelled']);
