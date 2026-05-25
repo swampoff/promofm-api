@@ -31,6 +31,13 @@ import { getDbClient } from "./db-client.tsx";
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { saveUpload, IMAGE_EXTS, MAX_IMAGE_BYTES } from './cabinet-uploads.tsx';
+import { pool } from './db-client.tsx';
+
+// Audio uploads — producer portfolio. Те же limits / extensions
+// что у DJ-микс-аплоадера и engineer portfolio. Поднимем в
+// cabinet-uploads.tsx когда добавится ещё один кабинет с audio.
+const PRODUCER_AUDIO_EXTS = new Set(['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac']);
+const PRODUCER_MAX_AUDIO_BYTES = 200 * 1024 * 1024; // 200 MB
 
 const app = new Hono();
 
@@ -587,6 +594,208 @@ app.delete('/portfolio/delete/:id', requireAuth, async (c) => {
 // ════════════════════════════════════════
 // PROFILE UPDATE
 // ════════════════════════════════════════
+
+// ════════════════════════════════════════
+// PORTFOLIO V2 (migration 028) — реальное портфолио с файлами
+// ════════════════════════════════════════
+//
+// Старые endpoint-ы (/portfolio/create, /portfolio/delete/:id) выше
+// используют `producerCustomPortfolioStore` — jsonb-blob с
+// метаданными без файлов. Они остаются для backward-compat
+// (текущие данные пользователей не теряются). Новые endpoint-ы
+// ниже работают с таблицей `producer_portfolio` и реально
+// загружают файл через `cabinet-uploads.saveUpload`. UI новых
+// пользователей должен использовать только эти.
+
+// GET /portfolio/v2 — список своих работ (включая is_public=false).
+app.get('/portfolio/v2', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId') as string;
+    if (!userId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+    const r = await pool.query(
+      `SELECT id, title, artist_name, work_type, description, audio_url, cover_url,
+              duration_sec, sort_order, is_public, created_at, updated_at
+         FROM producer_portfolio
+        WHERE user_id = $1
+        ORDER BY sort_order ASC, created_at DESC`,
+      [userId],
+    );
+    return c.json({
+      success: true,
+      data: r.rows.map((row: any) => ({
+        id: row.id,
+        title: row.title,
+        artistName: row.artist_name,
+        workType: row.work_type,
+        description: row.description,
+        audioUrl: row.audio_url,
+        coverUrl: row.cover_url,
+        durationSec: row.duration_sec,
+        sortOrder: row.sort_order,
+        isPublic: row.is_public,
+        createdAt: row.created_at?.toISOString?.() || row.created_at,
+        updatedAt: row.updated_at?.toISOString?.() || row.updated_at,
+      })),
+    });
+  } catch (error: any) {
+    console.error('Producer portfolio list failed:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// POST /portfolio/v2 — multipart upload + INSERT.
+// fields: file, title, workType, artistName?, description?, durationSec?
+app.post('/portfolio/v2', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId') as string;
+    if (!userId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+
+    const title = String(body.title || file.name || 'Без названия').slice(0, 200);
+    const workType = String(body.workType || 'mixing').slice(0, 40);
+    const artistName = String(body.artistName || '').slice(0, 200) || null;
+    const description = String(body.description || '').slice(0, 2000) || null;
+    const durationSec = Number(body.durationSec) || null;
+
+    const uploaded = await saveUpload(
+      file,
+      'producer-portfolio',
+      `pf-${userId}`,
+      PRODUCER_AUDIO_EXTS,
+      PRODUCER_MAX_AUDIO_BYTES,
+    );
+
+    const ins = await pool.query(
+      `INSERT INTO producer_portfolio
+         (user_id, title, artist_name, work_type, description, audio_url, duration_sec)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, created_at`,
+      [userId, title, artistName, workType, description, uploaded.url, durationSec],
+    );
+
+    return c.json({
+      success: true,
+      data: {
+        id: ins.rows[0].id,
+        title,
+        artistName,
+        workType,
+        description,
+        audioUrl: uploaded.url,
+        coverUrl: null,
+        durationSec,
+        sortOrder: 0,
+        isPublic: true,
+        createdAt: ins.rows[0].created_at?.toISOString?.() || ins.rows[0].created_at,
+      },
+    });
+  } catch (error: any) {
+    console.error('Producer portfolio create failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
+  }
+});
+
+// PUT /portfolio/v2/:id — метаданные.
+app.put('/portfolio/v2/:id', requireAuth, async (c) => {
+  const id = c.req.param('id');
+  try {
+    const userId = c.get('userId') as string;
+    if (!userId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+    const body = await c.req.json();
+    const setFields: string[] = [];
+    const args: any[] = [];
+    let i = 1;
+    const allowed: Record<string, string> = {
+      title: 'title',
+      artistName: 'artist_name',
+      workType: 'work_type',
+      description: 'description',
+      durationSec: 'duration_sec',
+      sortOrder: 'sort_order',
+      isPublic: 'is_public',
+    };
+    for (const [key, column] of Object.entries(allowed)) {
+      if (Object.prototype.hasOwnProperty.call(body, key)) {
+        setFields.push(`${column} = $${i++}`);
+        args.push((body as any)[key]);
+      }
+    }
+    if (setFields.length === 0) {
+      return c.json({ success: false, error: 'No fields to update' }, 400);
+    }
+    setFields.push(`updated_at = NOW()`);
+    args.push(id, userId);
+    const r = await pool.query(
+      `UPDATE producer_portfolio SET ${setFields.join(', ')}
+        WHERE id = $${i++} AND user_id = $${i}
+        RETURNING id`,
+      args,
+    );
+    if (r.rows.length === 0) {
+      return c.json({ success: false, error: 'Not found or not yours' }, 404);
+    }
+    return c.json({ success: true });
+  } catch (error: any) {
+    console.error('Producer portfolio update failed:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// DELETE /portfolio/v2/:id — удалить запись.
+app.delete('/portfolio/v2/:id', requireAuth, async (c) => {
+  const id = c.req.param('id');
+  try {
+    const userId = c.get('userId') as string;
+    if (!userId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+    const r = await pool.query(
+      `DELETE FROM producer_portfolio WHERE id = $1 AND user_id = $2 RETURNING id`,
+      [id, userId],
+    );
+    if (r.rows.length === 0) {
+      return c.json({ success: false, error: 'Not found or not yours' }, 404);
+    }
+    return c.json({ success: true });
+  } catch (error: any) {
+    console.error('Producer portfolio delete failed:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// GET /portfolio/v2/public/:userId — публичный листинг (без auth).
+app.get('/portfolio/v2/public/:userId', async (c) => {
+  const targetUserId = c.req.param('userId');
+  try {
+    const r = await pool.query(
+      `SELECT id, title, artist_name, work_type, description, audio_url, cover_url,
+              duration_sec, sort_order, created_at
+         FROM producer_portfolio
+        WHERE user_id = $1 AND is_public = true
+        ORDER BY sort_order ASC, created_at DESC
+        LIMIT 100`,
+      [targetUserId],
+    );
+    return c.json({
+      success: true,
+      data: r.rows.map((row: any) => ({
+        id: row.id,
+        title: row.title,
+        artistName: row.artist_name,
+        workType: row.work_type,
+        description: row.description,
+        audioUrl: row.audio_url,
+        coverUrl: row.cover_url,
+        durationSec: row.duration_sec,
+        sortOrder: row.sort_order,
+        createdAt: row.created_at?.toISOString?.() || row.created_at,
+      })),
+    });
+  } catch (error: any) {
+    console.error('Producer public portfolio failed:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
 
 app.put('/profile/update/:producerId', requireAuth, async (c) => {
   try {
