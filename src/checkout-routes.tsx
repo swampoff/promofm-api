@@ -166,6 +166,88 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill venue subscription ───
+  //
+  // Activates the venue's chosen tier when YooKassa confirms payment
+  // (initial subscribe OR — for cron-driven recurring — the
+  // re-charge succeeds via saved payment method). Idempotent: a
+  // re-delivered webhook with the same orderId is a no-op because
+  // the period is computed from `subscriptionExpiresAt` which only
+  // gets extended forward, never duplicated.
+  //
+  // Source-of-truth for VENUE_PLANS lives in
+  // src/venue-billing-routes.tsx; this table duplicates the
+  // minimum fields the webhook needs to avoid pulling the Hono app
+  // graph into this module.
+  if (session.type === 'venue_subscription' && session.metadata?.planKey) {
+    try {
+      const VENUE_PLANS_LOCAL: Record<string, { name: string; price_month: number; price_year: number }> = {
+        start:    { name: 'Старт',   price_month: 4990,  price_year: 49900 },
+        business: { name: 'Бизнес',  price_month: 9990,  price_year: 99900 },
+        network:  { name: 'Сеть',    price_month: 14990, price_year: 149900 },
+      };
+      const planKey = session.metadata.planKey;
+      const plan = VENUE_PLANS_LOCAL[planKey];
+      if (plan) {
+        const interval = session.metadata.interval === 'year' ? 'year' : 'month';
+        const daysToAdd = interval === 'year' ? 365 : 30;
+        const userId = session.userId || session.metadata.userId;
+
+        // Read current profile; extend the existing expiry if any,
+        // else start from now. This keeps mid-cycle upgrades fair
+        // (customer doesn't lose remaining paid days).
+        const { pool: dbPool } = await import('./db-client.tsx');
+        const cur = await dbPool.query(
+          `SELECT data FROM venue_profiles WHERE user_id = $1`,
+          [userId]
+        );
+        const curData = cur.rows[0]?.data || {};
+        const existingExpiry = curData.subscriptionExpiresAt ? new Date(curData.subscriptionExpiresAt) : null;
+        const baseMs = existingExpiry && existingExpiry.getTime() > Date.now()
+          ? existingExpiry.getTime()
+          : Date.now();
+        const newExpiry = new Date(baseMs + daysToAdd * 24 * 60 * 60 * 1000).toISOString();
+
+        const nextData = {
+          ...curData,
+          subscriptionStatus:     'active',
+          subscriptionPlan:        planKey,
+          subscriptionExpiresAt:   newExpiry,
+          subscriptionInterval:    interval,
+          subscriptionPriceRub:    session.amount,
+          subscriptionUpdatedAt:   now,
+          subscriptionGateway:     session.gateway,
+          subscriptionGatewayPaymentId: session.gatewayPaymentId,
+          updatedAt:               now,
+        };
+
+        await dbPool.query(
+          `UPDATE venue_profiles SET data = $1::jsonb, updated_at = NOW() WHERE user_id = $2`,
+          [JSON.stringify(nextData), userId]
+        );
+
+        // If venue had paused streams (e.g. coming back from
+        // expiry), un-pause them so the APK starts playing again
+        // on the next poll. Bearer tokens that were revoked on
+        // expiry are NOT auto-restored — those were nuked
+        // intentionally so the venue regenerates them; new tokens
+        // come from /server/api/venue-api/tokens.
+        await dbPool.query(
+          `UPDATE venue_station_streams
+              SET status     = 'provisioned',
+                  updated_at = NOW()
+            WHERE user_id = $1 AND status = 'paused'`,
+          [userId]
+        );
+
+        log.info({ userId, planKey, interval, newExpiry }, 'venue_subscription_activated');
+      }
+    } catch (err) {
+      log.error({ err, userId: session.userId, orderId: session.orderId }, 'venue_subscription_activation_error');
+      throw err;
+    }
+  }
+
 
   // ─── Fulfill marketplace purchase ───
   if (session.type === 'purchase' && session.metadata?.itemType) {

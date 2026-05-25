@@ -9,7 +9,7 @@
 
 export type GatewayName = 'yookassa' | 'tbank' | 'stripe';
 
-export type PaymentType = 'purchase' | 'subscription' | 'donation' | 'topup';
+export type PaymentType = 'purchase' | 'subscription' | 'donation' | 'topup' | 'venue_subscription';
 
 export interface PaymentSessionRequest {
   amount: number;             // in rubles (e.g. 999.00)

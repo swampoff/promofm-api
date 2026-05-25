@@ -238,6 +238,81 @@ publication fee. Source: `tracks-page.tsx:775` (Promomusicfigma) +
 
 ## Venue cabinet
 
+### Subscription tiers (venue-side, NOT artist)
+
+**Source:** `src/venue-billing-routes.tsx:VENUE_PLANS` (duplicated in
+`checkout-routes.tsx` webhook handler for offline activation path —
+keep both in sync when prices change).
+
+| Tier       | Price/mo  | Price/yr   | Effective plan limits |
+|------------|-----------|------------|------------------------|
+| start      | 4 990     | 49 900     | 1 zone, basic library, 5 playlists, 500 tracks |
+| business   | 9 990     | 99 900     | 4 zones, full library, 20 playlists, 2000 tracks, analytics + scheduling + branding |
+| network    | 14 990    | 149 900    | unlimited zones, premium library, multi-location, API access |
+| enterprise | by sales  | by sales   | unlimited everything, custom contract |
+
+Trial: 14 days at `effectivePlan='business'`. Stamped on first
+GET /venue/profile (`venue-trial.tsx:applyInitialTrial`).
+
+### Subscribe / save-card / recurring (venue billing)
+
+**Source:** `src/venue-billing-routes.tsx` + `src/venue-billing-helpers.tsx` + webhook branch in `src/checkout-routes.tsx`.
+
+Endpoints under `/server/api/venue-billing`:
+- `POST /subscribe { tier, interval }` — creates YooKassa session
+  with `savePaymentMethod: true` so future recurring charges work
+  without redirecting the user. Returns `confirmationUrl`.
+- `POST /cancel` — flips `subscriptionStatus='cancelled'` but keeps
+  `subscriptionExpiresAt` intact. Stream plays until period end,
+  then the cron flips to expired + revokes tokens.
+- `GET  /me` — current subscription state + saved card summary
+  (last4, brand, gateway) for cabinet display.
+- `POST /cron/charge-recurring` — CRON_SECRET. Mirror of artist
+  `/subscriptions/charge-recurring` but scoped to `venue_profiles`.
+  Charges venues whose `subscriptionExpiresAt` is within 3 days OR
+  past. On charge failure / no card past expiry → marks expired
+  (see `markVenueExpired` below). Idempotent via deterministic
+  `venue-renew-{userId}-{expiresMs}` orderId.
+
+Webhook in `checkout-routes.tsx`: `session.type === 'venue_subscription'`
++ `session.metadata.planKey` → activates the tier on
+`venue_profiles.data`:
+  - `subscriptionStatus='active'`
+  - `subscriptionPlan=<tier>`
+  - `subscriptionExpiresAt` extended from existing expiry (mid-cycle
+    upgrades don't lose remaining days)
+  - `subscriptionInterval`, `subscriptionPriceRub`
+  - Also un-pauses any `venue_station_streams` rows that were
+    `paused` (post-expiry reactivation).
+
+### `markVenueExpired(userId, email, reason)` — kill-switch helper
+
+When a venue's subscription becomes unviable (charge failed, no card
+at trial end, paid period after cancellation ran out):
+- `venue_profiles.data.subscriptionStatus = 'expired'`
+- `venue_profiles.data.subscriptionPlan = 'free'`
+- All `venue_api_tokens.revoked_at = NOW()` — APK gets 401 on next
+  poll, shows lock-screen «оплатите чтобы продолжить»
+- All `venue_station_streams.status = 'paused'` — admin UI shows
+  the state
+- SSE `venue_subscription_expired` event + email (re-uses
+  `sendVenueTrialExpiredEmail` for now)
+
+### Trial-end auto-charge
+
+**Source:** `src/venue-billing-helpers.tsx:tryAutoChargeAtTrialEnd` +
+hook in `venue-trial.tsx:expireTrialsOnce`.
+
+If venue saved a card during onboarding (via /venue-billing/subscribe
+with savePaymentMethod=true), the trial-expiry cron attempts to
+charge it for the first paid month BEFORE falling back to «mark
+expired». Charge succeeds → subscription becomes active with 30-day
+period from trial end. Charge fails / no card → original expired
+path kicks in (revoke tokens, pause streams, email).
+
+This is the difference between «1000 триалов / 0 платящих» and a
+working funnel — without it every trial silently dies on day 14.
+
 ### 14-day trial mechanic
 
 **Source:** `src/venue-trial.tsx` + `src/venue-routes.tsx`.

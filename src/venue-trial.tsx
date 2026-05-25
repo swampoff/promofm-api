@@ -182,6 +182,30 @@ export async function expireTrialsOnce(): Promise<CronResult> {
       });
 
       if (state.isExpired) {
+        // First-month auto-charge attempt: if the venue saved a card
+        // during onboarding (POST /venue-billing/subscribe with
+        // savePaymentMethod=true), we charge it now instead of
+        // downgrading. The full charge → activation → period extension
+        // pipeline lives in venue-billing-routes.tsx; we just delegate.
+        let chargedFirstMonth = false;
+        try {
+          const { tryAutoChargeAtTrialEnd } = await import('./venue-billing-helpers.tsx');
+          chargedFirstMonth = await tryAutoChargeAtTrialEnd(row.user_id, row.data);
+        } catch (e: any) {
+          console.warn('[venue-trial] auto-charge attempt failed for', row.user_id, ':', e?.message);
+        }
+
+        if (chargedFirstMonth) {
+          // Charge succeeded — venue-billing-helpers already wrote
+          // the new state (subscriptionStatus='active', extended
+          // expiry, emitted SSE, etc.). Count this as a "warned"
+          // outcome (positive transition) and move on.
+          result.warned++;
+          continue;
+        }
+
+        // No card OR charge failed → fall back to original expiry path:
+        // mark expired, revoke bearer tokens, pause streams, email.
         const nextData = {
           ...row.data,
           subscriptionStatus: 'expired',
@@ -196,6 +220,21 @@ export async function expireTrialsOnce(): Promise<CronResult> {
             WHERE user_id = $2`,
           [JSON.stringify(nextData), row.user_id]
         );
+
+        // Revoke bearer tokens — APK gets 401 on next poll, stops
+        // playing. Pause streams so admin UI shows the right state.
+        await pool.query(
+          `UPDATE venue_api_tokens SET revoked_at = NOW()
+            WHERE user_id = $1 AND revoked_at IS NULL`,
+          [row.user_id]
+        ).catch((e) => console.warn('[venue-trial] token revoke failed:', e?.message));
+        await pool.query(
+          `UPDATE venue_station_streams
+              SET status = 'paused', updated_at = NOW()
+            WHERE user_id = $1 AND status IN ('provisioned', 'live')`,
+          [row.user_id]
+        ).catch((e) => console.warn('[venue-trial] stream pause failed:', e?.message));
+
         emitSSE(row.user_id, {
           type: 'venue_trial_expired',
           data: { status: 'expired', plan: 'free' },
