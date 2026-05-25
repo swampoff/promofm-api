@@ -7,8 +7,7 @@
  *   dm_conversations (id, participant_ids text[], last_message_text, last_message_at, data jsonb)
  *   dm_messages (id, conversation_id, sender_id, content, message_type, is_read, read_at, created_at)
  *   dm_unread (user_id, conversation_id, unread_count, updated_at)
- *   dm_blocks (blocker_id, blocked_id, reason, created_at) — migration 022
- *   dm_reports (id, reporter_id, reported_id, message_id, category, details, status, ...) — migration 022
+ *   dm_message_reactions (message_id, user_id, emoji, created_at)  — migration 024
  *
  * Endpoints:
  *   GET    /conversations/:userId
@@ -23,12 +22,8 @@
  *   GET    /presence/:userId
  *   GET    /rules
  *   POST   /presence
- *   GET    /search-contacts                   — radio out of graph,
- *                                                blocked users hidden
- *   GET    /blocks                            — list my blocks
- *   POST   /blocks/:userId                    — block (idempotent)
- *   DELETE /blocks/:userId                    — unblock
- *   POST   /reports                           — file abuse report
+ *   GET    /search-contacts
+ *   POST   /messages/:messageId/reactions             — toggle emoji
  */
 
 import { Hono } from 'hono';
@@ -411,8 +406,26 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
 
     const msgs = await pool.query(
       `SELECT m.id, m.conversation_id, m.sender_id, m.content, m.message_type, m.is_read, m.created_at,
-              m.attachment_url, m.attachment_name, m.attachment_size, m.attachment_mime, m.attachment_meta,
-              u.full_name as sender_name, u.role::text as sender_role
+              u.full_name as sender_name, u.role::text as sender_role,
+              -- Aggregate reactions per emoji into the shape the FE
+              -- already expects (Message.reactions on messages-page.tsx):
+              --   [{ emoji, count, users: [userId, ...] }]
+              -- LEFT JOIN + json_agg keeps the query plan flat; at
+              -- typical message volumes (<5k per conv) the overhead
+              -- is single-digit ms.
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'emoji', re.emoji,
+                  'count', re.cnt,
+                  'users', re.users
+                ))
+                FROM (
+                  SELECT emoji, COUNT(*)::int AS cnt, json_agg(user_id) AS users
+                    FROM dm_message_reactions
+                   WHERE message_id = m.id::text
+                  GROUP BY emoji
+                ) re
+              ), '[]'::json) AS reactions
        FROM dm_messages m
        LEFT JOIN users u ON u.id::text = m.sender_id
        WHERE m.conversation_id = $1
@@ -430,14 +443,7 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
       type: m.message_type,
       isRead: m.is_read,
       createdAt: m.created_at?.toISOString?.() || m.created_at,
-      // Attachment payload — null for plain text messages.
-      attachment: m.attachment_url ? {
-        url: m.attachment_url,
-        name: m.attachment_name,
-        size: m.attachment_size != null ? Number(m.attachment_size) : null,
-        mime: m.attachment_mime,
-        meta: m.attachment_meta,
-      } : null,
+      reactions: m.reactions || [],
     }));
 
     return c.json({ success: true, messages });
@@ -775,177 +781,99 @@ app.get('/search-contacts', requireAuth, async (c) => {
   return c.json({ success: true, contacts });
 });
 
-// ── POST /messages/:conversationId/attachment ──
+// ── Message reactions ──
 //
-// Multipart upload that creates a `dm_messages` row with attachment
-// columns populated. Single round-trip — client gets the full
-// hydrated message back so the optimistic UI can swap its
-// local-blob preview for the real URL without a second fetch.
-//
-// Body (multipart/form-data):
-//   file        — the actual file blob (required)
-//   isVoice     — '1' / 'true' when the upload is a voice memo
-//                  (recorded via MediaRecorder on the client)
-//   durationMs  — voice memo duration in milliseconds (optional,
-//                  surfaces in attachment_meta.durationMs)
-//   width, height — optional image/video dimensions for the
-//                  attachment_meta (avoids a second decode round)
-//   replyToId   — optional message id this attachment replies to
-//
-// Responds with `{ success: true, message: { ...same shape as
-// /messages/:convId entries } }` so the FE can append it to the
-// list immediately.
-app.post('/messages/:conversationId/attachment', requireAuth, async (c) => {
-  const conversationId = c.req.param('conversationId');
-  try {
-    const authUserId = c.get('userId');
+// Schema in migration 024. Reactions are toggled per (message,
+// user, emoji): POSTing the same emoji twice on the same message
+// removes it (Telegram/WA behaviour). The full emoji set is open
+// — backend accepts anything ≤16 chars (covers ZWJ sequences like
+// 👨‍🦰 which can hit ~14 bytes). FE pickers gate the menu down to
+// a curated set.
 
-    // 1. Validate conv membership BEFORE touching the filesystem.
-    const conv = await pool.query(
-      `SELECT participant_ids, data FROM dm_conversations WHERE id = $1`,
-      [conversationId]
-    );
-    if (conv.rows.length === 0) {
-      return c.json({ success: false, error: 'Conversation not found' }, 404);
+// POST /messages/:messageId/reactions — toggle one emoji.
+// Body: { emoji }
+//
+// Verifies the caller is a participant of the message's
+// conversation before accepting the reaction (no «reacting from
+// outside»).
+app.post('/messages/:messageId/reactions', requireAuth, async (c) => {
+  const messageId = c.req.param('messageId');
+  try {
+    const authUserId = String(c.get('userId'));
+    const { emoji } = await c.req.json() as { emoji: string };
+    if (typeof emoji !== 'string' || emoji.length === 0 || emoji.length > 16) {
+      return c.json({ success: false, error: 'Invalid emoji' }, 400);
     }
-    const participantIds: string[] = conv.rows[0].participant_ids || [];
-    if (!participantIds.includes(String(authUserId))) {
+
+    // 1. Find the message + its conv to verify access.
+    const m = await pool.query(
+      `SELECT m.id::text AS id, m.conversation_id, c.participant_ids
+         FROM dm_messages m
+         JOIN dm_conversations c ON c.id = m.conversation_id
+        WHERE m.id::text = $1
+        LIMIT 1`,
+      [messageId]
+    );
+    if (m.rows.length === 0) {
+      return c.json({ success: false, error: 'Message not found' }, 404);
+    }
+    const participantIds: string[] = m.rows[0].participant_ids || [];
+    if (!participantIds.includes(authUserId)) {
       return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
     }
+    const conversationId = m.rows[0].conversation_id;
+    const normMessageId = m.rows[0].id;
 
-    // 2. Parse multipart.
-    const body = await c.req.parseBody();
-    const file = body.file as File | undefined;
-    if (!file) {
-      return c.json({ success: false, error: 'Файл не передан' }, 400);
-    }
-    const isVoice = String(body.isVoice || '').toLowerCase() === 'true' || String(body.isVoice || '') === '1';
-    const sizeLimit = isVoice ? DM_MAX_VOICE_BYTES : DM_MAX_FILE_BYTES;
-    if (file.size > sizeLimit) {
-      return c.json({
-        success: false,
-        error: `Файл слишком большой (макс. ${Math.round(sizeLimit / 1024 / 1024)} МБ)`,
-      }, 413);
-    }
-    const mime = file.type || 'application/octet-stream';
-    if (!DM_ALLOWED_MIME_PREFIXES.some(p => mime.startsWith(p))) {
-      return c.json({
-        success: false,
-        error: `Тип файла не поддерживается: ${mime}`,
-      }, 415);
-    }
-
-    // 3. Write to disk. Per-conversation folder makes orphan cleanup
-    //    trivial (delete folder on conv archive/purge).
-    const ext = pickExt(file.name, mime);
-    const dir = path.join(DM_UPLOADS_BASE, 'dm', conversationId);
-    await fs.mkdir(dir, { recursive: true });
-    const filename = `${crypto.randomUUID()}.${ext}`;
-    const buf = Buffer.from(await file.arrayBuffer());
-    await fs.writeFile(path.join(dir, filename), buf);
-    const url = `${DM_PUBLIC_BASE}/dm/${conversationId}/${filename}`;
-
-    // 4. Build attachment_meta from optional form fields.
-    const meta: Record<string, any> = {};
-    const durationMs = Number(body.durationMs);
-    if (Number.isFinite(durationMs) && durationMs > 0) meta.durationMs = durationMs;
-    const width = Number(body.width);
-    const height = Number(body.height);
-    if (Number.isFinite(width) && width > 0) meta.width = width;
-    if (Number.isFinite(height) && height > 0) meta.height = height;
-
-    const messageType = classifyMessageType(mime, isVoice);
-    // The `content` column carries a short description used by
-    // /conversations preview («📎 файл», «🎤 голосовое»). The full
-    // attachment lives in the new columns.
-    const previewText = isVoice
-      ? '🎤 Голосовое сообщение'
-      : mime.startsWith('image/')
-        ? '🖼 Изображение'
-        : mime.startsWith('video/')
-          ? '🎬 Видео'
-          : mime.startsWith('audio/')
-            ? '🎵 Аудио'
-            : `📎 ${file.name || 'Файл'}`;
-
-    // 5. Insert dm_messages row.
-    const ins = await pool.query(
-      `INSERT INTO dm_messages
-         (conversation_id, sender_id, content, message_type, is_read, created_at,
-          attachment_url, attachment_name, attachment_size, attachment_mime, attachment_meta)
-       VALUES ($1, $2, $3, $4, false, NOW(), $5, $6, $7, $8, $9::jsonb)
-       RETURNING id, created_at`,
-      [
-        conversationId,
-        String(authUserId),
-        previewText,
-        messageType,
-        url,
-        file.name || null,
-        file.size,
-        mime,
-        Object.keys(meta).length > 0 ? JSON.stringify(meta) : null,
-      ]
+    // 2. Toggle: DELETE returns count, INSERT only if nothing
+    //    deleted. Two round-trips but each is sub-ms.
+    const del = await pool.query(
+      `DELETE FROM dm_message_reactions
+        WHERE message_id = $1 AND user_id = $2 AND emoji = $3`,
+      [normMessageId, authUserId, emoji]
     );
-    const msgId = ins.rows[0].id;
-    const createdAt = ins.rows[0].created_at;
-
-    // 6. Bump conv preview + ensure unread for other participants.
-    await pool.query(
-      `UPDATE dm_conversations SET last_message_text = $1, last_message_at = NOW() WHERE id = $2`,
-      [previewText.slice(0, 500), conversationId]
-    );
-    for (const pid of participantIds) {
-      if (pid === String(authUserId)) continue;
+    let action: 'added' | 'removed';
+    if (del.rowCount && del.rowCount > 0) {
+      action = 'removed';
+    } else {
       await pool.query(
-        `INSERT INTO dm_unread (user_id, conversation_id, unread_count, updated_at)
-         VALUES ($1, $2, 1, NOW())
-         ON CONFLICT (user_id, conversation_id) DO UPDATE
-           SET unread_count = dm_unread.unread_count + 1, updated_at = NOW()`,
-        [pid, conversationId]
+        `INSERT INTO dm_message_reactions (message_id, user_id, emoji)
+         VALUES ($1, $2, $3)
+         ON CONFLICT DO NOTHING`,
+        [normMessageId, authUserId, emoji]
       );
+      action = 'added';
     }
 
-    // 7. Hydrate sender + build response in same shape as
-    //    /messages/:convId rows so the FE can append directly.
-    const senderRow = await pool.query(
-      `SELECT full_name, role::text AS role FROM users WHERE id::text = $1 LIMIT 1`,
-      [String(authUserId)]
+    // 3. Re-aggregate this message's reactions so the FE can hot-
+    //    swap without re-fetching the entire message list.
+    const agg = await pool.query(
+      `SELECT json_agg(json_build_object(
+                'emoji', emoji, 'count', cnt, 'users', users
+              )) AS reactions
+         FROM (
+           SELECT emoji, COUNT(*)::int AS cnt, json_agg(user_id) AS users
+             FROM dm_message_reactions
+            WHERE message_id = $1
+           GROUP BY emoji
+         ) re`,
+      [normMessageId]
     );
-    const senderName = senderRow.rows[0]?.full_name || String(authUserId);
-    const senderRole = mapRole(senderRow.rows[0]?.role || 'artist');
+    const reactions = agg.rows[0]?.reactions || [];
 
-    const message = {
-      id: msgId,
-      conversationId,
-      senderId: String(authUserId),
-      senderName,
-      senderRole,
-      text: previewText,
-      type: messageType,
-      isRead: false,
-      createdAt: createdAt?.toISOString?.() || createdAt,
-      attachment: {
-        url,
-        name: file.name || null,
-        size: file.size,
-        mime,
-        meta: Object.keys(meta).length > 0 ? meta : null,
-      },
-    };
+    log.info({ messageId: normMessageId, userId: authUserId, emoji, action }, 'dm_reaction_toggled');
 
-    // 8. Push SSE to recipients so other tabs see the message live
-    //    without polling.
+    // 4. Push SSE so other tabs / participants see the bump live.
     for (const pid of participantIds) {
-      if (pid === String(authUserId)) continue;
-      emitSSE(pid, { type: 'dm_message', data: { conversationId, message } });
+      emitSSE(pid, {
+        type: 'dm_reaction_updated',
+        data: { conversationId, messageId: normMessageId, reactions },
+      });
     }
 
-    log.info({ conversationId, messageId: msgId, mime, bytes: file.size, voice: isVoice }, 'dm_attachment_uploaded');
-    return c.json({ success: true, message });
+    return c.json({ success: true, action, reactions });
   } catch (err: any) {
-    log.error({ err, conversationId }, 'attachment_upload_failed');
-    return c.json({ success: false, error: err?.message || 'Upload failed' }, 500);
+    log.error({ err, messageId }, 'reaction_toggle_failed');
+    return c.json({ success: false, error: 'Не удалось сохранить реакцию' }, 500);
   }
 });
 
