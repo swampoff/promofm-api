@@ -611,4 +611,121 @@ app.get('/search-contacts', requireAuth, async (c) => {
   return c.json({ success: true, contacts });
 });
 
+// POST /conversations/:id/participants — creator adds a new member
+// to an existing group. Body: { participant: { userId, userName, role } }.
+//
+// Validation:
+//   - Conv exists and is a group (data.isGroup truthy).
+//   - Caller is the creator (data.creatorId === authUserId).
+//   - Target user isn't already in the group (idempotent — returns
+//     200 with `added: false`).
+//   - canCommunicate() holds for every existing-member ↔ new-member
+//     pair (radio still out of the graph).
+//   - Hard cap of 50 participants (matches POST /conversations).
+//
+// Side effects:
+//   - Appends to participant_ids.
+//   - Writes a system message «X добавил(а) Y в группу».
+//   - Emits SSE `dm_participant_added` to every existing participant
+//     AND the new one (so their conv list refreshes).
+app.post('/conversations/:id/participants', requireAuth, async (c) => {
+  const conversationId = c.req.param('id');
+  try {
+    const authUserId = String(c.get('userId'));
+    const { participant } = await c.req.json() as { participant: Participant };
+    if (!participant?.userId || !participant?.role) {
+      return c.json({ success: false, error: 'participant.userId + role required' }, 400);
+    }
+
+    const conv = await pool.query(
+      `SELECT participant_ids, data FROM dm_conversations WHERE id = $1`,
+      [conversationId]
+    );
+    if (conv.rows.length === 0) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    const participantIds: string[] = conv.rows[0].participant_ids || [];
+    const data = conv.rows[0].data || {};
+    if (!data.isGroup) {
+      return c.json({
+        success: false,
+        error: 'Добавлять участников можно только в группы',
+        code: 'NOT_A_GROUP',
+      }, 400);
+    }
+    if (!participantIds.includes(authUserId)) {
+      return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
+    }
+    if (data.creatorId && data.creatorId !== authUserId) {
+      return c.json({
+        success: false,
+        error: 'Только создатель группы может добавлять участников',
+      }, 403);
+    }
+    if (participantIds.includes(participant.userId)) {
+      return c.json({ success: true, added: false, alreadyMember: true });
+    }
+    if (participantIds.length >= 50) {
+      return c.json({
+        success: false,
+        error: 'Группа уже содержит 50 участников',
+      }, 400);
+    }
+
+    // Validate every existing-member ↔ new-member pair against the
+    // communication matrix. We need each existing member's role —
+    // hydrate cheaply via getParticipantInfo.
+    const existing = await Promise.all(participantIds.map(uid => getParticipantInfo(uid)));
+    for (const exMember of existing) {
+      if (!canCommunicate(exMember.role, participant.role)) {
+        const labelA = ROLE_LABELS[exMember.role] || exMember.role;
+        const labelB = ROLE_LABELS[participant.role] || participant.role;
+        return c.json({
+          success: false,
+          error: `${labelA} не может переписываться с ролью ${labelB} — добавление отклонено`,
+          code: 'COMMUNICATION_RESTRICTED',
+        }, 403);
+      }
+    }
+
+    const newParticipantIds = [...participantIds, participant.userId];
+    await pool.query(
+      `UPDATE dm_conversations SET participant_ids = $1 WHERE id = $2`,
+      [newParticipantIds, conversationId]
+    );
+
+    // System message — best-effort; the membership change has already
+    // committed. Failure here is logged but doesn't roll back.
+    try {
+      const adderRow = await pool.query(
+        `SELECT full_name FROM users WHERE id::text = $1 LIMIT 1`,
+        [authUserId]
+      );
+      const adderName = adderRow.rows[0]?.full_name || 'Создатель';
+      const targetName = participant.userName || 'участник';
+      await pool.query(
+        `INSERT INTO dm_messages (conversation_id, sender_id, content, message_type, is_read, created_at)
+         VALUES ($1, $2, $3, 'system', false, NOW())`,
+        [conversationId, authUserId, `${adderName} добавил(а) ${targetName} в группу`]
+      );
+    } catch (sysErr) {
+      log.warn({ err: sysErr, conversationId }, 'add_participant_system_message_failed');
+    }
+
+    log.info({ conversationId, addedBy: authUserId, addedId: participant.userId }, 'dm_group_participant_added');
+
+    for (const pid of newParticipantIds) {
+      emitSSE(pid, {
+        type: 'dm_participant_added',
+        data: { conversationId, participant },
+      });
+    }
+
+    return c.json({ success: true, added: true, participantCount: newParticipantIds.length });
+  } catch (err: any) {
+    log.error({ err, conversationId }, 'add_participant_failed');
+    return c.json({ success: false, error: 'Не удалось добавить участника' }, 500);
+  }
+});
+
 export default app;
