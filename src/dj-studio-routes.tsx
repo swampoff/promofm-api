@@ -707,7 +707,7 @@ app.get('/subscription/:djId', requireAuth, requireDjRole, async (c) => {
       return c.json({ success: true, data: defaultSub });
     }
 
-    return c.json({ success: true, data: sub });
+    return c.json({ success: true, data: subscriptionView(sub) });
   } catch (error) {
     console.error('Error fetching DJ subscription:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -814,10 +814,11 @@ app.get('/dashboard/stats', requireAuth, requireDjRole, async (c) => {
       [userId]
     ).catch(() => ({ rows: [{ avg: 0 }] }));
 
-    const [mixesAgg, reviewsAgg, events] = await Promise.all([
+    const [mixesAgg, reviewsAgg, events, planLimits] = await Promise.all([
       mixesAggPromise,
       reviewsAggPromise,
       djEventsStore.get(userId).catch(() => []),
+      getDjPlanLimits(String(userId)).catch(() => DJ_PLANS[0].limits),
     ]);
     const mixesCount = Number(mixesAgg.rows?.[0]?.cnt || 0);
     const totalPlays = Number(mixesAgg.rows?.[0]?.plays || 0);
@@ -849,13 +850,14 @@ app.get('/dashboard/stats', requireAuth, requireDjRole, async (c) => {
         earnings: totalEarnings,
         rating: Number(avgRating.toFixed(2)),
         followers,
+        analyticsLevel: String(planLimits?.analytics || 'basic'),
       },
     });
   } catch (error) {
     console.error('Error building DJ dashboard stats:', error);
     return c.json({
       success: true,
-      data: { mixesCount: 0, listens: 0, bookingsCount: 0, earnings: 0, rating: 0, followers: 0 },
+      data: { mixesCount: 0, listens: 0, bookingsCount: 0, earnings: 0, rating: 0, followers: 0, analyticsLevel: 'basic' },
     });
   }
 });
@@ -878,10 +880,11 @@ function inCurrentMonth(iso: string | undefined): boolean {
 app.get('/finances/overview', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const [events, withdrawals, txs] = await Promise.all([
+    const [events, withdrawals, txs, planLimits] = await Promise.all([
       djEventsStore.get(userId).catch(() => []),
       djWithdrawalsStore.get(userId).catch(() => []),
       djTransactionsStore.get(userId).catch(() => []),
+      getDjPlanLimits(String(userId)).catch(() => DJ_PLANS[0].limits),
     ]);
     const eventsArr: any[] = Array.isArray(events) ? events : [];
     const withdrawalsArr: any[] = Array.isArray(withdrawals) ? withdrawals : [];
@@ -914,6 +917,7 @@ app.get('/finances/overview', requireAuth, requireDjRole, async (c) => {
         totalEarned,
         totalWithdrawn,
         transactionsCount: txsArr.length,
+        analyticsLevel: String(planLimits?.analytics || 'basic'),
       },
     });
   } catch (error) {
@@ -925,6 +929,7 @@ app.get('/finances/overview', requireAuth, requireDjRole, async (c) => {
         monthEarnings: 0, monthBookings: 0,
         commissionRate: COMMISSION_RATE,
         totalEarned: 0, totalWithdrawn: 0, transactionsCount: 0,
+        analyticsLevel: 'basic',
       },
     });
   }
@@ -934,9 +939,10 @@ app.get('/finances/overview', requireAuth, requireDjRole, async (c) => {
 app.get('/finances/transactions', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const [events, txs] = await Promise.all([
+    const [events, txs, planLimits] = await Promise.all([
       djEventsStore.get(userId).catch(() => []),
       djTransactionsStore.get(userId).catch(() => []),
+      getDjPlanLimits(String(userId)).catch(() => DJ_PLANS[0].limits),
     ]);
     const eventsArr: any[] = Array.isArray(events) ? events : [];
     const txsArr: any[] = Array.isArray(txs) ? txs : [];
@@ -970,10 +976,38 @@ app.get('/finances/transactions', requireAuth, requireDjRole, async (c) => {
       return db - da;
     });
 
-    return c.json({ success: true, data: combined });
+    // Analytics-tier gating: `basic` (Starter) sees current month
+    // only; `advanced`/`full` (Pro/Agency) see the full history.
+    // The cap on historical data is the only concrete capability
+    // sold by the «Расширенная аналитика» feature line on the
+    // pricing card. The UI gets `analyticsLevel` + `truncated` so
+    // it can show a «Полная история — на Pro» CTA.
+    const analyticsLevel = String(planLimits?.analytics || 'basic');
+    let payload = combined;
+    let truncated = false;
+    if (analyticsLevel === 'basic') {
+      const monthStart = new Date();
+      monthStart.setUTCDate(1);
+      monthStart.setUTCHours(0, 0, 0, 0);
+      const cutoff = monthStart.getTime();
+      const before = combined.length;
+      payload = combined.filter((t) => {
+        if (!t.date) return true;
+        const ts = new Date(t.date).getTime();
+        if (!Number.isFinite(ts)) return true;
+        return ts >= cutoff;
+      });
+      truncated = payload.length < before;
+    }
+
+    return c.json({
+      success: true,
+      data: payload,
+      meta: { analyticsLevel, truncated, totalAvailable: combined.length },
+    });
   } catch (error) {
     console.error('Error fetching DJ transactions:', error);
-    return c.json({ success: true, data: [] });
+    return c.json({ success: true, data: [], meta: { analyticsLevel: 'basic', truncated: false, totalAvailable: 0 } });
   }
 });
 
@@ -1513,6 +1547,18 @@ app.get('/mixes', requireAuth, requireDjRole, async (c) => {
 export async function getDjPlanLimits(djId: string): Promise<{ mixes: number; events: number; analytics: string }> {
   try {
     const sub: any = await djSubscriptionsStore.get(djId);
+    // Lazy expiry check — if the stored subscription's endDate has
+    // passed, fall back to starter limits even when the row still
+    // says status:'active'. Without this the DJ would keep using
+    // Pro/Agency caps forever after the paid period ended; there's
+    // no cron job downgrading expired rows. See subscriptionView()
+    // for the matching UI-facing fields (expired flag, daysLeft).
+    if (sub?.endDate) {
+      const end = new Date(sub.endDate).getTime();
+      if (Number.isFinite(end) && end < Date.now()) {
+        return { ...DJ_PLANS[0].limits } as any;
+      }
+    }
     if (sub?.limits && typeof sub.limits === 'object') {
       return {
         mixes: Number(sub.limits.mixes) || DJ_PLANS[0].limits.mixes,
@@ -1524,6 +1570,31 @@ export async function getDjPlanLimits(djId: string): Promise<{ mixes: number; ev
     console.warn('[dj-studio] getDjPlanLimits failed:', e?.message);
   }
   return { ...DJ_PLANS[0].limits } as any;
+}
+
+// Build the UI-facing subscription envelope. Adds `expired` and
+// `daysLeft` so the cabinet can show «Подписка истекла, продлите»
+// without the frontend re-implementing date math. When the stored
+// row is past endDate, the `limits` field returned to the client is
+// the starter ones — matches what getDjPlanLimits() enforces, so
+// what the UI displays and what the backend actually allows stay in
+// sync.
+function subscriptionView(sub: any): any {
+  if (!sub) return null;
+  const out: any = { ...sub };
+  if (sub.endDate) {
+    const end = new Date(sub.endDate).getTime();
+    if (Number.isFinite(end)) {
+      const msLeft = end - Date.now();
+      out.daysLeft = Math.ceil(msLeft / 86400000);
+      if (msLeft < 0) {
+        out.expired = true;
+        out.status = 'expired';
+        out.limits = { ...DJ_PLANS[0].limits };
+      }
+    }
+  }
+  return out;
 }
 
 // POST /mixes — загрузить новый микс (multipart: audio, cover, title, genre…)

@@ -621,7 +621,7 @@ When `available=false` → «скоро будет» banner instead of dead link
 `-1` = unlimited. Resolver: `getDjPlanLimits(djId)` — reads
 `djSubscriptionsStore`, defaults to starter when no record.
 
-Enforced endpoints (audit pass 2026-05-25 closed two gaps):
+Enforced endpoints (audit pass 2026-05-25 closed multiple gaps):
 - `POST /dj-studio/mixes` — `limits.mixes` (count vs cap)
 - `POST /dj-studio/events` — `limits.events` per-month (counts
   non-cancelled events in the same calendar month as the requested
@@ -630,6 +630,33 @@ Enforced endpoints (audit pass 2026-05-25 closed two gaps):
 - `POST /booking/create` — `limits.events` (only when
   `performerType === 'dj'`); counts non-rejected non-cancelled
   bookings in the same calendar month as eventDate.
+- `GET /dj-studio/finances/transactions` — `limits.analytics`.
+  `basic` (Starter) returns only transactions in the current
+  calendar month; `advanced`/`full` (Pro/Agency) return full
+  history. Response includes
+  `meta: { analyticsLevel, truncated, totalAvailable }` so the
+  cabinet can surface a «Полная история — Pro+» CTA when truncated.
+
+Subscription expiry (lazy check, no cron):
+- `getDjPlanLimits(djId)` — if stored `sub.endDate` has passed,
+  returns starter limits regardless of stored `sub.limits`.
+- `GET /dj-studio/subscription/:djId` — runs `subscriptionView()`
+  on the stored row: adds `daysLeft` (ceil of remaining days) and,
+  when past endDate, sets `expired: true`, `status: 'expired'` and
+  rewrites `limits` to starter. Frontend can pivot on these to
+  show «Продлите подписку» without re-implementing date math.
+- There is intentionally no cron downgrading expired rows in the
+  store — the lazy check is the source of truth, and renewals
+  arrive via webhook from YooKassa.
+
+Analytics tier — what's actually surfaced:
+- `GET /dashboard/stats` includes `data.analyticsLevel`.
+- `GET /finances/overview` includes `data.analyticsLevel`.
+- `GET /finances/transactions` includes
+  `meta.analyticsLevel` + the `basic`-only month truncation
+  described above.
+- Other endpoints don't gate on tier yet. Future: chart breakdowns,
+  CSV export, API tokens for `full`.
 
 Subscription activation:
 - **Free plan (`starter`)** — direct `POST /dj-studio/subscription/:djId/change`
