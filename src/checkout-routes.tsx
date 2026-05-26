@@ -717,6 +717,96 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill dj_mix_publish (approved → published прямо на webhook) ───
+  // Зеркало track_publish, но без промежуточных 'paid'→'upcoming'→'published'.
+  // У миксов нет «Скоро в эфире» стадии (юзер: «webhook ставит
+  // moderation_status='published'»). Approved → оплата → виден в публичном
+  // профиле + питчинге сразу.
+  if (session.metadata?.type === 'dj_mix_publish' && session.metadata?.mixId) {
+    try {
+      const mixId = String(session.metadata.mixId);
+      const { pool: mxPool } = await import('./db-client.tsx');
+
+      // Raw UPDATE с jsonb merge (см. комментарий к track_publish ниже —
+      // тот же паттерн против stale snapshots от параллельных admin-update'ов).
+      const result = await mxPool.query(
+        `UPDATE dj_mixes
+            SET moderation_status = 'published',
+                is_hidden         = false,
+                status            = 'published',
+                data              = COALESCE(data, '{}'::jsonb)
+                                    || jsonb_build_object(
+                                         'payment_completed', true,
+                                         'payment_amount',   $2::numeric,
+                                         'payment_order_id', $3::text,
+                                         'payment_gateway',  $4::text,
+                                         'paid_at',          $5::text
+                                       ),
+                moderated_at      = COALESCE(moderated_at, $6::timestamptz),
+                updated_at        = $6
+          WHERE id = $1
+            AND moderation_status = 'approved'
+          RETURNING dj_id, title`,
+        [mixId, session.amount, session.orderId, session.gateway, now, now]
+      );
+
+      if (result.rowCount === 0) {
+        log.warn(
+          { mixId, orderId: session.orderId },
+          'dj_mix_payment_received_but_state_mismatch'
+        );
+      } else {
+        const { dj_id: djId, title } = result.rows[0];
+        log.info(
+          { mixId, djId, amount: session.amount, orderId: session.orderId },
+          'dj_mix_payment_published'
+        );
+
+        // Inbox + SSE — то же что у track_published: DJ видит «Опубликован»
+        // мгновенно, без F5.
+        try {
+          const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+          await notifyCrossCabinet({
+            targetUserId: djId,
+            targetRole: 'dj',
+            sourceRole: 'system',
+            type: 'mix_published',
+            title: 'Микс опубликован!',
+            message: `"${title}" попал на радио и в питчинг`,
+            link: '/dj/mixes',
+            metadata: { mixId, amount: session.amount },
+          });
+        } catch (err) {
+          log.warn({ err, mixId }, 'dj_mix_published_notify_failed');
+        }
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(djId, {
+            type: 'mix_published',
+            data: { mixId, title, amount: session.amount },
+          });
+          emitSSE('admin', {
+            type: 'mix_published',
+            data: { mixId, title, djId, amount: session.amount },
+          });
+        } catch {}
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.error({ err, mixId: session.metadata.mixId, orderId: session.orderId }, 'dj_mix_publish_fulfillment_error');
+      // Money taken — flag для ops чтобы вручную поправить состояние.
+      try {
+        session.metadata = {
+          ...(session.metadata || {}),
+          fulfillment_failed: 'true',
+          fulfillment_error: errMsg,
+          fulfillment_failed_at: now,
+        };
+        await upsertPaymentSession(session.orderId, session);
+      } catch {}
+    }
+  }
+
   // ─── Fulfill video_publish / concert_publish (publish_orders → paid) ───
   // Pipeline aligned with tracks: payment makes the order 'paid', NOT 'published'.
   // Admin must explicitly publish from the moderation panel after verifying payment.
@@ -1104,6 +1194,43 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         return c.json({ success: false, error: 'Сумма не соответствует тарифу' }, 400);
       }
     }
+    // dj_mix_publish: те же три защиты что у трека артиста.
+    // Mix должен быть owned + moderation_status='approved' (после админ-апрува,
+    // ждёт оплаты). Amount = data.payment_amount или 5000 ₽ дефолт — клиент
+    // не может занизить через DevTools.
+    if (type === 'purchase' && metadata?.type === 'dj_mix_publish') {
+      const mixId = metadata?.mixId;
+      if (!mixId) {
+        return c.json({ success: false, error: 'metadata.mixId обязателен для dj_mix_publish' }, 400);
+      }
+      try {
+        const { pool: vpool } = await import('./db-client.tsx');
+        const { rows } = await vpool.query(
+          `SELECT dj_id, moderation_status, data FROM dj_mixes WHERE id = $1 LIMIT 1`,
+          [String(mixId)]
+        );
+        if (rows.length === 0) {
+          return c.json({ success: false, error: 'Микс не найден' }, 404);
+        }
+        const mix = rows[0];
+        if (mix.dj_id !== userId) {
+          log.warn({ userId, mixId, ownerId: mix.dj_id }, 'dj_mix_publish_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужой микс' }, 403);
+        }
+        if (mix.moderation_status !== 'approved') {
+          return c.json({ success: false, error: `Микс должен быть одобрен модератором (текущий статус: ${mix.moderation_status})` }, 400);
+        }
+        const expected = Number(mix.data?.payment_amount) || 5000;
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, mixId, expected, received: amount }, 'dj_mix_publish_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене публикации микса' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, mixId }, 'dj_mix_publish_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить микс' }, 500);
+      }
+    }
+
     // For track_publish the amount MUST match the track's price (per-track or default).
     // Track must be owned by the payer and in 'approved' status (awaiting payment).
     // Blocks: pay-1-ruble exploit, pay-for-someone-elses-track, pay-twice on already-published.
