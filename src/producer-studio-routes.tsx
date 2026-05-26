@@ -614,7 +614,7 @@ app.get('/portfolio/v2', requireAuth, async (c) => {
     if (!userId) return c.json({ success: false, error: 'Unauthorized' }, 401);
     const r = await pool.query(
       `SELECT id, title, artist_name, work_type, description, audio_url, cover_url,
-              duration_sec, sort_order, is_public, created_at, updated_at
+              duration_sec, bpm, sort_order, is_public, created_at, updated_at
          FROM producer_portfolio
         WHERE user_id = $1
         ORDER BY sort_order ASC, created_at DESC`,
@@ -631,6 +631,7 @@ app.get('/portfolio/v2', requireAuth, async (c) => {
         audioUrl: row.audio_url,
         coverUrl: row.cover_url,
         durationSec: row.duration_sec,
+        bpm: row.bpm,
         sortOrder: row.sort_order,
         isPublic: row.is_public,
         createdAt: row.created_at?.toISOString?.() || row.created_at,
@@ -658,6 +659,9 @@ app.post('/portfolio/v2', requireAuth, async (c) => {
     const artistName = String(body.artistName || '').slice(0, 200) || null;
     const description = String(body.description || '').slice(0, 2000) || null;
     const durationSec = Number(body.durationSec) || null;
+    // BPM — опциональный, миграция 029. FE валидирует 40-220.
+    const bpmRaw = Number(body.bpm);
+    const bpm = Number.isFinite(bpmRaw) && bpmRaw > 0 ? Math.round(bpmRaw) : null;
 
     const uploaded = await saveUpload(
       file,
@@ -669,10 +673,10 @@ app.post('/portfolio/v2', requireAuth, async (c) => {
 
     const ins = await pool.query(
       `INSERT INTO producer_portfolio
-         (user_id, title, artist_name, work_type, description, audio_url, duration_sec)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (user_id, title, artist_name, work_type, description, audio_url, duration_sec, bpm)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id, created_at`,
-      [userId, title, artistName, workType, description, uploaded.url, durationSec],
+      [userId, title, artistName, workType, description, uploaded.url, durationSec, bpm],
     );
 
     return c.json({
@@ -686,6 +690,7 @@ app.post('/portfolio/v2', requireAuth, async (c) => {
         audioUrl: uploaded.url,
         coverUrl: null,
         durationSec,
+        bpm,
         sortOrder: 0,
         isPublic: true,
         createdAt: ins.rows[0].created_at?.toISOString?.() || ins.rows[0].created_at,
@@ -713,6 +718,7 @@ app.put('/portfolio/v2/:id', requireAuth, async (c) => {
       workType: 'work_type',
       description: 'description',
       durationSec: 'duration_sec',
+      bpm: 'bpm',
       sortOrder: 'sort_order',
       isPublic: 'is_public',
     };
@@ -769,7 +775,7 @@ app.get('/portfolio/v2/public/:userId', async (c) => {
   try {
     const r = await pool.query(
       `SELECT id, title, artist_name, work_type, description, audio_url, cover_url,
-              duration_sec, sort_order, created_at
+              duration_sec, bpm, sort_order, created_at
          FROM producer_portfolio
         WHERE user_id = $1 AND is_public = true
         ORDER BY sort_order ASC, created_at DESC
@@ -787,6 +793,7 @@ app.get('/portfolio/v2/public/:userId', async (c) => {
         audioUrl: row.audio_url,
         coverUrl: row.cover_url,
         durationSec: row.duration_sec,
+        bpm: row.bpm,
         sortOrder: row.sort_order,
         createdAt: row.created_at?.toISOString?.() || row.created_at,
       })),
