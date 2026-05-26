@@ -1427,6 +1427,43 @@ function sanitizeExt(name: string | undefined, allowed: Set<string>): string | n
   return allowed.has(ext) ? ext : null;
 }
 
+// ─── Whitelist жанров для DJ-миксов ────────────────────────────────
+// Зеркало datalist'а #dj-genres-list во фронте (DjMixManager.tsx).
+// Сравнение case-insensitive: 'house' === 'House' === 'HOUSE'. Если
+// добавляешь жанр сюда — синхронно добавь в datalist на фронте.
+const DJ_MIX_GENRES = new Set([
+  'house', 'deep house', 'tech house', 'progressive house',
+  'future house', 'bass house', 'afro house', 'melodic house',
+  'techno', 'melodic techno', 'minimal techno', 'hard techno',
+  'trance', 'progressive trance', 'psy-trance', 'uplifting trance',
+  'drum & bass', 'liquid dnb', 'neurofunk', 'jungle',
+  'dubstep', 'riddim', 'trap', 'hardstyle',
+  'disco', 'nu disco', 'funk', 'electro',
+  'breakbeat', 'uk garage', 'garage house', 'speed garage',
+  'ambient', 'downtempo', 'chillout', 'lo-fi',
+  'hip-hop', 'r&b', 'soul', 'latin',
+  'mashup', 'open format', 'top 40', 'edm',
+]);
+
+/** Возвращает нормализованный жанр (как был введён, но trimmed) или
+ *  false если жанр не в whitelist. Пустой жанр возвращает '' — допустим. */
+function validateMixGenre(input: string): string | false {
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  return DJ_MIX_GENRES.has(trimmed.toLowerCase()) ? trimmed : false;
+}
+
+/** BPM: пустая строка → ''. Число в диапазоне 40-220 → строка с числом.
+ *  Иначе false (валидация провалена). */
+function validateMixBpm(input: string): string | false {
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  if (!/^\d{2,3}$/.test(trimmed)) return false;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n < 40 || n > 220) return false;
+  return String(n);
+}
+
 async function saveUpload(file: File, subdir: string, prefix: string, allowed: Set<string>, maxBytes: number) {
   if (file.size > maxBytes) {
     throw new Error(`Файл слишком большой (макс. ${Math.round(maxBytes / 1024 / 1024)} МБ)`);
@@ -1669,15 +1706,35 @@ app.post('/mixes', requireAuth, requireDjRole, async (c) => {
     const audio = body.audio as File | undefined;
     const cover = body.cover as File | undefined;
     const title = String(body.title || '').trim();
-    const genre = String(body.genre || '').trim();
+    const genreRaw = String(body.genre || '').trim();
     const description = String(body.description || '').slice(0, 2000);
-    const bpmRange = String(body.bpmRange || '').slice(0, 32);
+    const bpmRaw = String(body.bpmRange || '').trim();
     const durationSec = Math.max(0, Number(body.durationSec || 0));
     const isPremium = String(body.isPremium || 'false') === 'true';
     const price = Math.max(0, Number(body.price || 0));
 
     if (!audio) return c.json({ success: false, error: 'Аудио-файл обязателен' }, 400);
     if (!title) return c.json({ success: false, error: 'Название микса обязательно' }, 400);
+
+    // ── Whitelist жанров. Должен совпадать с datalist'ом фронта
+    // (DjMixManager.tsx → dj-genres-list). Сравнение case-insensitive,
+    // нормализация — lowercase + trim. Пустой жанр допустим (опциональное поле).
+    const genre = validateMixGenre(genreRaw);
+    if (genre === false) {
+      return c.json({
+        success: false,
+        error: `Жанр «${genreRaw}» не поддерживается. Выберите из подсказок: House, Techno, Trance, Drum & Bass, Dubstep и др.`,
+      }, 400);
+    }
+
+    // ── BPM: пусто — ок; иначе 40-220, только число.
+    const bpmRange = validateMixBpm(bpmRaw);
+    if (bpmRange === false) {
+      return c.json({
+        success: false,
+        error: 'BPM должен быть числом в диапазоне 40-220',
+      }, 400);
+    }
 
     const audioUploaded = await saveUpload(audio, 'dj-mixes', `mix-${userId}`, AUDIO_EXTS, MAX_AUDIO_BYTES);
     let coverUrl = '';
