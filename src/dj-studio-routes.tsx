@@ -103,6 +103,11 @@ function ensureDjMixesSchema(): Promise<void> {
           bpm_range TEXT,
           status TEXT DEFAULT 'published',
           data JSONB DEFAULT '{}'::jsonb,
+          moderation_status TEXT DEFAULT 'pending',
+          moderated_at TIMESTAMPTZ,
+          moderation_comment TEXT,
+          rejection_reason TEXT,
+          is_hidden BOOLEAN DEFAULT TRUE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -111,9 +116,23 @@ function ensureDjMixesSchema(): Promise<void> {
           ADD COLUMN IF NOT EXISTS cover_url TEXT,
           ADD COLUMN IF NOT EXISTS description TEXT,
           ADD COLUMN IF NOT EXISTS bpm_range TEXT,
-          ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'published';
+          ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'published',
+          ADD COLUMN IF NOT EXISTS moderation_status TEXT,
+          ADD COLUMN IF NOT EXISTS moderated_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS moderation_comment TEXT,
+          ADD COLUMN IF NOT EXISTS rejection_reason TEXT,
+          ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN DEFAULT TRUE;
+        -- Backfill старых строк до того как переключим default + NOT NULL
+        UPDATE dj_mixes
+           SET moderation_status = 'published',
+               is_hidden         = FALSE,
+               moderated_at      = COALESCE(updated_at, created_at, NOW())
+         WHERE moderation_status IS NULL;
+        ALTER TABLE dj_mixes
+          ALTER COLUMN moderation_status SET DEFAULT 'pending';
         CREATE INDEX IF NOT EXISTS idx_dj_mixes_dj_id ON dj_mixes(dj_id);
         CREATE INDEX IF NOT EXISTS idx_dj_mixes_created_at ON dj_mixes(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_dj_mixes_moderation_status ON dj_mixes(moderation_status);
       `);
     } catch (err) {
       console.error('[dj-studio] ensureDjMixesSchema failed:', err);
@@ -1582,7 +1601,8 @@ app.get('/mixes', requireAuth, requireDjRole, async (c) => {
     await ensureDjMixesSchema();
     const { rows } = await pool.query(
       `SELECT id, dj_id, title, genre, duration, plays_count, audio_url, cover_url,
-              description, bpm_range, status, data, created_at, updated_at
+              description, bpm_range, status, data, created_at, updated_at,
+              moderation_status, moderated_at, moderation_comment, rejection_reason, is_hidden
          FROM dj_mixes
         WHERE dj_id = $1
         ORDER BY created_at DESC`,
@@ -1605,6 +1625,16 @@ app.get('/mixes', requireAuth, requireDjRole, async (c) => {
       isPremium: !!r.data?.isPremium,
       price: r.data?.price || 0,
       status: r.status || 'published',
+      // Зеркало пайплайна tracks: pending/approved/upcoming/published/rejected.
+      // Кабинет рисует badge + CTA по этому полю.
+      moderationStatus: r.moderation_status || 'pending',
+      moderatedAt: r.moderated_at,
+      moderationComment: r.moderation_comment || '',
+      rejectionReason: r.rejection_reason || '',
+      isHidden: !!r.is_hidden,
+      requiresPayment: !!r.data?.requires_payment,
+      paymentAmount: Number(r.data?.payment_amount || 0),
+      firstMixFreeApplied: !!r.data?.first_mix_free_applied,
       createdAt: r.created_at,
     }));
     return c.json({ success: true, data: mixes });
@@ -1746,10 +1776,23 @@ app.post('/mixes', requireAuth, requireDjRole, async (c) => {
     const id = `mix-${crypto.randomUUID()}`;
     const data = { likes: 0, downloads: 0, comments: 0, isPremium, price };
 
+    // Зеркало пайплайна tracks (track-moderation-routes.tsx :119 submitTrack):
+    // загруженный микс уходит в очередь админ-модерации (moderation_status='pending',
+    // is_hidden=TRUE). Публичные эндпоинты (/tracks/new, dj public profile,
+    // marketplace) фильтруют по moderation_status IN ('upcoming','published')
+    // AND is_hidden=FALSE, поэтому новый микс не показывается до апрува.
+    // Старая колонка `status` (draft/published) остаётся ради обратной
+    // совместимости с существующими SELECT — но переключение происходит
+    // через moderation_status.
     await pool.query(
       `INSERT INTO dj_mixes
-         (id, dj_id, title, genre, duration, plays_count, audio_url, cover_url, description, bpm_range, status, data, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, 'published', $10, NOW(), NOW())`,
+         (id, dj_id, title, genre, duration, plays_count, audio_url, cover_url,
+          description, bpm_range, status, data,
+          moderation_status, is_hidden,
+          created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, 'draft', $10,
+               'pending', TRUE,
+               NOW(), NOW())`,
       [id, userId, title, genre, durationSec, audioUploaded.url, coverUrl, description, bpmRange, data]
     );
 
@@ -1764,7 +1807,9 @@ app.post('/mixes', requireAuth, requireDjRole, async (c) => {
         coverUrl,
         description, bpmRange,
         isPremium, price,
-        status: 'published',
+        status: 'draft',
+        moderationStatus: 'pending',
+        isHidden: true,
         createdAt: new Date().toISOString(),
       },
     }, 201);

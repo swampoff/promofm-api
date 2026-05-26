@@ -141,6 +141,12 @@ app.get('/djs/:id/mixes', async (c) => {
     const id = c.req.param('id');
     // dj_mixes.dj_id хранится как user_id, но публичный URL может содержать
     // dj_profiles.id (uuid). Резолвим через подзапрос — принимаем оба варианта.
+    // Публичный фид DJ — только одобренные миксы (moderation_status IN
+    // ('upcoming','published') + is_hidden=FALSE). Зеркало того что
+    // tracks-routes делает для треков артистов после модерации. Старая
+    // колонка status='published' оставлена как доп. фильтр для миксов
+    // что были опубликованы ДО миграции 030 — они уже backfill'нуты в
+    // moderation_status='published', is_hidden=FALSE.
     const { rows } = await pool.query(
       `SELECT m.id, m.title, m.genre, m.duration, m.plays_count as plays,
               m.audio_url, m.cover_url, m.description, m.bpm_range, m.data, m.status
@@ -148,7 +154,8 @@ app.get('/djs/:id/mixes', async (c) => {
          WHERE (m.dj_id = $1 OR m.dj_id = (
                 SELECT user_id FROM dj_profiles
                  WHERE id::text = $1 OR user_id = $1 LIMIT 1))
-           AND (m.status IS NULL OR m.status = 'published')
+           AND m.moderation_status IN ('upcoming', 'published')
+           AND m.is_hidden = FALSE
          ORDER BY m.created_at DESC`,
       [id]
     );
