@@ -981,6 +981,29 @@ app.post('/promote-upcoming', async (c) => {
         },
       });
 
+      // Сразу инжектим трек в активный weekly_release (новинки недели).
+      // Раньше: weekly_release пересоздавался только по пятницам через
+      // friday.js, треки промоутнутые из upcoming в середине недели
+      // повисали в БД published, но не появлялись в публичных «Новинках»
+      // до следующей пятницы. Теперь cron сразу добавляет id в начало
+      // track_ids текущего активного release (защита от дублей через
+      // NOT t.id = ANY(track_ids)).
+      try {
+        await (await import('./db-client.tsx')).pool.query(
+          `UPDATE weekly_releases
+              SET track_ids = ARRAY[$1::uuid] || track_ids
+            WHERE id = (
+              SELECT id FROM weekly_releases
+               WHERE is_published = true
+               ORDER BY release_date DESC LIMIT 1
+            )
+              AND NOT ($1::uuid = ANY(track_ids))`,
+          [track.id]
+        );
+      } catch (e: any) {
+        console.warn('[promote-upcoming] weekly_release inject failed:', e?.message);
+      }
+
       // Notify artist
       if (track.user_id) {
         const pubTitle = 'Трек опубликован!';
