@@ -717,6 +717,83 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill banner_publish payment ───
+  // Approved банер ждал оплаты — после webhook'а активируем его:
+  // moderation_status='paid', status='active', выставляем start/end_date.
+  // Длительность берётся из banner.duration_days (положена при создании
+  // согласно выбранному сроку и server-side calculator'у).
+  if (session.metadata?.type === 'banner_publish' && session.metadata?.bannerId) {
+    try {
+      const bannerId = session.metadata.bannerId;
+      const { pool: bpPool } = await import('./db-client.tsx');
+
+      // Атомарный UPDATE с jsonb-мерджем — защита от race condition
+      // (параллельный webhook + ручной admin-activate).
+      const result = await bpPool.query(
+        `UPDATE banner_ads
+            SET moderation_status = 'paid',
+                status            = 'active',
+                start_date        = $2::timestamptz,
+                end_date          = ($2::timestamptz + (COALESCE(duration_days, 7) || ' days')::interval),
+                data              = COALESCE(data, '{}'::jsonb)
+                                    || jsonb_build_object(
+                                         'payment_completed', true,
+                                         'payment_amount',   $3::numeric,
+                                         'payment_order_id', $4::text,
+                                         'payment_gateway',  $5::text,
+                                         'paid_at',          $2::text
+                                       ),
+                updated_at        = $2
+          WHERE id = $1
+            AND moderation_status = 'approved'
+          RETURNING id, title, user_id, end_date`,
+        [bannerId, now, session.amount, session.orderId, session.gateway]
+      );
+
+      if (result.rowCount === 0) {
+        log.warn({ bannerId, orderId: session.orderId }, 'banner_payment_state_mismatch');
+      } else {
+        log.info(
+          { bannerId, amount: session.amount, orderId: session.orderId, endDate: result.rows[0]?.end_date },
+          'banner_payment_received_and_activated'
+        );
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(session.userId, {
+            type: 'banner_activated',
+            data: {
+              bannerId,
+              title: result.rows[0]?.title || '',
+              endDate: result.rows[0]?.end_date,
+              amount: session.amount,
+            },
+          });
+          emitSSE('admin', {
+            type: 'banner_activated',
+            data: {
+              bannerId,
+              title: result.rows[0]?.title || '',
+              userId: session.userId,
+              amount: session.amount,
+            },
+          });
+        } catch {}
+      }
+    } catch (err: any) {
+      const errMsg = String(err?.message || err);
+      log.error({ err, bannerId: session.metadata.bannerId, orderId: session.orderId }, 'banner_publish_fulfillment_error');
+      try {
+        session.metadata = {
+          ...(session.metadata || {}),
+          fulfillment_failed: 'true',
+          fulfillment_error: errMsg,
+          fulfillment_failed_at: now,
+        };
+        await upsertPaymentSession(session.orderId, session);
+      } catch {}
+    }
+  }
+
   // ─── Fulfill video_publish / concert_publish (publish_orders → paid) ───
   // Pipeline aligned with tracks: payment makes the order 'paid', NOT 'published'.
   // Admin must explicitly publish from the moderation panel after verifying payment.
@@ -1133,6 +1210,43 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       } catch (err) {
         log.error({ err, trackId }, 'track_publish_validation_error');
         return c.json({ success: false, error: 'Не удалось проверить трек' }, 500);
+      }
+    }
+    // banner_publish — оплата активации рекламной кампании. Сервер
+    // пересчитывает цену через calculateBannerPrice (см. banner-pricing.tsx)
+    // против тарифа подписки юзера на момент создания (сохранён в
+    // banner.data.subscription_tier). Сумма от фронта должна точно
+    // совпадать с пересчётом.
+    if (type === 'purchase' && metadata?.type === 'banner_publish') {
+      const bannerId = metadata?.bannerId;
+      if (!bannerId) {
+        return c.json({ success: false, error: 'metadata.bannerId обязателен для banner_publish' }, 400);
+      }
+      try {
+        const { getBannerById } = await import('./db-typed.tsx');
+        const banner = await getBannerById(String(bannerId));
+        if (!banner) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
+        if (String(banner.user_id) !== userId) {
+          log.warn({ userId, bannerId, ownerId: banner.user_id }, 'banner_publish_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужую кампанию' }, 403);
+        }
+        if (banner.moderation_status !== 'approved') {
+          return c.json({
+            success: false,
+            error: `Кампания должна быть одобрена модератором (текущий статус: ${banner.moderation_status})`,
+          }, 400);
+        }
+        const expected = Number(banner.price || (banner as any)?.data?.final_price || 0);
+        if (expected <= 0) {
+          return c.json({ success: false, error: 'Цена кампании не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, bannerId, expected, received: amount }, 'banner_publish_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене кампании' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, bannerId }, 'banner_publish_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить кампанию' }, 500);
       }
     }
     if (!returnUrl) {
