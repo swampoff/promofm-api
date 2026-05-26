@@ -1546,7 +1546,11 @@ app.post('/profile/cover', requireAuth, requireDjRole, async (c) => {
   }
 });
 
-// POST /portfolio/upload — загрузить файл (аудио/видео) в портфолио
+// POST /portfolio/upload — загрузить файл в портфолио DJ.
+// Поддерживаются аудио (миксы/треки), видео (живые сеты, клипы) и
+// изображения (афиши, фото с площадок). Тип определяется по расширению,
+// не по MIME (юзер может ребрендить .jpg → .png и т.п. — расширение
+// надёжнее в кросс-браузерных drop-event'ах).
 app.post('/portfolio/upload', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
@@ -1556,17 +1560,30 @@ app.post('/portfolio/upload', requireAuth, requireDjRole, async (c) => {
     const displayName = String(body.name || file?.name || 'Файл');
     if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
 
+    // Определяем тип по расширению. sanitizeExt возвращает санитизированное
+    // расширение если оно в allowlist'е, иначе false.
     const isVideo = sanitizeExt(file.name, VIDEO_EXTS);
-    const allowed = isVideo ? VIDEO_EXTS : AUDIO_EXTS;
-    const maxBytes = isVideo ? MAX_VIDEO_BYTES : MAX_AUDIO_BYTES;
-    const subdir = isVideo ? 'dj-videos' : 'dj-portfolio';
+    const isImage = !isVideo && sanitizeExt(file.name, IMAGE_EXTS);
+    const isAudio = !isVideo && !isImage && sanitizeExt(file.name, AUDIO_EXTS);
+
+    if (!isVideo && !isImage && !isAudio) {
+      return c.json({
+        success: false,
+        error: 'Поддерживаются аудио (mp3, wav, m4a, aac, ogg, flac), видео (mp4, webm, mov, m4v) и изображения (jpg, png, webp, gif)',
+      }, 400);
+    }
+
+    const kind: 'video' | 'audio' | 'image' = isVideo ? 'video' : isImage ? 'image' : 'audio';
+    const allowed = isVideo ? VIDEO_EXTS : isImage ? IMAGE_EXTS : AUDIO_EXTS;
+    const maxBytes = isVideo ? MAX_VIDEO_BYTES : isImage ? MAX_IMAGE_BYTES : MAX_AUDIO_BYTES;
+    const subdir = isVideo ? 'dj-videos' : isImage ? 'dj-portfolio-images' : 'dj-portfolio';
     const uploaded = await saveUpload(file, subdir, `pf-${userId}`, allowed, maxBytes);
 
     const portfolioFile = {
       id: `pf-${crypto.randomUUID()}`,
       name: displayName,
       url: uploaded.url,
-      kind: isVideo ? 'video' : 'audio',
+      kind,
       size: `${Math.round(uploaded.size / 1024 / 1024 * 10) / 10} МБ`,
       date: new Date().toISOString(),
     };
