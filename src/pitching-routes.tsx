@@ -110,13 +110,34 @@ function generateId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
+// ── Categories ──────────────────────────────────────────────────────────────
+// 3 категории питчинга для bundle-checkout (POST /pitching/submit).
+// Radio sits separately: у DJ радио идёт через карточку микса
+// (submit-moderation), у артистов — через old single submit-radio.
+// CATEGORY_TABLES — маппинг для catalog-lookup в /submit где мы
+// SELECT name, price_rub из соответствующей таблицы для проверки
+// что target существует + получения server-authoritative цены.
+type Category = 'playlist' | 'influencer' | 'media';
+
+const CATEGORIES: Category[] = ['playlist', 'influencer', 'media'];
+
+function isCategory(v: any): v is Category {
+  return typeof v === 'string' && (CATEGORIES as string[]).includes(v);
+}
+
+const CATEGORY_TABLES: Record<Category, string> = {
+  playlist:   'pitching_playlists',
+  influencer: 'pitching_influencers',
+  media:      'pitching_media_outlets',
+};
+
 // ── Public catalog ────────────────────────────────────────────────────────────
 
 app.get('/playlists', async (c) => {
   try {
     await ensureSchema();
     const r = await pool.query(
-      `SELECT id, name, platform, followers, genre, region, description, curator_contact
+      `SELECT id, name, platform, followers, genre, region, description, curator_contact, price_rub
        FROM pitching_playlists WHERE status = 'active'
        ORDER BY followers DESC, name ASC`
     );
@@ -135,6 +156,37 @@ app.get('/radio-stations', async (c) => {
        ORDER BY name ASC`
     );
     return c.json({ success: true, stations: r.rows });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// Influencers / Media outlets — каталоги для bundle-checkout pipeline.
+// Создаются в миграции 032_pitching_pipeline_complete.sql (id uuid,
+// price_rub integer, status text). Фронт зовёт fetchPitchingInfluencers
+// и fetchPitchingMediaOutlets из CreateMixPitchModal + артистского
+// pitching-page.tsx.
+app.get('/influencers', async (c) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, name, platform, followers, genre, region, description, contact, price_rub
+       FROM pitching_influencers WHERE status = 'active'
+       ORDER BY followers DESC, name ASC`
+    );
+    return c.json({ success: true, influencers: r.rows });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.get('/media-outlets', async (c) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, name, website, monthly_audience, genre, region, description, contact, price_rub
+       FROM pitching_media_outlets WHERE status = 'active'
+       ORDER BY monthly_audience DESC, name ASC`
+    );
+    return c.json({ success: true, outlets: r.rows });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
