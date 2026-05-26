@@ -1776,22 +1776,19 @@ app.post('/mixes', requireAuth, requireDjRole, async (c) => {
     const id = `mix-${crypto.randomUUID()}`;
     const data = { likes: 0, downloads: 0, comments: 0, isPremium, price };
 
-    // Зеркало пайплайна tracks (track-moderation-routes.tsx :119 submitTrack):
-    // загруженный микс уходит в очередь админ-модерации (moderation_status='pending',
-    // is_hidden=TRUE). Публичные эндпоинты (/tracks/new, dj public profile,
-    // marketplace) фильтруют по moderation_status IN ('upcoming','published')
-    // AND is_hidden=FALSE, поэтому новый микс не показывается до апрува.
-    // Старая колонка `status` (draft/published) остаётся ради обратной
-    // совместимости с существующими SELECT — но переключение происходит
-    // через moderation_status.
+    // Бизнес-правило (опт-ин модерация): загруженный микс сразу
+    // published и виден в публичном профиле DJ. На радио/питчинг
+    // отправляется ОТДЕЛЬНОЙ кнопкой через POST /mixes/:id/submit-moderation —
+    // тогда moderation_status переключается на 'pending' + is_hidden=TRUE.
+    // См. миграцию 031_dj_mixes_opt_in_moderation.sql для дефолтов.
     await pool.query(
       `INSERT INTO dj_mixes
          (id, dj_id, title, genre, duration, plays_count, audio_url, cover_url,
           description, bpm_range, status, data,
           moderation_status, is_hidden,
           created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, 'draft', $10,
-               'pending', TRUE,
+       VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, 'published', $10,
+               'published', FALSE,
                NOW(), NOW())`,
       [id, userId, title, genre, durationSec, audioUploaded.url, coverUrl, description, bpmRange, data]
     );
@@ -1834,6 +1831,73 @@ app.delete('/mixes/:id', requireAuth, requireDjRole, async (c) => {
     return c.json({ success: true });
   } catch (error: any) {
     console.error('Error deleting DJ mix:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// POST /mixes/:id/submit-moderation — отправить свой микс на админ-модерацию
+// (опт-ин: только если DJ хочет промо на радио/питчинг). Микс уходит в
+// pending + is_hidden=TRUE, исчезает из публичного профиля до апрува.
+// После approve/reject админ возвращает в published — см.
+// dj-mix-moderation-routes.tsx POST /manage-dj-mix-moderation.
+app.post('/mixes/:id/submit-moderation', requireAuth, requireDjRole, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const id = c.req.param('id');
+    // Только владелец и только если микс сейчас не в очереди модерации
+    // (защита от двойного сабмита, который сбрасывал бы admin-comment).
+    const { rows } = await pool.query(
+      `SELECT moderation_status FROM dj_mixes WHERE id = $1 AND dj_id = $2 LIMIT 1`,
+      [id, userId]
+    );
+    if (rows.length === 0) {
+      return c.json({ success: false, error: 'Микс не найден' }, 404);
+    }
+    const current = rows[0].moderation_status;
+    if (current === 'pending') {
+      return c.json({ success: false, error: 'Микс уже на модерации' }, 409);
+    }
+    if (current === 'approved' || current === 'upcoming') {
+      return c.json({ success: false, error: 'Микс уже одобрен — повторная модерация не нужна' }, 409);
+    }
+    await pool.query(
+      `UPDATE dj_mixes
+          SET moderation_status = 'pending',
+              is_hidden         = TRUE,
+              moderation_comment = NULL,
+              rejection_reason   = NULL,
+              updated_at         = NOW()
+        WHERE id = $1 AND dj_id = $2`,
+      [id, userId]
+    );
+    return c.json({ success: true, data: { moderationStatus: 'pending', isHidden: true } });
+  } catch (error: any) {
+    console.error('Error submitting mix for moderation:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// POST /mixes/:id/withdraw-moderation — снять микс с модерации,
+// вернуть в published. Можно только если ещё pending (админ не
+// обработал) — иначе approve/reject админа уже зафиксирован.
+app.post('/mixes/:id/withdraw-moderation', requireAuth, requireDjRole, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const id = c.req.param('id');
+    const res = await pool.query(
+      `UPDATE dj_mixes
+          SET moderation_status = 'published',
+              is_hidden         = FALSE,
+              updated_at         = NOW()
+        WHERE id = $1 AND dj_id = $2 AND moderation_status = 'pending'`,
+      [id, userId]
+    );
+    if (res.rowCount === 0) {
+      return c.json({ success: false, error: 'Микс не найден или уже обработан админом' }, 404);
+    }
+    return c.json({ success: true, data: { moderationStatus: 'published', isHidden: false } });
+  } catch (error: any) {
+    console.error('Error withdrawing mix from moderation:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
