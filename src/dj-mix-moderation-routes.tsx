@@ -176,12 +176,21 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
       const publicationPrice = await resolveDjMixPublicationPrice(djId, String(pendingMixId));
       const isFirstFree = publicationPrice === 0;
 
+      // Для first-mix-free выставляем upcoming_until = now + 3 дня
+      // (UPCOMING_DAYS) — без этого cron /promote-upcoming не поднимет
+      // микс в published. Симметрично track-flow approve-paid.
+      const UPCOMING_DAYS = 3;
+      const upcomingUntil = isFirstFree
+        ? new Date(Date.now() + UPCOMING_DAYS * 86400000).toISOString()
+        : null;
+
       const newData = {
         ...(mix.data || {}),
         requires_payment: !isFirstFree,
         payment_amount: publicationPrice,
         first_mix_free_applied: isFirstFree,
         paid_at: isFirstFree ? now : (mix.data?.paid_at || null),
+        ...(upcomingUntil ? { upcoming_until: upcomingUntil, approved_for_release_at: now } : {}),
       };
 
       await pool.query(
@@ -199,7 +208,7 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
           moderator_notes || (isFirstFree ? 'Микс одобрен (первый микс — бесплатно)' : 'Микс одобрен'),
           now,
           !isFirstFree,                         // is_hidden=false только для бесплатных
-          isFirstFree ? 'published' : 'draft',  // старая колонка status держим в синхроне
+          isFirstFree ? 'upcoming' : 'draft',  // старая колонка status держим в синхроне с moderation_status
           newData,
           pendingMixId,
         ]

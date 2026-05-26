@@ -717,37 +717,46 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
-  // ─── Fulfill dj_mix_publish (approved → published прямо на webhook) ───
-  // Зеркало track_publish, но без промежуточных 'paid'→'upcoming'→'published'.
-  // У миксов нет «Скоро в эфире» стадии (юзер: «webhook ставит
-  // moderation_status='published'»). Approved → оплата → виден в публичном
-  // профиле + питчинге сразу.
+  // ─── Fulfill dj_mix_publish (approved → upcoming → published через cron) ───
+  // Симметрично track_publish: оплаченный микс уходит в 'upcoming' на
+  // UPCOMING_DAYS (3 дня), показывается в «Скоро» наряду с треками
+  // артистов и UNION'ится в Новинки недели (где «Новинки» = upcoming ∪
+  // published). Cron POST /track-moderation/promote-upcoming затем
+  // расширен на dj_mixes — переводит upcoming в published когда
+  // upcoming_until истёк.
+  //
+  // Раньше webhook ставил сразу published — миксы попадали в Новинки
+  // мгновенно без «Скоро»-стадии. user-reported: DJ Ден появлялся в
+  // /tracks/new сразу, минуя upcoming-витрину.
   if (session.metadata?.type === 'dj_mix_publish' && session.metadata?.mixId) {
     try {
       const mixId = String(session.metadata.mixId);
       const { pool: mxPool } = await import('./db-client.tsx');
 
-      // Raw UPDATE с jsonb merge (см. комментарий к track_publish ниже —
-      // тот же паттерн против stale snapshots от параллельных admin-update'ов).
+      const UPCOMING_DAYS = 3;
+      const upcomingUntilIso = new Date(Date.now() + UPCOMING_DAYS * 86400000).toISOString();
+
       const result = await mxPool.query(
         `UPDATE dj_mixes
-            SET moderation_status = 'published',
+            SET moderation_status = 'upcoming',
                 is_hidden         = false,
-                status            = 'published',
+                status            = 'upcoming',
                 data              = COALESCE(data, '{}'::jsonb)
                                     || jsonb_build_object(
                                          'payment_completed', true,
                                          'payment_amount',   $2::numeric,
                                          'payment_order_id', $3::text,
                                          'payment_gateway',  $4::text,
-                                         'paid_at',          $5::text
+                                         'paid_at',          $5::text,
+                                         'upcoming_until',   $7::text,
+                                         'approved_for_release_at', $5::text
                                        ),
                 moderated_at      = COALESCE(moderated_at, $6::timestamptz),
                 updated_at        = $6
           WHERE id = $1
             AND moderation_status = 'approved'
           RETURNING dj_id, title`,
-        [mixId, session.amount, session.orderId, session.gateway, now, now]
+        [mixId, session.amount, session.orderId, session.gateway, now, now, upcomingUntilIso]
       );
 
       if (result.rowCount === 0) {
@@ -762,8 +771,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           'dj_mix_payment_published'
         );
 
-        // Inbox + SSE — то же что у track_published: DJ видит «Опубликован»
-        // мгновенно, без F5.
+        // Inbox + SSE — теперь это «в Скоро на 3 дня», а не сразу
+        // опубликован. После promote-upcoming придёт второй notif
+        // «теперь в Новинках недели».
         try {
           const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
           await notifyCrossCabinet({
@@ -771,8 +781,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             targetRole: 'dj',
             sourceRole: 'system',
             type: 'mix_published',
-            title: 'Микс опубликован!',
-            message: `"${title}" попал на радио и в питчинг`,
+            title: 'Микс попал в «Скоро»',
+            message: `"${title}" появится в «Новинках недели» через 3 дня`,
             link: '/dj/mixes',
             metadata: { mixId, amount: session.amount },
           });
