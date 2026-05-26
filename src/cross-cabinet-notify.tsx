@@ -30,6 +30,7 @@ export type NotificationType =
   | 'collab_message'
   | 'booking_update'
   | 'track_moderation'
+  | 'mix_moderation'
   | 'order_update'
   | 'payment_received'
   | 'system_alert'
@@ -320,6 +321,7 @@ function mapTypeToSSEEvent(type: NotificationType): string {
     payment_received: 'payment_received',
     system_alert: 'system_alert',
     track_moderation: 'moderation_update',
+    mix_moderation: 'moderation_update',
     pitching_update: 'notification',
     admin_action: 'notification',
     subscription_updated: 'subscription_updated',

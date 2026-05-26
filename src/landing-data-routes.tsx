@@ -430,8 +430,32 @@ landing.get('/tracks/new', async (c) => {
       } catch (e) { console.warn('[landing] radio airplay query failed:', (e as any)?.message); }
     }
 
+    // ── DJ-миксы в той же ленте «Новинки недели» ──────────────────
+    // Зеркало артистского пайплайна: микс после модерации (status
+    // upcoming/published, is_hidden=false) попадает в общий фид
+    // наравне с треками. Сливаем по created_at и обрезаем по limit
+    // суммарно, чтобы фид оставался компактным.
+    let djMixRows: any[] = [];
+    try {
+      const r = await pool.query(
+        `SELECT m.id, m.title, m.genre, m.duration, m.audio_url, m.cover_url,
+                m.plays_count, m.dj_id, m.created_at,
+                COALESCE(dp.dj_name, '') AS dj_name
+           FROM dj_mixes m
+           LEFT JOIN dj_profiles dp ON dp.user_id = m.dj_id
+          WHERE m.moderation_status IN ('upcoming', 'published')
+            AND m.is_hidden = FALSE
+          ORDER BY m.created_at DESC
+          LIMIT $1`,
+        [limit]
+      );
+      djMixRows = r.rows || [];
+    } catch (e: any) {
+      console.warn('[landing/tracks/new] DJ mixes union failed:', e?.message);
+    }
+
     // Map to frontend-expected format
-    const mapped = tracks.map((t: any) => ({
+    const mappedTracks = tracks.map((t: any) => ({
       id: t.id,
       title: t.title || '',
       artist: t.artist_name || '',
@@ -454,7 +478,38 @@ landing.get('/tracks/new', async (c) => {
       radio_stations: radioMap[t.id]?.stations || [],
       stationsCount: radioMap[t.id]?.stationsCount || 0,
       broadcastCitiesCount: radioMap[t.id]?.broadcastCitiesCount || 0,
+      source_kind: 'track' as const,
     }));
+
+    const mappedMixes = djMixRows.map((m: any) => ({
+      id: m.id,
+      title: m.title || '',
+      artist: m.dj_name || 'DJ',
+      artist_name: m.dj_name || 'DJ',
+      genre: m.genre || '',
+      duration: m.duration || 0,
+      audioUrl: m.audio_url || '',
+      audio_url: m.audio_url || '',
+      coverUrl: m.cover_url || '',
+      cover_url: m.cover_url || '',
+      plays: m.plays_count || 0,
+      likes: 0,
+      artistId: m.dj_id || '',
+      createdAt: m.created_at,
+      created_at: m.created_at,
+      yandex_music_url: '',
+      youtube_url: '',
+      spotify_url: '',
+      city: '',
+      radio_stations: [],
+      stationsCount: 0,
+      broadcastCitiesCount: 0,
+      source_kind: 'dj_mix' as const,
+    }));
+
+    const mapped = [...mappedTracks, ...mappedMixes]
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(0, limit);
 
     // If no real tracks, fallback to chart data with covers
     if (mapped.length === 0) {
