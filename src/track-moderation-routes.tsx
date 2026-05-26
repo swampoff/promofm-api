@@ -1014,15 +1014,74 @@ app.post('/promote-upcoming', async (c) => {
       promoted++;
     }
 
+    // ── Mixes: тот же flow — upcoming с истёкшим upcoming_until → published ──
+    // Зеркало tracks-цикла выше. Cron-задача одна (POST /promote-upcoming),
+    // обрабатывает оба типа за один прогон. Уведомление DJ другое (link
+    // на /dj/mixes), но логика идентична.
+    let mixesPromoted = 0;
+    try {
+      const { rows: mixRows } = await (await import('./db-client.tsx')).pool.query(
+        `SELECT id, title, dj_id, data FROM dj_mixes WHERE moderation_status = 'upcoming'`
+      );
+      const mixNow = new Date();
+      for (const mix of mixRows) {
+        const until = mix.data?.upcoming_until;
+        if (!until || new Date(until) > mixNow) continue;
+
+        await (await import('./db-client.tsx')).pool.query(
+          `UPDATE dj_mixes
+              SET moderation_status = 'published',
+                  status            = 'published',
+                  is_hidden         = false,
+                  data              = COALESCE(data, '{}'::jsonb)
+                                      || jsonb_build_object('published_at', $2::text),
+                  updated_at        = $2
+            WHERE id = $1 AND moderation_status = 'upcoming'`,
+          [mix.id, mixNow.toISOString()]
+        );
+
+        if (mix.dj_id) {
+          const pubTitle = 'Микс опубликован!';
+          const pubMsg = `«${mix.title}» теперь в Новинках недели`;
+          notifyCrossCabinet({
+            targetUserId: String(mix.dj_id),
+            targetRole: 'dj',
+            sourceRole: 'system',
+            type: 'mix_published',
+            title: pubTitle,
+            message: pubMsg,
+            link: '/dj/mixes',
+          }).catch(() => {});
+
+          const mixInboxId = `mn-${crypto.randomUUID()}`;
+          upsertNotification(String(mix.dj_id), mixInboxId, {
+            id: mixInboxId,
+            type: 'mix_published',
+            title: pubTitle,
+            message: pubMsg,
+            mixId: mix.id,
+            mixTitle: mix.title,
+            link: '/dj/mixes',
+            read: false,
+            createdAt: mixNow.toISOString(),
+          }).catch((err: any) => console.error('[promote-upcoming/mix] inbox notif failed:', err?.message || err));
+        }
+
+        mixesPromoted++;
+      }
+    } catch (e: any) {
+      console.error('[promote-upcoming/mix] failed:', e?.message);
+    }
+
     // Rebuild new releases if any were promoted
-    if (promoted > 0) {
+    if (promoted > 0 || mixesPromoted > 0) {
       fetch('http://127.0.0.1:3000/server/api/charts/build-new-releases', {
         method: 'POST',
         headers: { 'X-Internal-Key': expectedKey, 'Content-Type': 'application/json' },
       }).catch(() => {});
     }
 
-    return c.json({ success: true, promoted, checked: rows.length });
+    return c.json({ success: true, promoted, mixesPromoted, checked: rows.length });
   } catch (error) {
     console.error('Error in promote-upcoming:', error);
     return c.json({ error: 'Internal server error' }, 500);
