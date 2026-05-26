@@ -7,6 +7,10 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { requireAuth } from './auth-middleware.tsx';
+import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
+import { upsertNotification } from './db.tsx';
+import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 
 const app = new Hono();
 
@@ -252,55 +256,181 @@ app.get('/djs/:id/calendar', async (c) => {
   }
 });
 
-// ═══════ POST /djs/:id/book — Request booking (requires auth) ═══════
+// ═══════ POST /djs/:id/book — Request booking ═══════
+//
+// Public-facing endpoint: гость с лендинга или авторизованный пользователь
+// могут отправить заявку на букинг DJ. Если пользователь залогинен —
+// берём userId из JWT (заполняем requester_id), если гость — пишем
+// clientName/clientEmail в data jsonb.
+//
+// Полный venue→dj booking flow (с прайсингом, комиссией, квотами,
+// расписанием) живёт в booking-routes.tsx POST /create. Этот эндпоинт
+// — лёгкая заявка «свяжитесь со мной», без денежных расчётов.
 
-app.post('/djs/:id/book', requireAuth, async (c) => {
+app.post('/djs/:id/book', async (c) => {
   try {
     const id = c.req.param('id');
-    const body = await c.req.json();
+    const body = await c.req.json().catch(() => ({}));
 
-    // Verify DJ exists
-    const { rows } = await pool.query('SELECT id, dj_name, data FROM dj_profiles WHERE id = $1 OR user_id = $1', [id]);
+    // Опциональный auth: если есть валидный JWT — заполняем requesterId.
+    // Иначе считаем заявителя гостем и валидируем contact-fields.
+    let requesterId: string | null = null;
+    let requesterEmail: string | null = null;
+    const authHeader = c.req.header('Authorization');
+    if (authHeader) {
+      try {
+        const token = authHeader.replace('Bearer ', '');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as any;
+        requesterId = decoded.sub || null;
+        requesterEmail = decoded.email || null;
+      } catch {
+        // битый/просроченный токен — продолжаем как гость
+      }
+    }
+
+    // Валидация: должны быть либо userId (auth), либо имя+email (гость)
+    const clientName = String(body.clientName || '').trim().slice(0, 200);
+    const clientEmail = String(body.clientEmail || requesterEmail || '').trim().slice(0, 200);
+    const message = String(body.message || '').trim().slice(0, 2000);
+    const eventDate = body.eventDate || null;
+    const eventType = String(body.eventType || 'event').trim().slice(0, 50);
+
+    if (!requesterId && (!clientName || !clientEmail)) {
+      return c.json({
+        success: false,
+        error: 'Укажите имя и email для связи',
+        code: 'CONTACT_REQUIRED',
+      }, 400);
+    }
+    if (clientEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientEmail)) {
+      return c.json({
+        success: false,
+        error: 'Email указан некорректно',
+        code: 'EMAIL_INVALID',
+      }, 400);
+    }
+    if (!eventDate) {
+      return c.json({
+        success: false,
+        error: 'Укажите дату мероприятия',
+        code: 'DATE_REQUIRED',
+      }, 400);
+    }
+
+    // Resolve DJ — принимаем как dj_profiles.id (uuid), так и user_id (text).
+    // user_id — text по схеме (см. CLAUDE.md cheat-sheet), поэтому
+    // cast id::text для второго условия.
+    const { rows } = await pool.query(
+      `SELECT id, user_id, dj_name, data
+         FROM dj_profiles
+        WHERE id::text = $1 OR user_id = $1
+        LIMIT 1`,
+      [id]
+    );
     if (rows.length === 0) {
       return c.json({ success: false, error: 'DJ not found' }, 404);
     }
 
     const djRow = rows[0];
     const djName = djRow.dj_name || djRow.data?.djName || 'DJ';
+    const djUserId = String(djRow.user_id || '');
 
-    // Insert booking into bookings table
-    const { rows: bookingRows } = await pool.query(
-      `INSERT INTO bookings (performer_id, performer_type, requester_id, event_title, event_type, event_date, message, status, created_at)
-       VALUES ($1, 'dj', $2, $3, $4, $5, $6, 'pending', NOW())
-       RETURNING id`,
-      [
-        id,
-        body.clientEmail || 'anonymous',
-        body.eventType ? `Букинг DJ ${djName}` : `Букинг DJ ${djName}`,
-        body.eventType || 'event',
-        body.eventDate || null,
-        body.message || '',
-      ]
-    ).catch(() => ({ rows: [] }));
+    // Букинг пишется в bookings — там сосуществуют (1) типизированные
+    // колонки legacy-формата и (2) поле data jsonb (см. booking-routes.tsx).
+    // Этот lightweight-flow заполняет ОБЕ стороны: типизированные поля
+    // для совместимости с SELECT в dj-marketplace-routes:220 (occupied
+    // dates), jsonb data — для админ-кабинета и любого нового JOIN'а.
+    const bookingId = `bk-${crypto.randomUUID()}`;
+    const eventTitle = `Заявка на букинг DJ ${djName}`;
 
-    const bookingId = bookingRows[0]?.id || `bk-${Date.now()}`;
-    const booking = {
-      id: bookingId,
+    const dataJsonb = {
       djId: id,
       djName,
-      clientName: body.clientName || '',
-      clientEmail: body.clientEmail || '',
-      eventDate: body.eventDate || '',
-      eventType: body.eventType || '',
-      message: body.message || '',
+      djUserId,
+      requesterId,
+      requesterType: requesterId ? 'authenticated' : 'guest',
+      clientName,
+      clientEmail,
+      eventType,
+      eventTitle,
+      eventDate,
+      message,
       status: 'pending',
+      source: 'marketplace',
       createdAt: new Date().toISOString(),
     };
 
-    return c.json({ success: true, data: booking });
+    await pool.query(
+      `INSERT INTO bookings
+         (id, performer_id, performer_type, requester_id, event_title, event_type, event_date, message, status, data, created_at)
+       VALUES ($1, $2, 'dj', $3, $4, $5, $6, $7, 'pending', $8, NOW())
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        bookingId,
+        djUserId || id,
+        requesterId || clientEmail || 'anonymous',
+        eventTitle,
+        eventType,
+        eventDate,
+        message,
+        dataJsonb,
+      ]
+    );
+
+    // Cross-cabinet notification — DJ видит баннер в кабинете /dj/bookings
+    // + админ-bell получает SSE. Не fail'имся, если упало — заявка важнее.
+    if (djUserId) {
+      notifyCrossCabinet({
+        targetUserId: djUserId,
+        targetRole: 'dj',
+        sourceRole: requesterId ? 'venue' : 'admin', // гость идёт как admin-сорс чтобы DJ не путался
+        type: 'booking_update',
+        title: 'Новая заявка на букинг',
+        message: `${clientName || 'Гость'} интересуется датой ${eventDate} (${eventType})`,
+        link: '/dj/bookings',
+      }).catch((err: any) => console.warn('[dj/book] notifyCrossCabinet failed:', err?.message));
+
+      // Persistent inbox для DJ-bell. Без этой записи cross-cabinet
+      // покажет SSE-баннер, но в /dj/bookings → «Колокольчик» заявка не
+      // отобразится (bell читает notifications, не cross_cabinet_*).
+      const notifId = `bn-${crypto.randomUUID()}`;
+      upsertNotification(djUserId, notifId, {
+        id: notifId,
+        type: 'booking_request_new',
+        title: 'Новая заявка на букинг',
+        message: `${clientName || 'Гость'} интересуется датой ${eventDate} (${eventType})${message ? '. ' + message.slice(0, 120) : ''}`,
+        bookingId,
+        djName,
+        clientName,
+        clientEmail,
+        eventDate,
+        eventType,
+        link: '/dj/bookings',
+        read: false,
+        createdAt: new Date().toISOString(),
+      }).catch((err: any) => console.warn('[dj/book] inbox notif failed:', err?.message));
+    }
+
+    console.log(`[dj-marketplace] Booking ${bookingId} for DJ ${djName} (${djUserId || id}) from ${clientEmail || requesterId}`);
+
+    return c.json({
+      success: true,
+      data: {
+        id: bookingId,
+        djId: id,
+        djName,
+        clientName,
+        clientEmail,
+        eventDate,
+        eventType,
+        message,
+        status: 'pending',
+        createdAt: dataJsonb.createdAt,
+      },
+    });
   } catch (err: any) {
     console.error('Booking error:', err);
-    return c.json({ success: false, error: 'Internal server error' }, 500);
+    return c.json({ success: false, error: err?.message || 'Internal server error' }, 500);
   }
 });
 
