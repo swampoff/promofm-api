@@ -20,6 +20,7 @@
 
 export type BannerPlacementId =
   | 'hero_main'
+  | 'hero_carousel'
   | 'feed_wide'
   | 'sidebar_large'
   | 'in_feed_card'
@@ -44,6 +45,14 @@ export const BANNER_PLACEMENTS: BannerPlacement[] = [
     dimensions: '1920×600 px',
     pricePerWeek: 60000,
     locations: ['Главная (/) — top of fold'],
+  },
+  {
+    id: 'hero_carousel',
+    name: 'Слайд в hero-карусели',
+    description: 'Ваш баннер крутится в главной карусели на лендинге вместе с promo-слайдами платформы (Сандра, Дэн, Лиана, etc). Автоматическая смена раз в 6 секунд.',
+    dimensions: '1920×600 px',
+    pricePerWeek: 30000,
+    locations: ['Главная (/) — слайд в hero-карусели'],
   },
   {
     id: 'feed_wide',
