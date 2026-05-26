@@ -1422,6 +1422,30 @@ export async function getPaymentTxUserSummaries(): Promise<any[]> {
 }
 
 
+/**
+ * jsonbStore — НЕ key-value хранилище. Это helper над таблицей
+ * PostgreSQL с колонкой `data jsonb`. Все вызовы под капотом —
+ * параметризованные SQL-запросы через `pg.Pool` (см. db-client.tsx).
+ *
+ * Никакого Redis, никакого Deno KV, никакого Upstash. Только
+ * PostgreSQL 16 на собственном VPS — данные не покидают сервер,
+ * полная поддержка ACID-транзакций, индексов, FK.
+ *
+ * Когда `jsonbStore(table, pk)` вызывается:
+ *   store.get(id)  → `SELECT data FROM <table> WHERE <pk> = $1`
+ *   store.set(id,v) → `INSERT … ON CONFLICT(<pk>) DO UPDATE`
+ *   store.getAll() → `SELECT data FROM <table> ORDER BY created_at`
+ *
+ * Для ускорения частых JSONB-фильтров добавлять GIN-индексы:
+ *   CREATE INDEX ON <table> USING gin ((data->'status'));
+ * См. miграцию 031 для примеров.
+ *
+ * Когда переходить с jsonbStore на типизированные колонки:
+ *  - нужны точные NUMERIC (деньги — нельзя в jsonb)
+ *  - нужны FK-constraint'ы (целостность ссылок)
+ *  - нужны JOIN'ы на другие таблицы по часто-фильтруемому полю
+ * Пример уже сделанной миграции — таблица `tracks` (db-typed.tsx).
+ */
 function jsonbStore(table: string, pk = 'id') {
   return {
     async get(id: string) {

@@ -840,3 +840,55 @@ Verified columns / types — DO NOT INVENT:
 | All `:userId` / `:artistId` URL params | arrive as | text |
 
 See CLAUDE.md "SQL writing pitfalls" for the full discussion.
+
+---
+
+## Хранилище данных — НЕ KV, а PostgreSQL
+
+Все 90 `*Store` в `src/db.tsx:1461-…` это **не** key-value хранилища
+в духе Redis/Deno KV/Upstash. Это helper'ы `jsonbStore(table, pk)`
+(определение `db.tsx:1425`) над PostgreSQL-таблицами с колонкой
+`data jsonb`. Под капотом — `pg.Pool` напрямую (`db-client.tsx:10`),
+никакого внешнего KV-сервиса нет и не было.
+
+### Под капотом каждого `*Store`
+
+```
+store.get(id)    → SELECT data FROM <table> WHERE <pk> = $1
+store.set(id, v) → INSERT INTO <table> … ON CONFLICT(<pk>) DO UPDATE
+store.del(id)    → DELETE FROM <table> WHERE <pk> = $1
+store.getAll()   → SELECT data FROM <table> ORDER BY created_at DESC
+store.getByCol() → SELECT data FROM <table> WHERE <col> = $1
+```
+
+### Производительность горячих фильтров
+
+Для частых WHERE на JSONB-поле — добавлять expression-индекс,
+не переписывать стор в типизированные колонки. См. миграцию
+`migrations/031_jsonb_hot_path_indexes.sql`:
+
+| Таблица | Индексируемое выражение |
+|---|---|
+| bookings | `(data->>'status')`, `((data->>'eventDate')::tstz)` |
+| publish_orders | `(data->>'status')`, `(data->>'type')` |
+| venue_profiles | `(data->>'subscriptionStatus')`, expires |
+| dj_profiles | `(data->>'city')`, `(data->>'verified')` |
+| payment_transactions | `(data->>'status')` |
+| service_orders | `(data->>'status')` |
+
+EXPLAIN ANALYZE на любом из этих фильтров после миграции 031 покажет
+`Index Scan using idx_*_jsonb` вместо `Seq Scan`.
+
+### Когда переходить со store на типизированные колонки
+
+JSONB удобен, но в трёх случаях нужны реальные колонки:
+1. **Деньги** — `amount NUMERIC(12,2)`, не JSONB (риск float-арифметики)
+2. **FK-целостность** — если ссылка должна каскадно удаляться/CHECK'иться
+3. **JOIN'ы по часто-фильтруемому полю** — JOIN через
+   `(data->>'field')::uuid` работает, но индекс на typed-колонке
+   быстрее в разы
+
+Пример уже мигрированной таблицы — `tracks` (typed-API в
+`src/db-typed.tsx:99` getPublishedTracks etc.). Список оставшихся
+`*Store` к рассмотрению на типизацию — раздел «Платежи / Финансы»
+из ответа в чате 2026-05-26.
