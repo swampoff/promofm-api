@@ -163,13 +163,34 @@ async function createSubmission(c: any, submissionType: 'playlist' | 'radio' | '
   await ensureSchema();
   const userId = c.get('userId') as string;
   const body = await c.req.json();
-  const { targetId, trackId, videoId, message, targetName: targetNameFromBody } = body || {};
+  const { targetId, trackId, videoId, mixId, message, targetName: targetNameFromBody } = body || {};
 
   if (!targetId) {
     return c.json({ success: false, error: 'targetId is required' }, 400);
   }
-  if (!trackId && !videoId) {
-    return c.json({ success: false, error: 'Either trackId or videoId is required' }, 400);
+  if (!trackId && !videoId && !mixId) {
+    return c.json({ success: false, error: 'Either trackId, videoId or mixId is required' }, 400);
+  }
+
+  // Если mixId — проверяем владение DJ + статус published (нельзя
+  // питчить чужой / неопубликованный / в модерации микс).
+  if (mixId) {
+    const mxRow = await pool.query(
+      `SELECT dj_id, moderation_status FROM dj_mixes WHERE id = $1 LIMIT 1`,
+      [mixId]
+    );
+    if (mxRow.rows.length === 0) {
+      return c.json({ success: false, error: 'Микс не найден' }, 404);
+    }
+    if (mxRow.rows[0].dj_id !== userId) {
+      return c.json({ success: false, error: 'Нельзя питчить чужой микс' }, 403);
+    }
+    if (mxRow.rows[0].moderation_status !== 'published') {
+      return c.json({
+        success: false,
+        error: `Микс должен быть опубликован для питчинга (статус: ${mxRow.rows[0].moderation_status})`,
+      }, 400);
+    }
   }
 
   // Soft target lookup — playlists & radio stations live in their own
@@ -186,13 +207,14 @@ async function createSubmission(c: any, submissionType: 'playlist' | 'radio' | '
     targetName = (targetRow.rows[0]?.name as string) || targetName;
   }
 
-  // Prevent duplicate pending submission of the same track/video to the same target.
+  // Prevent duplicate pending submission of the same track/video/mix to the same target.
   const dup = await pool.query(
     `SELECT id FROM pitching_submissions
      WHERE user_id = $1 AND target_id = $2 AND status = 'pending'
        AND COALESCE(track_id, '') = COALESCE($3, '')
-       AND COALESCE(video_id, '') = COALESCE($4, '')`,
-    [userId, targetId, trackId || null, videoId || null]
+       AND COALESCE(video_id, '') = COALESCE($4, '')
+       AND COALESCE(mix_id, '')   = COALESCE($5, '')`,
+    [userId, targetId, trackId || null, videoId || null, mixId || null]
   );
   if (dup.rows.length > 0) {
     return c.json({ success: false, error: 'Заявка уже отправлена и ждёт модерации' }, 409);
@@ -201,9 +223,9 @@ async function createSubmission(c: any, submissionType: 'playlist' | 'radio' | '
   const id = generateId('pit');
   await pool.query(
     `INSERT INTO pitching_submissions
-       (id, user_id, submission_type, target_id, target_name, track_id, video_id, message, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')`,
-    [id, userId, submissionType, targetId, targetName, trackId || null, videoId || null, message || null]
+       (id, user_id, submission_type, target_id, target_name, track_id, video_id, mix_id, message, status, actor_role)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10)`,
+    [id, userId, submissionType, targetId, targetName, trackId || null, videoId || null, mixId || null, message || null, mixId ? 'dj' : 'artist']
   );
 
   try {
