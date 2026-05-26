@@ -48,6 +48,32 @@ function mapRow(row: any) {
     completedGigs: parseInt(row.completed_gigs) || 0,
     bio: row.bio || p.bio || p.bioShort || d.bio || d.bioShort || '',
     tags: row.tags || p.specializations || d.specializations || [],
+    // Портфолио — массив категорий с файлами (audio/video/image).
+    // Лежит в data.portfolioCategories (см. dj-studio-routes.tsx
+    // POST /portfolio/upload). Чистим неполные записи + только
+    // категории с непустым files[] чтобы фронт не рендерил пустые
+    // карточки на публичной странице.
+    portfolioCategories: Array.isArray(d.portfolioCategories)
+      ? d.portfolioCategories
+          .map((cat: any) => ({
+            id: String(cat?.id || ''),
+            label: String(cat?.label || cat?.id || ''),
+            files: Array.isArray(cat?.files)
+              ? cat.files
+                  .filter((f: any) => f && f.url)
+                  .map((f: any) => ({
+                    id: String(f.id || ''),
+                    name: String(f.name || 'Файл'),
+                    url: String(f.url),
+                    kind: f.kind === 'video' ? 'video' : f.kind === 'image' ? 'image' : 'audio',
+                    size: String(f.size || ''),
+                    date: String(f.date || ''),
+                    duration: f.duration ? String(f.duration) : undefined,
+                  }))
+              : [],
+          }))
+          .filter((cat: any) => cat.id && cat.files.length > 0)
+      : [],
   };
 }
 
