@@ -551,12 +551,14 @@ app.post('/submit', requireAuth, async (c) => {
       return c.json({ success: false, error: 'returnUrl обязателен' }, 400);
     }
 
-    // Normalize + validate every item.
+    // Normalize + validate every item. mixId добавлен для DJ-питчингов —
+    // DJ корзина может включать миксы вместо/вместе с треками.
     type Normalized = {
       category: Category;
       targetId: string;
       trackId: string | null;
       videoId: string | null;
+      mixId: string | null;
       message: string | null;
     };
     const normalized: Normalized[] = [];
@@ -565,16 +567,63 @@ app.post('/submit', requireAuth, async (c) => {
       if (!it?.targetId) {
         return c.json({ success: false, error: 'Каждая позиция должна содержать targetId' }, 400);
       }
-      if (!it?.trackId && !it?.videoId) {
-        return c.json({ success: false, error: 'Каждая позиция должна содержать trackId или videoId' }, 400);
+      if (!it?.trackId && !it?.videoId && !it?.mixId) {
+        return c.json({ success: false, error: 'Каждая позиция должна содержать trackId, videoId или mixId' }, 400);
       }
       normalized.push({
         category,
         targetId: String(it.targetId),
         trackId: it.trackId ? String(it.trackId) : null,
         videoId: it.videoId ? String(it.videoId) : null,
+        mixId: it.mixId ? String(it.mixId) : null,
         message: it.message ? String(it.message) : null,
       });
+    }
+
+    // Owner + status check для всех mixId. До bundle-INSERT — атомарно
+    // отказываем если хоть один микс чужой / не published. Иначе
+    // DJ заплатит за корзину где половина позиций сломается.
+    const mixIds = Array.from(new Set(normalized.filter(n => n.mixId).map(n => n.mixId!)));
+    if (mixIds.length > 0) {
+      const mxRows = await pool.query(
+        `SELECT id, dj_id, moderation_status FROM dj_mixes WHERE id = ANY($1)`,
+        [mixIds]
+      );
+      const mixById = new Map(mxRows.rows.map((r: any) => [r.id, r]));
+      for (const id of mixIds) {
+        const mix = mixById.get(id);
+        if (!mix) {
+          return c.json({ success: false, error: `Микс ${id} не найден` }, 404);
+        }
+        if (mix.dj_id !== userId) {
+          return c.json({ success: false, error: `Нельзя питчить чужой микс (${id})` }, 403);
+        }
+        if (mix.moderation_status !== 'published') {
+          return c.json({ success: false, error: `Микс ${id} должен быть опубликован (статус: ${mix.moderation_status})` }, 400);
+        }
+      }
+    }
+
+    // Owner + status check для trackId (то же, что у tracks-checkout).
+    const trackIds = Array.from(new Set(normalized.filter(n => n.trackId).map(n => n.trackId!)));
+    if (trackIds.length > 0) {
+      const tRows = await pool.query(
+        `SELECT id, user_id, moderation_status FROM tracks WHERE id = ANY($1)`,
+        [trackIds]
+      );
+      const trackById = new Map(tRows.rows.map((r: any) => [r.id, r]));
+      for (const id of trackIds) {
+        const tr = trackById.get(id);
+        if (!tr) {
+          return c.json({ success: false, error: `Трек ${id} не найден` }, 404);
+        }
+        if (tr.user_id !== userId) {
+          return c.json({ success: false, error: `Нельзя питчить чужой трек (${id})` }, 403);
+        }
+        if (!['published', 'upcoming', 'paid', 'approved'].includes(tr.moderation_status)) {
+          return c.json({ success: false, error: `Трек ${id} должен быть опубликован (статус: ${tr.moderation_status})` }, 400);
+        }
+      }
     }
 
     // Resolve catalog rows per category — server-authoritative pricing.
@@ -619,11 +668,15 @@ app.post('/submit', requireAuth, async (c) => {
         // returns full price — never under-charges.
         const priced = await applySubscriptionDiscount(userId, 'pitching', cat.price_rub);
         const id = generateId('pit');
+        // actor_role = 'dj' если в позиции mixId, иначе 'artist'.
+        // Используется в admin moderation queue для разделения DJ vs artist
+        // и в notify-cross-cabinet для правильного targetRole.
+        const actorRole = n.mixId ? 'dj' : 'artist';
         await client.query(
           `INSERT INTO pitching_submissions
-             (id, user_id, category, target_id, target_name, track_id, video_id, message,
-              price_rub, payment_session_id, status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending_payment')`,
+             (id, user_id, category, target_id, target_name, track_id, video_id, mix_id, message,
+              price_rub, payment_session_id, status, actor_role)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending_payment', $12)`,
           [
             id,
             userId,
@@ -632,9 +685,11 @@ app.post('/submit', requireAuth, async (c) => {
             cat.name,
             n.trackId,
             n.videoId,
+            n.mixId,
             n.message,
             priced.finalPrice,
             orderId,
+            actorRole,
           ]
         );
         submissionIds.push(id);
