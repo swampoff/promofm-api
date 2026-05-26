@@ -1262,6 +1262,43 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         return c.json({ success: false, error: 'Не удалось проверить трек' }, 500);
       }
     }
+    // banner_publish — оплата активации рекламной кампании. Сервер
+    // пересчитывает цену через calculateBannerPrice (см. banner-pricing.tsx)
+    // против тарифа подписки юзера на момент создания (сохранён в
+    // banner.data.subscription_tier). Сумма от фронта должна точно
+    // совпадать с пересчётом.
+    if (type === 'purchase' && metadata?.type === 'banner_publish') {
+      const bannerId = metadata?.bannerId;
+      if (!bannerId) {
+        return c.json({ success: false, error: 'metadata.bannerId обязателен для banner_publish' }, 400);
+      }
+      try {
+        const { getBannerById } = await import('./db-typed.tsx');
+        const banner = await getBannerById(String(bannerId));
+        if (!banner) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
+        if (String(banner.user_id) !== userId) {
+          log.warn({ userId, bannerId, ownerId: banner.user_id }, 'banner_publish_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужую кампанию' }, 403);
+        }
+        if (banner.moderation_status !== 'approved') {
+          return c.json({
+            success: false,
+            error: `Кампания должна быть одобрена модератором (текущий статус: ${banner.moderation_status})`,
+          }, 400);
+        }
+        const expected = Number(banner.price || (banner as any)?.data?.final_price || 0);
+        if (expected <= 0) {
+          return c.json({ success: false, error: 'Цена кампании не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, bannerId, expected, received: amount }, 'banner_publish_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене кампании' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, bannerId }, 'banner_publish_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить кампанию' }, 500);
+      }
+    }
     if (!returnUrl) {
       return c.json({ success: false, error: 'returnUrl обязателен' }, 400);
     }
