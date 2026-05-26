@@ -249,9 +249,31 @@ async function createSubmission(c: any, submissionType: 'playlist' | 'radio' | '
   return c.json({ success: true, submissionId: id });
 }
 
+// Старые free-submit endpoints. С 2026-05-26 питчинг — платная
+// услуга для всех (артистов и DJ), submit идёт через
+// POST /api/checkout/create-session с metadata.type='pitch_submission'.
+// Webhook после оплаты создаёт pitching_submission row.
+// Прямой вызов этих endpoints возвращает 402 Payment Required +
+// инструкцию для клиента.
+function paymentRequired(c: any, subType: string) {
+  const prices: Record<string, number> = { playlist: 15000, radio: 12000, influencer: 10000, outlet: 8000 };
+  return c.json({
+    success: false,
+    error: 'Питчинг требует оплаты. Используйте /api/checkout/create-session с metadata.type=pitch_submission',
+    requiredPaymentRub: prices[subType] || null,
+    metadataExample: {
+      type: 'pitch_submission',
+      submissionType: subType,
+      targetId: '<id из каталога>',
+      trackId: '<или videoId или mixId>',
+      message: '<опционально>',
+    },
+  }, 402);
+}
+
 app.post('/submit-pitch', requireAuth, async (c) => {
   try {
-    return await createSubmission(c, 'playlist');
+    return paymentRequired(c, 'playlist');
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -259,7 +281,7 @@ app.post('/submit-pitch', requireAuth, async (c) => {
 
 app.post('/submit-radio', requireAuth, async (c) => {
   try {
-    return await createSubmission(c, 'radio');
+    return paymentRequired(c, 'radio');
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -267,7 +289,7 @@ app.post('/submit-radio', requireAuth, async (c) => {
 
 app.post('/submit-influencer', requireAuth, async (c) => {
   try {
-    return await createSubmission(c, 'influencer');
+    return paymentRequired(c, 'influencer');
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -275,7 +297,7 @@ app.post('/submit-influencer', requireAuth, async (c) => {
 
 app.post('/submit-outlet', requireAuth, async (c) => {
   try {
-    return await createSubmission(c, 'outlet');
+    return paymentRequired(c, 'outlet');
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }

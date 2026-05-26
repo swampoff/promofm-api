@@ -807,6 +807,86 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill pitch_submission ─────────────────────────────────
+  // После оплаты создаём запись в pitching_submissions со статусом
+  // 'pending'. Админ потом ревьюит и approve/reject (как раньше).
+  // Без оплаты submission не создаётся — это и есть смысл «не
+  // бесплатная услуга» (до 2026-05-26 submit-pitch создавал записи
+  // даром, что вело к спаму куратора и нулевой монетизации).
+  if (session.metadata?.type === 'pitch_submission' && session.metadata?.targetId) {
+    try {
+      const meta = session.metadata;
+      const subType = String(meta.submissionType);
+      const targetId = String(meta.targetId);
+      const targetName = String(meta.targetName || targetId);
+      const trackId = meta.trackId ? String(meta.trackId) : null;
+      const videoId = meta.videoId ? String(meta.videoId) : null;
+      const mixId = meta.mixId ? String(meta.mixId) : null;
+      const message = meta.message ? String(meta.message) : null;
+      const actorRole = mixId ? 'dj' : 'artist';
+
+      const { pool: psPool } = await import('./db-client.tsx');
+      const submissionId = `pit-${crypto.randomUUID()}`;
+      await psPool.query(
+        `INSERT INTO pitching_submissions
+           (id, user_id, submission_type, target_id, target_name,
+            track_id, video_id, mix_id, message, status, actor_role,
+            created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, NOW(), NOW())
+         ON CONFLICT (id) DO NOTHING`,
+        [submissionId, session.userId, subType, targetId, targetName,
+         trackId, videoId, mixId, message, actorRole]
+      );
+      log.info(
+        { submissionId, subType, targetId, userId: session.userId, amount: session.amount },
+        'pitch_submission_paid'
+      );
+
+      // Inbox-нотификация админу + SSE для живого обновления moderation-страницы.
+      try {
+        const { notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
+        await notifyAllAdmins({
+          sourceRole: actorRole,
+          type: 'admin_action',
+          title:
+            subType === 'playlist' ? 'Новая заявка в плейлист (оплачено)' :
+            subType === 'radio'    ? 'Новая заявка на радио (оплачено)' :
+            subType === 'influencer' ? 'Новая заявка блогеру (оплачено)' :
+            subType === 'outlet'   ? 'Новый пресс-релиз (оплачено)' :
+            'Новая заявка на питчинг (оплачено)',
+          message: `${actorRole === 'dj' ? 'DJ' : 'Артист'} ${session.userId} → «${targetName}» — ${session.amount} ₽`,
+          link: 'pitching-moderation',
+          metadata: { submissionId, targetId, subType, amount: session.amount, orderId: session.orderId },
+        });
+      } catch (e: any) {
+        log.warn({ err: e, submissionId }, 'pitch_submission_admin_notify_failed');
+      }
+      try {
+        const { emitSSE } = await import('./sse-routes.tsx');
+        emitSSE(session.userId, {
+          type: 'pitch_submitted',
+          data: { submissionId, subType, targetName, amount: session.amount },
+        });
+        emitSSE('admin', {
+          type: 'pitch_submitted',
+          data: { submissionId, subType, targetName, userId: session.userId, amount: session.amount },
+        });
+      } catch {}
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.error({ err, orderId: session.orderId }, 'pitch_submission_fulfillment_error');
+      try {
+        session.metadata = {
+          ...(session.metadata || {}),
+          fulfillment_failed: 'true',
+          fulfillment_error: errMsg,
+          fulfillment_failed_at: now,
+        };
+        await upsertPaymentSession(session.orderId, session);
+      } catch {}
+    }
+  }
+
   // ─── Fulfill video_publish / concert_publish (publish_orders → paid) ───
   // Pipeline aligned with tracks: payment makes the order 'paid', NOT 'published'.
   // Admin must explicitly publish from the moderation panel after verifying payment.
@@ -1232,6 +1312,70 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
     }
 
     // For track_publish the amount MUST match the track's price (per-track or default).
+    // pitch_submission: оплата перед отправкой питча в каталог
+    // (playlist / radio / influencer / outlet). Объект отправки —
+    // trackId / videoId / mixId (один из трёх). Цены жёсткие на бэке —
+    // клиент не может занизить через DevTools.
+    if (type === 'purchase' && metadata?.type === 'pitch_submission') {
+      const PITCH_PRICES: Record<string, number> = {
+        playlist:   15000,
+        radio:      12000,
+        influencer: 10000,
+        outlet:      8000,
+      };
+      const subType = String(metadata?.submissionType || '');
+      const targetId = metadata?.targetId;
+      const trackId = metadata?.trackId;
+      const videoId = metadata?.videoId;
+      const mixId = metadata?.mixId;
+      if (!PITCH_PRICES[subType]) {
+        return c.json({ success: false, error: 'Недопустимый submissionType. Допустимые: playlist, radio, influencer, outlet' }, 400);
+      }
+      if (!targetId) {
+        return c.json({ success: false, error: 'metadata.targetId обязателен' }, 400);
+      }
+      if (!trackId && !videoId && !mixId) {
+        return c.json({ success: false, error: 'Нужен один из: trackId, videoId, mixId' }, 400);
+      }
+      const expectedAmount = PITCH_PRICES[subType];
+      if (Math.abs(amount - expectedAmount) > 0.01) {
+        log.warn({ userId, subType, expected: expectedAmount, received: amount }, 'pitch_submission_amount_tampering_blocked');
+        return c.json({ success: false, error: `Сумма должна быть ${expectedAmount} ₽` }, 400);
+      }
+      try {
+        const { pool: vpool } = await import('./db-client.tsx');
+        // Owner check для trackId / mixId. videoId — пока без owner-check
+        // (видео-каталог не унифицирован, fallback на честность клиента).
+        if (trackId) {
+          const { rows } = await vpool.query(`SELECT user_id, moderation_status FROM tracks WHERE id = $1`, [String(trackId)]);
+          if (rows.length === 0) return c.json({ success: false, error: 'Трек не найден' }, 404);
+          if (rows[0].user_id !== userId) return c.json({ success: false, error: 'Нельзя питчить чужой трек' }, 403);
+          if (!['published', 'upcoming', 'paid', 'approved'].includes(rows[0].moderation_status)) {
+            return c.json({ success: false, error: `Трек должен быть опубликован (статус: ${rows[0].moderation_status})` }, 400);
+          }
+        }
+        if (mixId) {
+          const { rows } = await vpool.query(`SELECT dj_id, moderation_status FROM dj_mixes WHERE id = $1`, [String(mixId)]);
+          if (rows.length === 0) return c.json({ success: false, error: 'Микс не найден' }, 404);
+          if (rows[0].dj_id !== userId) return c.json({ success: false, error: 'Нельзя питчить чужой микс' }, 403);
+          if (rows[0].moderation_status !== 'published') {
+            return c.json({ success: false, error: `Микс должен быть опубликован (статус: ${rows[0].moderation_status})` }, 400);
+          }
+        }
+        // Target existence check для playlist/radio (catalog tables).
+        if (subType === 'playlist' || subType === 'radio') {
+          const tbl = subType === 'playlist' ? 'pitching_playlists' : 'pitching_radio_stations';
+          const { rows } = await vpool.query(`SELECT id FROM ${tbl} WHERE id = $1 AND status = 'active'`, [String(targetId)]);
+          if (rows.length === 0) {
+            return c.json({ success: false, error: `Target не найден в каталоге ${subType}` }, 404);
+          }
+        }
+      } catch (err) {
+        log.error({ err, subType, targetId, trackId, mixId }, 'pitch_submission_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить заявку' }, 500);
+      }
+    }
+
     // Track must be owned by the payer and in 'approved' status (awaiting payment).
     // Blocks: pay-1-ruble exploit, pay-for-someone-elses-track, pay-twice on already-published.
     if (type === 'purchase' && metadata?.type === 'track_publish') {
