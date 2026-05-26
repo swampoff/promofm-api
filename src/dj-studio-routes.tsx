@@ -1790,24 +1790,42 @@ app.post('/mixes', requireAuth, requireDjRole, async (c) => {
       coverUrl = coverUploaded.url;
     }
 
-    const id = `mix-${crypto.randomUUID()}`;
-    const data = { likes: 0, downloads: 0, comments: 0, isPremium, price };
+    // Премиум требует положительную цену — иначе нечего продавать.
+    if (isPremium && price <= 0) {
+      return c.json({
+        success: false,
+        error: 'Премиум-микс требует положительную цену (₽). Снимите галочку «Премиум» или укажите цену.',
+      }, 400);
+    }
 
-    // Бизнес-правило (опт-ин модерация): загруженный микс сразу
-    // published и виден в публичном профиле DJ. На радио/питчинг
-    // отправляется ОТДЕЛЬНОЙ кнопкой через POST /mixes/:id/submit-moderation —
-    // тогда moderation_status переключается на 'pending' + is_hidden=TRUE.
-    // См. миграцию 031_dj_mixes_opt_in_moderation.sql для дефолтов.
+    const id = `mix-${crypto.randomUUID()}`;
+    const data = {
+      likes: 0, downloads: 0, comments: 0,
+      isPremium, price,
+      // Премиум-микс после approve должен автоматически попасть
+      // в каталог для радио и venues — флаг читается админ-flow'ом.
+      distribute: isPremium ? { radio: true, venues: true } : null,
+    };
+
+    // Премиум-микс сразу уходит на модерацию админу (это и есть
+    // «премиум-режим»: платный + контроль качества). Обычный (бесплатный)
+    // микс публикуется в личный профиль DJ без модерации; чтобы попасть
+    // на радио/в venues, DJ потом сам жмёт «На радио / питчинг».
+    const dbStatus           = isPremium ? 'draft'     : 'published';
+    const dbModerationStatus = isPremium ? 'pending'   : 'published';
+    const dbIsHidden         = isPremium ? true        : false;
+
     await pool.query(
       `INSERT INTO dj_mixes
          (id, dj_id, title, genre, duration, plays_count, audio_url, cover_url,
           description, bpm_range, status, data,
           moderation_status, is_hidden,
           created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, 'published', $10,
-               'published', FALSE,
+       VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10, $11,
+               $12, $13,
                NOW(), NOW())`,
-      [id, userId, title, genre, durationSec, audioUploaded.url, coverUrl, description, bpmRange, data]
+      [id, userId, title, genre, durationSec, audioUploaded.url, coverUrl, description, bpmRange,
+       dbStatus, data, dbModerationStatus, dbIsHidden]
     );
 
     return c.json({
@@ -1821,9 +1839,10 @@ app.post('/mixes', requireAuth, requireDjRole, async (c) => {
         coverUrl,
         description, bpmRange,
         isPremium, price,
-        status: 'draft',
-        moderationStatus: 'pending',
-        isHidden: true,
+        // Возвращаем РЕАЛЬНОЕ состояние, что лежит в БД, а не lying-pending.
+        status:           dbStatus,
+        moderationStatus: dbModerationStatus,
+        isHidden:         dbIsHidden,
         createdAt: new Date().toISOString(),
       },
     }, 201);
