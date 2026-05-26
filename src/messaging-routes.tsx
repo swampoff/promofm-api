@@ -789,35 +789,42 @@ app.get('/search-contacts', requireAuth, async (c) => {
   const role = c.req.query('role') || '';
   const authRole = c.get('userRole');
   const authUserId = c.get('userId');
-  if (!q) return c.json({ success: true, contacts: [] });
 
   const contacts: Participant[] = [];
   try {
     const allowed = ALLOWED_CONTACTS[mapRole(authRole)] || [];
     // Empty allowlist (currently: radio) → return nothing instead
     // of falling through to a name-only LIKE that would expose every
-    // user on the platform. Caught when radio was reverted out of
-    // the DM graph on 2026-05-25 — the old code had no else-branch
-    // for the empty case.
+    // user on the platform.
     if (allowed.length === 0) {
       return c.json({ success: true, contacts: [] });
     }
-    const params: any[] = [`%${q}%`];
-    let where = `(LOWER(u.full_name) LIKE $1 OR LOWER(u.email) LIKE $1)`;
-    if (role && allowed.includes(role as CabinetRole)) {
-      where += ` AND u.role::text = $2`;
-      params.push(role === 'radio' ? 'radio_station' : role);
-    } else {
-      // Restrict to allowed roles. Always emit the ANY($2) filter so
-      // a searcher who hasn't picked a role chip still can't see
-      // anyone outside their allowed set.
-      const dbRoles = allowed.map(r => r === 'radio' ? 'radio_station' : r);
-      where += ` AND u.role::text = ANY($2)`;
-      params.push(dbRoles);
+    // ── Browse mode ──
+    // Раньше: if (!q) return [] — пустой запрос всегда отдавал ничего,
+    // и юзер не понимал что есть 140+ зарегистрированных людей. Теперь
+    // пустой q выдаёт первых 25 свежих юзеров allowed-set (или roleChip
+    // если выбран). LIKE-фильтр включается только когда q непустой.
+    const hasQ = q.length > 0;
+    const params: any[] = [];
+    let where = '';
+    if (hasQ) {
+      params.push(`%${q}%`);
+      where = `(LOWER(u.full_name) LIKE $1 OR LOWER(u.email) LIKE $1)`;
     }
+    if (role && allowed.includes(role as CabinetRole)) {
+      params.push(role === 'radio' ? 'radio_station' : role);
+      where = (where ? where + ' AND ' : '') + `u.role::text = $${params.length}`;
+    } else {
+      const dbRoles = allowed.map(r => r === 'radio' ? 'radio_station' : r);
+      params.push(dbRoles);
+      where = (where ? where + ' AND ' : '') + `u.role::text = ANY($${params.length})`;
+    }
+    // С поиском — порядок не критичен (LIMIT 25 хватает). В browse-режиме
+    // — свежие регистрации сверху чтобы новички быстро находились.
+    const orderBy = hasQ ? '' : 'ORDER BY u.created_at DESC';
     const r = await pool.query(
       `SELECT u.id, u.full_name, u.role::text, u.avatar_url
-       FROM users u WHERE ${where} AND u.status = 'active' LIMIT 25`,
+       FROM users u WHERE ${where} AND u.status = 'active' ${orderBy} LIMIT 25`,
       params
     );
 
