@@ -2031,6 +2031,17 @@ landing.post('/build-albums', async (c) => {
   }
 
   // === Apple Music Top Albums (fallback if Billboard < 10) ===
+  //
+  // Apple Music смешивает single-track релизы (синглы вроде Drake
+  // ICEMAN / HABIBTI / MAID OF HONOUR) с настоящими альбомами в
+  // одном "Top Albums" чарте — у них release_type='album' но
+  // trackCount=1. Юзер видит «АЛЬБОМЫ НЕДЕЛИ» а там треки.
+  //
+  // Фильтр: после скрапа собираем все Apple album IDs из URL,
+  // один батч-запрос в iTunes Lookup API (200 IDs макс за раз),
+  // отбрасываем релизы с trackCount < 4 (синглы и EP с 1-3
+  // треками). Заодно тянем artworkUrl100 чтобы у coverUrl был
+  // нормальный thumbnail.
   if (worldAlbums.length < 10) {
     var appleMd = await fetchMarkdown(
       'apple_music_top',
@@ -2038,30 +2049,29 @@ landing.post('/build-albums', async (c) => {
       8000
     );
     if (appleMd) {
-      // Format: [Title](apple-url) ... rank number ... artist name
       var appleLines = appleMd.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
-      for (var ai = 0; ai < appleLines.length && worldAlbums.length < 15; ai++) {
-        // Match [Album Title](https://music.apple.com/us/album/...)
-        var linkM = appleLines[ai].match(/^-?\s*\[([^\]]+)\]\(https:\/\/music\.apple\.com\/[^)]+\/album\/[^)]+\)/);
+      // Соберём candidates: { id, title, artist, position }
+      var appleCandidates: Array<{ id: string; title: string; artist: string; position: number }> = [];
+
+      for (var ai = 0; ai < appleLines.length && appleCandidates.length < 30; ai++) {
+        // [Album Title](https://music.apple.com/us/album/<slug>/<id>)
+        var linkM = appleLines[ai].match(/^-?\s*\[([^\]]+)\]\(https:\/\/music\.apple\.com\/[^)]+\/album\/[^)\/]+\/(\d+)/);
         if (!linkM) continue;
         var appleTitle = linkM[1].trim();
+        var appleId = linkM[2];
         if (!appleTitle || appleTitle.length < 2) continue;
         if (/Top Charts|Top Albums|Apple Music|Browse|See All|Sign In/i.test(appleTitle)) continue;
 
-        // Look forward for rank number and artist name
         var appleRank = 0;
         var appleArtist = '';
         for (var aj = ai + 1; aj < Math.min(ai + 5, appleLines.length); aj++) {
           var al = appleLines[aj];
           if (!al) continue;
-          // Rank number
           var rankM = al.match(/^(\d{1,3})$/);
           if (rankM && !appleRank) { appleRank = parseInt(rankM[1]); continue; }
-          // Skip duplicate link lines, empty, nav elements
           if (/^-\s*\[|^PLAY|^Shuffle|^Repeat|^Mute|^PREVIOUS|^NEXT|^LIVE|^Sign|^Playback/.test(al)) break;
           if (/^\[[^\]]+\]\(https:/.test(al)) continue;
           if (al.length < 2) continue;
-          // Artist name = first non-number non-link text after title
           if (appleRank && !appleArtist) {
             appleArtist = al.trim();
             break;
@@ -2070,19 +2080,74 @@ landing.post('/build-albums', async (c) => {
 
         if (!appleRank || appleRank > 20) continue;
         if (!appleArtist || appleArtist.length < 2) continue;
-        if (worldAlbums.some(function(a) { return a.position === appleRank; })) continue;
+        if (appleCandidates.some(function(c) { return c.position === appleRank; })) continue;
 
-        worldAlbums.push({
-          id: 'am-' + appleRank,
-          title: appleTitle,
-          artist: appleArtist,
-          coverUrl: '',
-          region: 'world',
-          genre: '',
-          releaseDate: '',
-          source: 'apple_music',
-          position: appleRank,
-        });
+        appleCandidates.push({ id: appleId, title: appleTitle, artist: appleArtist, position: appleRank });
+      }
+
+      // Батч-запрос в iTunes Lookup API для всех ID разом.
+      // Лимит 200 IDs/запрос, мы имеем максимум 30 — спокойно.
+      const MIN_TRACKS_FOR_ALBUM = 4; // synglы (1) и mini-EP (2-3) отсекаем
+      if (appleCandidates.length > 0) {
+        try {
+          const ids = appleCandidates.map(c => c.id).join(',');
+          const lookupRes = await fetch(`https://itunes.apple.com/lookup?id=${ids}&entity=album&limit=200`);
+          if (lookupRes.ok) {
+            const lookupJson: any = await lookupRes.json();
+            const byId: Record<string, any> = {};
+            for (const item of (lookupJson?.results || [])) {
+              if (item?.collectionId) {
+                byId[String(item.collectionId)] = item;
+              }
+            }
+
+            for (const cand of appleCandidates) {
+              if (worldAlbums.length >= 15) break;
+              const meta = byId[cand.id];
+              // Если lookup не вернул запись (старый/региональный релиз) —
+              // оставляем (rely на Apple Music classification). Если вернул —
+              // строго фильтруем по trackCount.
+              if (meta && Number(meta.trackCount) < MIN_TRACKS_FOR_ALBUM) {
+                console.log(`[albums:weekly] Apple skipping "${cand.title}" by ${cand.artist} — trackCount=${meta.trackCount} (single/EP, not album)`);
+                continue;
+              }
+              if (worldAlbums.some(function(a: any) { return a.position === cand.position; })) continue;
+
+              worldAlbums.push({
+                id: 'am-' + cand.position,
+                title: cand.title,
+                artist: cand.artist,
+                coverUrl: meta?.artworkUrl100 ? meta.artworkUrl100.replace('100x100', '500x500') : '',
+                region: 'world',
+                genre: meta?.primaryGenreName || '',
+                releaseDate: meta?.releaseDate || '',
+                source: 'apple_music',
+                position: cand.position,
+                trackCount: meta?.trackCount || null,
+              });
+            }
+          } else {
+            // Lookup упал — falls back на старое поведение (без фильтрации).
+            console.warn(`[albums:weekly] iTunes lookup failed: HTTP ${lookupRes.status}. Pushing without single-filter.`);
+            for (const cand of appleCandidates) {
+              if (worldAlbums.length >= 15) break;
+              if (worldAlbums.some(function(a: any) { return a.position === cand.position; })) continue;
+              worldAlbums.push({
+                id: 'am-' + cand.position,
+                title: cand.title,
+                artist: cand.artist,
+                coverUrl: '',
+                region: 'world',
+                genre: '',
+                releaseDate: '',
+                source: 'apple_music',
+                position: cand.position,
+              });
+            }
+          }
+        } catch (lookupErr: any) {
+          console.warn(`[albums:weekly] iTunes lookup threw:`, lookupErr?.message);
+        }
       }
     }
   }
