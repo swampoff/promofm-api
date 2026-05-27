@@ -48,6 +48,9 @@ CREATE TEMP TABLE _pcs_backup ON COMMIT DROP AS
 
 ALTER TABLE producer_custom_services DROP CONSTRAINT IF EXISTS producer_custom_services_pkey;
 ALTER TABLE producer_custom_services DROP CONSTRAINT IF EXISTS producer_custom_services_user_id_key;
+-- Защита от повторного запуска:
+ALTER TABLE producer_custom_services DROP CONSTRAINT IF EXISTS producer_custom_services_app_id_unique;
+ALTER TABLE producer_custom_services DROP CONSTRAINT IF EXISTS pcs_producer_app_unique;
 
 TRUNCATE producer_custom_services;
 
@@ -79,8 +82,9 @@ ALTER TABLE producer_custom_services
   ADD COLUMN IF NOT EXISTS rating        NUMERIC      NOT NULL DEFAULT 5.0;
 
 ALTER TABLE producer_custom_services ADD PRIMARY KEY (id);
+-- Композитный UNIQUE: legacy 'svc1', 'svc2' могли дублироваться у разных продюсеров.
 ALTER TABLE producer_custom_services
-  ADD CONSTRAINT producer_custom_services_app_id_unique UNIQUE (app_id);
+  ADD CONSTRAINT pcs_producer_app_unique UNIQUE (producer_id, app_id);
 
 CREATE INDEX IF NOT EXISTS idx_pcs_producer_id ON producer_custom_services(producer_id);
 CREATE INDEX IF NOT EXISTS idx_pcs_status      ON producer_custom_services(status);
@@ -120,6 +124,9 @@ CREATE TEMP TABLE _pcp_backup ON COMMIT DROP AS
 
 ALTER TABLE producer_custom_portfolio DROP CONSTRAINT IF EXISTS producer_custom_portfolio_pkey;
 ALTER TABLE producer_custom_portfolio DROP CONSTRAINT IF EXISTS producer_custom_portfolio_user_id_key;
+-- Защита от повторного запуска:
+ALTER TABLE producer_custom_portfolio DROP CONSTRAINT IF EXISTS producer_custom_portfolio_app_id_unique;
+ALTER TABLE producer_custom_portfolio DROP CONSTRAINT IF EXISTS pcp_producer_app_unique;
 
 TRUNCATE producer_custom_portfolio;
 
@@ -146,8 +153,9 @@ ALTER TABLE producer_custom_portfolio
   ADD COLUMN IF NOT EXISTS description   TEXT;
 
 ALTER TABLE producer_custom_portfolio ADD PRIMARY KEY (id);
+-- Композитный UNIQUE: legacy 'pf1', 'pf2' могли дублироваться у разных продюсеров.
 ALTER TABLE producer_custom_portfolio
-  ADD CONSTRAINT producer_custom_portfolio_app_id_unique UNIQUE (app_id);
+  ADD CONSTRAINT pcp_producer_app_unique UNIQUE (producer_id, app_id);
 
 CREATE INDEX IF NOT EXISTS idx_pcp_producer_id_created
   ON producer_custom_portfolio(producer_id, created_at DESC);
