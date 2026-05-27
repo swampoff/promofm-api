@@ -21,7 +21,7 @@ import fs from 'node:fs/promises';
 import {
   getDjProfile, upsertDjProfile,
   djNotificationsStore, djSubscriptionsStore,
-  djCampaignsStore, djWithdrawalsStore, djTransactionsStore,
+  djCampaignsStore, djTransactionsStore,
   getCoinBalance,
 } from './db.tsx';
 import { pool } from './db-client.tsx';
@@ -45,8 +45,40 @@ async function getUserId(c: any): Promise<string> {
   return c.get('userId') || FALLBACK_DJ_USER_ID;
 }
 
-function generateId(prefix: string) {
-  return `${prefix}-${crypto.randomUUID()}`;
+// dj_withdrawals row-per-withdrawal (migration 044). API contract:
+// {id, djId, amount, method, destinationLabel, status, yooPayoutId,
+//  error?, requestedAt, paidAt?, canceledAt?, createdAt, updatedAt?}.
+
+const DJW_COLS = `app_id, dj_id, amount, method, destination_label, status,
+  yoo_payout_id, error, requested_at, paid_at, canceled_at,
+  created_at, updated_at`;
+
+function mapDjWithdrawalRow(r: any): any {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : undefined);
+  return {
+    id: r.app_id,
+    djId: r.dj_id,
+    amount: Number(r.amount),
+    method: r.method || undefined,
+    destinationLabel: r.destination_label || undefined,
+    status: r.status,
+    yooPayoutId: r.yoo_payout_id || undefined,
+    error: r.error || undefined,
+    requestedAt: iso(r.requested_at),
+    paidAt: iso(r.paid_at),
+    canceledAt: iso(r.canceled_at),
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+  };
+}
+
+async function fetchDjWithdrawals(djId: string): Promise<any[]> {
+  const r = await pool.query(
+    `SELECT ${DJW_COLS} FROM dj_withdrawals
+      WHERE dj_id = $1 ORDER BY created_at DESC`,
+    [djId]
+  );
+  return r.rows.map(mapDjWithdrawalRow);
 }
 
 // dj_events row (row-per-event after migration 036) → внешний API контракт.
@@ -1037,7 +1069,7 @@ app.get('/finances/overview', requireAuth, requireDjRole, async (c) => {
     const userId = await getUserId(c);
     const [events, withdrawals, txs, planLimits] = await Promise.all([
       fetchDjEvents(userId).catch(() => []),
-      djWithdrawalsStore.get(userId).catch(() => []),
+      fetchDjWithdrawals(userId).catch(() => []),
       djTransactionsStore.get(userId).catch(() => []),
       getDjPlanLimits(String(userId)).catch(() => DJ_PLANS[0].limits),
     ]);
@@ -1170,8 +1202,8 @@ app.get('/finances/transactions', requireAuth, requireDjRole, async (c) => {
 app.get('/finances/withdrawals', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const list = (await djWithdrawalsStore.get(userId)) || [];
-    return c.json({ success: true, data: Array.isArray(list) ? list : [] });
+    const list = await fetchDjWithdrawals(userId);
+    return c.json({ success: true, data: list });
   } catch (error) {
     console.error('Error fetching DJ withdrawals:', error);
     return c.json({ success: true, data: [] });
@@ -1224,16 +1256,21 @@ app.post('/finances/withdrawals', requireAuth, requireDjRole, async (c) => {
       destinationLabel = cardLast4 ? `Карта …${cardLast4}` : 'Карта';
     }
 
-    // Проверим доступный баланс — резервируем под все pending/succeeded заявки
+    // Проверим доступный баланс — резервируем под все pending/succeeded/
+    // paid/completed заявки. Один SQL aggregate вместо in-memory filter
+    // массива.
     const events = await fetchDjEvents(userId);
-    const withdrawalsExisting = (await djWithdrawalsStore.get(userId)) || [];
     const totalEarned = (events as any[])
       .filter((e: any) => e.status === 'completed')
       .reduce((s: number, e: any) => s + (e.fee || 0), 0);
-    const reservedStatuses = new Set(['pending', 'succeeded', 'paid', 'completed']);
-    const totalReserved = (withdrawalsExisting as any[])
-      .filter((w: any) => reservedStatuses.has(w.status))
-      .reduce((s: number, w: any) => s + (w.amount || 0), 0);
+    const reservedRes = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0)::numeric AS reserved
+         FROM dj_withdrawals
+        WHERE dj_id = $1
+          AND status IN ('pending','succeeded','paid','completed')`,
+      [userId]
+    );
+    const totalReserved = Number(reservedRes.rows[0]?.reserved ?? 0);
     const available = Math.max(0, totalEarned - totalReserved);
     if (amount > available) {
       return c.json({ success: false, error: `Недостаточно средств. Доступно: ${available} ₽` }, 400);
@@ -1259,34 +1296,31 @@ app.post('/finances/withdrawals', requireAuth, requireDjRole, async (c) => {
         : (result.status as any) === 'canceled' ? 'canceled' : 'pending';
     } catch (payoutErr: any) {
       console.error('YooKassa payout failed:', payoutErr);
-      // Логируем failed-заявку — DJ должен видеть, что произошло
-      const failed = {
-        id, djId: userId, amount, method,
-        destinationLabel,
-        status: 'failed' as const,
-        requestedAt: now, createdAt: now,
-        error: payoutErr?.message || 'Не удалось создать выплату',
-      };
-      const list = Array.isArray(withdrawalsExisting) ? withdrawalsExisting : [];
-      list.unshift(failed);
-      await djWithdrawalsStore.set(userId, list);
-      return c.json({ success: false, error: failed.error }, 502);
+      // Логируем failed-заявку — DJ должен видеть, что произошло.
+      // INSERT — атомарно, race-free.
+      const errMsg = payoutErr?.message || 'Не удалось создать выплату';
+      await pool.query(
+        `INSERT INTO dj_withdrawals
+           (app_id, dj_id, amount, method, destination_label, status,
+            error, requested_at)
+         VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7)
+         ON CONFLICT (dj_id, app_id) DO NOTHING`,
+        [id, userId, amount, method, destinationLabel, errMsg, now]
+      );
+      return c.json({ success: false, error: errMsg }, 502);
     }
 
-    const withdrawal = {
-      id,
-      djId: userId,
-      amount,
-      method,
-      destinationLabel,
-      status: payoutStatus,
-      yooPayoutId: payoutId,
-      requestedAt: now,
-      createdAt: now,
-    };
-    const list = Array.isArray(withdrawalsExisting) ? withdrawalsExisting : [];
-    list.unshift(withdrawal);
-    await djWithdrawalsStore.set(userId, list);
+    // Успешный payout — атомарный INSERT, никаких race conditions.
+    const ins = await pool.query(
+      `INSERT INTO dj_withdrawals
+         (app_id, dj_id, amount, method, destination_label, status,
+          yoo_payout_id, requested_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (dj_id, app_id) DO NOTHING
+       RETURNING ${DJW_COLS}`,
+      [id, userId, amount, method, destinationLabel, payoutStatus, payoutId, now]
+    );
+    const withdrawal = ins.rowCount ? mapDjWithdrawalRow(ins.rows[0]) : null;
 
     return c.json({ success: true, data: withdrawal }, 201);
   } catch (error) {

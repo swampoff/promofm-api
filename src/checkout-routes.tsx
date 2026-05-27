@@ -1453,7 +1453,7 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
     if (event.startsWith('payout.')) {
       try {
         const { fetchYooKassaPayout } = await import('./gateway-yookassa-payouts.tsx');
-        const { djWithdrawalsStore } = await import('./db.tsx');
+        const { pool: cpool } = await import('./db-client.tsx');
         const payoutId: string = body?.object?.id || '';
         const withdrawalId: string = body?.object?.metadata?.withdrawal_id || '';
         const djId: string = body?.object?.metadata?.dj_id || '';
@@ -1467,50 +1467,72 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
           log.warn({ payoutId }, 'payout_verification_failed');
           return c.json({ success: false, error: 'Verification failed' }, 400);
         }
-        const list: any[] = (await djWithdrawalsStore.get(djId)) || [];
-        const idx = list.findIndex((w: any) => w.yooPayoutId === payoutId || w.id === withdrawalId);
-        if (idx === -1) {
-          log.warn({ payoutId, djId }, 'payout_withdrawal_not_found');
-          return c.json({ success: true, message: 'Withdrawal not found — acknowledged' });
-        }
+
+        // dj_withdrawals row-per-withdrawal (migration 044). Lookup
+        // через partial index по yoo_payout_id (или app_id fallback
+        // для legacy/before-yoo-id rows).
         const newStatus = verified.status === 'succeeded' ? 'succeeded'
-          : verified.status === 'canceled' ? 'canceled' : list[idx].status;
-        const prevStatus = list[idx].status;
-        list[idx] = {
-          ...list[idx],
-          status: newStatus,
-          ...(newStatus === 'succeeded' ? { paidAt: new Date().toISOString() } : {}),
-          ...(newStatus === 'canceled' ? { canceledAt: new Date().toISOString() } : {}),
-          updatedAt: new Date().toISOString(),
-        };
-        await djWithdrawalsStore.set(djId, list);
+          : verified.status === 'canceled' ? 'canceled' : null;
+        if (!newStatus) {
+          log.info({ payoutId, djId, vstatus: verified.status }, 'payout_status_noop');
+          return c.json({ success: true, message: `Status ${verified.status} — no update` });
+        }
+        // UPDATE conditionally — обновляем только если status реально
+        // меняется. Atomic: два concurrent webhook'а с одинаковым
+        // newStatus — second получит rowCount=0 (status уже = newStatus),
+        // не задвоит notification. RETURNING даёт нам данные для SSE.
+        const upd = await cpool.query(
+          `UPDATE dj_withdrawals
+              SET status = $1,
+                  paid_at = CASE WHEN $1 = 'succeeded' THEN NOW() ELSE paid_at END,
+                  canceled_at = CASE WHEN $1 = 'canceled' THEN NOW() ELSE canceled_at END,
+                  updated_at = NOW()
+            WHERE dj_id = $2
+              AND (yoo_payout_id = $3 OR app_id = $4)
+              AND status != $1
+           RETURNING app_id, amount, method, destination_label`,
+          [newStatus, djId, payoutId, withdrawalId]
+        );
+        if (upd.rowCount === 0) {
+          // Либо not found, либо status уже = newStatus (idempotent retry).
+          // Проверяем какой случай:
+          const check = await cpool.query(
+            `SELECT status FROM dj_withdrawals
+              WHERE dj_id = $1 AND (yoo_payout_id = $2 OR app_id = $3)`,
+            [djId, payoutId, withdrawalId]
+          );
+          if (check.rowCount === 0) {
+            log.warn({ payoutId, djId }, 'payout_withdrawal_not_found');
+          } else {
+            log.info({ payoutId, djId, currentStatus: check.rows[0].status }, 'payout_status_idempotent');
+          }
+          return c.json({ success: true, message: 'No update needed — acknowledged' });
+        }
+        const w = upd.rows[0];
         log.info({ payoutId, djId, status: newStatus }, 'payout_status_updated');
 
         // Cross-cabinet push to the DJ (SSE + persisted notification)
-        if (newStatus !== prevStatus) {
-          try {
-            const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
-            const w = list[idx];
-            await notifyCrossCabinet({
-              targetUserId: djId,
-              targetRole: 'dj',
-              sourceRole: 'admin',
-              type: 'payment_update',
-              title: newStatus === 'succeeded' ? 'Выплата успешна' : 'Выплата отменена',
-              message: newStatus === 'succeeded'
-                ? `${w.amount} ₽ → ${w.destinationLabel || w.method}`
-                : `${w.amount} ₽: выплата отклонена ЮКассой`,
-              metadata: {
-                withdrawalId: w.id,
-                yooPayoutId: payoutId,
-                status: newStatus,
-                amount: w.amount,
-                method: w.method,
-              },
-            });
-          } catch (notifyErr) {
-            log.warn({ err: notifyErr, djId, payoutId }, 'payout_notify_failed');
-          }
+        try {
+          const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+          await notifyCrossCabinet({
+            targetUserId: djId,
+            targetRole: 'dj',
+            sourceRole: 'admin',
+            type: 'payment_update',
+            title: newStatus === 'succeeded' ? 'Выплата успешна' : 'Выплата отменена',
+            message: newStatus === 'succeeded'
+              ? `${w.amount} ₽ → ${w.destination_label || w.method}`
+              : `${w.amount} ₽: выплата отклонена ЮКассой`,
+            metadata: {
+              withdrawalId: w.app_id,
+              yooPayoutId: payoutId,
+              status: newStatus,
+              amount: Number(w.amount),
+              method: w.method,
+            },
+          });
+        } catch (notifyErr) {
+          log.warn({ err: notifyErr, djId, payoutId }, 'payout_notify_failed');
         }
         return c.json({ success: true });
       } catch (payoutErr) {

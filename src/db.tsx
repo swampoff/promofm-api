@@ -1503,17 +1503,19 @@ export const bookingCalendarStore = jsonbStore('booking_calendar', 'performer_id
 // payment_transactions переехал на row-per-tx (migration 037). Доступ
 // через pool.query из platform-revenue.tsx + track-test-routes.tsx.
 export const paymentBalancesStore = jsonbStore('payment_balances', 'user_id');
-export const djMarketplaceIndexStore = jsonbStore('dj_marketplace_index');
+// dj_marketplace_index, dj_reviews, dj_collaborations, dj_pitches,
+// dj_editor_profiles — store declarations удалены как orphan (2026-05-27):
+// dj_marketplace_index, dj_collaborations, dj_pitches — 0 callers;
+// dj_reviews / dj_editor_profiles используются напрямую через
+// pool.query / db().from(), store-helper не нужен.
 export const djMixesStore = jsonbStore('dj_mixes', 'dj_id');
-export const djReviewsStore = jsonbStore('dj_reviews', 'dj_id');
 // dj_calendar таблица + декларация удалены (migration 040). Был zombie
 // код, 0 callers — DJ-календарь как фича не реализован.
-export const djCollaborationsStore = jsonbStore('dj_collaborations', 'dj_id');
 export const djNotificationsStore = jsonbStore('dj_notifications', 'dj_id');
 export const djSubscriptionsStore = jsonbStore('dj_subscriptions', 'dj_id');
-export const djPitchesStore = jsonbStore('dj_pitches', 'dj_id');
 export const djCampaignsStore = jsonbStore('dj_campaigns', 'dj_id');
-export const djWithdrawalsStore = jsonbStore('dj_withdrawals', 'dj_id');
+// dj_withdrawals переехал на row-per-withdrawal (migration 044). Доступ
+// через pool.query из dj-studio-routes.tsx + checkout-routes.tsx webhook.
 export const djTransactionsStore = jsonbStore('dj_transactions', 'dj_id');
 export const collabOffersByArtistStore = jsonbStore('collab_offers_by_artist', 'artist_id');
 export const collabOffersByProducerStore = jsonbStore('collab_offers_by_producer', 'producer_id');
