@@ -736,23 +736,22 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       const UPCOMING_DAYS = 3;
       const upcomingUntilIso = new Date(Date.now() + UPCOMING_DAYS * 86400000).toISOString();
 
+      // Native cols (migration 046): payment_* + upcoming_until +
+      // approved_for_release_at стали колонками, data jsonb DROPped.
       const result = await mxPool.query(
         `UPDATE dj_mixes
-            SET moderation_status = 'upcoming',
-                is_hidden         = false,
-                status            = 'upcoming',
-                data              = COALESCE(data, '{}'::jsonb)
-                                    || jsonb_build_object(
-                                         'payment_completed', true,
-                                         'payment_amount',   $2::numeric,
-                                         'payment_order_id', $3::text,
-                                         'payment_gateway',  $4::text,
-                                         'paid_at',          $5::text,
-                                         'upcoming_until',   $7::text,
-                                         'approved_for_release_at', $5::text
-                                       ),
-                moderated_at      = COALESCE(moderated_at, $6::timestamptz),
-                updated_at        = $6
+            SET moderation_status        = 'upcoming',
+                is_hidden                = false,
+                status                   = 'upcoming',
+                payment_completed        = TRUE,
+                payment_amount           = $2,
+                payment_order_id         = $3,
+                payment_gateway          = $4,
+                paid_at                  = $5::timestamptz,
+                upcoming_until           = $7::timestamptz,
+                approved_for_release_at  = $5::timestamptz,
+                moderated_at             = COALESCE(moderated_at, $6::timestamptz),
+                updated_at               = $6
           WHERE id = $1
             AND moderation_status = 'approved'
           RETURNING dj_id, title`,
@@ -1216,7 +1215,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       try {
         const { pool: vpool } = await import('./db-client.tsx');
         const { rows } = await vpool.query(
-          `SELECT dj_id, moderation_status, data FROM dj_mixes WHERE id = $1 LIMIT 1`,
+          `SELECT dj_id, moderation_status, payment_amount FROM dj_mixes WHERE id = $1 LIMIT 1`,
           [String(mixId)]
         );
         if (rows.length === 0) {
@@ -1230,7 +1229,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         if (mix.moderation_status !== 'approved') {
           return c.json({ success: false, error: `Микс должен быть одобрен модератором (текущий статус: ${mix.moderation_status})` }, 400);
         }
-        const expected = Number(mix.data?.payment_amount) || 5000;
+        const expected = Number(mix.payment_amount) || 5000;
         if (Math.abs(amount - expected) > 0.01) {
           log.warn({ userId, mixId, expected, received: amount }, 'dj_mix_publish_amount_tampering_blocked');
           return c.json({ success: false, error: 'Сумма не соответствует цене публикации микса' }, 400);

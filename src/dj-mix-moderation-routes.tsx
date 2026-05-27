@@ -145,8 +145,9 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
       return c.json({ error: 'action должен быть approve или reject' }, 400);
     }
 
+    // Native cols (migration 046) — data jsonb dropped.
     const mixRes = await pool.query(
-      `SELECT id, dj_id, title, audio_url, cover_url, data, moderation_status
+      `SELECT id, dj_id, title, audio_url, cover_url, moderation_status, paid_at
          FROM dj_mixes WHERE id = $1 LIMIT 1`,
       [pendingMixId]
     );
@@ -184,32 +185,34 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
         ? new Date(Date.now() + UPCOMING_DAYS * 86400000).toISOString()
         : null;
 
-      const newData = {
-        ...(mix.data || {}),
-        requires_payment: !isFirstFree,
-        payment_amount: publicationPrice,
-        first_mix_free_applied: isFirstFree,
-        paid_at: isFirstFree ? now : (mix.data?.paid_at || null),
-        ...(upcomingUntil ? { upcoming_until: upcomingUntil, approved_for_release_at: now } : {}),
-      };
-
+      // Native cols (migration 046): больше никакого data jsonb merge.
+      // COALESCE для paid_at сохраняет существующее значение когда оно
+      // не isFirstFree (re-approve scenario).
       await pool.query(
         `UPDATE dj_mixes
-            SET moderation_status   = $1,
-                moderation_comment  = $2,
-                moderated_at        = $3,
-                is_hidden           = $4,
-                status              = $5,
-                data                = $6,
-                updated_at          = NOW()
-          WHERE id = $7`,
+            SET moderation_status        = $1,
+                moderation_comment       = $2,
+                moderated_at             = $3,
+                is_hidden                = $4,
+                status                   = $5,
+                requires_payment         = $6,
+                payment_amount           = $7,
+                first_mix_free_applied   = $8,
+                paid_at                  = CASE WHEN $8 THEN $3::timestamptz ELSE paid_at END,
+                upcoming_until           = COALESCE($9::timestamptz, upcoming_until),
+                approved_for_release_at  = COALESCE($9::timestamptz, approved_for_release_at),
+                updated_at               = NOW()
+          WHERE id = $10`,
         [
           isFirstFree ? 'upcoming' : 'approved',
           moderator_notes || (isFirstFree ? 'Микс одобрен (первый микс — бесплатно)' : 'Микс одобрен'),
           now,
           !isFirstFree,                         // is_hidden=false только для бесплатных
-          isFirstFree ? 'upcoming' : 'draft',  // старая колонка status держим в синхроне с moderation_status
-          newData,
+          isFirstFree ? 'upcoming' : 'draft',  // старая колонка status держим в синхроне
+          !isFirstFree,                         // requires_payment
+          publicationPrice,                     // payment_amount
+          isFirstFree,                          // first_mix_free_applied
+          upcomingUntil,                        // upcoming_until (NULL для paid path)
           pendingMixId,
         ]
       );

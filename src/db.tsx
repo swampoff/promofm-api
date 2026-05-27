@@ -1505,7 +1505,10 @@ export const bookingCalendarStore = jsonbStore('booking_calendar', 'performer_id
 // через pool.query из platform-revenue.tsx + track-test-routes.tsx.
 export const paymentBalancesStore = jsonbStore('payment_balances', 'user_id');
 export const djMarketplaceIndexStore = jsonbStore('dj_marketplace_index');
-export const djMixesStore = jsonbStore('dj_mixes', 'dj_id');
+// dj_mixes — data jsonb promoted в 17 native cols (migration 046).
+// 0 callers через jsonbStore; все reads/writes идут через pool.query
+// в dj-studio/dj-marketplace/dj-mix-moderation/checkout/track-moderation/
+// landing-data.
 export const djReviewsStore = jsonbStore('dj_reviews', 'dj_id');
 // dj_calendar таблица + декларация удалены (migration 040). Был zombie
 // код, 0 callers — DJ-календарь как фича не реализован.

@@ -1894,13 +1894,6 @@ app.post('/mixes', requireAuth, requireDjRole, async (c) => {
     }
 
     const id = `mix-${crypto.randomUUID()}`;
-    const data = {
-      likes: 0, downloads: 0, comments: 0,
-      isPremium, price,
-      // Премиум-микс после approve должен автоматически попасть
-      // в каталог для радио и venues — флаг читается админ-flow'ом.
-      distribute: isPremium ? { radio: true, venues: true } : null,
-    };
 
     // Премиум-микс сразу уходит на модерацию админу (это и есть
     // «премиум-режим»: платный + контроль качества). Обычный (бесплатный)
@@ -1910,17 +1903,26 @@ app.post('/mixes', requireAuth, requireDjRole, async (c) => {
     const dbModerationStatus = isPremium ? 'pending'   : 'published';
     const dbIsHidden         = isPremium ? true        : false;
 
+    // Native cols (migration 046): is_premium/price/distribute_*/
+    // requires_payment — больше никаких data jsonb писаний.
     await pool.query(
       `INSERT INTO dj_mixes
          (id, dj_id, title, genre, duration, plays_count, audio_url, cover_url,
-          description, bpm_range, status, data,
+          description, bpm_range, status,
           moderation_status, is_hidden,
+          is_premium, price, requires_payment,
+          distribute_radio, distribute_venues,
           created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10, $11,
-               $12, $13,
+       VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10,
+               $11, $12,
+               $13, $14, $15,
+               $16, $17,
                NOW(), NOW())`,
       [id, userId, title, genre, durationSec, audioUploaded.url, coverUrl, description, bpmRange,
-       dbStatus, data, dbModerationStatus, dbIsHidden]
+       dbStatus,
+       dbModerationStatus, dbIsHidden,
+       isPremium, price, isPremium,           // requires_payment = isPremium на upload
+       isPremium, isPremium]                  // distribute_radio/venues включаются для premium
     );
 
     return c.json({

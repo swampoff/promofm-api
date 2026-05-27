@@ -51,10 +51,15 @@ stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md
 | `radio_analytics` | per-station объект (+ `.getAll()` для radio-partners) | **Оставлен как есть** на этом waves. ⚠️ Дуальное назначение (analytics + station-registry для landing) — стоит распутать в Wave 3 (вынести registry в `radio_stations` или дать landing запрос к нему). | — |
 | `venue_analytics` | per-venue объект, 4 `.get()` callers, 0 `.set()` в коде | **Оставлен как есть** — singleton cache, читается, пишется откуда-то ещё (cron?). Если будет cross-venue admin dashboard — добавить native cols. | — |
 
-### 🔜 Wave 3 — гибриды (тривиальный refactor)
+### ⏳ Wave 3 — promote jsonb → native (per-table proper migration)
 
-Таблицы где native колонки уже всё закрывают, но `data jsonb` дублирует — просто удалить колонку `data` + рефактор handler'ов на native columns:
-`dj_collaborations`, `dj_bookings`, `dj_reviews`, `dj_mixes`, `dj_subscriptions`, `dj_notifications`, `notification_campaigns`, `pitching_requests`, `radio_ad_slots`, `track_analytics`, `user_subscriptions`, `track_moderation`, `track_test_requests`, `donations`, `support_tickets`, `bookings`, `payment_withdrawals`, `marketing_campaigns`.
+«Гибрид» с активным data jsonb — native не закрывает поля. Каждая таблица требует proper migration (promote всех data полей + handler refactor + DROP COLUMN data). НЕ тривиальный «DROP колонки», как показал audit 2026-05-27.
+
+| Таблица | Status | PR | Notes |
+|---|---|---|---|
+| `dj_mixes` | ⏳ in-PR | #62 | 17 native cols promoted (payment_*, upcoming_until, published_at, is_premium, price, likes_count, distribute_*, requires_payment, first_mix_free_applied). 5 writers + 4 readers refactored. data jsonb DROPped. |
+
+Остальные hybrid'ы (`bookings`, `support_tickets`, `marketing_campaigns`, `radio_ad_slots`, `notification_campaigns`, `track_test_requests`, `track_moderation`) — следующие в очереди.
 
 ### 🔜 Wave 4 — settings/configs (можно отложить)
 
