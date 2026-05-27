@@ -446,6 +446,9 @@ landing.get('/tracks/new', async (c) => {
       //   (b) data.first_mix_free_applied=true — первый микс DJ бесплатно
       //       (manageDjMixModeration approve выставляет этот флаг).
       // Это симметрично tracks: paid без admin-publish не виден тут.
+      // Native cols (migration 046): payment_completed/first_mix_free_applied
+      // — boolean колонки, partial index idx_dj_mixes_public_catalog
+      // покрывает этот WHERE.
       const r = await pool.query(
         `SELECT m.id, m.title, m.genre, m.duration, m.audio_url, m.cover_url,
                 m.plays_count, m.dj_id, m.created_at,
@@ -454,10 +457,7 @@ landing.get('/tracks/new', async (c) => {
            LEFT JOIN dj_profiles dp ON dp.user_id = m.dj_id
           WHERE m.moderation_status IN ('upcoming', 'published')
             AND m.is_hidden = FALSE
-            AND (
-                  (m.data->>'payment_completed') = 'true'
-               OR (m.data->>'first_mix_free_applied') = 'true'
-                )
+            AND (m.payment_completed = TRUE OR m.first_mix_free_applied = TRUE)
           ORDER BY m.created_at DESC
           LIMIT $1`,
         [limit]
@@ -700,19 +700,19 @@ landing.get("/releases/upcoming", async (c) => {
       }),
       // DJ-миксы в Скоро: те же условия, payment_completed обязателен
       // (защита от опт-ин-миксов которые сразу published без оплаты).
+      // Native cols (migration 046): upcoming_until/payment_completed/
+      // first_mix_free_applied — native, индекс idx_dj_mixes_upcoming_until
+      // покрывает ORDER BY + WHERE по upcoming_until.
       pool.query(
         `SELECT m.id, m.title, COALESCE(dp.dj_name, '') AS artist_name, m.genre,
-                m.cover_url, m.data->>'upcoming_until' AS upcoming_until
+                m.cover_url, m.upcoming_until
            FROM dj_mixes m
            LEFT JOIN dj_profiles dp ON dp.user_id = m.dj_id
           WHERE m.moderation_status = 'upcoming'
             AND COALESCE(m.is_hidden, false) = false
-            AND m.data->>'upcoming_until' IS NOT NULL
-            AND (
-                  (m.data->>'payment_completed') = 'true'
-               OR (m.data->>'first_mix_free_applied') = 'true'
-                )
-          ORDER BY (m.data->>'upcoming_until')::timestamptz ASC
+            AND m.upcoming_until IS NOT NULL
+            AND (m.payment_completed = TRUE OR m.first_mix_free_applied = TRUE)
+          ORDER BY m.upcoming_until ASC
           LIMIT $1`,
         [limit]
       ).then((r) => r.rows).catch((e: any) => {

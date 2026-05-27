@@ -1168,21 +1168,25 @@ app.post('/promote-upcoming', async (c) => {
     // на /dj/mixes), но логика идентична.
     let mixesPromoted = 0;
     try {
-      const { rows: mixRows } = await (await import('./db-client.tsx')).pool.query(
-        `SELECT id, title, dj_id, data FROM dj_mixes WHERE moderation_status = 'upcoming'`
-      );
+      // Native cols (migration 046): WHERE и UPDATE напрямую по
+      // upcoming_until/published_at TIMESTAMPTZ. Partial index
+      // idx_dj_mixes_upcoming_until покрывает этот запрос.
       const mixNow = new Date();
+      const { rows: mixRows } = await (await import('./db-client.tsx')).pool.query(
+        `SELECT id, title, dj_id
+           FROM dj_mixes
+          WHERE moderation_status = 'upcoming'
+            AND upcoming_until IS NOT NULL
+            AND upcoming_until <= $1::timestamptz`,
+        [mixNow.toISOString()]
+      );
       for (const mix of mixRows) {
-        const until = mix.data?.upcoming_until;
-        if (!until || new Date(until) > mixNow) continue;
-
         await (await import('./db-client.tsx')).pool.query(
           `UPDATE dj_mixes
               SET moderation_status = 'published',
                   status            = 'published',
                   is_hidden         = false,
-                  data              = COALESCE(data, '{}'::jsonb)
-                                      || jsonb_build_object('published_at', $2::text),
+                  published_at      = $2::timestamptz,
                   updated_at        = $2
             WHERE id = $1 AND moderation_status = 'upcoming'`,
           [mix.id, mixNow.toISOString()]

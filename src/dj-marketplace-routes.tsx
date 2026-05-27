@@ -177,9 +177,11 @@ app.get('/djs/:id/mixes', async (c) => {
     // колонка status='published' оставлена как доп. фильтр для миксов
     // что были опубликованы ДО миграции 030 — они уже backfill'нуты в
     // moderation_status='published', is_hidden=FALSE.
+    // Native cols (migration 046): is_premium/price/likes_count напрямую.
     const { rows } = await pool.query(
-      `SELECT m.id, m.title, m.genre, m.duration, m.plays_count as plays,
-              m.audio_url, m.cover_url, m.description, m.bpm_range, m.data, m.status
+      `SELECT m.id, m.title, m.genre, m.duration, m.plays_count AS plays,
+              m.audio_url, m.cover_url, m.description, m.bpm_range, m.status,
+              m.is_premium, m.price, m.likes_count
          FROM dj_mixes m
          WHERE (m.dj_id = $1 OR m.dj_id = (
                 SELECT user_id FROM dj_profiles
@@ -196,13 +198,13 @@ app.get('/djs/:id/mixes', async (c) => {
       duration: r.duration ? `${Math.floor(r.duration / 60)}:${String(r.duration % 60).padStart(2, '0')}` : '',
       durationSec: r.duration || 0,
       plays: r.plays || 0,
-      likes: r.data?.likes || 0,
+      likes: r.likes_count || 0,
       audioUrl: r.audio_url || '',
       coverUrl: r.cover_url || '',
       description: r.description || '',
       bpmRange: r.bpm_range || '',
-      isPremium: !!r.data?.isPremium,
-      price: Number(r.data?.price) || 0,
+      isPremium: !!r.is_premium,
+      price: Number(r.price) || 0,
     }));
     return c.json({ success: true, data: mixes });
   } catch (err: any) {
