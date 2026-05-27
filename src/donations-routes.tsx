@@ -80,19 +80,37 @@ async function resolveDonationCommissionRate(
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-async function getWithdrawalsList(userId: string): Promise<any[]> {
-  const r = await pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [userId]);
-  const raw = r.rows[0]?.data;
-  return Array.isArray(raw) ? raw : [];
+// row-per-withdrawal (migration 043). Все донат-заявки имеют source='donation'.
+function mapWithdrawalRow(r: any): any {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : undefined);
+  return {
+    id: r.app_id,
+    source: r.source,
+    userId: r.user_id,
+    amount: Number(r.amount),
+    commission: r.commission !== null ? Number(r.commission) : undefined,
+    commissionRate: r.commission_rate !== null ? Number(r.commission_rate) : undefined,
+    commissionTier: r.commission_tier || undefined,
+    payout: r.payout !== null ? Number(r.payout) : undefined,
+    paymentMethod: r.payment_method || undefined,
+    paymentDetails: r.payment_details || null,
+    status: r.status,
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+  };
 }
 
-async function saveWithdrawalsList(userId: string, list: any[]): Promise<void> {
-  await pool.query(
-    `INSERT INTO payment_withdrawals (user_id, data, created_at, updated_at)
-     VALUES ($1, $2::jsonb, NOW(), NOW())
-     ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
-    [userId, JSON.stringify(list)]
+async function getDonationWithdrawals(userId: string): Promise<any[]> {
+  const r = await pool.query(
+    `SELECT app_id, user_id, source, amount, commission, commission_rate,
+            commission_tier, payout, payment_method, payment_details, status,
+            created_at, updated_at
+       FROM payment_withdrawals
+      WHERE user_id = $1 AND source = 'donation'
+      ORDER BY created_at DESC`,
+    [userId]
   );
+  return r.rows.map(mapWithdrawalRow);
 }
 
 async function getDonationBalance(artistId: string): Promise<number> {
@@ -101,9 +119,10 @@ async function getDonationBalance(artistId: string): Promise<number> {
     .filter((d: any) => d?.status === 'completed' || d?.status === 'paid')
     .reduce((sum: number, d: any) => sum + (Number(d?.amount) || 0), 0);
 
-  const wds = await getWithdrawalsList(artistId);
+  // SQL уже фильтрует source='donation' — filter в JS убран.
+  const wds = await getDonationWithdrawals(artistId);
   const reserved = wds
-    .filter((w: any) => w?.source === 'donation' && w?.status !== 'rejected' && w?.status !== 'cancelled')
+    .filter((w: any) => w?.status !== 'rejected' && w?.status !== 'cancelled')
     .reduce((s: number, w: any) => s + (Number(w?.amount) || 0), 0);
 
   return Math.max(0, earned - reserved);
@@ -146,15 +165,15 @@ donationsRoutes.get('/list', requireAuth, async (c) => {
 donationsRoutes.get('/withdrawals', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
-    const list = await getWithdrawalsList(userId);
-    const donationWds = list.filter((w: any) => w?.source === 'donation');
+    // getDonationWithdrawals возвращает уже отсортированный список
+    // только source='donation'.
+    const donationWds = await getDonationWithdrawals(userId);
     const balance = await getDonationBalance(userId);
     const { rate, tier } = await resolveDonationCommissionRate(String(userId || ''));
     return c.json({
       success: true,
-      data: donationWds.sort((a: any, b: any) =>
-        String(b?.createdAt || '').localeCompare(String(a?.createdAt || ''))
-      ),
+      // getDonationWithdrawals уже ORDER BY created_at DESC — sort убран.
+      data: donationWds,
       balance,
       commission: { rate, tier },
     });
@@ -214,9 +233,20 @@ donationsRoutes.post('/withdrawals', requireAuth, async (c) => {
       updatedAt: now,
     };
 
-    const list = await getWithdrawalsList(userId);
-    list.unshift(request);
-    await saveWithdrawalsList(userId, list);
+    // row-per-withdrawal: INSERT — атомарно, никакого read-modify-write.
+    await pool.query(
+      `INSERT INTO payment_withdrawals
+         (app_id, user_id, source, amount, commission, commission_rate,
+          commission_tier, payout, payment_method, payment_details, status)
+       VALUES ($1, $2, 'donation', $3, $4, $5, $6, $7, $8, $9::jsonb, 'pending')
+       ON CONFLICT (user_id, app_id) DO NOTHING`,
+      [
+        request.id, userId, request.amount, request.commission,
+        request.commissionRate, request.commissionTier, request.payout,
+        request.paymentMethod,
+        request.paymentDetails ? JSON.stringify(request.paymentDetails) : null,
+      ]
+    );
 
     return c.json({
       success: true,

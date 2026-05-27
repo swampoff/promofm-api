@@ -81,23 +81,39 @@ async function createWithdrawRequest(userId: string, amount: number, paymentMeth
   }
 
   const id = `wd-${crypto.randomUUID()}`;
-  const req = { id, userId, amount, paymentMethodId, status: 'pending', createdAt: new Date().toISOString() };
-  const _wq = await (await import("./db-client.tsx")).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [userId]);
-  const reqs: any[] = Array.isArray(_wq.rows[0]?.data) ? _wq.rows[0].data : [];
-  reqs.push(req);
+  // row-per-withdrawal (migration 043): INSERT — никаких race conditions.
   await (await import("./db-client.tsx")).pool.query(
-    `INSERT INTO payment_withdrawals (user_id, data, created_at, updated_at) VALUES ($1, $2::jsonb, NOW(), NOW())
-     ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
-    [userId, JSON.stringify(reqs)]
+    `INSERT INTO payment_withdrawals
+       (app_id, user_id, amount, payment_method, status)
+     VALUES ($1, $2, $3, $4, 'pending')
+     ON CONFLICT (user_id, app_id) DO NOTHING`,
+    [id, userId, amount, paymentMethodId]
   );
   return id;
 }
 
 async function getWithdrawRequests(userId: string, status?: string): Promise<any[]> {
-  const _wq2 = await (await import("./db-client.tsx")).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [userId]);
-  let reqs: any[] = Array.isArray(_wq2.rows[0]?.data) ? _wq2.rows[0].data : [];
-  if (status) reqs = reqs.filter((r: any) => r.status === status);
-  return reqs;
+  // row-per-withdrawal: фильтр в SQL. source IS NULL = generic payments
+  // (НЕ donation, НЕ radio — каждый модуль scope'ит свой source).
+  const params: any[] = [userId];
+  let where = `user_id = $1 AND source IS NULL`;
+  if (status) { params.push(status); where += ` AND status = $${params.length}`; }
+  const _wq2 = await (await import("./db-client.tsx")).pool.query(
+    `SELECT app_id, user_id, amount, payment_method, status,
+            created_at, updated_at
+       FROM payment_withdrawals
+      WHERE ${where}
+      ORDER BY created_at DESC`,
+    params
+  );
+  return _wq2.rows.map((r: any) => ({
+    id: r.app_id,
+    userId: r.user_id,
+    amount: Number(r.amount),
+    paymentMethodId: r.payment_method,
+    status: r.status,
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+  }));
 }
 
 async function getCategoryStats(userId: string, type: string, period: string): Promise<any[]> {

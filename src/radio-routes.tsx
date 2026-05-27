@@ -726,28 +726,35 @@ app.get('/finance/transactions', requireAuth, async (c) => {
 // FINANCE / WITHDRAWALS — radio station partner payouts
 // =====================================================
 
-function radioWithdrawalKey(stationUserId: string): string {
-  return `radio:${stationUserId}`;
+// row-per-withdrawal (migration 043). Radio scope'ится через source='radio'.
+// Legacy ключ 'radio:${userId}' распакован миграцией в user_id + source.
+
+function mapRadioWithdrawalRow(r: any): any {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : undefined);
+  return {
+    id: r.app_id,
+    source: r.source,
+    stationId: r.user_id,
+    amount: Number(r.amount),
+    paymentMethod: r.payment_method || undefined,
+    paymentDetails: r.payment_details || null,
+    status: r.status,
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+  };
 }
 
 async function _getRadioWithdrawals(stationUserId: string): Promise<any[]> {
   const { pool: rwPool } = await import('./db-client.tsx');
   const r = await rwPool.query(
-    `SELECT data FROM payment_withdrawals WHERE user_id = $1`,
-    [radioWithdrawalKey(stationUserId)]
+    `SELECT app_id, user_id, source, amount, payment_method, payment_details,
+            status, created_at, updated_at
+       FROM payment_withdrawals
+      WHERE user_id = $1 AND source = 'radio'
+      ORDER BY created_at DESC`,
+    [stationUserId]
   );
-  const raw = r.rows[0]?.data;
-  return Array.isArray(raw) ? raw : [];
-}
-
-async function _saveRadioWithdrawals(stationUserId: string, list: any[]): Promise<void> {
-  const { pool: rwPool } = await import('./db-client.tsx');
-  await rwPool.query(
-    `INSERT INTO payment_withdrawals (user_id, data, created_at, updated_at)
-     VALUES ($1, $2::jsonb, NOW(), NOW())
-     ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
-    [radioWithdrawalKey(stationUserId), JSON.stringify(list)]
-  );
+  return r.rows.map(mapRadioWithdrawalRow);
 }
 
 async function _getRadioBalance(stationUserId: string): Promise<number> {
@@ -804,19 +811,23 @@ app.post('/finance/withdrawals', requireAuth, async (c) => {
     }
 
     const id = `wd-${crypto.randomUUID()}`;
-    const now = new Date().toISOString();
-    const request = {
-      id, source: 'radio', stationId: userId, amount,
-      paymentMethod: body.paymentMethod || 'card',
-      paymentDetails: body.paymentDetails || null,
-      status: 'pending', createdAt: now, updatedAt: now,
-    };
+    const paymentMethod = body.paymentMethod || 'card';
+    const paymentDetails = body.paymentDetails || null;
 
-    const list = await _getRadioWithdrawals(userId);
-    list.unshift(request);
-    await _saveRadioWithdrawals(userId, list);
+    // row-per-withdrawal: атомарный INSERT, race-free.
+    const { pool: rwPool } = await import('./db-client.tsx');
+    const ins = await rwPool.query(
+      `INSERT INTO payment_withdrawals
+         (app_id, user_id, source, amount, payment_method, payment_details, status)
+       VALUES ($1, $2, 'radio', $3, $4, $5::jsonb, 'pending')
+       ON CONFLICT (user_id, app_id) DO NOTHING
+       RETURNING app_id, user_id, source, amount, payment_method,
+                 payment_details, status, created_at, updated_at`,
+      [id, userId, amount, paymentMethod, paymentDetails ? JSON.stringify(paymentDetails) : null]
+    );
+    const withdrawal = ins.rowCount ? mapRadioWithdrawalRow(ins.rows[0]) : null;
 
-    return c.json({ success: true, withdrawal: request, balance: balance - amount }, 201);
+    return c.json({ success: true, withdrawal, balance: balance - amount }, 201);
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -827,18 +838,31 @@ app.post('/finance/withdrawals/:id/cancel', requireAuth, async (c) => {
   try {
     const userId = await getRadioUserId(c);
     const wdId = c.req.param('id');
-    const list = await _getRadioWithdrawals(userId);
-    const idx = list.findIndex((w: any) => w?.id === wdId);
-    if (idx === -1) {
-      return c.json({ success: false, error: 'Withdrawal not found' }, 404);
+
+    // Atomic UPDATE: только если status='pending' И owner совпадает.
+    // Возвращает строку чтобы отличить 404 vs «not pending» vs OK.
+    const { pool: rwPool } = await import('./db-client.tsx');
+    const upd = await rwPool.query(
+      `UPDATE payment_withdrawals
+          SET status = 'cancelled', updated_at = NOW()
+        WHERE app_id = $1 AND user_id = $2 AND source = 'radio' AND status = 'pending'
+       RETURNING app_id, user_id, source, amount, payment_method,
+                 payment_details, status, created_at, updated_at`,
+      [wdId, userId]
+    );
+    if (upd.rowCount === 0) {
+      // Проверим почему — отсутствует или not pending.
+      const check = await rwPool.query(
+        `SELECT status FROM payment_withdrawals
+          WHERE app_id = $1 AND user_id = $2 AND source = 'radio'`,
+        [wdId, userId]
+      );
+      if (check.rowCount === 0) {
+        return c.json({ success: false, error: 'Withdrawal not found' }, 404);
+      }
+      return c.json({ success: false, error: `Can only cancel pending requests (current: ${check.rows[0].status})` }, 400);
     }
-    if (list[idx].status !== 'pending') {
-      return c.json({ success: false, error: `Can only cancel pending requests (current: ${list[idx].status})` }, 400);
-    }
-    list[idx].status = 'cancelled';
-    list[idx].updatedAt = new Date().toISOString();
-    await _saveRadioWithdrawals(userId, list);
-    return c.json({ success: true, withdrawal: list[idx] });
+    return c.json({ success: true, withdrawal: mapRadioWithdrawalRow(upd.rows[0]) });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
