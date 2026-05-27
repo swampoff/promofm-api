@@ -2090,7 +2090,11 @@ export const agentSessionsIndexStore = jsonbStore('agent_sessions_index');
 // блок "Notification Campaigns" ниже).
 export const notificationSettingsKvStore = jsonbStore('notification_settings', 'user_id');
 export const systemConfigStore = jsonbStore('system_config', 'key');
-export const accountingStore = jsonbStore('accounting_data', 'key');
+// accountingStore — split на 5 native таблиц (migration 055):
+//   accounting_reports / accounting_documents / accounting_ledger /
+//   accounting_counterparties / accounting_calendar. Доступ — напрямую
+//   через pool.query в payments-routes.tsx. accounting_data таблица
+//   оставлена на проде для legacy non-accounting:* keys (если есть).
 export const guideDataStore = jsonbStore('promo_guide_data', 'key');
 export const elevenlabsStore = jsonbStore('elevenlabs_config');
 export const platformRevenueLogStore = jsonbStore('platform_revenue_log');
