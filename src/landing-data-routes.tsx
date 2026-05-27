@@ -2039,17 +2039,60 @@ landing.post('/build-albums', async (c) => {
 
   // === Apple Music Top Albums (fallback if Billboard < 10) ===
   //
-  // Apple Music смешивает single-track релизы (синглы вроде Drake
-  // ICEMAN / HABIBTI / MAID OF HONOUR) с настоящими альбомами в
-  // одном "Top Albums" чарте — у них release_type='album' но
-  // trackCount=1. Юзер видит «АЛЬБОМЫ НЕДЕЛИ» а там треки.
+  // Раньше парсили HTML music.apple.com/us/browse/top-charts/albums и
+  // фильтровали через iTunes Lookup, но Apple оформляет некоторые
+  // синглы (Drake ICEMAN / HABIBTI / MAID OF HONOUR) как Album w/
+  // trackCount=1 и хитро мимикрирует под альбомы — фильтр не отлавливал.
   //
-  // Фильтр: после скрапа собираем все Apple album IDs из URL,
-  // один батч-запрос в iTunes Lookup API (200 IDs макс за раз),
-  // отбрасываем релизы с trackCount < 4 (синглы и EP с 1-3
-  // треками). Заодно тянем artworkUrl100 чтобы у coverUrl был
-  // нормальный thumbnail.
+  // Новый источник: itunes.apple.com/us/rss/topalbums/limit=15/json —
+  // официальный RSS Top Albums Apple Marketing, **только альбомы**,
+  // без single-релизов по самому source contract. JSON-формат,
+  // быстрее парсится чем HTML-markdown, не требует Firecrawl-токенов.
   if (worldAlbums.length < 10) {
+    try {
+      const rssRes = await fetch('https://itunes.apple.com/us/rss/topalbums/limit=15/json', {
+        headers: { 'Accept': 'application/json' },
+      });
+      if (rssRes.ok) {
+        const rss: any = await rssRes.json();
+        const entries = rss?.feed?.entry || [];
+        let appleRank = 0;
+        for (const ent of entries) {
+          if (worldAlbums.length >= 15) break;
+          appleRank++;
+          const title = String(ent?.['im:name']?.label || '').trim();
+          const artist = String(ent?.['im:artist']?.label || '').trim();
+          if (!title || !artist) continue;
+          // Cover: im:image[2].label (largest), но обычно 170x170 — заменим
+          // на 500x500 через простую регекс-замену (Apple CDN convention).
+          const imgs = Array.isArray(ent?.['im:image']) ? ent['im:image'] : [];
+          const rawCover = String(imgs[imgs.length - 1]?.label || '');
+          const cover = rawCover.replace(/\/\d+x\d+bb\.(jpg|png)$/, '/500x500bb.$1');
+          const appleId = ent?.id?.attributes?.['im:id'] || '';
+          worldAlbums.push({
+            id: 'am-' + (appleId || appleRank),
+            title,
+            artist,
+            coverUrl: cover,
+            region: 'world',
+            genre: String(ent?.category?.attributes?.term || ''),
+            releaseDate: String(ent?.['im:releaseDate']?.label || ''),
+            source: 'apple_music',
+            position: appleRank,
+          });
+        }
+        console.log(`[albums:weekly] Apple RSS: pulled ${entries.length} albums`);
+      } else {
+        console.warn(`[albums:weekly] Apple RSS HTTP ${rssRes.status} — skipping Apple branch`);
+      }
+    } catch (rssErr: any) {
+      console.warn(`[albums:weekly] Apple RSS error: ${rssErr?.message} — skipping Apple branch`);
+    }
+  }
+
+  // Legacy HTML scrape branch — оставлен закомментированным как backup
+  // на случай если RSS отключат. Reactivate: переименовать flag выше.
+  if (false) {
     var appleMd = await fetchMarkdown(
       'apple_music_top',
       'https://music.apple.com/us/browse/top-charts/albums',
