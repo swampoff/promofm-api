@@ -51,10 +51,43 @@ stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md
 | `radio_analytics` | per-station объект (+ `.getAll()` для radio-partners) | **Оставлен как есть** на этом waves. ⚠️ Дуальное назначение (analytics + station-registry для landing) — стоит распутать в Wave 3 (вынести registry в `radio_stations` или дать landing запрос к нему). | — |
 | `venue_analytics` | per-venue объект, 4 `.get()` callers, 0 `.set()` в коде | **Оставлен как есть** — singleton cache, читается, пишется откуда-то ещё (cron?). Если будет cross-venue admin dashboard — добавить native cols. | — |
 
-### 🔜 Wave 3 — гибриды (тривиальный refactor)
+### ⏳ Wave 1.5 — array-stores пропущенные в Wave 1
 
-Таблицы где native колонки уже всё закрывают, но `data jsonb` дублирует — просто удалить колонку `data` + рефактор handler'ов на native columns:
-`dj_collaborations`, `dj_bookings`, `dj_reviews`, `dj_mixes`, `dj_subscriptions`, `dj_notifications`, `notification_campaigns`, `pitching_requests`, `radio_ad_slots`, `track_analytics`, `user_subscriptions`, `track_moderation`, `track_test_requests`, `donations`, `support_tickets`, `bookings`, `payment_withdrawals`, `marketing_campaigns`.
+| Таблица | Composite UNIQUE | PR | Risk closed |
+|---|---|---|---|
+| `producer_convs` | `(producer_id, app_id)` | #58 v2 | race на conv create |
+| `producer_messages` | `(conversation_id, app_id)` | #58 v2 | race на message send + 69 orphan messages wipe |
+| `producer_sessions` | `(producer_id, app_id)` | #58 v2 | race на session create |
+| `payment_withdrawals` | `(user_id, app_id)` | #59 | 💰 race на withdrawal create (4 модуля). Radio `radio:${id}` префикс распакован в `source='radio'` |
+| `dj_withdrawals` | `(dj_id, app_id)` | #60 | 💰 race на withdrawal + YooKassa webhook race. Native `yoo_payout_id INDEX` для webhook UPDATE atomic |
+
+### 🟢 Orphan jsonbStore declarations удалены (2026-05-27)
+
+5 stale declarations убраны из `db.tsx` в PR #60: `djMarketplaceIndexStore`, `djReviewsStore` (table used directly), `djCollaborationsStore`, `djPitchesStore`, `djEditorProfilesStore` (table used directly). Code clean-up, нет SQL изменений. Соответствующие таблицы (`dj_marketplace_index`, `dj_collaborations`, `dj_pitches`) — кандидаты на DROP TABLE если laptop подтвердит 0 rows.
+
+### 🔜 Wave 1.5 leftovers — dj cabinet arrays
+
+- `dj_notifications` — array of notifications per dj (1 write), Wave 1.5 candidate
+- `dj_campaigns` — array of campaigns per dj (1 write), Wave 1.5 candidate
+- `dj_subscriptions` — single object per dj (не массив) — singleton-style, валидно
+- `dj_transactions` — read-only (0 writes в коде), populated откуда-то ещё; не bomb
+
+### 🔜 Wave 3 — гибриды (НЕ тривиальный, нужен per-table refactor)
+
+Аудит 2026-05-27 показал что «гибрид» = native cols + active data jsonb writes
+(сохраняют full object). Просто `DROP COLUMN data` ломает чтения. Реальный
+объём работы похож на Wave 1.
+
+**🔴 Hybrid с active data writes (нужны новые native cols + handler refactor):**
+- `dj_mixes` — `data->>'payment_amount'`, `data->>'upcoming_until'`, `data->>'published_at'` активно используются
+- `bookings`, `support_tickets`, `marketing_campaigns` — `upsert*` пишет `data: fullObject`
+- `radio_ad_slots`, `notification_campaigns`, `track_test_requests`, `track_moderation` — все ещё через jsonbStore
+
+**🟢 Truly trivial Wave 3 (write-only data, ready for DROP):**
+- `donations` — `createDonation` пишет только native cols, read `r.data \|\| r` works без data
+
+**🤷 Возможные orphan'ы (нужна проверка):**
+- `dj_bookings`, `pitching_requests`, `user_subscriptions`, `track_analytics` — нет active callers в grep, могут быть DROPpable
 
 ### 🔜 Wave 4 — settings/configs (можно отложить)
 
