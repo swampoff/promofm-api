@@ -5,8 +5,8 @@
  *   producerConvsStore          → producer_convs table (pk: user_id)
  *   producerMessagesStore       → producer_messages table (pk: user_id)
  *   producerSessionsStore       → producer_sessions table (pk: user_id)
- *   producerCustomServicesStore → producer_custom_services table (pk: user_id)
- *   producerCustomPortfolioStore→ producer_custom_portfolio table (pk: user_id)
+ *   producer_custom_services    table (row-per-service, since migration 039)
+ *   producer_custom_portfolio   table (row-per-entry,   since migration 039)
  *   paymentWithdrawalsStore     → payment_withdrawals table (pk: user_id)
  *   producerSettingsStore       → producer_settings table (pk: user_id)
  *   producerProfileEditStore    → producer_profile_edit table (pk: user_id)
@@ -18,8 +18,6 @@ import * as db from './db.tsx';
 import {
   producerAiLastStore,
   producerConvsStore,
-  producerCustomPortfolioStore,
-  producerCustomServicesStore,
   producerMessagesStore,
   producerProfileEditStore,
   producerSessionsStore,
@@ -27,11 +25,10 @@ import {
   producerServicesStore,
 } from './db.tsx';
 import { getPaymentBalance, upsertPaymentBalance } from './db.tsx';
-import { getDbClient } from "./db-client.tsx";
+import { getDbClient, pool } from "./db-client.tsx";
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { saveUpload, IMAGE_EXTS, MAX_IMAGE_BYTES } from './cabinet-uploads.tsx';
-import { pool } from './db-client.tsx';
 
 // Audio uploads — producer portfolio. Те же limits / extensions
 // что у DJ-микс-аплоадера и engineer portfolio. Поднимем в
@@ -500,16 +497,51 @@ interface CustomService {
   orders: number; rating: number; createdAt: string;
 }
 
+// row mapper: snake_case → API camelCase. `type` в API = `service_type`
+// в БД (избегаем reserved-keyword путаницы в запросах).
+function mapServiceRow(row: any): CustomService {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : String(d);
+  return {
+    id: row.app_id,
+    producerId: row.producer_id,
+    title: row.title,
+    type: row.service_type,
+    basePrice: Number(row.base_price),
+    description: row.description || '',
+    deliveryDays: row.delivery_days,
+    revisions: row.revisions,
+    includes: Array.isArray(row.includes) ? row.includes : [],
+    status: row.status,
+    orders: row.orders,
+    rating: Number(row.rating),
+    createdAt: iso(row.created_at),
+  };
+}
+
+const SERVICE_COLS = `app_id, producer_id, title, service_type, base_price,
+  description, delivery_days, revisions, includes, status, orders, rating, created_at`;
+
 app.post('/services/create', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const producerId = c.get('userId'); // IDOR fix
     const { title, type, basePrice, description, deliveryDays, revisions, includes } = body;
     if (!producerId || !title || !basePrice) return c.json({ success: false, error: 'producerId, title, basePrice required' }, 400);
-    const svc: CustomService = { id: genId('svc'), producerId, title, type: type || 'mixing', basePrice: Number(basePrice), description: description || '', deliveryDays: Number(deliveryDays) || 5, revisions: Number(revisions) || 2, includes: includes || [], status: 'active', orders: 0, rating: 5.0, createdAt: nowIso() };
-    const list: CustomService[] = await producerCustomServicesStore.get(producerId) || [];
-    list.push(svc);
-    await producerCustomServicesStore.set(producerId, list);
+
+    const appId = genId('svc');
+    const r = await pool.query(
+      `INSERT INTO producer_custom_services
+         (app_id, producer_id, title, service_type, base_price, description,
+          delivery_days, revisions, includes, status, orders, rating)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, 'active', 0, 5.0)
+       RETURNING ${SERVICE_COLS}`,
+      [
+        appId, producerId, title, type || 'mixing', Number(basePrice),
+        description || '', Number(deliveryDays) || 5, Number(revisions) || 2,
+        JSON.stringify(Array.isArray(includes) ? includes : []),
+      ]
+    );
+    const svc = mapServiceRow(r.rows[0]);
     // Bridge: sync to marketplace so service appears in public catalog
     await syncServiceToMarketplace(svc);
     return c.json({ success: true, data: svc });
@@ -522,14 +554,34 @@ app.put('/services/update/:serviceId', requireAuth, async (c) => {
     const body = await c.req.json();
     const producerId = c.get('userId'); // IDOR fix: use JWT userId
     if (!producerId) return c.json({ success: false, error: 'Auth required' }, 401);
-    const list: CustomService[] = await producerCustomServicesStore.get(producerId) || [];
-    const idx = list.findIndex(s => s.id === serviceId);
-    if (idx < 0) return c.json({ success: false, error: 'Service not found' }, 404);
-    for (const f of ['title','type','basePrice','description','deliveryDays','revisions','includes','status']) { if (body[f] !== undefined) (list[idx] as any)[f] = body[f]; }
-    await producerCustomServicesStore.set(producerId, list);
+
+    const sets: string[] = ['updated_at = NOW()'];
+    const params: any[] = [];
+    const push = (col: string, val: any) => { params.push(val); sets.push(`${col} = $${params.length}`); };
+
+    if (typeof body.title === 'string')         push('title',         body.title);
+    if (typeof body.type === 'string')          push('service_type',  body.type);
+    if (body.basePrice !== undefined)           push('base_price',    Number(body.basePrice));
+    if (body.description !== undefined)         push('description',   body.description);
+    if (body.deliveryDays !== undefined)        push('delivery_days', Number(body.deliveryDays));
+    if (body.revisions !== undefined)           push('revisions',     Number(body.revisions));
+    if (Array.isArray(body.includes))           push('includes',      JSON.stringify(body.includes));
+    if (typeof body.status === 'string')        push('status',        body.status);
+
+    params.push(serviceId, producerId);
+    const idxA = params.length - 1;
+    const idxB = params.length;
+    const r = await pool.query(
+      `UPDATE producer_custom_services SET ${sets.join(', ')}
+        WHERE app_id = $${idxA} AND producer_id = $${idxB}
+       RETURNING ${SERVICE_COLS}`,
+      params
+    );
+    if (r.rowCount === 0) return c.json({ success: false, error: 'Service not found' }, 404);
+    const svc = mapServiceRow(r.rows[0]);
     // Bridge: sync to marketplace
-    await syncServiceToMarketplace(list[idx]);
-    return c.json({ success: true, data: list[idx] });
+    await syncServiceToMarketplace(svc);
+    return c.json({ success: true, data: svc });
   } catch (error) { console.log(`Error updating service: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
@@ -538,10 +590,13 @@ app.delete('/services/delete/:serviceId', requireAuth, async (c) => {
     const serviceId = c.req.param('serviceId');
     const producerId = c.get('userId'); // IDOR fix: use JWT userId
     if (!producerId) return c.json({ success: false, error: 'Auth required' }, 401);
-    const list: CustomService[] = await producerCustomServicesStore.get(producerId) || [];
-    const filtered = list.filter(s => s.id !== serviceId);
-    if (filtered.length === list.length) return c.json({ success: false, error: 'Not found' }, 404);
-    await producerCustomServicesStore.set(producerId, filtered);
+
+    const r = await pool.query(
+      `DELETE FROM producer_custom_services
+        WHERE app_id = $1 AND producer_id = $2`,
+      [serviceId, producerId]
+    );
+    if (r.rowCount === 0) return c.json({ success: false, error: 'Not found' }, 404);
     // Bridge: remove from marketplace
     await removeServiceFromMarketplace(serviceId);
     return c.json({ success: true });
@@ -555,8 +610,12 @@ app.get('/services/custom/:producerId', requireAuth, async (c) => {
   if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
-    const list: CustomService[] = await producerCustomServicesStore.get(producerId) || [];
-    return c.json({ success: true, data: list });
+    const r = await pool.query(
+      `SELECT ${SERVICE_COLS} FROM producer_custom_services
+        WHERE producer_id = $1 ORDER BY created_at DESC`,
+      [producerId]
+    );
+    return c.json({ success: true, data: r.rows.map(mapServiceRow) });
   } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
@@ -564,17 +623,39 @@ app.get('/services/custom/:producerId', requireAuth, async (c) => {
 // PORTFOLIO CRUD
 // ════════════════════════════════════════
 
+function mapPortfolioRow(row: any) {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : String(d);
+  return {
+    id: row.app_id,
+    producerId: row.producer_id,
+    title: row.title,
+    artist: row.artist,
+    type: row.item_type,
+    year: row.year,
+    description: row.description || '',
+    createdAt: iso(row.created_at),
+  };
+}
+
 app.post('/portfolio/create', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const producerId = c.get('userId'); // IDOR fix
     const { title, artist, type, description } = body;
     if (!producerId || !title || !artist) return c.json({ success: false, error: 'producerId, title, artist required' }, 400);
-    const entry = { id: genId('pf'), producerId, title, artist, type: type || 'Сведение', year: new Date().getFullYear(), description: description || '', createdAt: nowIso() };
-    const list = await producerCustomPortfolioStore.get(producerId) || [];
-    (list as any[]).unshift(entry);
-    await producerCustomPortfolioStore.set(producerId, list);
-    return c.json({ success: true, data: entry });
+
+    const appId = genId('pf');
+    const r = await pool.query(
+      `INSERT INTO producer_custom_portfolio
+         (app_id, producer_id, title, artist, item_type, year, description)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING app_id, producer_id, title, artist, item_type, year, description, created_at`,
+      [
+        appId, producerId, title, artist, type || 'Сведение',
+        new Date().getFullYear(), description || '',
+      ]
+    );
+    return c.json({ success: true, data: mapPortfolioRow(r.rows[0]) });
   } catch (error) { console.log(`Error creating portfolio: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
@@ -583,10 +664,12 @@ app.delete('/portfolio/delete/:id', requireAuth, async (c) => {
     const id = c.req.param('id');
     const producerId = c.get('userId'); // IDOR fix: use JWT userId
     if (!producerId) return c.json({ success: false, error: 'Auth required' }, 401);
-    const list = await producerCustomPortfolioStore.get(producerId) || [];
-    const filtered = (list as any[]).filter(p => p.id !== id);
-    if (filtered.length === (list as any[]).length) return c.json({ success: false, error: 'Not found' }, 404);
-    await producerCustomPortfolioStore.set(producerId, filtered);
+    const r = await pool.query(
+      `DELETE FROM producer_custom_portfolio
+        WHERE app_id = $1 AND producer_id = $2`,
+      [id, producerId]
+    );
+    if (r.rowCount === 0) return c.json({ success: false, error: 'Not found' }, 404);
     return c.json({ success: true });
   } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -897,7 +980,11 @@ app.post('/ai/analyze', requireAuth, async (c) => {
       producerSessionsStore.get(producerId),
       producerSettingsStore.get(producerId),
       (await import('./db-client.tsx')).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [producerId]).then((r: any) => Array.isArray(r.rows[0]?.data) ? r.rows[0].data : []),
-      producerCustomServicesStore.get(producerId),
+      pool.query(
+        `SELECT ${SERVICE_COLS} FROM producer_custom_services
+          WHERE producer_id = $1 ORDER BY created_at DESC`,
+        [producerId]
+      ).then((r: any) => r.rows.map(mapServiceRow)),
     ]);
 
     const dc = {
