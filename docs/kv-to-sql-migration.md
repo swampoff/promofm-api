@@ -19,26 +19,27 @@
 
 ## Прогресс
 
-### ✅ Готово (мигрированы)
+### ✅ Wave 1 — DONE (на проде row-per-entity)
 
-| Таблица | Миграция | PR | Notes |
+| Таблица | Composite UNIQUE | Code refactor PR | Notes |
 |---|---|---|---|
-| `publish_orders` | 013 | — | row-per-order, native cols |
-| `subscriptions` | (исторически) | — | row-per-subscription |
-| `agent_queue` → `agent_tasks` | 036 | #51 | row-per-task, jsonbStore-декларация удалена |
-| `dj_events` | 036 | #51 | row-per-event |
-| `venue_playlists` | 036 | #51 | row-per-playlist, `content_items` остаётся jsonb (legit nested) |
+| `publish_orders` | — | (исторически) | row-per-order |
+| `subscriptions` | — | (исторически) | row-per-subscription |
+| `agent_queue` → `agent_tasks` | `(app_id)` | #51 | row-per-task, новая таблица |
+| `dj_events` | `(dj_id, app_id)` | #51 | row-per-event, native cols |
+| `venue_playlists` | `(venue_id, app_id)` | #51 | row-per-playlist, content_items остаётся jsonb (legit nested) |
+| `payment_transactions` | `(user_id, app_id)` | #52 | row-per-tx, 4 RLS policies (pt_admin_all/insert/select_own/update_own) |
+| `collab_messages` | `(offer_id, app_id)` | #53 | row-per-message |
+| `publish_chats` | `(order_id, app_id)` | #53 | row-per-message, partial index на is_read=FALSE |
+| `producer_custom_services` | `(producer_id, app_id)` | #54 (merged) | row-per-service |
+| `producer_custom_portfolio` | `(producer_id, app_id)` | #54 (merged) | row-per-entry |
+| `dj_calendar` | — | #55 | DROP TABLE (orphan, 0 callers) |
 
-### ⏳ Wave 1 — критичные деньги/комм (в работе)
-
-| Таблица | Риск | Приоритет |
-|---|---|---|
-| `payment_transactions` | 💰 деньги в чистом kv — track-test handler пишет через `set(user_id, oneTx)` (а не array), что **перетирает все предыдущие транзакции пользователя** | 1 |
-| `collab_messages` | 💬 race condition: 2 одновременных сообщения → 1 потеряно (get-modify-set) | 1 |
-| `publish_chats` | 💬 то же | 1 |
-| `dj_calendar` | 🧟 orphan — declaration есть, callers нет. Удалить декларацию + DROP TABLE если 0 rows | 1 |
-| `producer_custom_portfolio` | 📁 публичный портфель продюсера | 1 |
-| `producer_custom_services` | 📁 публичные услуги продюсера | 1 |
+**Инцидент 2026-05-27:** все эти таблицы оказались уже в target state на проде
+к моменту code-refactor merge'a (миграции применились через путь вне cloud-сессии).
+Migration SQL файлы (036, 037, 038, 040) удалены из PR'ов — оставлены только
+code refactor (`pool.query` per-row INSERT/SELECT/UPDATE/DELETE) + удаление
+stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md`.
 
 ### 🔜 Wave 2 — analytics/aggregation
 
@@ -46,39 +47,77 @@
 
 ### 🔜 Wave 3 — гибриды (тривиальный refactor)
 
-Таблицы где native колонки уже всё закрывают, но `data jsonb` дублирует — просто удалить:
+Таблицы где native колонки уже всё закрывают, но `data jsonb` дублирует — просто удалить колонку `data` + рефактор handler'ов на native columns:
 `dj_collaborations`, `dj_bookings`, `dj_reviews`, `dj_mixes`, `dj_subscriptions`, `dj_notifications`, `notification_campaigns`, `pitching_requests`, `radio_ad_slots`, `track_analytics`, `user_subscriptions`, `track_moderation`, `track_test_requests`, `donations`, `support_tickets`, `bookings`, `payment_withdrawals`, `marketing_campaigns`.
 
 ### 🔜 Wave 4 — settings/configs (можно отложить)
 
-Read-mostly singleton'ы где kv-store валиден:
-`system_config`, `accounting_data`, `elevenlabs_config`, `email_templates`, `email_history`, `notification_settings`, `producer_settings`, `producer_ai_last`.
+Read-mostly singleton'ы где kv-store валиден (один объект на user/system, не массив):
+`system_config`, `accounting_data`, `elevenlabs_config`, `email_templates`, `email_history`, `notification_settings`, `producer_settings`, `producer_ai_last`, `payment_balances`.
 
 ### 🚫 Правило для cloud-сессий
 
 **НЕ СОЗДАВАТЬ** новые KV-таблицы с паттерном `entity_id PK + data JSONB`. См. `CLAUDE.md` → секция «⛔ FORBIDDEN: создавать новые KV-store таблицы».
 
-## Шаблон миграции
+## Шаблон для будущих миграций (Wave 2-3)
 
-Канон — `src/migrations/036_kv_to_sql_agent_queue_dj_events_venue_playlists.sql`:
+### Схема
+
+```sql
+-- Колонки:
+--   id          UUID PRIMARY KEY DEFAULT gen_random_uuid()
+--   app_id      TEXT  -- legacy идентификатор от старого app-кода
+--   <entity>_id TEXT INDEX  -- parent entity для группировки/owner-check
+--   <native cols под основные поля>
+--   extra       JSONB DEFAULT '{}'::jsonb  -- residual поля из старого jsonb
+--   created_at  TIMESTAMPTZ DEFAULT NOW()
+--   updated_at  TIMESTAMPTZ DEFAULT NOW()
+--
+-- UNIQUE: композитный (entity_id, app_id) — legacy app_id мог дублироваться
+-- между entity'ями (per-entity counter в старом коде).
+```
+
+### Migration file — NO `BEGIN/COMMIT` inside
+
+См. CLAUDE.md секцию «Migration files: NO BEGIN/COMMIT inside the file» —
+runner оборачивает heredoc'ом. Файл содержит DDL only.
+
+Apply:
+```bash
+sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+BEGIN;
+\i /opt/promofm-api/src/migrations/NNN_xxx.sql
+COMMIT;
+EOF
+```
+
+Dry-run (заменить COMMIT на ROLLBACK).
+
+### Шаги в SQL
 
 1. `CREATE TEMP TABLE _backup ON COMMIT DROP AS SELECT * FROM <legacy>`
-2. `ALTER TABLE <legacy> DROP CONSTRAINT IF EXISTS …` (все PK/UNIQUE на entity_id)
-3. `TRUNCATE <legacy>`
-4. `ALTER TABLE <legacy> ADD COLUMN IF NOT EXISTS id UUID, app_id TEXT, <native cols>, extra JSONB`
-5. `ALTER TABLE <legacy> ADD PRIMARY KEY (id)` + `CREATE INDEX … ON <legacy>(entity_id)`
-6. `INSERT INTO <legacy> (…) SELECT … FROM _backup, LATERAL jsonb_array_elements(b.data) elem`
-7. `ALTER TABLE <legacy> DROP COLUMN IF EXISTS data`
+2. `DROP POLICY IF EXISTS …` (RLS policies зависят от колонок, снять до DROP COLUMN)
+3. `ALTER TABLE <legacy> DROP CONSTRAINT IF EXISTS …` (все PK/UNIQUE на entity_id; +старые имена IF EXISTS для idempotency повторного запуска)
+4. `TRUNCATE <legacy>`
+5. `ALTER TABLE <legacy> ADD COLUMN IF NOT EXISTS id UUID, app_id TEXT, <native cols>, extra JSONB`
+6. `ALTER TABLE <legacy> ADD PRIMARY KEY (id)` + `ADD CONSTRAINT … UNIQUE (entity_id, app_id)` + `CREATE INDEX … ON <legacy>(entity_id)`
+7. `INSERT INTO <legacy> (…) SELECT … FROM _backup, LATERAL jsonb_array_elements(b.data) elem`
+8. `ALTER TABLE <legacy> DROP COLUMN IF EXISTS data`
+9. `CREATE POLICY …` для RLS на новой колонке (если на исходной были policies)
 
-Атомарно в одной транзакции. Backfill — через `jsonb_array_elements`.
-`extra jsonb` ловит любые поля которые не промоутили в нативные колонки.
-
-## Шаблон handler'а
+### Code
 
 После миграции:
 - Удалить `jsonbStore('<table>', ...)` декларацию из `src/db.tsx`
 - Заменить все `store.get(id)` / `store.set(id, arr)` на `pool.query(...)`
 - Добавить `mapXxxRow(row)` хелпер для конвертации snake_case → camelCase API
 - Owner-check через WHERE: `WHERE app_id = $1 AND <owner_col> = $2`
+- INSERT с `ON CONFLICT (<entity_id>, app_id) DO NOTHING` для idempotency
 
 Канон — `src/dj-studio-routes.tsx::fetchDjEvents` + CRUD-эндпойнты `/events*`.
+
+### Pre-flight (mandatory)
+
+Перед apply на проде laptop делает dry-run + сравнивает counts (см. CLAUDE.md
+секцию «Pre-flight»). Cloud НЕ имеет SSH — пишет SQL и список колонок в PR
+description, laptop валидирует.
