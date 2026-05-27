@@ -2111,11 +2111,25 @@ landing.post('/build-albums', async (c) => {
             for (const cand of appleCandidates) {
               if (worldAlbums.length >= 15) break;
               const meta = byId[cand.id];
-              // Если lookup не вернул запись (старый/региональный релиз) —
-              // оставляем (rely на Apple Music classification). Если вернул —
-              // строго фильтруем по trackCount.
-              if (meta && Number(meta.trackCount) < MIN_TRACKS_FOR_ALBUM) {
-                console.log(`[albums:weekly] Apple skipping "${cand.title}" by ${cand.artist} — trackCount=${meta.trackCount} (single/EP, not album)`);
+              // Раньше fallback: «если lookup не вернул запись — оставляем,
+              // rely на Apple classification». Apple Music HTML сейчас помечает
+              // синглы как `/album/...` URL (Drake ICEMAN / HABIBTI оформлены
+              // как Album w/ trackCount=1 ID 1842854411). Поэтому строгий
+              // подход: нет meta → skip (лучше пустая страница чем синглы как
+              // «альбомы недели»).
+              if (!meta) {
+                console.log(`[albums:weekly] Apple skipping "${cand.title}" — no iTunes meta`);
+                continue;
+              }
+              if (Number(meta.trackCount) < MIN_TRACKS_FOR_ALBUM) {
+                console.log(`[albums:weekly] Apple skipping "${cand.title}" by ${cand.artist} — trackCount=${meta.trackCount} (single/EP)`);
+                continue;
+              }
+              // Доп guard по collectionName/title: «Track Title - Single» / «... - EP»
+              // — это явное Apple-маркеры single-релиза даже если trackCount странно.
+              const collName = String(meta.collectionName || cand.title || '');
+              if (/\s-\s(Single|EP)\s*$/i.test(collName)) {
+                console.log(`[albums:weekly] Apple skipping "${cand.title}" — title marked Single/EP`);
                 continue;
               }
               if (worldAlbums.some(function(a: any) { return a.position === cand.position; })) continue;
@@ -2134,23 +2148,12 @@ landing.post('/build-albums', async (c) => {
               });
             }
           } else {
-            // Lookup упал — falls back на старое поведение (без фильтрации).
-            console.warn(`[albums:weekly] iTunes lookup failed: HTTP ${lookupRes.status}. Pushing without single-filter.`);
-            for (const cand of appleCandidates) {
-              if (worldAlbums.length >= 15) break;
-              if (worldAlbums.some(function(a: any) { return a.position === cand.position; })) continue;
-              worldAlbums.push({
-                id: 'am-' + cand.position,
-                title: cand.title,
-                artist: cand.artist,
-                coverUrl: '',
-                region: 'world',
-                genre: '',
-                releaseDate: '',
-                source: 'apple_music',
-                position: cand.position,
-              });
-            }
+            // Lookup упал — НЕ fallback'имся. Раньше пушили без фильтра, и
+            // синглы Drake (ICEMAN/HABIBTI/MAID OF HONOUR) попадали в чарт
+            // «Альбомы недели» как fake-альбомы. Лучше показать пустой
+            // блок Apple на этот цикл — Yandex/Billboard пополнят следующим
+            // прогоном через 3 часа.
+            console.warn(`[albums:weekly] iTunes lookup failed: HTTP ${lookupRes.status}. Skipping Apple Music entirely (no fallback to avoid singles).`);
           }
         } catch (lookupErr: any) {
           console.warn(`[albums:weekly] iTunes lookup threw:`, lookupErr?.message);
