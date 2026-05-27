@@ -1745,8 +1745,8 @@ export const emailHistoryStore = jsonbStore('email_history');
 export const emailTemplatesStore = jsonbStore('email_templates');
 export const chartAggregationStore = jsonbStore('chart_aggregation');
 export const chartSourcesStore = jsonbStore('chart_sources');
-export const radioAdSlotsStore = jsonbStore('radio_ad_slots');
-export const radioAdSlotIndexStore = jsonbStore('radio_ad_slot_index', 'radio_id');
+// radioAdSlotsStore + radioAdSlotIndexStore — заменены на нативные хелперы
+// после migration 050. См. блок «Radio Ad Slots» ниже.
 export const radioAnalyticsStore = jsonbStore('radio_analytics', 'radio_id');
 export const radioArtistRequestsStore = jsonbStore('radio_artist_requests', 'radio_id');
 export const radioVenueRequestsStore = jsonbStore('radio_venue_requests', 'radio_id');
@@ -1821,24 +1821,103 @@ export async function createCoinTransactionKv(userId: string, txId: string, tx: 
   if (error) console.error('[db] createCoinTransactionKv:', error);
 }
 
-// ─── Radio Ad Slots (compound key) ───
+// ─── Radio Ad Slots (row-per-slot, native cols since migration 050) ───
+
+const RADIO_AD_SLOT_COLS = `id, radio_id, slot_type, time_slot, price, duration,
+  max_per_hour, description, status, created_at, updated_at`;
+
+function mapRadioAdSlotRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  // Preserve historical camelCase API contract (frontend reads slotType/timeSlot/etc).
+  return {
+    id: r.id,
+    stationId: r.radio_id,
+    slotType: r.slot_type || 'standard',
+    timeSlot: r.time_slot || '',
+    price: Number(r.price || 0),
+    duration: Number(r.duration || 30),
+    maxPerHour: Number(r.max_per_hour || 4),
+    description: r.description || '',
+    status: r.status || 'available',
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+  };
+}
 
 export async function getRadioAdSlot(radioId: string, slotId: string) {
-  const { data, error } = await db()
-    .from('radio_ad_slots')
-    .select('*')
-    .eq('id', slotId)
-    .eq('radio_id', radioId)
-    .maybeSingle();
-  if (error) console.error('[db] getRadioAdSlot:', error);
-  return data ? (data.data ?? data) : null;
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${RADIO_AD_SLOT_COLS} FROM radio_ad_slots
+      WHERE radio_id = $1 AND id = $2 LIMIT 1`,
+    [radioId, slotId]
+  );
+  return r.rowCount ? mapRadioAdSlotRow(r.rows[0]) : null;
+}
+
+export async function listRadioAdSlotsByStation(radioId: string) {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${RADIO_AD_SLOT_COLS} FROM radio_ad_slots
+      WHERE radio_id = $1
+      ORDER BY created_at DESC`,
+    [radioId]
+  );
+  return r.rows.map(mapRadioAdSlotRow);
+}
+
+export async function countRadioAdSlots(radioId: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM radio_ad_slots WHERE radio_id = $1`,
+    [radioId]
+  );
+  return Number(r.rows[0]?.n || 0);
 }
 
 export async function upsertRadioAdSlot(radioId: string, slotId: string, slot: Record<string, any>) {
-  const { error } = await db()
-    .from('radio_ad_slots')
-    .upsert({ id: slotId, radio_id: radioId, data: slot, updated_at: new Date().toISOString() }, { onConflict: 'id' });
-  if (error) console.error('[db] upsertRadioAdSlot:', error);
+  // Row-per-slot (migration 050): native cols only, no data jsonb,
+  // no separate radio_ad_slot_index table.
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO radio_ad_slots (
+       id, radio_id, slot_type, time_slot, price, duration,
+       max_per_hour, description, status, updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       radio_id     = COALESCE(EXCLUDED.radio_id, radio_ad_slots.radio_id),
+       slot_type    = EXCLUDED.slot_type,
+       time_slot    = EXCLUDED.time_slot,
+       price        = EXCLUDED.price,
+       duration     = EXCLUDED.duration,
+       max_per_hour = EXCLUDED.max_per_hour,
+       description  = EXCLUDED.description,
+       status       = EXCLUDED.status,
+       updated_at   = NOW()`,
+    [
+      slotId,
+      radioId,
+      slot.slotType || slot.slot_type || 'standard',
+      slot.timeSlot || slot.time_slot || null,
+      Number(slot.price ?? 0),
+      Number(slot.duration ?? 30),
+      Number(slot.maxPerHour ?? slot.max_per_hour ?? 4),
+      slot.description || '',
+      slot.status || 'available',
+    ]
+  );
+}
+
+export async function deleteRadioAdSlot(radioId: string, slotId: string): Promise<number> {
+  // Composite WHERE — closes the IDOR present in the legacy
+  // radioAdSlotsStore.del(slotId) call (no radio_id check).
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `DELETE FROM radio_ad_slots WHERE radio_id = $1 AND id = $2`,
+    [radioId, slotId]
+  );
+  return r.rowCount || 0;
 }
 
 // ─── Ticket Providers / Sales (compound key) ───

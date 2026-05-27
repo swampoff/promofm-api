@@ -1,18 +1,10 @@
 /**
  * RADIO ROUTES - API для кабинета радиостанций
- * Маршруты радио (JSON stores)
- * 
- * KV ключи:
- * - radio_station:{userId} - профиль радиостанции
- * - radio_ad_slot:{stationId}:{slotId} - рекламный слот
- * - radio_ad_slots_index:{stationId} - JSON массив slot ID
- * - radio_artist_requests:{stationId} - заявки артистов (JSON массив)
- * - radio_venue_requests:{stationId} - заявки заведений (JSON массив)
- * - radio_finance:{stationId} - финансовая сводка
- * - radio_transactions:{stationId} - транзакции (JSON массив)
- * - radio_notifications:{stationId} - уведомления (JSON массив)
- * - radio_analytics:{stationId} - детальная аналитика
- * 
+ *
+ * radio_ad_slots — row-per-slot, native cols (migration 050).
+ * Остальные stores ещё на kv (radio_artist_requests, radio_venue_requests,
+ * radio_finance, radio_transactions, radio_notifications, radio_analytics).
+ *
  * Endpoints:
  * - POST /ad-slots/create - Создать рекламный слот
  * - GET /ad-slots/list - Список рекламных слотов
@@ -35,7 +27,13 @@
  */
 
 import { Hono } from 'hono';
-import { getRadioAdSlot, getRadioProfile, upsertRadioAdSlot, radioAdSlotIndexStore, radioAdSlotsStore, radioAnalyticsStore, radioArtistRequestsStore, radioFinanceStore, radioNotificationsStore, radioTransactionsStore, radioVenueRequestsStore } from './db.tsx';
+import {
+  getRadioAdSlot, listRadioAdSlotsByStation, countRadioAdSlots,
+  upsertRadioAdSlot, deleteRadioAdSlot,
+  getRadioProfile, radioAnalyticsStore, radioArtistRequestsStore,
+  radioFinanceStore, radioNotificationsStore, radioTransactionsStore,
+  radioVenueRequestsStore,
+} from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { requireAuth, requireRole } from './auth-middleware.tsx';
@@ -75,9 +73,8 @@ app.post('/ad-slots/create', requireAuth, async (c) => {
     const { slotType, timeSlot, price, duration, maxPerHour, description } = body;
 
     const slotId = `slot-${crypto.randomUUID()}`;
-    const adSlot = {
-      id: slotId,
-      stationId: station.id,
+    // Single INSERT — раньше делали 2 write'а (slot + index), без транзакции.
+    await upsertRadioAdSlot(station.id, slotId, {
       slotType: slotType || 'standard',
       timeSlot: timeSlot || '12:00-13:00',
       price: price || 0,
@@ -85,19 +82,8 @@ app.post('/ad-slots/create', requireAuth, async (c) => {
       maxPerHour: maxPerHour || 4,
       description: description || '',
       status: 'available',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    // Сохранить слот
-    await upsertRadioAdSlot(station.id, slotId, adSlot);
-
-    // Обновить индекс
-    const indexData = await radioAdSlotIndexStore.get(station.id);
-    const slotIds: string[] = Array.isArray(indexData) ? indexData : [];
-    slotIds.unshift(slotId);
-    await radioAdSlotIndexStore.set(station.id, slotIds);
-
+    });
+    const adSlot = await getRadioAdSlot(station.id, slotId);
     return c.json({ success: true, adSlot, message: 'Ad slot created successfully' });
   } catch (error: any) {
     console.error('Error creating ad slot:', error);
@@ -114,17 +100,9 @@ app.get('/ad-slots/list', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
-    const indexData = await radioAdSlotIndexStore.get(station.id);
-    const slotIds: string[] = Array.isArray(indexData) ? indexData : [];
-
-    if (slotIds.length === 0) {
-      return c.json({ success: true, adSlots: [] });
-    }
-
-    const slotValues = await Promise.all(slotIds.map((id: string) => getRadioAdSlot(station.id, id)));
-    const adSlots = slotValues
-      .filter(v => v !== null);
-
+    // Native query через idx_radio_ad_slots_station_created — одна
+    // round-trip взамен «get index array + Promise.all per-id fetch».
+    const adSlots = await listRadioAdSlotsByStation(station.id);
     return c.json({ success: true, adSlots });
   } catch (error: any) {
     console.error('Error listing ad slots:', error);
@@ -142,25 +120,24 @@ app.put('/ad-slots/:id', requireAuth, async (c) => {
     }
 
     const slotId = c.req.param('id');
-    const slotData = await getRadioAdSlot(station.id, slotId);
-    if (!slotData) {
+    const existing = await getRadioAdSlot(station.id, slotId);
+    if (!existing) {
       return c.json({ error: 'Ad slot not found' }, 404);
     }
 
-    const slot = slotData;
     const body = await c.req.json();
-
-    if (body.slotType !== undefined) slot.slotType = body.slotType;
-    if (body.timeSlot !== undefined) slot.timeSlot = body.timeSlot;
-    if (body.price !== undefined) slot.price = body.price;
-    if (body.duration !== undefined) slot.duration = body.duration;
-    if (body.maxPerHour !== undefined) slot.maxPerHour = body.maxPerHour;
-    if (body.description !== undefined) slot.description = body.description;
-    if (body.status !== undefined) slot.status = body.status;
-    slot.updatedAt = new Date().toISOString();
-
-    await upsertRadioAdSlot(station.id, slotId, slot);
-    return c.json({ success: true, adSlot: slot });
+    const merged = {
+      slotType:    body.slotType    !== undefined ? body.slotType    : existing.slotType,
+      timeSlot:    body.timeSlot    !== undefined ? body.timeSlot    : existing.timeSlot,
+      price:       body.price       !== undefined ? body.price       : existing.price,
+      duration:    body.duration    !== undefined ? body.duration    : existing.duration,
+      maxPerHour:  body.maxPerHour  !== undefined ? body.maxPerHour  : existing.maxPerHour,
+      description: body.description !== undefined ? body.description : existing.description,
+      status:      body.status      !== undefined ? body.status      : existing.status,
+    };
+    await upsertRadioAdSlot(station.id, slotId, merged);
+    const adSlot = await getRadioAdSlot(station.id, slotId);
+    return c.json({ success: true, adSlot });
   } catch (error: any) {
     console.error('Error updating ad slot:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -177,14 +154,13 @@ app.delete('/ad-slots/:id', requireAuth, async (c) => {
     }
 
     const slotId = c.req.param('id');
-    await radioAdSlotsStore.del(slotId);
-
-    // Обновить индекс
-    const indexData = await radioAdSlotIndexStore.get(station.id);
-    const slotIds: string[] = Array.isArray(indexData) ? indexData : [];
-    const filtered = slotIds.filter(id => id !== slotId);
-    await radioAdSlotIndexStore.set(station.id, filtered);
-
+    // Atomic composite-key DELETE — фикс IDOR. Раньше radioAdSlotsStore
+    // .del(slotId) удалял по id без проверки radio_id, любой залогиненный
+    // юзер с известным slot id мог удалить чужой слот.
+    const rowCount = await deleteRadioAdSlot(station.id, slotId);
+    if (rowCount === 0) {
+      return c.json({ error: 'Ad slot not found' }, 404);
+    }
     return c.json({ success: true, message: 'Ad slot deleted' });
   } catch (error: any) {
     console.error('Error deleting ad slot:', error);
@@ -952,12 +928,13 @@ app.get('/analytics', requireAuth, async (c) => {
     const station = await getStation(userId);
     if (!station) return c.json({ success: false, error: 'Station not found' }, 404);
 
-    // Собираем данные из раз��ых KV-ключей
-    const [artistReqData, venueReqData, financeData, adSlotsIndex, transactionsData, detailedAnalyticsData] = await Promise.all([
+    // Собираем данные из разных stores. adSlotsCount — native COUNT(*)
+    // вместо чтения JSON-массива из index-таблицы (migration 050 убрала её).
+    const [artistReqData, venueReqData, financeData, adSlotsCount, transactionsData, detailedAnalyticsData] = await Promise.all([
       radioArtistRequestsStore.get(station.id),
       radioVenueRequestsStore.get(station.id),
       radioFinanceStore.get(station.id),
-      radioAdSlotIndexStore.get(station.id),
+      countRadioAdSlots(station.id),
       radioTransactionsStore.get(station.id),
       radioAnalyticsStore.get(station.id),
     ]);
@@ -965,7 +942,6 @@ app.get('/analytics', requireAuth, async (c) => {
     const artistRequests = Array.isArray(artistReqData) ? artistReqData : [];
     const venueRequests = Array.isArray(venueReqData) ? venueReqData : [];
     const finance = financeData || {};
-    const adSlotIds = Array.isArray(adSlotsIndex) ? adSlotsIndex : [];
     const transactions = Array.isArray(transactionsData) ? transactionsData : [];
     const detailedAnalytics = detailedAnalyticsData || {};
 
@@ -1052,7 +1028,7 @@ app.get('/analytics', requireAuth, async (c) => {
         artistStats,
         venueStats,
         revenue,
-        adSlotsCount: adSlotIds.length,
+        adSlotsCount,
         topVenues,
         topArtists,
         recentActivity,
