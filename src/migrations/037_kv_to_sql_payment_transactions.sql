@@ -44,6 +44,9 @@ CREATE TEMP TABLE _pt_backup ON COMMIT DROP AS SELECT * FROM payment_transaction
 
 ALTER TABLE payment_transactions DROP CONSTRAINT IF EXISTS payment_transactions_pkey;
 ALTER TABLE payment_transactions DROP CONSTRAINT IF EXISTS payment_transactions_user_id_key;
+-- Защита от повторного запуска:
+ALTER TABLE payment_transactions DROP CONSTRAINT IF EXISTS payment_transactions_app_id_unique;
+ALTER TABLE payment_transactions DROP CONSTRAINT IF EXISTS payment_transactions_user_app_unique;
 
 TRUNCATE payment_transactions;
 
@@ -64,7 +67,11 @@ ALTER TABLE payment_transactions
 ALTER TABLE payment_transactions ALTER COLUMN id SET DEFAULT gen_random_uuid();
 ALTER TABLE payment_transactions ALTER COLUMN id SET NOT NULL;
 ALTER TABLE payment_transactions ADD PRIMARY KEY (id);
-ALTER TABLE payment_transactions ADD CONSTRAINT payment_transactions_app_id_unique UNIQUE (app_id);
+-- Композитный UNIQUE: legacy app_id может дублироваться между bucket'ами
+-- ('platform' и 'marketplace' писали одну и ту же 'rev-uuid' в обоих —
+-- видно в backfill из platform-revenue.tsx). (user_id, app_id) разводит.
+ALTER TABLE payment_transactions
+  ADD CONSTRAINT payment_transactions_user_app_unique UNIQUE (user_id, app_id);
 
 -- ЯP user_id уже есть в таблице (TEXT), просто переводим в INDEX.
 CREATE INDEX IF NOT EXISTS idx_payment_transactions_user_id_created

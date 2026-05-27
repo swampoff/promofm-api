@@ -387,7 +387,7 @@ app.post('/payment/confirm', requireAuth, async (c) => {
           related_entity_id, created_at)
        VALUES ($1, $2, $3, 'RUB', 'track_test', 'completed',
                $4, $5, 'track_test_request', $6, NOW())
-       ON CONFLICT (app_id) DO NOTHING`,
+       ON CONFLICT (user_id, app_id) DO NOTHING`,
       [
         crypto.randomUUID(),
         request.user_id,

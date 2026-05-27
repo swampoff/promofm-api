@@ -96,7 +96,7 @@ export async function recordRevenue(params: {
           description, metadata, created_at)
        VALUES ($1, 'platform', $2, 'RUB', 'commission', $3, 'completed',
                $4, $5::jsonb, $6)
-       ON CONFLICT (app_id) DO NOTHING`,
+       ON CONFLICT (user_id, app_id) DO NOTHING`,
       [
         id,
         params.platformRevenue,
@@ -135,7 +135,7 @@ export async function recordRevenue(params: {
             description, metadata, created_at)
          VALUES ($1, 'marketplace', $2, 'RUB', $3, $4, 'completed',
                  $5, $6::jsonb, $7)
-         ON CONFLICT (app_id) DO NOTHING`,
+         ON CONFLICT (user_id, app_id) DO NOTHING`,
         [
           mAppId,
           params.grossAmount,
