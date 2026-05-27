@@ -1505,7 +1505,8 @@ export const paymentBalancesStore = jsonbStore('payment_balances', 'user_id');
 export const djMarketplaceIndexStore = jsonbStore('dj_marketplace_index');
 export const djMixesStore = jsonbStore('dj_mixes', 'dj_id');
 export const djReviewsStore = jsonbStore('dj_reviews', 'dj_id');
-export const djCalendarStore = jsonbStore('dj_calendar', 'dj_id');
+// dj_calendar таблица + декларация удалены (migration 040). Был zombie
+// код, 0 callers — DJ-календарь как фича не реализован.
 export const djEventsStore = jsonbStore('dj_events', 'dj_id');
 export const djCollaborationsStore = jsonbStore('dj_collaborations', 'dj_id');
 export const djNotificationsStore = jsonbStore('dj_notifications', 'dj_id');
