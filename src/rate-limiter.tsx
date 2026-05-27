@@ -4,6 +4,7 @@
  */
 
 import type { Context, Next } from 'hono';
+import jwt from 'jsonwebtoken';
 
 interface RateLimitEntry {
   timestamps: number[];
@@ -14,6 +15,21 @@ interface RateLimiterOptions {
   max: number;         // Max requests per window
   keyFn?: (c: Context) => string;  // Custom key function (default: IP)
   message?: string;    // Custom error message
+  skip?: (c: Context) => boolean;  // Optional bypass predicate
+}
+
+// admin/superadmin bypass — System Test fires ~64 batched calls and
+// would otherwise blow through apiLimiter (200/min)
+function isAdminToken(c: Context): boolean {
+  const auth = c.req.header('Authorization');
+  const token = auth?.replace('Bearer ', '');
+  if (!token || !process.env.JWT_SECRET) return false;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] }) as any;
+    return decoded?.role === 'admin' || decoded?.role === 'superadmin';
+  } catch {
+    return false;
+  }
 }
 
 const stores = new Map<string, Map<string, RateLimitEntry>>();
@@ -46,6 +62,10 @@ export function createRateLimiter(name: string, options: RateLimiterOptions) {
   const store = stores.get(name)!;
 
   return async (c: Context, next: Next) => {
+    if (options.skip && options.skip(c)) {
+      await next();
+      return;
+    }
     const key = options.keyFn ? options.keyFn(c) : getClientIP(c);
     const now = Date.now();
 
@@ -90,4 +110,5 @@ export const apiLimiter = createRateLimiter('api', {
   windowMs: 60000,
   max: 200,          // 200 requests per minute per IP
   message: 'Rate limit exceeded, please slow down',
+  skip: isAdminToken,
 });
