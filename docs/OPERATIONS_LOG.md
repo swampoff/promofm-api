@@ -34,6 +34,40 @@ record of what got executed.
 
 ---
 
+## 2026-05-27 — миграция 039 (producer_custom_* row-per-item) случайно применилась к проду в dry-run
+
+- **What:** Laptop запустил `BEGIN; \i 039_kv_to_sql_producer_custom.sql; ROLLBACK;`
+  ожидая dry-run, но файл содержал `BEGIN; …; COMMIT;` внутри. Inner
+  `COMMIT;` закрыл outer transaction до момента ROLLBACK → миграция
+  фактически применилась к prod БД (TRUNCATE producer_custom_services
+  + producer_custom_portfolio + reshape schema + recreate RLS policies).
+- **Affected:** таблицы `producer_custom_services` и `producer_custom_portfolio`.
+  Объём данных был тривиален (несколько строк, мигрированы через
+  jsonb_array_elements backfill). RLS policies producer_sel/ins/upd/del
+  пересозданы на producer_id колонке.
+- **Why:** old migration convention (BEGIN/COMMIT inside file) ломает
+  dry-run pattern. Laptop не имел способа откатить применённое.
+- **How:**
+  1. Сразу мерж `claude/kv-to-sql-producer-custom` → main (commit 22fc952)
+     чтобы вернуть синхронность кода (`producer-studio-routes.tsx` уже
+     ожидал новые колонки `producer_id`/`base_price`/etc).
+  2. `git pull && sudo systemctl restart promofm-api` на VPS.
+  3. Health check 200 OK.
+  4. Diff чистый — ветка была rebased поверх свежих коммитов
+     (Apple RSS albums × 4, X-Internal-Key × 4, authUserId × 8 регрессии
+     не вернулись).
+- **Verified:** health=200, dj cabinet работает, producer cabinet работает.
+- **Follow-ups:**
+  - Migration files 036/037/038/040 переработаны: убран inner BEGIN/COMMIT,
+    runner оборачивает (PR #51, #52, #53, #55). Apply через heredoc:
+    `BEGIN; \i file; COMMIT;`, dry-run через `BEGIN; \i file; ROLLBACK;`.
+  - CLAUDE.md обновлён — секция «Migration files: NO BEGIN/COMMIT inside»
+    закрепляет конвенцию для будущих сессий.
+  - Все будущие миграции (041+) должны следовать тому же паттерну
+    (DDL only inside file, runner controls transaction).
+
+---
+
 ## 2026-05-25 — TODO: Гуськова Надежда — ручная починка кабинета артиста
 
 > **PLACEHOLDER** — please fill in. The user reported spending
