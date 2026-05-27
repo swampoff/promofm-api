@@ -34,6 +34,35 @@ record of what got executed.
 
 ---
 
+## 2026-05-27 — wipe 69 orphan messages в producer_messages (Wave 1.5)
+
+- **What:** migration 042 wipe'ает 15 строк × 69 сообщений в
+  `producer_messages.data` jsonb. Это «zombie данные» от старого
+  partial refactor: native колонки (sender_id, recipient_id, subject,
+  content, is_read) добавили, но массивы из `data` jsonb не
+  expand'нули в строки, и app-код всё это время был broken
+  (`jsonbStore.set` ссылался на user_id колонку, которой не было
+  после rename).
+- **Affected:** `producer_messages` таблица. 15 row's data (по ~4-5
+  messages в jsonb-массиве каждая) удалены через TRUNCATE.
+- **Why:** Орфаны — нечем привязать к conversation. Legacy pk был
+  `user_id` с `conversationId` значением; после rename в `id uuid`
+  это mapping потеряно. Также 0 строк в `producer_convs` — нет
+  conversation'ов куда attach. App-код producer cabinet messaging
+  всё это время writes silent-fail'или.
+- **How:** `TRUNCATE producer_messages` в миграции 042 v2 (см.
+  файл `src/migrations/042_kv_wave1_5_producer_messaging.sql`).
+- **Verified:** Backup создан laptop'ом перед apply:
+  `/root/wave15-backup-20260527-181500.sql` (18.5 KB).
+- **Follow-ups:**
+  - Producer cabinet messaging получит чистый рестарт после деплоя.
+    Старая семантика «direct user-to-user через sender_id/recipient_id»
+    дропнута — теперь conversation-grouped (producer_convs links).
+  - Если кто-то заметит «исчезли тестовые сообщения» — это они,
+    восстановление возможно через backup.
+
+---
+
 ## 2026-05-27 — миграция 039 (producer_custom_* row-per-item) случайно применилась к проду в dry-run
 
 - **What:** Laptop запустил `BEGIN; \i 039_kv_to_sql_producer_custom.sql; ROLLBACK;`

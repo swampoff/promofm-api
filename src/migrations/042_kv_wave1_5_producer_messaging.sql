@@ -1,22 +1,29 @@
--- 042_kv_wave1_5_producer_messaging.sql
+-- 042_kv_wave1_5_producer_messaging.sql (v2 после laptop dry-run 2026-05-27)
 --
 -- Wave 1.5: producer_convs + producer_messages + producer_sessions —
 -- те же race-condition паттерны как у Wave 1 collab_messages/publish_chats.
--- Не попали в Wave 1 первоначально, чиним сейчас.
 --
--- BEFORE: каждая таблица — jsonbStore('foo', 'user_id'), где user_id
--- TEXT PK хранит:
---   - producer_convs:    producerId → массив ConversationMeta
---   - producer_messages: ОШИБОЧНО названо user_id, фактически conversationId
---                        → массив Message
---   - producer_sessions: producerId → массив CalendarSession
+-- v2 ИЗМЕНЕНИЯ относительно v1:
+-- - producer_messages: переход с migrate-from-jsonb на wipe-and-rebuild.
+--   Прод оказался в hybrid-state (id uuid PK + native колонки + data
+--   jsonb), legacy 69 сообщений в data — orphans (нет producer_convs
+--   куда attach'нуть, mapping потерян при прошлом partial refactor).
+--   App-код всё это время был broken (jsonbStore.set ссылался на
+--   несуществующую user_id колонку → silent fail). TRUNCATE + rebuild.
+--   Backup /root/wave15-backup-20260527-181500.sql.
+-- - producer_convs + producer_sessions: без изменений (laptop confirmed
+--   schema matches expected: user_id TEXT PK + data jsonb).
 --
--- Все три имеют get-modify-set race: 2 параллельных POST → теряем
--- одну запись. Реальные баги, не теория (producer cabinet messaging
--- активно используется).
+-- BEFORE:
+--   - producer_convs:    pk='user_id' (producerId), data: ConversationMeta[]
+--   - producer_messages: hybrid id uuid PK + 5 unused native cols + data
+--                        jsonb (15 rows × 69 orphan messages)
+--   - producer_sessions: pk='user_id' (producerId), data: CalendarSession[]
 --
 -- AFTER: row-per-entity, native колонки, native owner_id (producer_id
 -- или conversation_id), composite UNIQUE (owner, app_id) для idempotency.
+-- 69 orphan messages wiped (нечем привязать к conversations, 0 convs
+-- на проде). Backup сохранён.
 --
 -- ⚠️ КОНВЕНЦИЯ ТРАНЗАКЦИИ: файл НЕ содержит BEGIN/COMMIT — runner
 -- оборачивает (см. CLAUDE.md → «Migration files: NO BEGIN/COMMIT»).
@@ -129,39 +136,55 @@ ALTER TABLE producer_convs DROP COLUMN IF EXISTS data;
 -- ════════════════════════════════════════════════════════════════════
 -- 2. producer_messages → row-per-message
 -- ════════════════════════════════════════════════════════════════════
--- Legacy pk='user_id' БЫЛ ОШИБОЧНО НАЗВАН — фактически хранил
--- conversationId. Переименовываем колонку в conversation_id.
-
-CREATE TEMP TABLE _pc_msgs_backup ON COMMIT DROP AS
-  SELECT user_id AS legacy_conversation_id, data, created_at
-    FROM producer_messages;
+-- HYBRID-state на проде (обнаружено laptop dry-run 2026-05-27):
+-- Таблица уже была частично отрефакторена в прошлом — id uuid PK,
+-- + native колонки sender_id/recipient_id/subject/content/is_read
+-- (паттерн direct user-to-user, не conversation-grouped). НО data
+-- jsonb осталась с legacy-массивами сообщений, а native колонки
+-- НИКОГДА не заполнялись (все NULL/FALSE на 15 строках с 69 сообщений
+-- в data).
+--
+-- Параллельно jsonbStore('producer_messages', 'user_id') в db.tsx
+-- ссылался на user_id колонку которая уже не существует — все
+-- store.set() из app-кода silent-fail'или с момента того старого
+-- refactor'а. Producer cabinet messaging НЕ работает на проде сейчас.
+--
+-- Decision: 69 legacy сообщений ОРФАНЫ — нечем привязать (legacy pk
+-- был user_id с conv_id значением; после rename в id uuid это
+-- mapping потеряно, plus 0 строк в producer_convs → 0 conversations
+-- куда attach'нуть). Wipe + клин-сборка под новую схему. Backup
+-- /root/wave15-backup-20260527-181500.sql у laptop.
 
 DROP POLICY IF EXISTS producer_sel ON producer_messages;
 DROP POLICY IF EXISTS producer_ins ON producer_messages;
 DROP POLICY IF EXISTS producer_upd ON producer_messages;
 DROP POLICY IF EXISTS producer_del ON producer_messages;
 
-ALTER TABLE producer_messages DROP CONSTRAINT IF EXISTS producer_messages_pkey;
+-- Wipe legacy data (69 orphan messages, no producer_convs to link).
+-- Backup preserved at /root/wave15-backup-20260527-181500.sql.
+TRUNCATE producer_messages;
+
+-- Drop unused legacy native columns (direct user-to-user pattern,
+-- никогда не использовался app-кодом — все 15 строк имели NULL).
+ALTER TABLE producer_messages DROP COLUMN IF EXISTS sender_id;
+ALTER TABLE producer_messages DROP COLUMN IF EXISTS recipient_id;
+ALTER TABLE producer_messages DROP COLUMN IF EXISTS subject;
+ALTER TABLE producer_messages DROP COLUMN IF EXISTS content;
+ALTER TABLE producer_messages DROP COLUMN IF EXISTS data;
+ALTER TABLE producer_messages DROP COLUMN IF EXISTS user_id;
+
+-- Снять старые constraint'ы (включая защиту от повторного запуска).
 ALTER TABLE producer_messages DROP CONSTRAINT IF EXISTS producer_messages_user_id_key;
 ALTER TABLE producer_messages DROP CONSTRAINT IF EXISTS producer_messages_app_id_unique;
 ALTER TABLE producer_messages DROP CONSTRAINT IF EXISTS pc_msgs_conv_app_unique;
 
-TRUNCATE producer_messages;
+-- id uuid PK уже есть на проде — не пересоздаём. Просто гарантируем
+-- DEFAULT (на случай если был выставлен и сброшен прошлой попыткой).
+ALTER TABLE producer_messages ALTER COLUMN id SET DEFAULT gen_random_uuid();
 
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.columns
-             WHERE table_name='producer_messages' AND column_name='user_id') THEN
-    ALTER TABLE producer_messages DROP COLUMN user_id;
-  END IF;
-  IF EXISTS (SELECT 1 FROM information_schema.columns
-             WHERE table_name='producer_messages' AND column_name='id') THEN
-    ALTER TABLE producer_messages DROP COLUMN id;
-  END IF;
-END $$;
-
+-- Новые колонки. Все ADD ... IF NOT EXISTS — defensive, если кто-то
+-- частично применил предыдущую версию миграции.
 ALTER TABLE producer_messages
-  ADD COLUMN id              UUID         NOT NULL DEFAULT gen_random_uuid(),
   ADD COLUMN IF NOT EXISTS app_id          TEXT,
   ADD COLUMN IF NOT EXISTS conversation_id TEXT         NOT NULL DEFAULT '',
   ADD COLUMN IF NOT EXISTS body            TEXT         NOT NULL DEFAULT '',
@@ -169,7 +192,12 @@ ALTER TABLE producer_messages
   ADD COLUMN IF NOT EXISTS attachment      JSONB,
   ADD COLUMN IF NOT EXISTS is_read         BOOLEAN      NOT NULL DEFAULT FALSE;
 
-ALTER TABLE producer_messages ADD PRIMARY KEY (id);
+-- created_at + updated_at скорее всего уже есть (laptop подтвердил),
+-- но defensive ADD IF NOT EXISTS на случай если schema частичная.
+ALTER TABLE producer_messages
+  ADD COLUMN IF NOT EXISTS created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW();
+
 ALTER TABLE producer_messages
   ADD CONSTRAINT pc_msgs_conv_app_unique UNIQUE (conversation_id, app_id);
 
@@ -178,24 +206,8 @@ CREATE INDEX IF NOT EXISTS idx_pc_msgs_conv_created
 CREATE INDEX IF NOT EXISTS idx_pc_msgs_unread
   ON producer_messages(conversation_id, is_read) WHERE is_read = FALSE;
 
-INSERT INTO producer_messages (
-  id, app_id, conversation_id, body, sender, attachment, is_read, created_at
-)
-SELECT
-  gen_random_uuid(),
-  elem->>'id',
-  b.legacy_conversation_id,
-  COALESCE(elem->>'text', ''),
-  COALESCE(NULLIF(elem->>'sender',''), 'producer'),
-  elem->'attachment',
-  COALESCE((elem->>'read')::boolean, FALSE),
-  COALESCE(NULLIF(elem->>'timestamp','')::timestamptz, b.created_at, NOW())
-FROM _pc_msgs_backup b,
-     LATERAL jsonb_array_elements(
-       CASE WHEN jsonb_typeof(b.data)='array' THEN b.data ELSE '[]'::jsonb END
-     ) elem;
-
-ALTER TABLE producer_messages DROP COLUMN IF EXISTS data;
+-- No backfill — legacy 69 сообщений уже wiped TRUNCATE'ом выше.
+-- (Восстановить из /root/wave15-backup-... если когда-то понадобится).
 
 -- ════════════════════════════════════════════════════════════════════
 -- 3. producer_sessions → row-per-session
