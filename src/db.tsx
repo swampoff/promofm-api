@@ -1554,8 +1554,10 @@ export const agentSessionsStore = jsonbStore('agent_sessions');
 export const agentSessionsIndexStore = jsonbStore('agent_sessions_index');
 // agent_queue → agent_tasks (row-per-task, migration 036). Доступ через
 // pool.query в agents-routes.tsx.
-export const artistAnalyticsCacheStore = jsonbStore('artist_analytics_cache', 'artist_id');
-export const artistTracksStatsStore = jsonbStore('artist_tracks_stats', 'artist_id');
+// artist_analytics_cache переехал на pool.query с native expires_at TTL
+// (migration 041). Доступ — artist-analytics-routes.tsx.
+// artist_tracks_stats — orphan, DROP TABLE (migration 041, declaration
+// удалена).
 export const notificationCampaignsStore = jsonbStore('notification_campaigns');
 export const notificationSettingsKvStore = jsonbStore('notification_settings', 'user_id');
 export const systemConfigStore = jsonbStore('system_config', 'key');

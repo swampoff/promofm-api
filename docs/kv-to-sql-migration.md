@@ -41,9 +41,15 @@ Migration SQL файлы (036, 037, 038, 040) удалены из PR'ов — о
 code refactor (`pool.query` per-row INSERT/SELECT/UPDATE/DELETE) + удаление
 stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md`.
 
-### 🔜 Wave 2 — analytics/aggregation
+### ✅ Wave 2 — analytics (частично DONE, остаток валидные singleton-KV)
 
-`artist_analytics_cache`, `artist_tracks_stats`, `chart_aggregation`, `radio_analytics`, `venue_analytics` — perf-критично, нужны индексы.
+| Таблица | Pattern | Действие | Migration / PR |
+|---|---|---|---|
+| `artist_analytics_cache` | cache `v2:artistId:period` → объект | row-per-key + native `expires_at TTL` (5 мин). Handler фильтрует `expires_at > NOW()`. | 041 |
+| `artist_tracks_stats` | declaration в db.tsx, 0 callers | DROP TABLE, declaration удалена | 041 |
+| `chart_aggregation` | singleton `key='last'`, метаданные о последней aggregation | **Оставлен как есть** — валидный singleton, переписывать незачем | — |
+| `radio_analytics` | per-station объект (+ `.getAll()` для radio-partners) | **Оставлен как есть** на этом waves. ⚠️ Дуальное назначение (analytics + station-registry для landing) — стоит распутать в Wave 3 (вынести registry в `radio_stations` или дать landing запрос к нему). | — |
+| `venue_analytics` | per-venue объект, 4 `.get()` callers, 0 `.set()` в коде | **Оставлен как есть** — singleton cache, читается, пишется откуда-то ещё (cron?). Если будет cross-venue admin dashboard — добавить native cols. | — |
 
 ### 🔜 Wave 3 — гибриды (тривиальный refactor)
 

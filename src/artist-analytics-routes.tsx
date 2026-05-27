@@ -34,7 +34,13 @@
 import { Hono } from 'hono';
 import { requireAuth, requireOwner } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
-import { artistAnalyticsCacheStore } from './db.tsx';
+
+// Cache TTL для overview-аналитики. 5 минут — баланс между скоростью
+// и свежестью: COUNT/SUM по tracks дёшев (≤500мс), но повторы внутри
+// одной сессии артиста (refresh dashboard, переключение period) ловит
+// кэш. Прогорклые записи не нужно ловить отдельным cron — следующий
+// compute их перезатрёт.
+const CACHE_TTL_SECONDS = 5 * 60;
 
 const app = new Hono();
 
@@ -45,11 +51,17 @@ app.get('/overview/:artistId', requireAuth, requireOwner('artistId'), async (c) 
 
   try {
     // Cache key prefix bumped to v2 so stale entries written by the old
-    // (broken) JSONB-aggregating version are not served. Old entries
-    // expire on their own TTL; we just stop reading them.
+    // (broken) JSONB-aggregating version are not served. Native
+    // expires_at column enforces TTL (migration 041) — stale rows are
+    // skipped on read, overwritten on next compute.
     const cacheKey = `v2:${artistId}:${period}`;
-    const cached = await artistAnalyticsCacheStore.get(cacheKey);
-    if (cached) {
+    const cacheRes = await pool.query(
+      `SELECT data FROM artist_analytics_cache
+        WHERE artist_id = $1 AND expires_at > NOW()`,
+      [cacheKey],
+    );
+    if (cacheRes.rows.length > 0) {
+      const cached = cacheRes.rows[0].data;
       return c.json({ success: true, analytics: cached, source: 'cache' });
     }
 
@@ -110,7 +122,15 @@ app.get('/overview/:artistId', requireAuth, requireOwner('artistId'), async (c) 
       hourlyActivity:    null,
     };
 
-    await artistAnalyticsCacheStore.set(cacheKey, analytics);
+    await pool.query(
+      `INSERT INTO artist_analytics_cache (artist_id, data, expires_at, updated_at)
+       VALUES ($1, $2::jsonb, NOW() + ($3 || ' seconds')::interval, NOW())
+       ON CONFLICT (artist_id) DO UPDATE
+         SET data = EXCLUDED.data,
+             expires_at = EXCLUDED.expires_at,
+             updated_at = NOW()`,
+      [cacheKey, JSON.stringify(analytics), String(CACHE_TTL_SECONDS)],
+    );
     return c.json({ success: true, analytics, source: 'db' });
   } catch (err) {
     console.error('[artist-analytics] /overview failed:', err);
