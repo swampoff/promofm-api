@@ -905,26 +905,102 @@ export async function getMessages(conversationId: string) {
 
 // ─── Support Tickets ───
 
+// ─── Support Tickets (row-per-ticket, full native cols since migration 048) ───
+
+const TICKET_NATIVE_COLS = `id, user_id, subject, description, category, priority,
+  status, assigned_to, attachments, tags, messages, rating, feedback,
+  sla_due_date, resolved_at, closed_at, created_at, updated_at`;
+
+function mapTicketRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    user_id: r.user_id,
+    subject: r.subject || '',
+    description: r.description || '',
+    category: r.category,
+    priority: r.priority,
+    status: r.status,
+    assigned_to: r.assigned_to || null,
+    attachments: r.attachments || [],
+    tags: r.tags || [],
+    messages: r.messages || [],
+    rating: r.rating !== null ? Number(r.rating) : null,
+    feedback: r.feedback || null,
+    sla_due_date: iso(r.sla_due_date),
+    resolved_at: iso(r.resolved_at),
+    closed_at: iso(r.closed_at),
+    created_at: iso(r.created_at),
+    updated_at: iso(r.updated_at),
+  };
+}
+
 export async function getTicketsByUser(userId: string) {
-  const { data, error } = await db()
-    .from('support_tickets')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false });
-  if (error) console.error('[db] getTicketsByUser:', error);
-  return (data || []).map((r: any) => r.data || r);
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${TICKET_NATIVE_COLS} FROM support_tickets
+      WHERE user_id = $1
+      ORDER BY created_at DESC`,
+    [userId]
+  );
+  return r.rows.map(mapTicketRow);
 }
 
 export async function upsertTicket(ticketId: string, ticket: Record<string, any>) {
-  const row = {
-    id: ticketId,
-    data: ticket,
-    updated_at: new Date().toISOString(),
-  };
-  const { error } = await db()
-    .from('support_tickets')
-    .upsert(row, { onConflict: 'id' });
-  if (error) console.error('[db] upsertTicket:', error);
+  // Row-per-ticket (migration 048): native cols only, no data jsonb.
+  // 🐛 PREV BUG: writes только {id, data, updated_at} без user_id —
+  // getTicketsByUser возвращал [] для ticket'ов созданных через этот
+  // helper.
+  const { pool } = await import('./db-client.tsx');
+  const att = ticket.attachments ?? [];
+  const tags = ticket.tags ?? [];
+  const msgs = ticket.messages ?? [];
+  await pool.query(
+    `INSERT INTO support_tickets (
+       id, user_id, subject, description, category, priority, status,
+       assigned_to, attachments, tags, messages, rating, feedback,
+       sla_due_date, resolved_at, closed_at, updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7,
+             $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13,
+             $14, $15, $16, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       user_id      = COALESCE(EXCLUDED.user_id, support_tickets.user_id),
+       subject      = EXCLUDED.subject,
+       description  = EXCLUDED.description,
+       category     = EXCLUDED.category,
+       priority     = EXCLUDED.priority,
+       status       = EXCLUDED.status,
+       assigned_to  = EXCLUDED.assigned_to,
+       attachments  = EXCLUDED.attachments,
+       tags         = EXCLUDED.tags,
+       messages     = EXCLUDED.messages,
+       rating       = EXCLUDED.rating,
+       feedback     = EXCLUDED.feedback,
+       sla_due_date = EXCLUDED.sla_due_date,
+       resolved_at  = EXCLUDED.resolved_at,
+       closed_at    = EXCLUDED.closed_at,
+       updated_at   = NOW()`,
+    [
+      ticketId,
+      ticket.user_id || null,
+      ticket.subject || '',
+      ticket.description || '',
+      ticket.category || null,
+      ticket.priority || 'medium',
+      ticket.status || 'open',
+      ticket.assigned_to || null,
+      JSON.stringify(Array.isArray(att) ? att : []),
+      JSON.stringify(Array.isArray(tags) ? tags : []),
+      JSON.stringify(Array.isArray(msgs) ? msgs : []),
+      ticket.rating ?? null,
+      ticket.feedback || null,
+      ticket.sla_due_date || null,
+      ticket.resolved_at || null,
+      ticket.closed_at || null,
+    ]
+  );
 }
 
 // ─── Marketing Campaigns ───
