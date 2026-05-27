@@ -5,10 +5,11 @@
 
 import { Hono } from 'hono';
 import {
-  getPaymentBalance, upsertPaymentBalance, debitAvailableToPendingAtomic, accountingStore,
+  getPaymentBalance, upsertPaymentBalance, debitAvailableToPendingAtomic,
   getPaymentMethods as dbGetPaymentMethods, upsertPaymentMethod,
   insertPaymentTx, getPaymentTxsByUser, getAllPaymentTxs, getPaymentTxStats, getPaymentTxUserSummaries,
 } from './db.tsx';
+import { pool } from './db-client.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -419,17 +420,27 @@ paymentsRoutes.get('/admin/stats', requireAuth, requireAdmin, async (c) => {
  */
 paymentsRoutes.get('/admin/accounting/reports', requireAuth, requireAdmin, async (c) => {
   try {
-    const raw = await accountingStore.get('accounting:reports');
-    const reports: any[] = raw || [];
     const statusFilter = c.req.query('status');
     const typeFilter = c.req.query('type');
     const periodFilter = c.req.query('taxPeriod');
-    let filtered = reports;
-    if (statusFilter && statusFilter !== 'all') filtered = filtered.filter((r: any) => r.status === statusFilter);
-    if (typeFilter && typeFilter !== 'all') filtered = filtered.filter((r: any) => r.type === typeFilter);
-    if (periodFilter && periodFilter !== 'all') filtered = filtered.filter((r: any) => r.taxPeriod === periodFilter);
-    filtered.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    return c.json({ success: true, data: filtered });
+    const where: string[] = [];
+    const params: any[] = [];
+    if (statusFilter && statusFilter !== 'all') { params.push(statusFilter); where.push(`status = $${params.length}`); }
+    if (typeFilter && typeFilter !== 'all') { params.push(typeFilter); where.push(`report_type = $${params.length}`); }
+    if (periodFilter && periodFilter !== 'all') { params.push(periodFilter); where.push(`tax_period = $${params.length}`); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const { rows } = await pool.query(
+      `SELECT id, report_type AS type, tax_period AS "taxPeriod", status, tax_amount AS "taxAmount",
+              extra, sent_at AS "sentAt", accepted_at AS "acceptedAt",
+              created_at AS "createdAt", updated_at AS "updatedAt"
+         FROM accounting_reports
+         ${whereSql}
+         ORDER BY created_at DESC`,
+      params,
+    );
+    // Spread extra (residual jsonb fields) onto each row for API compat.
+    const data = rows.map((r: any) => ({ ...r.extra, ...r, extra: undefined }));
+    return c.json({ success: true, data });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/reports:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -443,17 +454,27 @@ paymentsRoutes.post('/admin/accounting/reports', requireAuth, requireAdmin, asyn
   try {
     const body = await c.req.json();
     const id = crypto.randomUUID();
-    const report = {
-      id,
-      ...body,
-      status: body.status || 'draft',
-      createdAt: new Date().toISOString(),
-    };
-    const raw = await accountingStore.get('accounting:reports');
-    const reports: any[] = raw || [];
-    reports.push(report);
-    await accountingStore.set('accounting:reports', reports);
-    return c.json({ success: true, data: report });
+    const extra = { ...body };
+    ['id', 'type', 'taxPeriod', 'status', 'taxAmount', 'sentAt', 'acceptedAt', 'createdAt', 'updatedAt'].forEach(k => delete extra[k]);
+    const { rows } = await pool.query(
+      `INSERT INTO accounting_reports
+         (id, report_type, tax_period, status, tax_amount, extra)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+       RETURNING id, report_type AS type, tax_period AS "taxPeriod", status,
+                 tax_amount AS "taxAmount", extra,
+                 sent_at AS "sentAt", accepted_at AS "acceptedAt",
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        id,
+        body.type || null,
+        body.taxPeriod || null,
+        body.status || 'draft',
+        Number(body.taxAmount || 0),
+        JSON.stringify(extra),
+      ],
+    );
+    const r = rows[0];
+    return c.json({ success: true, data: { ...r.extra, ...r, extra: undefined } });
   } catch (error: any) {
     console.error('Error in POST /admin/accounting/reports:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -465,17 +486,35 @@ paymentsRoutes.post('/admin/accounting/reports', requireAuth, requireAdmin, asyn
  */
 paymentsRoutes.put('/admin/accounting/reports/:id', requireAuth, requireAdmin, async (c) => {
   try {
-    const reportId = parseInt(c.req.param('id'));
+    const reportId = c.req.param('id'); // string id (UUID); фикс legacy parseInt() bug
     const body = await c.req.json();
-    const raw = await accountingStore.get('accounting:reports');
-    const reports: any[] = raw || [];
-    const idx = reports.findIndex((r: any) => r.id === reportId);
-    if (idx === -1) return c.json({ error: 'Report not found' }, 404);
-    reports[idx] = { ...reports[idx], ...body, updatedAt: new Date().toISOString() };
-    if (body.status === 'sent' && !reports[idx].sentAt) reports[idx].sentAt = new Date().toISOString();
-    if (body.status === 'accepted' && !reports[idx].acceptedAt) reports[idx].acceptedAt = new Date().toISOString();
-    await accountingStore.set('accounting:reports', reports);
-    return c.json({ success: true, data: reports[idx] });
+    // Atomic UPDATE с COALESCE — обновляем только переданные поля.
+    // sent_at / accepted_at автоматически выставляются при status transition.
+    const { rows } = await pool.query(
+      `UPDATE accounting_reports SET
+         report_type = COALESCE($2, report_type),
+         tax_period  = COALESCE($3, tax_period),
+         status      = COALESCE($4, status),
+         tax_amount  = COALESCE($5, tax_amount),
+         sent_at     = CASE WHEN $4 = 'sent' AND sent_at IS NULL THEN NOW() ELSE sent_at END,
+         accepted_at = CASE WHEN $4 = 'accepted' AND accepted_at IS NULL THEN NOW() ELSE accepted_at END,
+         updated_at  = NOW()
+       WHERE id = $1
+       RETURNING id, report_type AS type, tax_period AS "taxPeriod", status,
+                 tax_amount AS "taxAmount", extra,
+                 sent_at AS "sentAt", accepted_at AS "acceptedAt",
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        reportId,
+        body.type ?? null,
+        body.taxPeriod ?? null,
+        body.status ?? null,
+        body.taxAmount !== undefined ? Number(body.taxAmount) : null,
+      ],
+    );
+    if (rows.length === 0) return c.json({ error: 'Report not found' }, 404);
+    const r = rows[0];
+    return c.json({ success: true, data: { ...r.extra, ...r, extra: undefined } });
   } catch (error: any) {
     console.error('Error in PUT /admin/accounting/reports/:id:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -487,11 +526,9 @@ paymentsRoutes.put('/admin/accounting/reports/:id', requireAuth, requireAdmin, a
  */
 paymentsRoutes.delete('/admin/accounting/reports/:id', requireAuth, requireAdmin, async (c) => {
   try {
-    const reportId = parseInt(c.req.param('id'));
-    const raw = await accountingStore.get('accounting:reports');
-    const reports: any[] = raw || [];
-    const filtered = reports.filter((r: any) => r.id !== reportId);
-    await accountingStore.set('accounting:reports', filtered);
+    const reportId = c.req.param('id'); // string id; фикс legacy parseInt() bug
+    const r = await pool.query(`DELETE FROM accounting_reports WHERE id = $1`, [reportId]);
+    if (r.rowCount === 0) return c.json({ error: 'Report not found' }, 404);
     return c.json({ success: true });
   } catch (error: any) {
     console.error('Error in DELETE /admin/accounting/reports/:id:', error);
@@ -504,19 +541,25 @@ paymentsRoutes.delete('/admin/accounting/reports/:id', requireAuth, requireAdmin
  */
 paymentsRoutes.get('/admin/accounting/documents', requireAuth, requireAdmin, async (c) => {
   try {
-    const raw = await accountingStore.get('accounting:documents');
-    const docs: any[] = raw || [];
-    const search = c.req.query('search')?.toLowerCase();
-    let filtered = docs;
+    const search = c.req.query('search');
+    let whereSql = '';
+    const params: any[] = [];
     if (search) {
-      filtered = filtered.filter((d: any) =>
-        d.number?.toLowerCase().includes(search) ||
-        d.counterparty?.toLowerCase().includes(search) ||
-        d.description?.toLowerCase().includes(search)
-      );
+      params.push(`%${search.toLowerCase()}%`);
+      whereSql = `WHERE LOWER(doc_number) LIKE $1 OR LOWER(counterparty) LIKE $1 OR LOWER(description) LIKE $1`;
     }
-    filtered.sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime());
-    return c.json({ success: true, data: filtered });
+    const { rows } = await pool.query(
+      `SELECT id, doc_number AS number, counterparty, description, doc_date AS date,
+              amount, vat_amount AS "vatAmount", doc_type AS type, status,
+              paid_at AS "paidAt", extra,
+              created_at AS "createdAt", updated_at AS "updatedAt"
+         FROM accounting_documents
+         ${whereSql}
+         ORDER BY doc_date DESC NULLS LAST`,
+      params,
+    );
+    const data = rows.map((r: any) => ({ ...r.extra, ...r, extra: undefined }));
+    return c.json({ success: true, data });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/documents:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -530,12 +573,34 @@ paymentsRoutes.post('/admin/accounting/documents', requireAuth, requireAdmin, as
   try {
     const body = await c.req.json();
     const id = crypto.randomUUID();
-    const doc = { id, ...body, status: body.status || 'draft', date: body.date || new Date().toISOString().split('T')[0] };
-    const raw = await accountingStore.get('accounting:documents');
-    const docs: any[] = raw || [];
-    docs.push(doc);
-    await accountingStore.set('accounting:documents', docs);
-    return c.json({ success: true, data: doc });
+    const extra = { ...body };
+    ['id', 'number', 'counterparty', 'description', 'date', 'amount', 'vatAmount',
+     'type', 'status', 'paidAt', 'createdAt', 'updatedAt'].forEach(k => delete extra[k]);
+    const { rows } = await pool.query(
+      `INSERT INTO accounting_documents
+         (id, doc_number, counterparty, description, doc_date, amount,
+          vat_amount, doc_type, status, paid_at, extra)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+       RETURNING id, doc_number AS number, counterparty, description, doc_date AS date,
+                 amount, vat_amount AS "vatAmount", doc_type AS type, status,
+                 paid_at AS "paidAt", extra,
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        id,
+        body.number || null,
+        body.counterparty || null,
+        body.description || null,
+        body.date || new Date().toISOString().split('T')[0],
+        Number(body.amount || 0),
+        Number(body.vatAmount || 0),
+        body.type || null,
+        body.status || 'draft',
+        body.paidAt || null,
+        JSON.stringify(extra),
+      ],
+    );
+    const r = rows[0];
+    return c.json({ success: true, data: { ...r.extra, ...r, extra: undefined } });
   } catch (error: any) {
     console.error('Error in POST /admin/accounting/documents:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -547,16 +612,42 @@ paymentsRoutes.post('/admin/accounting/documents', requireAuth, requireAdmin, as
  */
 paymentsRoutes.put('/admin/accounting/documents/:id', requireAuth, requireAdmin, async (c) => {
   try {
-    const docId = parseInt(c.req.param('id'));
+    const docId = c.req.param('id'); // string id; фикс legacy parseInt() bug
     const body = await c.req.json();
-    const raw = await accountingStore.get('accounting:documents');
-    const docs: any[] = raw || [];
-    const idx = docs.findIndex((d: any) => d.id === docId);
-    if (idx === -1) return c.json({ error: 'Document not found' }, 404);
-    docs[idx] = { ...docs[idx], ...body };
-    if (body.status === 'paid' && !docs[idx].paidAt) docs[idx].paidAt = new Date().toISOString().split('T')[0];
-    await accountingStore.set('accounting:documents', docs);
-    return c.json({ success: true, data: docs[idx] });
+    const { rows } = await pool.query(
+      `UPDATE accounting_documents SET
+         doc_number   = COALESCE($2, doc_number),
+         counterparty = COALESCE($3, counterparty),
+         description  = COALESCE($4, description),
+         doc_date     = COALESCE($5::date, doc_date),
+         amount       = COALESCE($6, amount),
+         vat_amount   = COALESCE($7, vat_amount),
+         doc_type     = COALESCE($8, doc_type),
+         status       = COALESCE($9, status),
+         paid_at      = CASE WHEN $9 = 'paid' AND paid_at IS NULL THEN CURRENT_DATE
+                             ELSE COALESCE($10::date, paid_at) END,
+         updated_at   = NOW()
+       WHERE id = $1
+       RETURNING id, doc_number AS number, counterparty, description, doc_date AS date,
+                 amount, vat_amount AS "vatAmount", doc_type AS type, status,
+                 paid_at AS "paidAt", extra,
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        docId,
+        body.number ?? null,
+        body.counterparty ?? null,
+        body.description ?? null,
+        body.date ?? null,
+        body.amount !== undefined ? Number(body.amount) : null,
+        body.vatAmount !== undefined ? Number(body.vatAmount) : null,
+        body.type ?? null,
+        body.status ?? null,
+        body.paidAt ?? null,
+      ],
+    );
+    if (rows.length === 0) return c.json({ error: 'Document not found' }, 404);
+    const r = rows[0];
+    return c.json({ success: true, data: { ...r.extra, ...r, extra: undefined } });
   } catch (error: any) {
     console.error('Error in PUT /admin/accounting/documents/:id:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -568,10 +659,15 @@ paymentsRoutes.put('/admin/accounting/documents/:id', requireAuth, requireAdmin,
  */
 paymentsRoutes.get('/admin/accounting/ledger', requireAuth, requireAdmin, async (c) => {
   try {
-    const raw = await accountingStore.get('accounting:ledger');
-    const entries: any[] = raw || [];
-    entries.sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime());
-    return c.json({ success: true, data: entries });
+    const { rows } = await pool.query(
+      `SELECT id, entry_date AS date, debit_account AS debit, credit_account AS credit,
+              amount, description, extra,
+              created_at AS "createdAt", updated_at AS "updatedAt"
+         FROM accounting_ledger
+         ORDER BY entry_date DESC NULLS LAST`
+    );
+    const data = rows.map((r: any) => ({ ...r.extra, ...r, extra: undefined }));
+    return c.json({ success: true, data });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/ledger:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -585,12 +681,27 @@ paymentsRoutes.post('/admin/accounting/ledger', requireAuth, requireAdmin, async
   try {
     const body = await c.req.json();
     const id = crypto.randomUUID();
-    const entry = { id, ...body, date: body.date || new Date().toISOString().split('T')[0] };
-    const raw = await accountingStore.get('accounting:ledger');
-    const entries: any[] = raw || [];
-    entries.push(entry);
-    await accountingStore.set('accounting:ledger', entries);
-    return c.json({ success: true, data: entry });
+    const extra = { ...body };
+    ['id', 'date', 'debit', 'credit', 'amount', 'description', 'createdAt', 'updatedAt'].forEach(k => delete extra[k]);
+    const { rows } = await pool.query(
+      `INSERT INTO accounting_ledger
+         (id, entry_date, debit_account, credit_account, amount, description, extra)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+       RETURNING id, entry_date AS date, debit_account AS debit, credit_account AS credit,
+                 amount, description, extra,
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        id,
+        body.date || new Date().toISOString().split('T')[0],
+        body.debit || null,
+        body.credit || null,
+        Number(body.amount || 0),
+        body.description || null,
+        JSON.stringify(extra),
+      ],
+    );
+    const r = rows[0];
+    return c.json({ success: true, data: { ...r.extra, ...r, extra: undefined } });
   } catch (error: any) {
     console.error('Error in POST /admin/accounting/ledger:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -602,18 +713,24 @@ paymentsRoutes.post('/admin/accounting/ledger', requireAuth, requireAdmin, async
  */
 paymentsRoutes.get('/admin/accounting/counterparties', requireAuth, requireAdmin, async (c) => {
   try {
-    const raw = await accountingStore.get('accounting:counterparties');
-    const cps: any[] = raw || [];
-    const search = c.req.query('search')?.toLowerCase();
-    let filtered = cps;
+    const search = c.req.query('search');
+    let whereSql = '';
+    const params: any[] = [];
     if (search) {
-      filtered = filtered.filter((cp: any) =>
-        cp.name?.toLowerCase().includes(search) ||
-        cp.inn?.includes(search) ||
-        cp.email?.toLowerCase().includes(search)
-      );
+      params.push(`%${search.toLowerCase()}%`);
+      whereSql = `WHERE LOWER(name) LIKE $1 OR inn LIKE $1 OR LOWER(email) LIKE $1`;
     }
-    return c.json({ success: true, data: filtered });
+    const { rows } = await pool.query(
+      `SELECT id, name, inn, kpp, email, address, status,
+              last_activity_date AS "lastActivityDate", extra,
+              created_at AS "createdAt", updated_at AS "updatedAt"
+         FROM accounting_counterparties
+         ${whereSql}
+         ORDER BY name`,
+      params,
+    );
+    const data = rows.map((r: any) => ({ ...r.extra, ...r, extra: undefined }));
+    return c.json({ success: true, data });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/counterparties:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -627,12 +744,28 @@ paymentsRoutes.post('/admin/accounting/counterparties', requireAuth, requireAdmi
   try {
     const body = await c.req.json();
     const id = crypto.randomUUID();
-    const cp = { id, ...body, status: body.status || 'active', lastActivityDate: new Date().toISOString().split('T')[0] };
-    const raw = await accountingStore.get('accounting:counterparties');
-    const cps: any[] = raw || [];
-    cps.push(cp);
-    await accountingStore.set('accounting:counterparties', cps);
-    return c.json({ success: true, data: cp });
+    const extra = { ...body };
+    ['id', 'name', 'inn', 'kpp', 'email', 'address', 'status', 'lastActivityDate', 'createdAt', 'updatedAt'].forEach(k => delete extra[k]);
+    const { rows } = await pool.query(
+      `INSERT INTO accounting_counterparties
+         (id, name, inn, kpp, email, address, status, last_activity_date, extra)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8::jsonb)
+       RETURNING id, name, inn, kpp, email, address, status,
+                 last_activity_date AS "lastActivityDate", extra,
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        id,
+        body.name || null,
+        body.inn || null,
+        body.kpp || null,
+        body.email || null,
+        body.address || null,
+        body.status || 'active',
+        JSON.stringify(extra),
+      ],
+    );
+    const r = rows[0];
+    return c.json({ success: true, data: { ...r.extra, ...r, extra: undefined } });
   } catch (error: any) {
     console.error('Error in POST /admin/accounting/counterparties:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -644,15 +777,35 @@ paymentsRoutes.post('/admin/accounting/counterparties', requireAuth, requireAdmi
  */
 paymentsRoutes.put('/admin/accounting/counterparties/:id', requireAuth, requireAdmin, async (c) => {
   try {
-    const cpId = parseInt(c.req.param('id'));
+    const cpId = c.req.param('id'); // string id; фикс legacy parseInt() bug
     const body = await c.req.json();
-    const raw = await accountingStore.get('accounting:counterparties');
-    const cps: any[] = raw || [];
-    const idx = cps.findIndex((cp: any) => cp.id === cpId);
-    if (idx === -1) return c.json({ error: 'Counterparty not found' }, 404);
-    cps[idx] = { ...cps[idx], ...body, lastActivityDate: new Date().toISOString().split('T')[0] };
-    await accountingStore.set('accounting:counterparties', cps);
-    return c.json({ success: true, data: cps[idx] });
+    const { rows } = await pool.query(
+      `UPDATE accounting_counterparties SET
+         name    = COALESCE($2, name),
+         inn     = COALESCE($3, inn),
+         kpp     = COALESCE($4, kpp),
+         email   = COALESCE($5, email),
+         address = COALESCE($6, address),
+         status  = COALESCE($7, status),
+         last_activity_date = CURRENT_DATE,
+         updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, name, inn, kpp, email, address, status,
+                 last_activity_date AS "lastActivityDate", extra,
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        cpId,
+        body.name ?? null,
+        body.inn ?? null,
+        body.kpp ?? null,
+        body.email ?? null,
+        body.address ?? null,
+        body.status ?? null,
+      ],
+    );
+    if (rows.length === 0) return c.json({ error: 'Counterparty not found' }, 404);
+    const r = rows[0];
+    return c.json({ success: true, data: { ...r.extra, ...r, extra: undefined } });
   } catch (error: any) {
     console.error('Error in PUT /admin/accounting/counterparties/:id:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -664,10 +817,14 @@ paymentsRoutes.put('/admin/accounting/counterparties/:id', requireAuth, requireA
  */
 paymentsRoutes.get('/admin/accounting/calendar', requireAuth, requireAdmin, async (c) => {
   try {
-    const raw = await accountingStore.get('accounting:calendar');
-    const events: any[] = raw || [];
-    events.sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    return c.json({ success: true, data: events });
+    const { rows } = await pool.query(
+      `SELECT id, event_date AS date, title, description, completed, extra,
+              created_at AS "createdAt", updated_at AS "updatedAt"
+         FROM accounting_calendar
+         ORDER BY event_date ASC NULLS LAST`
+    );
+    const data = rows.map((r: any) => ({ ...r.extra, ...r, extra: undefined }));
+    return c.json({ success: true, data });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/calendar:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -681,12 +838,25 @@ paymentsRoutes.post('/admin/accounting/calendar', requireAuth, requireAdmin, asy
   try {
     const body = await c.req.json();
     const id = crypto.randomUUID();
-    const event = { id, ...body, completed: body.completed || false };
-    const raw = await accountingStore.get('accounting:calendar');
-    const events: any[] = raw || [];
-    events.push(event);
-    await accountingStore.set('accounting:calendar', events);
-    return c.json({ success: true, data: event });
+    const extra = { ...body };
+    ['id', 'date', 'title', 'description', 'completed', 'createdAt', 'updatedAt'].forEach(k => delete extra[k]);
+    const { rows } = await pool.query(
+      `INSERT INTO accounting_calendar
+         (id, event_date, title, description, completed, extra)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+       RETURNING id, event_date AS date, title, description, completed, extra,
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        id,
+        body.date || null,
+        body.title || null,
+        body.description || null,
+        !!body.completed,
+        JSON.stringify(extra),
+      ],
+    );
+    const r = rows[0];
+    return c.json({ success: true, data: { ...r.extra, ...r, extra: undefined } });
   } catch (error: any) {
     console.error('Error in POST /admin/accounting/calendar:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -698,15 +868,29 @@ paymentsRoutes.post('/admin/accounting/calendar', requireAuth, requireAdmin, asy
  */
 paymentsRoutes.put('/admin/accounting/calendar/:id', requireAuth, requireAdmin, async (c) => {
   try {
-    const eventId = parseInt(c.req.param('id'));
+    const eventId = c.req.param('id'); // string id; фикс legacy parseInt() bug
     const body = await c.req.json();
-    const raw = await accountingStore.get('accounting:calendar');
-    const events: any[] = raw || [];
-    const idx = events.findIndex((e: any) => e.id === eventId);
-    if (idx === -1) return c.json({ error: 'Calendar event not found' }, 404);
-    events[idx] = { ...events[idx], ...body };
-    await accountingStore.set('accounting:calendar', events);
-    return c.json({ success: true, data: events[idx] });
+    const { rows } = await pool.query(
+      `UPDATE accounting_calendar SET
+         event_date  = COALESCE($2::date, event_date),
+         title       = COALESCE($3, title),
+         description = COALESCE($4, description),
+         completed   = COALESCE($5, completed),
+         updated_at  = NOW()
+       WHERE id = $1
+       RETURNING id, event_date AS date, title, description, completed, extra,
+                 created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [
+        eventId,
+        body.date ?? null,
+        body.title ?? null,
+        body.description ?? null,
+        body.completed !== undefined ? !!body.completed : null,
+      ],
+    );
+    if (rows.length === 0) return c.json({ error: 'Calendar event not found' }, 404);
+    const r = rows[0];
+    return c.json({ success: true, data: { ...r.extra, ...r, extra: undefined } });
   } catch (error: any) {
     console.error('Error in PUT /admin/accounting/calendar/:id:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
@@ -718,47 +902,47 @@ paymentsRoutes.put('/admin/accounting/calendar/:id', requireAuth, requireAdmin, 
  */
 paymentsRoutes.get('/admin/accounting/summary', requireAuth, requireAdmin, async (c) => {
   try {
-    const [reportsRaw, docsRaw, calendarRaw] = await Promise.all([
-      accountingStore.get('accounting:reports'),
-      accountingStore.get('accounting:documents'),
-      accountingStore.get('accounting:calendar'),
+    // SQL aggregation — взамен SELECT-all-then-JS-reduce.
+    const [reportAgg, docAgg, calAgg, upcoming] = await Promise.all([
+      pool.query(
+        `SELECT
+           COUNT(*)                                                            AS count,
+           COALESCE(SUM(tax_amount) FILTER (WHERE status IN ('accepted','sent')), 0) AS total_paid,
+           COALESCE(SUM(tax_amount) FILTER (WHERE status IN ('ready','draft')),   0) AS pending
+         FROM accounting_reports`
+      ),
+      pool.query(
+        `SELECT
+           COUNT(*)                                                  AS count,
+           COALESCE(SUM(amount)     FILTER (WHERE status = 'paid'),   0) AS total_paid,
+           COALESCE(SUM(vat_amount) FILTER (WHERE status = 'paid'),   0) AS total_vat,
+           COALESCE(SUM(amount)     FILTER (WHERE status = 'issued'), 0) AS pending
+         FROM accounting_documents`
+      ),
+      pool.query(`SELECT COUNT(*) AS count FROM accounting_calendar`),
+      pool.query(
+        `SELECT id, event_date AS date, title, description, completed
+           FROM accounting_calendar
+          WHERE completed = FALSE AND event_date > CURRENT_DATE
+          ORDER BY event_date ASC
+          LIMIT 5`
+      ),
     ]);
-    const reports: any[] = reportsRaw || [];
-    const docs: any[] = docsRaw || [];
-    const calendar: any[] = calendarRaw || [];
-
-    const totalTaxPaid = reports
-      .filter((r: any) => r.status === 'accepted' || r.status === 'sent')
-      .reduce((s: number, r: any) => s + (r.taxAmount || 0), 0);
-    const pendingTax = reports
-      .filter((r: any) => r.status === 'ready' || r.status === 'draft')
-      .reduce((s: number, r: any) => s + (r.taxAmount || 0), 0);
-    const totalDocsPaid = docs
-      .filter((d: any) => d.status === 'paid')
-      .reduce((s: number, d: any) => s + (d.amount || 0), 0);
-    const totalVAT = docs
-      .filter((d: any) => d.status === 'paid')
-      .reduce((s: number, d: any) => s + (d.vatAmount || 0), 0);
-    const pendingPayments = docs
-      .filter((d: any) => d.status === 'issued')
-      .reduce((s: number, d: any) => s + (d.amount || 0), 0);
-    const upcomingDeadlines = calendar
-      .filter((e: any) => !e.completed && new Date(e.date) > new Date())
-      .sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime())
-      .slice(0, 5);
-
+    const reps = reportAgg.rows[0] || {};
+    const ds   = docAgg.rows[0] || {};
+    const cs   = calAgg.rows[0] || {};
     return c.json({
       success: true,
       data: {
-        totalTaxPaid,
-        pendingTax,
-        totalDocsPaid,
-        totalVAT,
-        pendingPayments,
-        upcomingDeadlines,
-        reportsCount: reports.length,
-        documentsCount: docs.length,
-        calendarEventsCount: calendar.length,
+        totalTaxPaid:        Number(reps.total_paid || 0),
+        pendingTax:          Number(reps.pending || 0),
+        totalDocsPaid:       Number(ds.total_paid || 0),
+        totalVAT:            Number(ds.total_vat || 0),
+        pendingPayments:     Number(ds.pending || 0),
+        upcomingDeadlines:   upcoming.rows,
+        reportsCount:        Number(reps.count || 0),
+        documentsCount:      Number(ds.count || 0),
+        calendarEventsCount: Number(cs.count || 0),
       }
     });
   } catch (error: any) {

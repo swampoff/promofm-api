@@ -83,10 +83,16 @@ stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md
 **Wave 1.5 leftovers (kv-array, не Wave 3):**
 - `dj_reviews`, `dj_collaborations`, `dj_notifications`, `dj_subscriptions`, `dj_withdrawals` — array-stores из dj cabinet
 
-### 🔜 Wave 4 — settings/configs (можно отложить)
+### 🔜 Wave 4 — settings/configs
 
-Read-mostly singleton'ы где kv-store валиден (один объект на user/system, не массив):
-`system_config`, `accounting_data`, `elevenlabs_config`, `email_templates`, `email_history`, `notification_settings`, `producer_settings`, `producer_ai_last`, `payment_balances`.
+**Singleton-per-key/user (валидный KV — leave as-is):**
+`system_config`, `elevenlabs_config`, `email_templates`, `notification_settings`, `producer_settings`, `producer_ai_last`, `payment_balances`, `email_history` (row-per-email через extra user_id), `accounting_data` (legacy non-accounting:* keys остаются singleton).
+
+**Mig'ированы:**
+- ✅ `accountingStore` → split на 5 native таблиц (migration 055, PR #71)
+  — accounting_reports / accounting_documents / accounting_ledger /
+  accounting_counterparties / accounting_calendar. Также фиксит
+  `parseInt(uuid)` bug в PUT/DELETE handler'ах.
 
 ### 🚫 Правило для cloud-сессий
 
