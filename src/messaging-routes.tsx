@@ -778,6 +778,83 @@ app.get('/rules', (c) => {
   return c.json({ success: true, allowedContacts: ALLOWED_CONTACTS, roleLabels: ROLE_LABELS });
 });
 
+// ── GET /blocks — список юзеров, которых я заблокировал ──
+//
+// Header doc обещал этот endpoint, но реализации не было — фронт-bell
+// дёргал и получал 404 (17 hits/period в admin-телеметрии). Возвращаем
+// просто массив blocked_id'ов для текущего юзера, чтобы UI мог скрывать
+// заблокированных в поиске и в инициаторах диалога.
+app.get('/blocks', requireAuth, async (c) => {
+  try {
+    const userId = String(c.get('userId') || '');
+    const { rows } = await pool.query(
+      `SELECT blocked_id, reason, created_at
+         FROM dm_blocks
+        WHERE blocker_id = $1
+        ORDER BY created_at DESC`,
+      [userId]
+    );
+    return c.json({
+      success: true,
+      blocks: rows.map((r: any) => ({
+        blockedId: String(r.blocked_id),
+        reason: r.reason || '',
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err: any) {
+    log.error({ err }, 'messaging_blocks_failed');
+    return c.json({ success: true, blocks: [] });
+  }
+});
+
+// ── GET /admin/reports — очередь жалоб для админа ──
+//
+// Аналогично /blocks — был задокументирован в header'е, но не
+// зарегистрирован (2 hits/period). Возвращаем последние pending
+// reports + опционально все по статусу (?status=actioned).
+app.get('/admin/reports', requireAuth, requireAdmin, async (c) => {
+  try {
+    const status = c.req.query('status') || 'pending';
+    const limit = Math.min(parseInt(c.req.query('limit') || '100', 10) || 100, 500);
+    const params: any[] = [];
+    let where = '';
+    if (status !== 'all') {
+      params.push(status);
+      where = `WHERE status = $${params.length}`;
+    }
+    params.push(limit);
+    const { rows } = await pool.query(
+      `SELECT id, reporter_id, reported_id, message_id, category, details, status,
+              reviewer_id, reviewed_at, resolution, created_at
+         FROM dm_reports
+         ${where}
+        ORDER BY created_at DESC
+        LIMIT $${params.length}`,
+      params
+    );
+    return c.json({
+      success: true,
+      reports: rows.map((r: any) => ({
+        id: String(r.id),
+        reporterId: String(r.reporter_id),
+        reportedId: String(r.reported_id),
+        messageId: r.message_id ? String(r.message_id) : null,
+        category: r.category,
+        details: r.details || '',
+        status: r.status,
+        reviewerId: r.reviewer_id ? String(r.reviewer_id) : null,
+        reviewedAt: r.reviewed_at,
+        resolution: r.resolution || '',
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err: any) {
+    log.error({ err }, 'messaging_admin_reports_failed');
+    return c.json({ success: true, reports: [] });
+  }
+});
+
 // ── POST /presence — heartbeat (no-op) ──
 
 app.post('/presence', requireAuth, (c) => c.json({ success: true }));
