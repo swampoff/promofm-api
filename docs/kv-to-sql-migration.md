@@ -100,6 +100,16 @@ stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md
   — accounting_reports / accounting_documents / accounting_ledger /
   accounting_counterparties / accounting_calendar. Также фиксит
   `parseInt(uuid)` bug в PUT/DELETE handler'ах.
+**Mig'ировано отдельными PR'ами (NOT singleton-KV, were array-in-value):**
+- ✅ `accountingStore` → 5 native таблиц (PR #71, migration 055)
+- ✅ `radioArtistRequestsStore` + `radioVenueRequestsStore` + `radioNotificationsStore`
+  → row-per-entity (PR #72, migration 056)
+
+**Singleton-per-key/user (валидный KV — leave as-is):**
+`system_config`, `elevenlabs_config`, `email_templates`, `email_history`, `notification_settings`, `producer_settings`, `producer_ai_last`, `payment_balances`.
+
+**Read-only (источник записи извне — оставлены):**
+`radio_finance`, `radio_transactions`, `dj_transactions`, `venue_analytics`, `radio_analytics`.
 
 ### 🚫 Правило для cloud-сессий
 

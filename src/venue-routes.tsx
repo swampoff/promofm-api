@@ -911,8 +911,9 @@ app.get('/radio-campaigns/:id/status', requireAuth, async (c) => {
     let radioStatus = null;
     let pricing = null;
     try {
-      const radioRequests = await radioVenueRequestsStore.get(campaign.stationId);
-      const requests = Array.isArray(radioRequests) ? radioRequests : (radioRequests?.data || []);
+      // radioVenueRequestsStore.get() since migration 056 always returns array;
+      // legacy fallback `(...).data` no longer needed.
+      const requests = await radioVenueRequestsStore.get(campaign.stationId);
       const radioReq = requests.find((r: any) => r.campaignId === campaignId || r.id === campaignId);
       if (radioReq) {
         radioStatus = {

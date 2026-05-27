@@ -1708,6 +1708,17 @@ const TRACK_TEST_REQUEST_COLS = `id, user_id, track_id, guest_email, guest_name,
   feedback_sent_date, completed_at, created_at, updated_at`;
 
 function mapTrackTestRequestRow(r: any): any {
+// ─── radio_* row-per-request stores (migration 056) ───
+//
+// Все 3 store'а имеют легаси-интерфейс `.get(stationId) → array`,
+// `.set(stationId, array) → void`. После migration 056 это row-per-item
+// SQL таблицы. Чтобы handler'ы не переписывать, фабрика делает adapter:
+//   .get  → SELECT ... WHERE radio_id = $1 ORDER BY created_at (or unshift'-style DESC)
+//   .set  → transactional replace-all: UPSERT каждый item + DELETE
+//           всех остальных rows для этого radio_id. Семантически
+//           идентично legacy KV `.set` (overwrites whole array).
+
+function mapArtistRequestRow(r: any): any {
   if (!r) return null;
   const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
   return {
@@ -1911,6 +1922,247 @@ function makeTrackTestAllRequestsView() {
       // No-op.
     },
     async getAll(): Promise<string[]> {
+    artistId: r.artist_id,
+    artistName: r.artist_name,
+    trackId: r.track_id,
+    trackTitle: r.track_title,
+    trackUrl: r.track_url,
+    status: r.status,
+    rejectionReason: r.rejection_reason,
+    respondedAt: iso(r.responded_at),
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+    ...(r.extra || {}),
+  };
+}
+
+function normalizeArtistRequestForInsert(radioId: string, item: any): any[] {
+  const id = item.id || `req-${cryptoRandomUUID()}`;
+  const extra = { ...item };
+  ['id','artistId','artistName','trackId','trackTitle','trackUrl','status',
+   'rejectionReason','respondedAt','createdAt','updatedAt'].forEach(k => delete extra[k]);
+  return [
+    id, radioId,
+    item.artistId || null, item.artistName || null,
+    item.trackId || null, item.trackTitle || null, item.trackUrl || null,
+    item.status || 'pending', item.rejectionReason || null,
+    item.respondedAt || null,
+    JSON.stringify(extra),
+    item.createdAt || null,
+  ];
+}
+
+function mapVenueRequestRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    venueId: r.venue_id,
+    venueName: r.venue_name,
+    venueCity: r.venue_city,
+    campaignId: r.campaign_id,
+    packageType: r.package_type,
+    audioUrl: r.audio_url,
+    startDate: iso(r.start_date),
+    endDate: iso(r.end_date),
+    targetPlays: Number(r.target_plays || 0),
+    completedPlays: Number(r.completed_plays || 0),
+    playsPerDay: Number(r.plays_per_day || 0),
+    durationDays: Number(r.duration_days || 1),
+    totalPrice: Number(r.total_price || 0),
+    platformFee: Number(r.platform_fee || 0),
+    stationPayout: Number(r.station_payout || 0),
+    timeSlots: r.time_slots || [],
+    status: r.status,
+    rejectionReason: r.rejection_reason,
+    approvedAt: iso(r.approved_at),
+    reviewedAt: iso(r.reviewed_at),
+    completedAt: iso(r.completed_at),
+    submittedAt: iso(r.created_at),
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+    ...(r.extra || {}),
+  };
+}
+
+function normalizeVenueRequestForInsert(radioId: string, item: any): any[] {
+  const id = item.id || `req-${cryptoRandomUUID()}`;
+  const extra = { ...item };
+  ['id','venueId','venueName','venueCity','campaignId','packageType','audioUrl',
+   'startDate','endDate','targetPlays','completedPlays','playsPerDay','durationDays',
+   'totalPrice','platformFee','stationPayout','timeSlots','status','rejectionReason',
+   'approvedAt','reviewedAt','completedAt','submittedAt','createdAt','updatedAt'
+  ].forEach(k => delete extra[k]);
+  const timeSlots = Array.isArray(item.timeSlots) ? item.timeSlots : [];
+  return [
+    id, radioId,
+    item.venueId || null, item.venueName || null, item.venueCity || null,
+    item.campaignId || null, item.packageType || null, item.audioUrl || null,
+    item.startDate || null, item.endDate || null,
+    Number(item.targetPlays || 0), Number(item.completedPlays || 0),
+    Number(item.playsPerDay || 0), Number(item.durationDays || 1),
+    Number(item.totalPrice || 0), Number(item.platformFee || 0),
+    Number(item.stationPayout || 0),
+    JSON.stringify(timeSlots),
+    item.status || 'pending', item.rejectionReason || null,
+    item.approvedAt || null, item.reviewedAt || null, item.completedAt || null,
+    JSON.stringify(extra),
+    item.createdAt || item.submittedAt || null,
+  ];
+}
+
+function mapRadioNotificationRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    type: r.notif_type,
+    title: r.title,
+    message: r.message,
+    priority: r.priority,
+    read: !!r.is_read,
+    relatedId: r.related_id,
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+    ...(r.extra || {}),
+  };
+}
+
+function normalizeRadioNotificationForInsert(radioId: string, item: any): any[] {
+  const id = item.id || `notif-${cryptoRandomUUID()}`;
+  const extra = { ...item };
+  ['id','type','title','message','priority','read','relatedId','createdAt','updatedAt']
+    .forEach(k => delete extra[k]);
+  return [
+    id, radioId,
+    item.type || null, item.title || null, item.message || null,
+    item.priority || 'normal', !!item.read,
+    item.relatedId || null,
+    JSON.stringify(extra),
+    item.createdAt || null,
+  ];
+}
+
+function cryptoRandomUUID(): string {
+  // Node 22 has globalThis.crypto.randomUUID
+  return (globalThis as any).crypto?.randomUUID?.() ||
+         `id-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+interface RadioRequestTableConfig {
+  columns: string;       // column list для INSERT
+  selectCols: string;    // column list для SELECT (порядок = аргументы mapper'а)
+  orderBy: string;       // ORDER BY clause для .get
+}
+
+const RADIO_TABLE_CONFIG: Record<string, RadioRequestTableConfig> = {
+  radio_artist_requests: {
+    columns: `id, radio_id, artist_id, artist_name, track_id, track_title, track_url,
+              status, rejection_reason, responded_at, extra, created_at`,
+    selectCols: `id, radio_id, artist_id, artist_name, track_id, track_title, track_url,
+                 status, rejection_reason, responded_at, extra, created_at, updated_at`,
+    orderBy: `ORDER BY created_at DESC`,
+  },
+  radio_venue_requests: {
+    columns: `id, radio_id, venue_id, venue_name, venue_city, campaign_id, package_type,
+              audio_url, start_date, end_date, target_plays, completed_plays,
+              plays_per_day, duration_days, total_price, platform_fee, station_payout,
+              time_slots, status, rejection_reason, approved_at, reviewed_at, completed_at,
+              extra, created_at`,
+    selectCols: `id, radio_id, venue_id, venue_name, venue_city, campaign_id, package_type,
+                 audio_url, start_date, end_date, target_plays, completed_plays,
+                 plays_per_day, duration_days, total_price, platform_fee, station_payout,
+                 time_slots, status, rejection_reason, approved_at, reviewed_at, completed_at,
+                 extra, created_at, updated_at`,
+    orderBy: `ORDER BY created_at DESC`,
+  },
+  radio_notifications: {
+    columns: `id, radio_id, notif_type, title, message, priority, is_read, related_id, extra, created_at`,
+    selectCols: `id, radio_id, notif_type, title, message, priority, is_read, related_id, extra, created_at, updated_at`,
+    orderBy: `ORDER BY created_at DESC`,
+  },
+};
+
+function makeRadioRequestArrayStore(
+  table: keyof typeof RADIO_TABLE_CONFIG,
+  mapRow: (r: any) => any,
+  normalize: (radioId: string, item: any) => any[],
+) {
+  const cfg = RADIO_TABLE_CONFIG[table];
+  return {
+    async get(stationId: string): Promise<any[]> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT ${cfg.selectCols} FROM ${table}
+          WHERE radio_id = $1
+          ${cfg.orderBy}`,
+        [stationId]
+      );
+      return r.rows.map(mapRow);
+    },
+    async set(stationId: string, value: any[]): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      const items = Array.isArray(value) ? value : [];
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const keptIds: string[] = [];
+        for (const item of items) {
+          const params = normalize(stationId, item);
+          keptIds.push(params[0]);
+          // Build INSERT ... ON CONFLICT (id) DO UPDATE SET <cols-from-EXCLUDED>
+          const colList = cfg.columns.split(',').map(c => c.trim());
+          // skip 'id' and 'radio_id' in UPDATE SET (PK + ownership) but
+          // also handle created_at — keep original on UPDATE.
+          const setParts = colList
+            .filter(c => c !== 'id' && c !== 'radio_id' && c !== 'created_at')
+            .map(c => `${c} = EXCLUDED.${c}`)
+            .concat(['updated_at = NOW()'])
+            .join(', ');
+          const placeholders = colList.map((_, i) => `$${i + 1}`);
+          // created_at is the last param; if null, default to NOW().
+          const createdAtIdx = colList.indexOf('created_at');
+          if (createdAtIdx >= 0) {
+            placeholders[createdAtIdx] = `COALESCE($${createdAtIdx + 1}::timestamptz, NOW())`;
+          }
+          // extra is jsonb — cast.
+          const extraIdx = colList.indexOf('extra');
+          if (extraIdx >= 0) placeholders[extraIdx] = `$${extraIdx + 1}::jsonb`;
+          // time_slots is jsonb for venue_requests.
+          const tsIdx = colList.indexOf('time_slots');
+          if (tsIdx >= 0) placeholders[tsIdx] = `$${tsIdx + 1}::jsonb`;
+          await client.query(
+            `INSERT INTO ${table} (${cfg.columns})
+             VALUES (${placeholders.join(', ')})
+             ON CONFLICT (id) DO UPDATE SET ${setParts}`,
+            params
+          );
+        }
+        // Delete rows for this station that weren't in the new array —
+        // matches legacy KV `.set` semantics (full overwrite).
+        if (keptIds.length > 0) {
+          await client.query(
+            `DELETE FROM ${table} WHERE radio_id = $1 AND id <> ALL($2::text[])`,
+            [stationId, keptIds]
+          );
+        } else {
+          await client.query(`DELETE FROM ${table} WHERE radio_id = $1`, [stationId]);
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+    async del(stationId: string): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      await pool.query(`DELETE FROM ${table} WHERE radio_id = $1`, [stationId]);
+    },
+    async getAll(): Promise<any[]> {
+      // Legacy `.getAll()` возвращал все KV-value (массивы). Не используется
+      // в callers — возвращаем пустой массив для совместимости.
       return [];
     },
   };
@@ -2050,10 +2302,16 @@ export const chartSourcesStore = jsonbStore('chart_sources');
 // radioAdSlotsStore + radioAdSlotIndexStore — заменены на нативные хелперы
 // после migration 050. См. блок «Radio Ad Slots» ниже.
 export const radioAnalyticsStore = jsonbStore('radio_analytics', 'radio_id');
-export const radioArtistRequestsStore = jsonbStore('radio_artist_requests', 'radio_id');
-export const radioVenueRequestsStore = jsonbStore('radio_venue_requests', 'radio_id');
+// radio_artist_requests/venue_requests/notifications — row-per-entity
+// since migration 056. Stores preserve .get(stationId)/.set(stationId, arr)
+// interface — array-of-objects снаружи, native cols внутри (per-item
+// upsert + delete-missing == transactional replace-all).
+export const radioArtistRequestsStore = makeRadioRequestArrayStore('radio_artist_requests', mapArtistRequestRow, normalizeArtistRequestForInsert);
+export const radioVenueRequestsStore  = makeRadioRequestArrayStore('radio_venue_requests',  mapVenueRequestRow,  normalizeVenueRequestForInsert);
+export const radioNotificationsStore  = makeRadioRequestArrayStore('radio_notifications',   mapRadioNotificationRow, normalizeRadioNotificationForInsert);
 export const radioFinanceStore = jsonbStore('radio_finance', 'radio_id');
-export const radioNotificationsStore = jsonbStore('radio_notifications', 'radio_id');
+// radio_transactions — read-only (0 writes в handler code). Источник —
+// внешний (cron / admin). Оставлен на jsonbStore.
 export const radioTransactionsStore = jsonbStore('radio_transactions', 'radio_id');
 // venue_playlists перевели на row-per-playlist (migration 036). Доступ
 // через pool.query в venue-routes.tsx / venue-api-routes.tsx.
