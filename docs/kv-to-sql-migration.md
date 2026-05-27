@@ -69,10 +69,17 @@ stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md
 (сохраняют full object). Просто `DROP COLUMN data` ломает чтения. Реальный
 объём работы похож на Wave 1.
 
-**🔴 Hybrid с active data writes (нужны новые native cols + handler refactor):**
-- `dj_mixes` — `data->>'payment_amount'`, `data->>'upcoming_until'`, `data->>'published_at'` активно используются
-- `bookings`, `support_tickets`, `marketing_campaigns` — `upsert*` пишет `data: fullObject`
-- `radio_ad_slots`, `notification_campaigns`, `track_test_requests`, `track_moderation` — все ещё через jsonbStore
+**🔴 Hybrid с active data writes:**
+- ✅ `dj_mixes` — PR #62 (migration 046)
+- ✅ `bookings` — PR #63 (migration 047)
+- ✅ `support_tickets` — PR #64 (migration 048)
+- ✅ `notification_campaigns` + `marketing_campaigns` cleanup — PR #65 (migration 049)
+- ✅ `radio_ad_slots` — PR #66 (migration 050) — also DROP `radio_ad_slot_index`
+- ✅ `track_test_requests` — PR #67 (migration 051) — 24 native cols + 2 jsonb (assigned_experts, category_averages), 3 hot-path indexes. Also DROP `track_test_user_requests` + `track_test_all_requests` (redundant index tables, derived from main `user_id` col).
+- `track_moderation` — отдельный PR
+
+**Satellite stores оставлены на jsonbStore (фолловап PR'ы):**
+- `track_test_reviews`, `track_test_request_reviews`, `track_test_experts`, `track_test_expert_stats` (cluster под фичей ExpertReview).
 
 **🟢 Truly trivial Wave 3 (write-only data, ready for DROP):**
 - `donations` — `createDonation` пишет только native cols, read `r.data \|\| r` works без data

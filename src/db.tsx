@@ -1630,6 +1630,226 @@ function jsonbStore(table: string, pk = 'id') {
   };
 }
 
+// ─── track_test_requests native-cols store (migration 051) ───
+
+const TRACK_TEST_REQUEST_COLS = `id, user_id, track_id, guest_email, guest_name,
+  guest_track_url, guest_cover_url, track_title, artist_name, genre,
+  status, payment_status, payment_amount, payment_transaction_id,
+  required_expert_count, completed_reviews_count, average_rating,
+  assigned_experts, category_averages, final_analysis,
+  consolidated_feedback, consolidated_recommendations,
+  admin_approval_status, moderation_notes, rejection_reason,
+  feedback_sent_date, completed_at, created_at, updated_at`;
+
+function mapTrackTestRequestRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    user_id: r.user_id,
+    track_id: r.track_id,
+    guest_email: r.guest_email,
+    guest_name: r.guest_name,
+    guest_track_url: r.guest_track_url,
+    guest_cover_url: r.guest_cover_url,
+    track_title: r.track_title || '',
+    artist_name: r.artist_name || '',
+    genre: r.genre,
+    status: r.status,
+    payment_status: r.payment_status,
+    payment_amount: Number(r.payment_amount || 0),
+    payment_transaction_id: r.payment_transaction_id,
+    required_expert_count: Number(r.required_expert_count || 5),
+    completed_reviews_count: Number(r.completed_reviews_count || 0),
+    average_rating: r.average_rating !== null && r.average_rating !== undefined ? Number(r.average_rating) : undefined,
+    assigned_experts: r.assigned_experts || [],
+    category_averages: r.category_averages || undefined,
+    final_analysis: r.final_analysis || undefined,
+    consolidated_feedback: r.consolidated_feedback || undefined,
+    consolidated_recommendations: r.consolidated_recommendations || undefined,
+    admin_approval_status: r.admin_approval_status || undefined,
+    moderation_notes: r.moderation_notes || undefined,
+    rejection_reason: r.rejection_reason || undefined,
+    feedback_sent_date: iso(r.feedback_sent_date) || undefined,
+    completed_at: iso(r.completed_at) || undefined,
+    created_at: iso(r.created_at),
+    updated_at: iso(r.updated_at),
+  };
+}
+
+function makeTrackTestRequestsStore() {
+  return {
+    async get(id: string): Promise<any | null> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT ${TRACK_TEST_REQUEST_COLS} FROM track_test_requests WHERE id = $1 LIMIT 1`,
+        [id]
+      );
+      return r.rowCount ? mapTrackTestRequestRow(r.rows[0]) : null;
+    },
+    async set(id: string, value: any): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      const assigned = Array.isArray(value.assigned_experts) ? value.assigned_experts : [];
+      const catAvg = value.category_averages && typeof value.category_averages === 'object' ? value.category_averages : {};
+      await pool.query(
+        `INSERT INTO track_test_requests (
+           id, user_id, track_id, guest_email, guest_name,
+           guest_track_url, guest_cover_url, track_title, artist_name, genre,
+           status, payment_status, payment_amount, payment_transaction_id,
+           required_expert_count, completed_reviews_count, average_rating,
+           assigned_experts, category_averages, final_analysis,
+           consolidated_feedback, consolidated_recommendations,
+           admin_approval_status, moderation_notes, rejection_reason,
+           feedback_sent_date, completed_at, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5,
+                 $6, $7, $8, $9, $10,
+                 $11, $12, $13, $14,
+                 $15, $16, $17,
+                 $18::jsonb, $19::jsonb, $20,
+                 $21, $22,
+                 $23, $24, $25,
+                 $26, $27, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           user_id                      = COALESCE(EXCLUDED.user_id, track_test_requests.user_id),
+           track_id                     = COALESCE(EXCLUDED.track_id, track_test_requests.track_id),
+           guest_email                  = EXCLUDED.guest_email,
+           guest_name                   = EXCLUDED.guest_name,
+           guest_track_url              = EXCLUDED.guest_track_url,
+           guest_cover_url              = EXCLUDED.guest_cover_url,
+           track_title                  = EXCLUDED.track_title,
+           artist_name                  = EXCLUDED.artist_name,
+           genre                        = EXCLUDED.genre,
+           status                       = EXCLUDED.status,
+           payment_status               = EXCLUDED.payment_status,
+           payment_amount               = EXCLUDED.payment_amount,
+           payment_transaction_id       = EXCLUDED.payment_transaction_id,
+           required_expert_count        = EXCLUDED.required_expert_count,
+           completed_reviews_count      = EXCLUDED.completed_reviews_count,
+           average_rating               = EXCLUDED.average_rating,
+           assigned_experts             = EXCLUDED.assigned_experts,
+           category_averages            = EXCLUDED.category_averages,
+           final_analysis               = EXCLUDED.final_analysis,
+           consolidated_feedback        = EXCLUDED.consolidated_feedback,
+           consolidated_recommendations = EXCLUDED.consolidated_recommendations,
+           admin_approval_status        = EXCLUDED.admin_approval_status,
+           moderation_notes             = EXCLUDED.moderation_notes,
+           rejection_reason             = EXCLUDED.rejection_reason,
+           feedback_sent_date           = EXCLUDED.feedback_sent_date,
+           completed_at                 = EXCLUDED.completed_at,
+           updated_at                   = NOW()`,
+        [
+          id,
+          value.user_id || null,
+          value.track_id || null,
+          value.guest_email || null,
+          value.guest_name || null,
+          value.guest_track_url || null,
+          value.guest_cover_url || null,
+          value.track_title || '',
+          value.artist_name || '',
+          value.genre || null,
+          value.status || 'pending_payment',
+          value.payment_status || 'pending',
+          Number(value.payment_amount || 0),
+          value.payment_transaction_id || null,
+          Number(value.required_expert_count || 5),
+          Number(value.completed_reviews_count || 0),
+          value.average_rating !== undefined && value.average_rating !== null ? Number(value.average_rating) : null,
+          JSON.stringify(assigned),
+          JSON.stringify(catAvg),
+          value.final_analysis || null,
+          value.consolidated_feedback || null,
+          value.consolidated_recommendations || null,
+          value.admin_approval_status || null,
+          value.moderation_notes || null,
+          value.rejection_reason || null,
+          value.feedback_sent_date || null,
+          value.completed_at || null,
+        ]
+      );
+    },
+    async del(id: string): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      await pool.query(`DELETE FROM track_test_requests WHERE id = $1`, [id]);
+    },
+    async getAll(): Promise<any[]> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT ${TRACK_TEST_REQUEST_COLS} FROM track_test_requests
+          ORDER BY created_at DESC`
+      );
+      return r.rows.map(mapTrackTestRequestRow);
+    },
+    async getByCol(column: string, value: string): Promise<any[]> {
+      const { pool } = await import('./db-client.tsx');
+      const allowed = new Set(['user_id', 'track_id', 'status', 'payment_status', 'payment_transaction_id']);
+      if (!allowed.has(column)) {
+        console.error(`[db] trackTestRequestsStore.getByCol: column "${column}" not allowed`);
+        return [];
+      }
+      const r = await pool.query(
+        `SELECT ${TRACK_TEST_REQUEST_COLS} FROM track_test_requests
+          WHERE ${column} = $1
+          ORDER BY created_at DESC`,
+        [value]
+      );
+      return r.rows.map(mapTrackTestRequestRow);
+    },
+  };
+}
+
+// trackTestUserRequestsStore: legacy interface — .get(userId) → string[],
+// .set(userId, ids) → store the per-user index array. После 051 это
+// derived из track_test_requests.user_id, поэтому set/del = no-op.
+function makeTrackTestUserRequestsView() {
+  return {
+    async get(userId: string): Promise<string[]> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT id FROM track_test_requests
+          WHERE user_id = $1
+          ORDER BY created_at DESC`,
+        [userId]
+      );
+      return r.rows.map((row: any) => row.id);
+    },
+    async set(_userId: string, _value: any): Promise<void> {
+      // No-op: index derived from track_test_requests.user_id automatically.
+    },
+    async del(_userId: string): Promise<void> {
+      // No-op: rows cleared via main store .del which removes by id.
+    },
+    async getAll(): Promise<string[]> {
+      // Legacy interface returned all user-keys; not used after migration.
+      return [];
+    },
+  };
+}
+
+// trackTestAllRequestsStore: legacy interface — .get('singleton') → string[]
+// global index of all request ids. Тоже derived от now.
+function makeTrackTestAllRequestsView() {
+  return {
+    async get(_key: string): Promise<string[]> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT id FROM track_test_requests ORDER BY created_at DESC`
+      );
+      return r.rows.map((row: any) => row.id);
+    },
+    async set(_key: string, _value: any): Promise<void> {
+      // No-op: derived view.
+    },
+    async del(_key: string): Promise<void> {
+      // No-op.
+    },
+    async getAll(): Promise<string[]> {
+      return [];
+    },
+  };
+}
+
 // ─── Store instances for all tables ───
 
 export const beatFavoritesStore = jsonbStore('beat_favorites', 'user_id');
@@ -1694,9 +1914,16 @@ export const venueAnalyticsStore = jsonbStore('venue_analytics', 'venue_id');
 export const venueRadioBrandStore = jsonbStore('venue_radio_brand', 'venue_id');
 export const ticketProvidersStore = jsonbStore('ticket_providers');
 export const ticketSalesStore = jsonbStore('ticket_sales');
-export const trackTestRequestsStore = jsonbStore('track_test_requests');
-export const trackTestUserRequestsStore = jsonbStore('track_test_user_requests', 'user_id');
-export const trackTestAllRequestsStore = jsonbStore('track_test_all_requests');
+// track_test_requests — row-per-request, native cols since migration 051.
+// Interface (.get / .set / .del / .getAll) preserved для совместимости
+// с handler'ами; backed by pool.query на native cols.
+export const trackTestRequestsStore = makeTrackTestRequestsStore();
+// Per-user / global index stores стали derived view из main table.
+// Handler'ы продолжают вызывать .get/.set, но set = no-op (данные авто-
+// синхронизированы через track_test_requests.user_id), а get возвращает
+// SELECT id FROM track_test_requests …
+export const trackTestUserRequestsStore = makeTrackTestUserRequestsView();
+export const trackTestAllRequestsStore = makeTrackTestAllRequestsView();
 export const trackTestExpertsStore = jsonbStore('track_test_experts');
 export const trackTestReviewsStore = jsonbStore('track_test_reviews');
 export const trackTestRequestReviewsStore = jsonbStore('track_test_request_reviews', 'request_id');
