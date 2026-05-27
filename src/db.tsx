@@ -1500,7 +1500,8 @@ export const serviceOrdersStore = jsonbStore('service_orders');
 export const serviceOrdersByClientStore = jsonbStore('service_orders_by_client', 'client_id');
 export const serviceOrdersByProducerStore = jsonbStore('service_orders_by_producer', 'producer_id');
 export const bookingCalendarStore = jsonbStore('booking_calendar', 'performer_id');
-export const paymentTransactionsStore = jsonbStore('payment_transactions', 'user_id');
+// payment_transactions переехал на row-per-tx (migration 037). Доступ
+// через pool.query из platform-revenue.tsx + track-test-routes.tsx.
 export const paymentBalancesStore = jsonbStore('payment_balances', 'user_id');
 export const djMarketplaceIndexStore = jsonbStore('dj_marketplace_index');
 export const djMixesStore = jsonbStore('dj_mixes', 'dj_id');
