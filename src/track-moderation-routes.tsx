@@ -265,6 +265,23 @@ app.post('/submitTrack', requireAuth, async (c) => {
     if (!body.title || !body.title.trim()) {
       return c.json({ error: 'Укажите название трека', code: 'TITLE_REQUIRED' }, 400);
     }
+    // RULE: трек нельзя отправить на модерацию без обложки.
+    // Раньше backend принимал пустой cover и подставлял
+    // /images/default-cover.svg — placeholder висел в публичном эфире,
+    // плеере, профиле артиста и «Новинках недели». Эстетически бедно
+    // и подрывает бренд (см. кейс DJ Альберт project «Великая сила -
+    // любовь» 2026-05-27).
+    // Симметрично AUDIO_REQUIRED — обязываем cover на этапе submitTrack,
+    // без него 400 COVER_REQUIRED. Default-cover SVG остаётся как
+    // final-fallback для legacy-rows (5677 без audio_url которые ждут
+    // миграции с старой платформы — там обложек тоже может не быть).
+    const coverImageUrl = body.cover_image_url || body.cover_url || '';
+    if (!coverImageUrl || !coverImageUrl.trim() || coverImageUrl.endsWith('/default-cover.svg')) {
+      return c.json({
+        error: 'Загрузите обложку трека перед отправкой на модерацию',
+        code: 'COVER_REQUIRED'
+      }, 400);
+    }
 
     const track = await typed.insertTrack({
       title: body.title || '',
