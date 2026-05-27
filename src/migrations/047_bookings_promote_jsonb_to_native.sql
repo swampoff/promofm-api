@@ -95,6 +95,12 @@ ALTER TABLE bookings
   ADD COLUMN IF NOT EXISTS deposit_amount NUMERIC,
   ADD COLUMN IF NOT EXISTS deposit_paid   BOOLEAN      NOT NULL DEFAULT FALSE;
 
+-- Laptop pre-flight fix 2026-05-27: event_date уже существует как TEXT,
+-- ADD COLUMN IF NOT EXISTS skipped. Конвертируем в TIMESTAMPTZ до UPDATE.
+ALTER TABLE bookings
+  ALTER COLUMN event_date TYPE TIMESTAMPTZ
+  USING NULLIF(event_date, '')::timestamptz;
+
 -- Backfill из data jsonb. Только UPDATE'им существующие строки —
 -- defensive: только если native col NULL (не overwrite если уже
 -- стояло).
