@@ -75,6 +75,92 @@ async function resolveTrackPublicationPrice(userId: string, currentTrackId: stri
   }
 }
 
+/**
+ * Stage published track для AutoDJ airplay.
+ *
+ * AutoDJ читает из /mnt/data/promofm-music/tracks/ и фильтрует треки в БД
+ * по `audio_url LIKE '/server/uploads/tracks/%'`. Артистский upload через
+ * /track-moderation/submit-track складывает файл в /uploads/track-audio/
+ * (другой путь) — туда AutoDJ не смотрит, трек не попадает в эфир.
+ *
+ * Эта функция мигрирует трек в правильную локацию:
+ *   1. Копирует физический файл из /var/www/promofm/uploads/track-audio/
+ *      в /mnt/data/promofm-music/tracks/<slug>.<ext>
+ *   2. UPDATE tracks.audio_url на /server/uploads/tracks/<slug>.<ext>
+ *   3. symlink на /var/www/promofm/uploads/tracks/<slug>.<ext> чтобы nginx
+ *      отдавал на новом URL
+ *
+ * Идемпотентно: если файл уже в MUSIC_DIR или audio_url уже норм — skip.
+ * Это правило для всех треков с шаутаутами (и без) — единственный путь
+ * чтобы published трек реально зазвучал в эфире.
+ */
+async function stageTrackForAirplay(trackId: string, track: any): Promise<void> {
+  const fs = await import('fs/promises');
+  const path = await import('path');
+  const audioUrl = String(track.audio_url || '');
+  // Уже на правильном пути — нечего делать.
+  if (audioUrl.startsWith('/server/uploads/tracks/')) return;
+  if (!audioUrl.includes('/uploads/track-audio/')) {
+    // Внешний URL (Yandex/Spotify/etc) — это не наш файл, AutoDJ не сможет
+    // его проиграть; оставляем как есть (он может попасть в эфир через
+    // другие источники типа Shazam).
+    return;
+  }
+  // Источник: физический файл артистской загрузки.
+  const filename = audioUrl.split('/uploads/track-audio/').pop() || '';
+  if (!filename) return;
+  // Если filename начинается с 'uploads/', убираем дубликат
+  const cleanFilename = filename.startsWith('uploads/') ? filename.substring(8) : filename;
+  const srcPath = `${UPLOADS_DIR}/track-audio/uploads/${cleanFilename}`;
+  // Slug-имя на основе artist + title для читаемости. Транслит и сжатие
+  // спецсимволов чтобы избежать problemc URL-encoding и shell escaping
+  // в ffmpeg / play_track.
+  const ext = (cleanFilename.split('.').pop() || 'mp3').toLowerCase();
+  const slug = `${String(track.artist_name || 'unknown').trim()}_-_${String(track.title || 'untitled').trim()}`
+    .replace(/[^A-Za-zА-Яа-я0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 80);
+  const dstName = `${slug}.${ext}`;
+  const MUSIC_DIR = '/mnt/data/promofm-music/tracks';
+  const dstPath = `${MUSIC_DIR}/${dstName}`;
+  const nginxPath = `${UPLOADS_DIR}/tracks/${dstName}`;
+  try {
+    await fs.access(srcPath);
+  } catch {
+    console.warn(`[stageForAir] source missing: ${srcPath}`);
+    return;
+  }
+  // Копируем (если уже есть — пропускаем).
+  try {
+    await fs.access(dstPath);
+    console.log(`[stageForAir] already staged: ${dstName}`);
+  } catch {
+    await fs.copyFile(srcPath, dstPath);
+    console.log(`[stageForAir] staged ${trackId}: ${dstName}`);
+  }
+  // Symlink на nginx-путь чтобы фронтенд продолжал получать файл по
+  // /server/uploads/tracks/<name>.
+  try {
+    await fs.symlink(dstPath, nginxPath);
+  } catch (e: any) {
+    if (e?.code !== 'EEXIST') console.warn(`[stageForAir] symlink failed: ${e?.message}`);
+  }
+  // Обновляем audio_url в БД.
+  const newUrl = `/server/uploads/tracks/${dstName}`;
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(`UPDATE tracks SET audio_url = $1, updated_at = NOW() WHERE id = $2`, [newUrl, trackId]);
+  console.log(`[stageForAir] DB url updated for ${trackId}: ${newUrl}`);
+
+  // Триггерим пересборку metadata.json чтобы AutoDJ сразу увидел новый трек
+  // (без этого build-metadata.py запускается только при рестарте autodj).
+  try {
+    const resp = await fetch('http://127.0.0.1:8087/api/metadata/scan', { method: 'POST' });
+    if (resp.ok) console.log(`[stageForAir] autodj metadata rescan triggered for ${trackId}`);
+  } catch (e: any) {
+    console.warn(`[stageForAir] autodj rescan failed (non-fatal):`, e?.message);
+  }
+}
+
 // Fire-and-forget AI analysis for uploaded track
 async function triggerAiAnalysis(trackId: string, audioUrl: string) {
   try {
@@ -980,6 +1066,18 @@ app.post('/promote-upcoming', async (c) => {
           published_at: now.toISOString(),
         },
       });
+
+      // Stage аудио для air (AutoDJ читает из /mnt/data/promofm-music/tracks/).
+      // Если трек загружен в /uploads/track-audio/ — копируем в MUSIC_DIR с
+      // понятным именем и обновляем audio_url на /server/uploads/tracks/<name>.
+      // build-metadata.py фильтрует именно LIKE '/server/uploads/tracks/%',
+      // без этой нормализации artist-uploaded треки в эфир не попадают.
+      // Идемпотентно: если файл уже в MUSIC_DIR — skip (cp -n).
+      try {
+        await stageTrackForAirplay(track.id, track);
+      } catch (e: any) {
+        console.warn(`[promote-upcoming] stageTrackForAirplay failed for ${track.id}:`, e?.message);
+      }
 
       // Сразу инжектим трек в активный weekly_release (новинки недели).
       // Раньше: weekly_release пересоздавался только по пятницам через
