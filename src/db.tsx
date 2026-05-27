@@ -1630,6 +1630,250 @@ function jsonbStore(table: string, pk = 'id') {
   };
 }
 
+// ─── track_test_reviews native-cols store (migration 053) ───
+
+const TRACK_TEST_REVIEW_COLS = `id, request_id, expert_email, expert_name, expert_role,
+  status, mixing_mastering_score, arrangement_score, originality_score,
+  commercial_potential_score, overall_score, mixing_mastering_feedback,
+  arrangement_feedback, originality_feedback, commercial_potential_feedback,
+  general_feedback, recommendations, audio_notes, reward_points, reward_paid,
+  completed_at, created_at, updated_at`;
+
+function mapTrackTestReviewRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    request_id: r.request_id,
+    expert_email: r.expert_email,
+    expert_name: r.expert_name || '',
+    expert_role: r.expert_role || undefined,
+    status: r.status,
+    mixing_mastering_score: Number(r.mixing_mastering_score || 0),
+    arrangement_score: Number(r.arrangement_score || 0),
+    originality_score: Number(r.originality_score || 0),
+    commercial_potential_score: Number(r.commercial_potential_score || 0),
+    overall_score: Number(r.overall_score || 0),
+    mixing_mastering_feedback: r.mixing_mastering_feedback || '',
+    arrangement_feedback: r.arrangement_feedback || '',
+    originality_feedback: r.originality_feedback || '',
+    commercial_potential_feedback: r.commercial_potential_feedback || '',
+    general_feedback: r.general_feedback || '',
+    recommendations: r.recommendations || '',
+    audio_notes: r.audio_notes || [],
+    reward_points: Number(r.reward_points || 50),
+    reward_paid: !!r.reward_paid,
+    completed_at: iso(r.completed_at) || undefined,
+    created_at: iso(r.created_at),
+    updated_at: iso(r.updated_at),
+  };
+}
+
+function makeTrackTestReviewsStore() {
+  return {
+    async get(id: string): Promise<any | null> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT ${TRACK_TEST_REVIEW_COLS} FROM track_test_reviews WHERE id = $1 LIMIT 1`,
+        [id]
+      );
+      return r.rowCount ? mapTrackTestReviewRow(r.rows[0]) : null;
+    },
+    async set(id: string, value: any): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      const notes = Array.isArray(value.audio_notes) ? value.audio_notes : [];
+      await pool.query(
+        `INSERT INTO track_test_reviews (
+           id, request_id, expert_email, expert_name, expert_role,
+           status, mixing_mastering_score, arrangement_score, originality_score,
+           commercial_potential_score, overall_score, mixing_mastering_feedback,
+           arrangement_feedback, originality_feedback, commercial_potential_feedback,
+           general_feedback, recommendations, audio_notes, reward_points, reward_paid,
+           completed_at, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5,
+                 $6, $7, $8, $9,
+                 $10, $11, $12,
+                 $13, $14, $15,
+                 $16, $17, $18::jsonb, $19, $20,
+                 $21, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           request_id                    = COALESCE(EXCLUDED.request_id, track_test_reviews.request_id),
+           expert_email                  = COALESCE(EXCLUDED.expert_email, track_test_reviews.expert_email),
+           expert_name                   = EXCLUDED.expert_name,
+           expert_role                   = EXCLUDED.expert_role,
+           status                        = EXCLUDED.status,
+           mixing_mastering_score        = EXCLUDED.mixing_mastering_score,
+           arrangement_score             = EXCLUDED.arrangement_score,
+           originality_score             = EXCLUDED.originality_score,
+           commercial_potential_score    = EXCLUDED.commercial_potential_score,
+           overall_score                 = EXCLUDED.overall_score,
+           mixing_mastering_feedback     = EXCLUDED.mixing_mastering_feedback,
+           arrangement_feedback          = EXCLUDED.arrangement_feedback,
+           originality_feedback          = EXCLUDED.originality_feedback,
+           commercial_potential_feedback = EXCLUDED.commercial_potential_feedback,
+           general_feedback              = EXCLUDED.general_feedback,
+           recommendations               = EXCLUDED.recommendations,
+           audio_notes                   = EXCLUDED.audio_notes,
+           reward_points                 = EXCLUDED.reward_points,
+           reward_paid                   = EXCLUDED.reward_paid,
+           completed_at                  = EXCLUDED.completed_at,
+           updated_at                    = NOW()`,
+        [
+          id,
+          value.request_id || null,
+          value.expert_email || null,
+          value.expert_name || '',
+          value.expert_role || null,
+          value.status || 'assigned',
+          Number(value.mixing_mastering_score || 0),
+          Number(value.arrangement_score || 0),
+          Number(value.originality_score || 0),
+          Number(value.commercial_potential_score || 0),
+          Number(value.overall_score || 0),
+          value.mixing_mastering_feedback || '',
+          value.arrangement_feedback || '',
+          value.originality_feedback || '',
+          value.commercial_potential_feedback || '',
+          value.general_feedback || '',
+          value.recommendations || '',
+          JSON.stringify(notes),
+          Number(value.reward_points || 50),
+          !!value.reward_paid,
+          value.completed_at || null,
+        ]
+      );
+    },
+    async del(id: string): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      await pool.query(`DELETE FROM track_test_reviews WHERE id = $1`, [id]);
+    },
+    async getAll(): Promise<any[]> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT ${TRACK_TEST_REVIEW_COLS} FROM track_test_reviews ORDER BY created_at DESC`
+      );
+      return r.rows.map(mapTrackTestReviewRow);
+    },
+    async getByCol(column: string, value: string): Promise<any[]> {
+      const { pool } = await import('./db-client.tsx');
+      const allowed = new Set(['request_id', 'expert_email', 'status']);
+      if (!allowed.has(column)) {
+        console.error(`[db] trackTestReviewsStore.getByCol: column "${column}" not allowed`);
+        return [];
+      }
+      const r = await pool.query(
+        `SELECT ${TRACK_TEST_REVIEW_COLS} FROM track_test_reviews
+          WHERE ${column} = $1
+          ORDER BY created_at DESC`,
+        [value]
+      );
+      return r.rows.map(mapTrackTestReviewRow);
+    },
+  };
+}
+
+// trackTestRequestReviewsStore — derived view: list review_ids per request.
+function makeTrackTestRequestReviewsView() {
+  return {
+    async get(requestId: string): Promise<string[]> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT id FROM track_test_reviews
+          WHERE request_id = $1
+          ORDER BY created_at ASC`,
+        [requestId]
+      );
+      return r.rows.map((row: any) => row.id);
+    },
+    async set(_requestId: string, _value: any): Promise<void> { /* no-op: derived from request_id */ },
+    async del(_requestId: string): Promise<void> { /* no-op */ },
+    async getAll(): Promise<string[]> { return []; },
+  };
+}
+
+// ─── track_test_expert_stats native-cols store (migration 053) ───
+
+function mapTrackTestExpertStatsRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    expert_id: r.expert_id,
+    total_assigned: Number(r.total_assigned || 0),
+    total_completed: Number(r.total_completed || 0),
+    total_coins: Number(r.total_coins || 0),
+    rating_bonus: Number(r.rating_bonus || 0),
+    joined_at: iso(r.joined_at) || undefined,
+  };
+}
+
+function makeTrackTestExpertStatsStore() {
+  return {
+    async get(expertId: string): Promise<any | null> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT expert_id, total_assigned, total_completed, total_coins, rating_bonus, joined_at
+           FROM track_test_expert_stats WHERE expert_id = $1 LIMIT 1`,
+        [expertId]
+      );
+      return r.rowCount ? mapTrackTestExpertStatsRow(r.rows[0]) : null;
+    },
+    async set(expertId: string, value: any): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      await pool.query(
+        `INSERT INTO track_test_expert_stats
+           (expert_id, total_assigned, total_completed, total_coins, rating_bonus, joined_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, NOW()), NOW())
+         ON CONFLICT (expert_id) DO UPDATE SET
+           total_assigned  = EXCLUDED.total_assigned,
+           total_completed = EXCLUDED.total_completed,
+           total_coins     = EXCLUDED.total_coins,
+           rating_bonus    = EXCLUDED.rating_bonus,
+           joined_at       = COALESCE(track_test_expert_stats.joined_at, EXCLUDED.joined_at),
+           updated_at      = NOW()`,
+        [
+          expertId,
+          Number(value.total_assigned || 0),
+          Number(value.total_completed || 0),
+          Number(value.total_coins || 0),
+          Number(value.rating_bonus || 0),
+          value.joined_at || null,
+        ]
+      );
+    },
+    async del(expertId: string): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      await pool.query(`DELETE FROM track_test_expert_stats WHERE expert_id = $1`, [expertId]);
+    },
+    async getAll(): Promise<any[]> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT expert_id, total_assigned, total_completed, total_coins, rating_bonus, joined_at
+           FROM track_test_expert_stats ORDER BY total_completed DESC`
+      );
+      return r.rows.map(mapTrackTestExpertStatsRow);
+    },
+  };
+}
+
+// trackTestExpertsStore — singleton registry. Derived: DISTINCT expert_id
+// FROM track_test_expert_stats. Handler ВСЕГДА вызывает .get('singleton')
+// и .set('singleton', array_of_ids). После 053 это derived из stats table.
+function makeTrackTestExpertsView() {
+  return {
+    async get(_key: string): Promise<string[]> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT expert_id FROM track_test_expert_stats ORDER BY joined_at NULLS LAST, expert_id`
+      );
+      return r.rows.map((row: any) => row.expert_id);
+    },
+    async set(_key: string, _value: any): Promise<void> { /* no-op: derived */ },
+    async del(_key: string): Promise<void> { /* no-op */ },
+    async getAll(): Promise<string[]> { return []; },
+  };
+}
+
 // ─── Store instances for all tables ───
 
 export const beatFavoritesStore = jsonbStore('beat_favorites', 'user_id');
@@ -1697,9 +1941,12 @@ export const ticketSalesStore = jsonbStore('ticket_sales');
 export const trackTestRequestsStore = jsonbStore('track_test_requests');
 export const trackTestUserRequestsStore = jsonbStore('track_test_user_requests', 'user_id');
 export const trackTestAllRequestsStore = jsonbStore('track_test_all_requests');
-export const trackTestExpertsStore = jsonbStore('track_test_experts');
-export const trackTestReviewsStore = jsonbStore('track_test_reviews');
-export const trackTestRequestReviewsStore = jsonbStore('track_test_request_reviews', 'request_id');
+// trackTestReviewsStore — native cols since migration 053.
+// trackTestRequestReviewsStore — derived from track_test_reviews.request_id (DROP'нута).
+// trackTestExpertsStore — derived from DISTINCT track_test_expert_stats.expert_id (DROP'нута).
+export const trackTestReviewsStore = makeTrackTestReviewsStore();
+export const trackTestRequestReviewsStore = makeTrackTestRequestReviewsView();
+export const trackTestExpertsStore = makeTrackTestExpertsView();
 export const newsPipelineStore = jsonbStore('news_pipeline', 'key');
 export const agentSessionsStore = jsonbStore('agent_sessions');
 export const agentSessionsIndexStore = jsonbStore('agent_sessions_index');
@@ -1717,7 +1964,8 @@ export const guideDataStore = jsonbStore('promo_guide_data', 'key');
 export const elevenlabsStore = jsonbStore('elevenlabs_config');
 export const platformRevenueLogStore = jsonbStore('platform_revenue_log');
 export const platformStatsStore = jsonbStore('platform_stats', 'id');
-export const trackTestExpertStatsStore = jsonbStore('track_test_expert_stats', 'expert_id');
+// trackTestExpertStatsStore — native cols since migration 053.
+export const trackTestExpertStatsStore = makeTrackTestExpertStatsStore();
 export const trackModerationStore = jsonbStore('track_moderation');
 export const newsPublicStore = jsonbStore('news_public');
 export const contactFormsStore = jsonbStore('contact_forms');
