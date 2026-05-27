@@ -218,12 +218,12 @@ app.post('/create', requireAuth, async (c) => {
         const monthEnd = new Date(monthStart);
         monthEnd.setUTCMonth(monthEnd.getUTCMonth() + 1);
 
+        // Native cols (migration 047) — partial index idx_bookings_performer_event_date.
         const cnt = await pool.query(
           `SELECT COUNT(*)::int AS n FROM bookings
             WHERE performer_id = $1
-              AND (data->>'eventDate')::timestamptz >= $2
-              AND (data->>'eventDate')::timestamptz <  $3
-              AND COALESCE(data->>'status', 'pending') NOT IN ('rejected', 'cancelled')`,
+              AND event_date >= $2 AND event_date < $3
+              AND status NOT IN ('rejected', 'cancelled')`,
           [String(performerId), monthStart.toISOString(), monthEnd.toISOString()]
         );
         const existing = Number(cnt.rows[0]?.n) || 0;
