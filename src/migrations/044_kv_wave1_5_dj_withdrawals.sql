@@ -39,6 +39,15 @@
 --      EOF
 --   3. cd /opt/promofm-api && git pull && sudo systemctl restart promofm-api
 
+-- Bootstrap legacy kv-store table if missing (jsonbStore.set never called → table not created).
+-- Laptop pre-flight 2026-05-27: dj_withdrawals не существовал на проде.
+CREATE TABLE IF NOT EXISTS dj_withdrawals (
+  dj_id      TEXT        PRIMARY KEY,
+  data       JSONB                DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ          DEFAULT NOW(),
+  updated_at TIMESTAMPTZ          DEFAULT NOW()
+);
+
 CREATE TEMP TABLE _djw_backup ON COMMIT DROP AS
   SELECT dj_id AS legacy_dj_id, data, created_at FROM dj_withdrawals;
 
