@@ -23,7 +23,8 @@
  *   await recordRevenue({ channel: 'dj_booking', ... });
  */
 
-import { platformRevenueLogStore, paymentTransactionsStore, paymentBalancesStore } from './db.tsx';
+import { platformRevenueLogStore, paymentBalancesStore } from './db.tsx';
+import { pool } from './db-client.tsx';
 
 export interface RevenueEntry {
   id: string;
@@ -87,55 +88,74 @@ export async function recordRevenue(params: {
   };
 
   try {
-    // 1. Платёжный ledger
-    const txRaw = await paymentTransactionsStore.get('platform');
-    const txs: any[] = Array.isArray(txRaw) ? txRaw : [];
-    txs.push({
-      id,
-      userId: 'platform',
-      type: 'commission',
-      category: params.channel,
-      amount: params.platformRevenue,
-      description: params.description,
-      metadata: { ...params.metadata, grossAmount: params.grossAmount, payoutAmount: entry.payoutAmount, channel: params.channel },
-      status: 'completed',
-      createdAt: now,
-    });
-    await paymentTransactionsStore.set('platform', txs);
+    // 1. Платёжный ledger — row-per-transaction (migration 037).
+    // 'platform' остаётся как valid user_id (system bucket для комиссий).
+    await pool.query(
+      `INSERT INTO payment_transactions
+         (app_id, user_id, amount, currency, tx_type, category, status,
+          description, metadata, created_at)
+       VALUES ($1, 'platform', $2, 'RUB', 'commission', $3, 'completed',
+               $4, $5::jsonb, $6)
+       ON CONFLICT (user_id, app_id) DO NOTHING`,
+      [
+        id,
+        params.platformRevenue,
+        params.channel,
+        params.description,
+        JSON.stringify({ ...params.metadata, grossAmount: params.grossAmount, payoutAmount: entry.payoutAmount, channel: params.channel }),
+        now,
+      ]
+    );
 
-    // 2. Баланс платформы
+    // 2. Баланс платформы — payment_balances остаётся singleton-style KV
+    // (один user → один баланс), это валидный паттерн.
     const balRaw = await paymentBalancesStore.get('platform');
     const bal = (balRaw && typeof balRaw === 'object' && !Array.isArray(balRaw)) ? balRaw as any : { available: 0, pending: 0, total: 0 };
     bal.available += params.platformRevenue;
     bal.total = bal.available + bal.pending;
     await paymentBalancesStore.set('platform', bal);
 
-    // 3. Общий реестр доходов
+    // 3. Общий реестр доходов — пока остаётся kv-array (Wave 2 будет
+    // мигрировать platform_revenue_log на row-per-entry).
     const logRaw = await platformRevenueLogStore.get('singleton');
     const log: RevenueEntry[] = Array.isArray(logRaw) ? logRaw : [];
     log.push(entry);
     await platformRevenueLogStore.set('singleton', log);
 
-    // 4. Также записать в marketplace:transactions для обратной совместимости (если маркетплейс)
+    // 4. Дублирующая запись в 'marketplace' bucket для совместимости
+    // с legacy marketplace-Финансы вьюхами. После Wave 2 (когда
+    // platform_revenue_log станет row-per-entry с category column)
+    // эту вставку можно удалить — admin-Финансы будет читать оттуда.
     if (['marketplace_beat', 'marketplace_service', 'marketplace_digital'].includes(params.channel)) {
-      const mRaw = await paymentTransactionsStore.get('marketplace');
-      const mTxs: any[] = Array.isArray(mRaw) ? mRaw : [];
-      mTxs.push({
-        id,
-        type: params.channel.replace('marketplace_', ''),
-        itemTitle: params.description,
-        totalPrice: params.grossAmount,
-        commission: params.platformRevenue,
-        producerPayout: entry.payoutAmount,
-        producerId: params.payeeId,
-        producerName: params.payeeName,
-        buyerId: params.payerId,
-        buyerName: params.payerName,
-        status: 'completed',
-        createdAt: now,
-        ...params.metadata,
-      });
-      await paymentTransactionsStore.set('marketplace', mTxs);
+      const mAppId = `${id}-mp`;
+      const subtype = params.channel.replace('marketplace_', '');
+      await pool.query(
+        `INSERT INTO payment_transactions
+           (app_id, user_id, amount, currency, tx_type, category, status,
+            description, metadata, created_at)
+         VALUES ($1, 'marketplace', $2, 'RUB', $3, $4, 'completed',
+                 $5, $6::jsonb, $7)
+         ON CONFLICT (user_id, app_id) DO NOTHING`,
+        [
+          mAppId,
+          params.grossAmount,
+          subtype,
+          params.channel,
+          params.description,
+          JSON.stringify({
+            itemTitle: params.description,
+            totalPrice: params.grossAmount,
+            commission: params.platformRevenue,
+            producerPayout: entry.payoutAmount,
+            producerId: params.payeeId,
+            producerName: params.payeeName,
+            buyerId: params.payerId,
+            buyerName: params.payerName,
+            ...params.metadata,
+          }),
+          now,
+        ]
+      );
     }
 
     console.log(`[Revenue] ${params.channel}: ${params.platformRevenue}₽ (gross ${params.grossAmount}₽)`);

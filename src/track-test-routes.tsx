@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { paymentTransactionsStore, trackTestAllRequestsStore, trackTestExpertsStore, trackTestExpertStatsStore, trackTestRequestReviewsStore, trackTestRequestsStore, trackTestReviewsStore, trackTestUserRequestsStore } from './db.tsx';
+import { trackTestAllRequestsStore, trackTestExpertsStore, trackTestExpertStatsStore, trackTestRequestReviewsStore, trackTestRequestsStore, trackTestReviewsStore, trackTestUserRequestsStore } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { quickLLM, getLLMStatus } from './llm-router.tsx';
@@ -379,22 +379,24 @@ app.post('/payment/confirm', requireAuth, async (c) => {
 
     await trackTestRequestsStore.set(request_id, request);
 
-    // Record transaction
-    const paymentTx = {
-      id: crypto.randomUUID(),
-      user_id: request.user_id,
-      amount: request.payment_amount,
-      currency: 'RUB',
-      type: 'track_test',
-      status: 'completed',
-      payment_method,
-      description: `Track test: ${request.track_title}`,
-      related_entity_type: 'track_test_request',
-      related_entity_id: request_id,
-      created_at: new Date().toISOString()
-    };
-
-    await paymentTransactionsStore.set(request.user_id, paymentTx);
+    // Record transaction (migration 037: row-per-tx, не overwrite массива).
+    await pool.query(
+      `INSERT INTO payment_transactions
+         (app_id, user_id, amount, currency, tx_type, status,
+          payment_method, description, related_entity_type,
+          related_entity_id, created_at)
+       VALUES ($1, $2, $3, 'RUB', 'track_test', 'completed',
+               $4, $5, 'track_test_request', $6, NOW())
+       ON CONFLICT (user_id, app_id) DO NOTHING`,
+      [
+        crypto.randomUUID(),
+        request.user_id,
+        request.payment_amount,
+        payment_method,
+        `Track test: ${request.track_title}`,
+        request_id,
+      ]
+    );
 
     // Запись дохода платформы (тест трека - 100% дохода)
     await recordRevenue({
