@@ -32,11 +32,16 @@
 -- MANUAL DEPLOY STEPS:
 --   1. pg_dump -t collab_messages -t publish_chats promofm \
 --        > /tmp/msgs_backup_$(date +%s).sql
---   2. sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 \
---        -f /opt/promofm-api/src/migrations/038_kv_to_sql_collab_messages_publish_chats.sql
+--   2. sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+--      BEGIN;
+--      \i /opt/promofm-api/src/migrations/038_kv_to_sql_collab_messages_publish_chats.sql
+--      COMMIT;
+--      EOF
 --   3. cd /opt/promofm-api && git pull && sudo systemctl restart promofm-api
-
-BEGIN;
+--
+-- ⚠️ КОНВЕНЦИЯ ТРАНЗАКЦИИ: файл НЕ содержит BEGIN/COMMIT — wrapping
+-- управляется внешним runner'ом (см. MANUAL DEPLOY STEPS выше).
+-- Inner BEGIN в DO $$ ... END $$ — это PL/pgSQL block, не transaction.
 
 -- ════════════════════════════════════════════════════════════════════
 -- 1. collab_messages → row-per-message
@@ -178,5 +183,3 @@ FROM _pc_backup b,
      ) elem;
 
 ALTER TABLE publish_chats DROP COLUMN IF EXISTS data;
-
-COMMIT;
