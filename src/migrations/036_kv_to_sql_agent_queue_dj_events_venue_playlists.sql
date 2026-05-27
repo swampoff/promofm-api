@@ -30,13 +30,18 @@
 -- MANUAL DEPLOY STEPS:
 --   1. (laptop) pg_dump -t agent_queue -t dj_events -t venue_playlists \
 --        promofm > /tmp/kv_backup_$(date +%s).sql
---   2. (laptop) sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 \
---        -f /opt/promofm-api/src/migrations/036_kv_to_sql_agent_queue_dj_events_venue_playlists.sql
+--   2. (laptop) sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+--      BEGIN;
+--      \i /opt/promofm-api/src/migrations/036_kv_to_sql_agent_queue_dj_events_venue_playlists.sql
+--      COMMIT;
+--      EOF
 --   3. (laptop) cd /opt/promofm-api && git pull && sudo systemctl restart promofm-api
 --
 -- Откат: восстановить из дампа шага 1.
-
-BEGIN;
+--
+-- ⚠️ КОНВЕНЦИЯ ТРАНЗАКЦИИ: файл НЕ содержит BEGIN/COMMIT — wrapping
+-- управляется внешним runner'ом (см. MANUAL DEPLOY STEPS выше).
+-- Inner BEGIN в DO $$ ... END $$ — это PL/pgSQL block, не transaction.
 
 -- ════════════════════════════════════════════════════════════════════
 -- 1. agent_queue → agent_tasks (новая таблица, старую DROP'аем)
@@ -245,5 +250,3 @@ FROM _vp_backup b,
      ) elem;
 
 ALTER TABLE venue_playlists DROP COLUMN IF EXISTS data;
-
-COMMIT;
