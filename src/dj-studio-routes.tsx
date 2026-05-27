@@ -769,35 +769,41 @@ app.delete('/collaborations/:id', requireAuth, requireDjRole, async (c) => {
 });
 
 // ════════════════════════════════════════
-// NOTIFICATIONS
+// NOTIFICATIONS (cross_cabinet_notifications, migration 045)
 // ════════════════════════════════════════
+// dj_notifications table dropped — был orphan (0 writers,
+// cross-cabinet-notify.tsx пишет в cross_cabinet_notifications).
+// DJ /notifications page всё это время был broken — всегда показывал
+// пустой массив. Эти handlers сейчас читают/обновляют актуальный store.
 
 // GET /notifications
 app.get('/notifications', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const notifications = await djNotificationsStore.get(userId) || [];
+    const { getCcnByUser } = await import('./db.tsx');
+    const notifications = await getCcnByUser(userId);
     return c.json({ success: true, data: notifications });
   } catch (error) {
+    console.error('Error fetching DJ notifications:', error);
     return c.json({ success: true, data: [] });
   }
 });
 
-// POST /notifications/read
+// POST /notifications/read — mark notifications as read.
+// body: { ids?: string[] }. If ids omitted → mark all as read.
 app.post('/notifications/read', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const body = await c.req.json();
-    const { ids } = body;
+    const body = await c.req.json().catch(() => ({}));
+    const ids: string[] | undefined = Array.isArray(body.ids) ? body.ids : undefined;
 
-    const notifications = (await djNotificationsStore.get(userId)) || [];
-    for (const n of notifications) {
-      if (!ids || ids.includes(n.id)) {
-        n.read = true;
-      }
+    const { markAsRead, markAllAsRead } = await import('./cross-cabinet-notify.tsx');
+    if (ids && ids.length > 0) {
+      for (const id of ids) await markAsRead(userId, id);
+      return c.json({ success: true, updated: ids.length });
     }
-    await djNotificationsStore.set(userId, notifications);
-    return c.json({ success: true });
+    const updated = await markAllAsRead(userId);
+    return c.json({ success: true, updated });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -1506,11 +1512,39 @@ app.post('/promotion/pitches', requireAuth, requireDjRole, async (c) => {
 });
 
 // GET /promotion/campaigns — рекламные кампании
+// dj_campaigns row-per-campaign (migration 045).
+const DJCAMP_COLS = `app_id, dj_id, title, campaign_type, status,
+  impressions, clicks, budget, spent, mix_id, started_at,
+  created_at, updated_at`;
+
+function mapDjCampaignRow(r: any): any {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : undefined);
+  return {
+    id: r.app_id,
+    djId: r.dj_id,
+    title: r.title,
+    type: r.campaign_type,
+    status: r.status,
+    impressions: r.impressions,
+    clicks: r.clicks,
+    budget: Number(r.budget),
+    spent: Number(r.spent),
+    mixId: r.mix_id || null,
+    startedAt: iso(r.started_at),
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+  };
+}
+
 app.get('/promotion/campaigns', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const list = (await djCampaignsStore.get(userId)) || [];
-    return c.json({ success: true, data: Array.isArray(list) ? list : [] });
+    const r = await pool.query(
+      `SELECT ${DJCAMP_COLS} FROM dj_campaigns
+        WHERE dj_id = $1 ORDER BY created_at DESC`,
+      [userId]
+    );
+    return c.json({ success: true, data: r.rows.map(mapDjCampaignRow) });
   } catch (error) {
     console.error('Error fetching DJ campaigns:', error);
     return c.json({ success: true, data: [] });
@@ -1525,30 +1559,24 @@ app.post('/promotion/campaigns', requireAuth, requireDjRole, async (c) => {
     const allowedTypes = new Set(['banner', 'social', 'email']);
     const type = allowedTypes.has(body.type) ? body.type : 'banner';
 
-    const id = generateId('camp');
-    const now = new Date().toISOString();
-    const campaign = {
-      id,
-      djId: userId,
-      title: String(body.title || 'Без названия').slice(0, 200),
-      type,
-      status: 'active',
-      impressions: 0,
-      clicks: 0,
-      budget: Math.max(0, Number(body.budget || 0)),
-      spent: 0,
-      mixId: body.mixId || null,
-      startedAt: now,
-      createdAt: now,
-      updatedAt: now,
-    };
+    const appId = generateId('camp');
+    const title = String(body.title || 'Без названия').slice(0, 200);
+    const budget = Math.max(0, Number(body.budget || 0));
 
-    const list = (await djCampaignsStore.get(userId)) || [];
-    const arr = Array.isArray(list) ? list : [];
-    arr.unshift(campaign);
-    await djCampaignsStore.set(userId, arr);
-
-    return c.json({ success: true, data: campaign }, 201);
+    // Атомарный INSERT — никаких race conditions на массиве.
+    const ins = await pool.query(
+      `INSERT INTO dj_campaigns
+         (app_id, dj_id, title, campaign_type, status, impressions, clicks,
+          budget, spent, mix_id, started_at)
+       VALUES ($1, $2, $3, $4, 'active', 0, 0, $5, 0, $6, NOW())
+       ON CONFLICT (dj_id, app_id) DO NOTHING
+       RETURNING ${DJCAMP_COLS}`,
+      [appId, userId, title, type, budget, body.mixId || null]
+    );
+    if (ins.rowCount === 0) {
+      return c.json({ success: false, error: 'Failed to create campaign' }, 500);
+    }
+    return c.json({ success: true, data: mapDjCampaignRow(ins.rows[0]) }, 201);
   } catch (error) {
     console.error('Error creating DJ campaign:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
