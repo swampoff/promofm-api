@@ -2,11 +2,11 @@
  * PRODUCER STUDIO ROUTES
  * Маршруты для реальных сообщений (SQL Store) и календаря сессий
  * Stores (from db.tsx):
- *   producerConvsStore          → producer_convs table (pk: user_id)
- *   producerMessagesStore       → producer_messages table (pk: user_id)
- *   producerSessionsStore       → producer_sessions table (pk: user_id)
- *   producer_custom_services    table (row-per-service, since migration 039)
- *   producer_custom_portfolio   table (row-per-entry,   since migration 039)
+ *   producer_convs              table (row-per-conversation, since migration 042)
+ *   producer_messages           table (row-per-message,      since migration 042)
+ *   producer_sessions           table (row-per-session,      since migration 042)
+ *   producer_custom_services    table (row-per-service,      since migration 039)
+ *   producer_custom_portfolio   table (row-per-entry,        since migration 039)
  *   paymentWithdrawalsStore     → payment_withdrawals table (pk: user_id)
  *   producerSettingsStore       → producer_settings table (pk: user_id)
  *   producerProfileEditStore    → producer_profile_edit table (pk: user_id)
@@ -17,10 +17,7 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import {
   producerAiLastStore,
-  producerConvsStore,
-  producerMessagesStore,
   producerProfileEditStore,
-  producerSessionsStore,
   producerSettingsStore,
   producerServicesStore,
 } from './db.tsx';
@@ -99,19 +96,42 @@ function timeHHmm(): string {
 }
 
 // ════════════════════════════════════════
-// CONVERSATIONS
+// CONVERSATIONS (row-per-conv since migration 042)
 // ════════════════════════════════════════
+
+function mapConvRow(row: any): ConversationMeta {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : String(d);
+  return {
+    id: row.app_id,
+    producerId: row.producer_id,
+    clientName: row.client_name,
+    clientInitial: row.client_initial || '?',
+    orderTitle: row.order_title || '',
+    orderId: row.order_id || '',
+    lastMessage: row.last_message || '',
+    lastTime: row.last_time || '',
+    unread: row.unread,
+    online: row.online,
+    createdAt: iso(row.created_at),
+  };
+}
+
+const CONV_COLS = `app_id, producer_id, client_name, client_initial, order_title,
+  order_id, last_message, last_time, unread, online, created_at, updated_at`;
 
 // GET /conversations/:producerId
 app.get('/conversations/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
-  // IDOR fix: verify ownership
-  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
-    return c.json({ success: false, error: 'Access denied' }, 403);
-  }
-    const convs: ConversationMeta[] = await producerConvsStore.get(producerId) || [];
-    return c.json({ success: true, data: convs });
+    if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+    const r = await pool.query(
+      `SELECT ${CONV_COLS} FROM producer_convs
+        WHERE producer_id = $1 ORDER BY created_at DESC`,
+      [producerId]
+    );
+    return c.json({ success: true, data: r.rows.map(mapConvRow) });
   } catch (error) {
     console.log(`Error fetching conversations: ${error}`);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -129,28 +149,23 @@ app.post('/conversations/create', requireAuth, async (c) => {
       return c.json({ success: false, error: 'producerId and clientName are required' }, 400);
     }
 
-    const conv: ConversationMeta = {
-      id: genId('conv'),
-      producerId,
-      clientName,
-      clientInitial: clientName[0]?.toUpperCase() || '?',
-      orderTitle: orderTitle || 'Новый диалог',
-      orderId: orderId || '',
-      lastMessage: '',
-      lastTime: timeHHmm(),
-      unread: 0,
-      online: false,
-      createdAt: nowIso(),
-    };
-
-    const convs: ConversationMeta[] = await producerConvsStore.get(producerId) || [];
-    convs.unshift(conv);
-    await producerConvsStore.set(producerId, convs);
-
-    // Create empty messages array
-    await producerMessagesStore.set(conv.id, []);
-
-    return c.json({ success: true, data: conv });
+    const appId = genId('conv');
+    const clientInitial = clientName[0]?.toUpperCase() || '?';
+    const r = await pool.query(
+      `INSERT INTO producer_convs
+         (app_id, producer_id, client_name, client_initial, order_title,
+          order_id, last_message, last_time, unread, online)
+       VALUES ($1, $2, $3, $4, $5, $6, '', $7, 0, FALSE)
+       RETURNING ${CONV_COLS}`,
+      [
+        appId, producerId, clientName, clientInitial,
+        orderTitle || 'Новый диалог', orderId || '',
+        timeHHmm(),
+      ]
+    );
+    // Сообщения теперь row-per-msg (никакой "empty array init" не нужен —
+    // первая запись через INSERT появится автоматически когда придёт.
+    return c.json({ success: true, data: mapConvRow(r.rows[0]) });
   } catch (error) {
     console.log(`Error creating conversation: ${error}`);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -158,15 +173,34 @@ app.post('/conversations/create', requireAuth, async (c) => {
 });
 
 // ════════════════════════════════════════
-// MESSAGES
+// MESSAGES (row-per-msg since migration 042)
 // ════════════════════════════════════════
+
+function mapMsgRow(row: any): Message {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : String(d);
+  return {
+    id: row.app_id,
+    text: row.body,
+    sender: row.sender,
+    timestamp: iso(row.created_at),
+    read: row.is_read,
+    ...(row.attachment ? { attachment: row.attachment } : {}),
+  };
+}
+
+const MSG_COLS = `app_id, conversation_id, body, sender, attachment,
+  is_read, created_at`;
 
 // GET /messages/:conversationId
 app.get('/messages/:conversationId', requireAuth, async (c) => {
   try {
     const convId = c.req.param('conversationId');
-    const msgs: Message[] = await producerMessagesStore.get(convId) || [];
-    return c.json({ success: true, data: msgs });
+    const r = await pool.query(
+      `SELECT ${MSG_COLS} FROM producer_messages
+        WHERE conversation_id = $1 ORDER BY created_at ASC`,
+      [convId]
+    );
+    return c.json({ success: true, data: r.rows.map(mapMsgRow) });
   } catch (error) {
     console.log(`Error fetching messages: ${error}`);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -179,12 +213,20 @@ app.get('/messages/:conversationId/poll', requireAuth, async (c) => {
   try {
     const convId = c.req.param('conversationId');
     const since = c.req.query('since') || '1970-01-01T00:00:00Z';
-    const sinceTime = new Date(since).getTime();
 
-    const msgs: Message[] = await producerMessagesStore.get(convId) || [];
-    const newMsgs = msgs.filter(m => new Date(m.timestamp).getTime() > sinceTime);
-
-    return c.json({ success: true, data: newMsgs, total: msgs.length });
+    const r = await pool.query(
+      `SELECT ${MSG_COLS} FROM producer_messages
+        WHERE conversation_id = $1 AND created_at > $2
+        ORDER BY created_at ASC`,
+      [convId, since]
+    );
+    // total отдаём для UI совместимости — отдельный COUNT, не доп
+    // запрос для каждой ячейки.
+    const totalR = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM producer_messages WHERE conversation_id = $1`,
+      [convId]
+    );
+    return c.json({ success: true, data: r.rows.map(mapMsgRow), total: totalR.rows[0]?.n ?? 0 });
   } catch (error) {
     console.log(`Error polling messages: ${error}`);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -201,35 +243,34 @@ app.post('/messages/send', requireAuth, async (c) => {
       return c.json({ success: false, error: 'conversationId, text, and sender are required' }, 400);
     }
 
-    const msg: Message = {
-      id: genId('msg'),
-      text,
-      sender,
-      timestamp: nowIso(),
-      read: false,
-      ...(attachment ? { attachment } : {}),
-    };
+    const appId = genId('msg');
+    // INSERT — никаких race condition'ов на массиве.
+    const msgRes = await pool.query(
+      `INSERT INTO producer_messages
+         (app_id, conversation_id, body, sender, attachment, is_read)
+       VALUES ($1, $2, $3, $4, $5::jsonb, FALSE)
+       RETURNING ${MSG_COLS}`,
+      [
+        appId, conversationId, text, sender,
+        attachment ? JSON.stringify(attachment) : null,
+      ]
+    );
+    const msg = mapMsgRow(msgRes.rows[0]);
 
-    // Append message
-    const msgs: Message[] = await producerMessagesStore.get(conversationId) || [];
-    msgs.push(msg);
-    await producerMessagesStore.set(conversationId, msgs);
-
-    // Update conversation meta
+    // Update conversation meta (lastMessage, lastTime, unread+1 если client).
+    // Один UPDATE — атомарно, никакого read-modify-write массива.
     if (producerId) {
-      const convs: ConversationMeta[] = await producerConvsStore.get(producerId) || [];
-      const idx = convs.findIndex(c => c.id === conversationId);
-      if (idx >= 0) {
-        convs[idx].lastMessage = text.length > 60 ? text.slice(0, 57) + '...' : text;
-        convs[idx].lastTime = timeHHmm();
-        if (sender === 'client') {
-          convs[idx].unread = (convs[idx].unread || 0) + 1;
-        }
-        await producerConvsStore.set(producerId, convs);
-      }
+      const lastMessage = text.length > 60 ? text.slice(0, 57) + '...' : text;
+      await pool.query(
+        `UPDATE producer_convs
+            SET last_message = $1,
+                last_time = $2,
+                unread = unread + CASE WHEN $3 = 'client' THEN 1 ELSE 0 END,
+                updated_at = NOW()
+          WHERE app_id = $4 AND producer_id = $5`,
+        [lastMessage, timeHHmm(), sender, conversationId, producerId]
+      );
     }
-
-
 
     return c.json({ success: true, data: msg });
   } catch (error) {
@@ -246,25 +287,23 @@ app.post('/messages/read', requireAuth, async (c) => {
       return c.json({ success: false, error: 'conversationId required' }, 400);
     }
 
-    // Mark all client messages as read
-    const msgs: Message[] = await producerMessagesStore.get(conversationId) || [];
-    let changed = false;
-    for (const m of msgs) {
-      if (m.sender === 'client' && !m.read) {
-        m.read = true;
-        changed = true;
-      }
-    }
-    if (changed) await producerMessagesStore.set(conversationId, msgs);
+    // Mark all client messages as read. UPDATE через partial-index'ный
+    // фильтр (idx_pc_msgs_unread покрывает is_read=FALSE).
+    await pool.query(
+      `UPDATE producer_messages
+          SET is_read = TRUE
+        WHERE conversation_id = $1 AND sender = 'client' AND is_read = FALSE`,
+      [conversationId]
+    );
 
     // Reset unread counter
     if (producerId) {
-      const convs: ConversationMeta[] = await producerConvsStore.get(producerId) || [];
-      const idx = convs.findIndex(c => c.id === conversationId);
-      if (idx >= 0 && convs[idx].unread > 0) {
-        convs[idx].unread = 0;
-        await producerConvsStore.set(producerId, convs);
-      }
+      await pool.query(
+        `UPDATE producer_convs
+            SET unread = 0, updated_at = NOW()
+          WHERE app_id = $1 AND producer_id = $2 AND unread > 0`,
+        [conversationId, producerId]
+      );
     }
 
     return c.json({ success: true });
@@ -975,9 +1014,15 @@ app.post('/ai/analyze', requireAuth, async (c) => {
     const { context, question } = body;
     if (!producerId) return c.json({ success: false, error: 'producerId required' }, 400);
 
-    const [convs, sessions, settings, withdrawals, customSvcs] = await Promise.all([
-      producerConvsStore.get(producerId),
-      producerSessionsStore.get(producerId),
+    const [convsRows, sessionsRows, settings, withdrawals, customSvcs] = await Promise.all([
+      pool.query(
+        `SELECT ${CONV_COLS} FROM producer_convs WHERE producer_id = $1`,
+        [producerId]
+      ).then((r: any) => r.rows.map(mapConvRow)),
+      pool.query(
+        `SELECT ${SESSION_COLS} FROM producer_sessions WHERE producer_id = $1`,
+        [producerId]
+      ).then((r: any) => r.rows.map(mapSessionRow)),
       producerSettingsStore.get(producerId),
       (await import('./db-client.tsx')).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [producerId]).then((r: any) => Array.isArray(r.rows[0]?.data) ? r.rows[0].data : []),
       pool.query(
@@ -986,12 +1031,14 @@ app.post('/ai/analyze', requireAuth, async (c) => {
         [producerId]
       ).then((r: any) => r.rows.map(mapServiceRow)),
     ]);
+    const convs = convsRows;
+    const sessions = sessionsRows;
 
     const dc = {
-      conversations: ((convs || []) as any[]).length,
-      totalUnread: ((convs || []) as any[]).reduce((s: number, c: any) => s + (c.unread || 0), 0),
-      sessions: ((sessions || []) as any[]).length,
-      upcomingSessions: ((sessions || []) as any[]).filter((s: any) => s.status === 'scheduled' || s.status === 'confirmed').length,
+      conversations: convs.length,
+      totalUnread: convs.reduce((s: number, c: any) => s + (c.unread || 0), 0),
+      sessions: sessions.length,
+      upcomingSessions: sessions.filter((s: any) => s.status === 'scheduled' || s.status === 'confirmed').length,
       withdrawals: ((withdrawals || []) as any[]).length,
       customServices: ((customSvcs || []) as any[]).length,
       vacationMode: (settings as any)?.vacationMode || false,
@@ -1045,19 +1092,51 @@ function fallbackRecs(d: any): string {
 }
 
 // ════════════════════════════════════════
-// CALENDAR SESSIONS
+// CALENDAR SESSIONS (row-per-session since migration 042)
 // ════════════════════════════════════════
+
+function mapSessionRow(row: any): CalendarSession {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : String(d);
+  const dateStr = (d: any): string => {
+    if (!d) return '';
+    if (d instanceof Date) return d.toISOString().slice(0, 10);
+    return String(d).slice(0, 10);
+  };
+  return {
+    id: row.app_id,
+    producerId: row.producer_id,
+    title: row.title,
+    clientName: row.client_name || '',
+    clientId: row.client_id || undefined,
+    date: dateStr(row.session_date),
+    startTime: row.start_time || '',
+    endTime: row.end_time || '',
+    type: row.session_type as CalendarSession['type'],
+    status: row.status as CalendarSession['status'],
+    notes: row.notes || '',
+    color: row.color || '',
+    orderId: row.order_id || '',
+    createdAt: iso(row.created_at),
+  };
+}
+
+const SESSION_COLS = `app_id, producer_id, title, client_name, client_id,
+  session_date, start_time, end_time, session_type, status, notes, color,
+  order_id, created_at, updated_at`;
 
 // GET /calendar/:producerId
 app.get('/calendar/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
-  // IDOR fix: verify ownership
-  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
-    return c.json({ success: false, error: 'Access denied' }, 403);
-  }
-    const sessions: CalendarSession[] = await producerSessionsStore.get(producerId) || [];
-    return c.json({ success: true, data: sessions });
+    if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+    const r = await pool.query(
+      `SELECT ${SESSION_COLS} FROM producer_sessions
+        WHERE producer_id = $1 ORDER BY session_date, start_time`,
+      [producerId]
+    );
+    return c.json({ success: true, data: r.rows.map(mapSessionRow) });
   } catch (error) {
     console.log(`Error fetching calendar: ${error}`);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -1068,27 +1147,36 @@ app.get('/calendar/:producerId', requireAuth, async (c) => {
 app.get('/calendar/:producerId/month', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
-  // IDOR fix: verify ownership
-  if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
-    return c.json({ success: false, error: 'Access denied' }, 403);
-  }
+    if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
     const year = parseInt(c.req.query('year') || '2026');
     const month = parseInt(c.req.query('month') || '2'); // 1-based
 
-    const sessions: CalendarSession[] = await producerSessionsStore.get(producerId) || [];
-
-    // Filter by month
-    const filtered = sessions.filter(s => {
-      const d = new Date(s.date);
-      return d.getFullYear() === year && d.getMonth() + 1 === month;
-    });
-
-    return c.json({ success: true, data: filtered });
+    // Фильтр по месяцу в SQL — индекс (producer_id, session_date) ловит.
+    const monthStart = new Date(Date.UTC(year, month - 1, 1));
+    const monthEnd = new Date(Date.UTC(year, month, 1));
+    const r = await pool.query(
+      `SELECT ${SESSION_COLS} FROM producer_sessions
+        WHERE producer_id = $1
+          AND session_date >= $2 AND session_date < $3
+        ORDER BY session_date, start_time`,
+      [producerId, monthStart.toISOString().slice(0, 10), monthEnd.toISOString().slice(0, 10)]
+    );
+    return c.json({ success: true, data: r.rows.map(mapSessionRow) });
   } catch (error) {
     console.log(`Error fetching month calendar: ${error}`);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
+
+const SESSION_TYPE_COLORS: Record<string, string> = {
+  recording: '#ef4444',
+  mixing: '#14b8a6',
+  mastering: '#8b5cf6',
+  consultation: '#f59e0b',
+  other: '#6b7280',
+};
 
 // POST /calendar/create
 app.post('/calendar/create', requireAuth, async (c) => {
@@ -1101,35 +1189,23 @@ app.post('/calendar/create', requireAuth, async (c) => {
       return c.json({ success: false, error: 'producerId, title, date, startTime, endTime are required' }, 400);
     }
 
-    const TYPE_COLORS: Record<string, string> = {
-      recording: '#ef4444',
-      mixing: '#14b8a6',
-      mastering: '#8b5cf6',
-      consultation: '#f59e0b',
-      other: '#6b7280',
-    };
+    const appId = genId('session');
+    const sessionType = type || 'other';
+    const color = SESSION_TYPE_COLORS[sessionType] || SESSION_TYPE_COLORS.other;
 
-    const session: CalendarSession = {
-      id: genId('session'),
-      producerId,
-      title,
-      clientName: clientName || '',
-      date,
-      startTime,
-      endTime,
-      type: type || 'other',
-      status: 'scheduled',
-      notes: notes || '',
-      color: TYPE_COLORS[type] || TYPE_COLORS.other,
-      orderId: orderId || '',
-      createdAt: nowIso(),
-    };
-
-    const sessions: CalendarSession[] = await producerSessionsStore.get(producerId) || [];
-    sessions.push(session);
-    await producerSessionsStore.set(producerId, sessions);
-
-    return c.json({ success: true, data: session });
+    const r = await pool.query(
+      `INSERT INTO producer_sessions
+         (app_id, producer_id, title, client_name, session_date,
+          start_time, end_time, session_type, status, notes, color, order_id)
+       VALUES ($1, $2, $3, $4, $5::date, $6, $7, $8, 'scheduled', $9, $10, $11)
+       RETURNING ${SESSION_COLS}`,
+      [
+        appId, producerId, title, clientName || '',
+        date, startTime, endTime,
+        sessionType, notes || '', color, orderId || '',
+      ]
+    );
+    return c.json({ success: true, data: mapSessionRow(r.rows[0]) });
   } catch (error) {
     console.log(`Error creating session: ${error}`);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -1147,23 +1223,31 @@ app.put('/calendar/update/:sessionId', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Auth required' }, 401);
     }
 
-    const sessions: CalendarSession[] = await producerSessionsStore.get(producerId) || [];
-    const idx = sessions.findIndex(s => s.id === sessionId);
+    const sets: string[] = ['updated_at = NOW()'];
+    const params: any[] = [];
+    const push = (col: string, val: any) => { params.push(val); sets.push(`${col} = $${params.length}`); };
 
-    if (idx < 0) {
-      return c.json({ success: false, error: 'Session not found' }, 404);
-    }
+    if (typeof body.title === 'string')      push('title',        body.title);
+    if (body.clientName !== undefined)       push('client_name',  body.clientName);
+    if (body.date !== undefined)             push('session_date', body.date);
+    if (body.startTime !== undefined)        push('start_time',   body.startTime);
+    if (body.endTime !== undefined)          push('end_time',     body.endTime);
+    if (typeof body.type === 'string')       push('session_type', body.type);
+    if (typeof body.status === 'string')     push('status',       body.status);
+    if (body.notes !== undefined)            push('notes',        body.notes);
+    if (body.color !== undefined)            push('color',        body.color);
 
-    // Update fields
-    const updatable = ['title', 'clientName', 'date', 'startTime', 'endTime', 'type', 'status', 'notes', 'color'];
-    for (const field of updatable) {
-      if (body[field] !== undefined) {
-        (sessions[idx] as any)[field] = body[field];
-      }
-    }
-
-    await producerSessionsStore.set(producerId, sessions);
-    return c.json({ success: true, data: sessions[idx] });
+    params.push(sessionId, producerId);
+    const idxA = params.length - 1;
+    const idxB = params.length;
+    const r = await pool.query(
+      `UPDATE producer_sessions SET ${sets.join(', ')}
+        WHERE app_id = $${idxA} AND producer_id = $${idxB}
+       RETURNING ${SESSION_COLS}`,
+      params
+    );
+    if (r.rowCount === 0) return c.json({ success: false, error: 'Session not found' }, 404);
+    return c.json({ success: true, data: mapSessionRow(r.rows[0]) });
   } catch (error) {
     console.log(`Error updating session: ${error}`);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -1180,14 +1264,14 @@ app.delete('/calendar/delete/:sessionId', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Auth required' }, 401);
     }
 
-    const sessions: CalendarSession[] = await producerSessionsStore.get(producerId) || [];
-    const filtered = sessions.filter(s => s.id !== sessionId);
-
-    if (filtered.length === sessions.length) {
+    const r = await pool.query(
+      `DELETE FROM producer_sessions
+        WHERE app_id = $1 AND producer_id = $2`,
+      [sessionId, producerId]
+    );
+    if (r.rowCount === 0) {
       return c.json({ success: false, error: 'Session not found' }, 404);
     }
-
-    await producerSessionsStore.set(producerId, filtered);
     return c.json({ success: true });
   } catch (error) {
     console.log(`Error deleting session: ${error}`);

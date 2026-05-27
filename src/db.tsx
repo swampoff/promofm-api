@@ -1489,10 +1489,9 @@ export const contractsStore = jsonbStore('contracts');
 export const digitalGoodsStore = jsonbStore('digital_goods');
 export const producerSettingsStore = jsonbStore('producer_settings', 'user_id');
 export const producerProfileEditStore = jsonbStore('producer_profile_edit', 'user_id');
-export const producerMessagesStore = jsonbStore('producer_messages', 'user_id');
 export const producerAiLastStore = jsonbStore('producer_ai_last', 'user_id');
-export const producerConvsStore = jsonbStore('producer_convs', 'user_id');
-export const producerSessionsStore = jsonbStore('producer_sessions', 'user_id');
+// producer_convs/messages/sessions переехали на row-per-entity
+// (migration 042). Доступ через pool.query в producer-studio-routes.tsx.
 // producer_custom_services / producer_custom_portfolio переехали на
 // row-per-item (migration 039). Доступ через pool.query в
 // producer-studio-routes.tsx.
