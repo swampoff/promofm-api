@@ -1630,6 +1630,87 @@ function jsonbStore(table: string, pk = 'id') {
   };
 }
 
+// ─── dj_subscriptions native-cols store (migration 054) ───
+
+function mapDjSubscriptionRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    djId: r.dj_id,
+    planId: r.plan_id,
+    planName: r.plan_name,
+    status: r.status,
+    price: Number(r.price || 0),
+    currency: r.currency,
+    interval: r.billing_interval,
+    startDate: iso(r.start_date),
+    endDate: iso(r.end_date),
+    limits: r.limits || {},
+  };
+}
+
+function makeDjSubscriptionsStore() {
+  return {
+    async get(djId: string): Promise<any | null> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT dj_id, plan_id, plan_name, status, price, currency,
+                billing_interval, start_date, end_date, limits
+           FROM dj_subscriptions WHERE dj_id = $1 LIMIT 1`,
+        [djId]
+      );
+      return r.rowCount ? mapDjSubscriptionRow(r.rows[0]) : null;
+    },
+    async set(djId: string, value: any): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      const limits = value.limits && typeof value.limits === 'object' ? value.limits : {};
+      await pool.query(
+        `INSERT INTO dj_subscriptions
+           (dj_id, plan_id, plan_name, status, price, currency,
+            billing_interval, start_date, end_date, limits, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, NOW())
+         ON CONFLICT (dj_id) DO UPDATE SET
+           plan_id          = EXCLUDED.plan_id,
+           plan_name        = EXCLUDED.plan_name,
+           status           = EXCLUDED.status,
+           price            = EXCLUDED.price,
+           currency         = EXCLUDED.currency,
+           billing_interval = EXCLUDED.billing_interval,
+           start_date       = EXCLUDED.start_date,
+           end_date         = EXCLUDED.end_date,
+           limits           = EXCLUDED.limits,
+           updated_at       = NOW()`,
+        [
+          djId,
+          value.planId || value.plan_id || null,
+          value.planName || value.plan_name || null,
+          value.status || 'active',
+          Number(value.price || 0),
+          value.currency || '₽',
+          value.interval || value.billing_interval || 'month',
+          value.startDate || value.start_date || null,
+          value.endDate || value.end_date || null,
+          JSON.stringify(limits),
+        ]
+      );
+    },
+    async del(djId: string): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      await pool.query(`DELETE FROM dj_subscriptions WHERE dj_id = $1`, [djId]);
+    },
+    async getAll(): Promise<any[]> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT dj_id, plan_id, plan_name, status, price, currency,
+                billing_interval, start_date, end_date, limits
+           FROM dj_subscriptions
+          ORDER BY updated_at DESC`
+      );
+      return r.rows.map(mapDjSubscriptionRow);
+    },
+  };
+}
+
 // ─── Store instances for all tables ───
 
 export const beatFavoritesStore = jsonbStore('beat_favorites', 'user_id');
@@ -1661,9 +1742,12 @@ export const paymentBalancesStore = jsonbStore('payment_balances', 'user_id');
 export const djMixesStore = jsonbStore('dj_mixes', 'dj_id');
 // dj_calendar таблица + декларация удалены (migration 040). Был zombie
 // код, 0 callers — DJ-календарь как фича не реализован.
-export const djNotificationsStore = jsonbStore('dj_notifications', 'dj_id');
-export const djSubscriptionsStore = jsonbStore('dj_subscriptions', 'dj_id');
-export const djCampaignsStore = jsonbStore('dj_campaigns', 'dj_id');
+// djNotificationsStore + djCampaignsStore — dead imports (0 method
+// invocations в коде). Удалены из db.tsx; таблицы dj_notifications /
+// dj_campaigns на проде НЕ DROP'нуты (могут писаться через прямой SQL —
+// проверка laptop'ом).
+// djSubscriptionsStore — native cols since migration 054.
+export const djSubscriptionsStore = makeDjSubscriptionsStore();
 // dj_withdrawals переехал на row-per-withdrawal (migration 044). Доступ
 // через pool.query из dj-studio-routes.tsx + checkout-routes.tsx webhook.
 export const djTransactionsStore = jsonbStore('dj_transactions', 'dj_id');
