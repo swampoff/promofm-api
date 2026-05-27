@@ -1708,17 +1708,6 @@ const TRACK_TEST_REQUEST_COLS = `id, user_id, track_id, guest_email, guest_name,
   feedback_sent_date, completed_at, created_at, updated_at`;
 
 function mapTrackTestRequestRow(r: any): any {
-// ─── radio_* row-per-request stores (migration 056) ───
-//
-// Все 3 store'а имеют легаси-интерфейс `.get(stationId) → array`,
-// `.set(stationId, array) → void`. После migration 056 это row-per-item
-// SQL таблицы. Чтобы handler'ы не переписывать, фабрика делает adapter:
-//   .get  → SELECT ... WHERE radio_id = $1 ORDER BY created_at (or unshift'-style DESC)
-//   .set  → transactional replace-all: UPSERT каждый item + DELETE
-//           всех остальных rows для этого radio_id. Семантически
-//           идентично legacy KV `.set` (overwrites whole array).
-
-function mapArtistRequestRow(r: any): any {
   if (!r) return null;
   const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
   return {
@@ -1922,6 +1911,27 @@ function makeTrackTestAllRequestsView() {
       // No-op.
     },
     async getAll(): Promise<string[]> {
+      return [];
+    },
+  };
+}
+
+
+// ─── radio_* row-per-request stores (migration 056) ───
+//
+// Все 3 store'а имеют легаси-интерфейс `.get(stationId) → array`,
+// `.set(stationId, array) → void`. После migration 056 это row-per-item
+// SQL таблицы. Чтобы handler'ы не переписывать, фабрика делает adapter:
+//   .get  → SELECT ... WHERE radio_id = $1 ORDER BY created_at (or unshift'-style DESC)
+//   .set  → transactional replace-all: UPSERT каждый item + DELETE
+//           всех остальных rows для этого radio_id. Семантически
+//           идентично legacy KV `.set` (overwrites whole array).
+
+function mapArtistRequestRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
     artistId: r.artist_id,
     artistName: r.artist_name,
     trackId: r.track_id,
@@ -2302,16 +2312,10 @@ export const chartSourcesStore = jsonbStore('chart_sources');
 // radioAdSlotsStore + radioAdSlotIndexStore — заменены на нативные хелперы
 // после migration 050. См. блок «Radio Ad Slots» ниже.
 export const radioAnalyticsStore = jsonbStore('radio_analytics', 'radio_id');
-// radio_artist_requests/venue_requests/notifications — row-per-entity
-// since migration 056. Stores preserve .get(stationId)/.set(stationId, arr)
-// interface — array-of-objects снаружи, native cols внутри (per-item
-// upsert + delete-missing == transactional replace-all).
 export const radioArtistRequestsStore = makeRadioRequestArrayStore('radio_artist_requests', mapArtistRequestRow, normalizeArtistRequestForInsert);
 export const radioVenueRequestsStore  = makeRadioRequestArrayStore('radio_venue_requests',  mapVenueRequestRow,  normalizeVenueRequestForInsert);
-export const radioNotificationsStore  = makeRadioRequestArrayStore('radio_notifications',   mapRadioNotificationRow, normalizeRadioNotificationForInsert);
 export const radioFinanceStore = jsonbStore('radio_finance', 'radio_id');
-// radio_transactions — read-only (0 writes в handler code). Источник —
-// внешний (cron / admin). Оставлен на jsonbStore.
+export const radioNotificationsStore  = makeRadioRequestArrayStore('radio_notifications',   mapRadioNotificationRow, normalizeRadioNotificationForInsert);
 export const radioTransactionsStore = jsonbStore('radio_transactions', 'radio_id');
 // venue_playlists перевели на row-per-playlist (migration 036). Доступ
 // через pool.query в venue-routes.tsx / venue-api-routes.tsx.
