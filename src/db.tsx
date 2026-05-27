@@ -2193,10 +2193,243 @@ export const producerAiLastStore = jsonbStore('producer_ai_last', 'user_id');
 // producer_custom_services / producer_custom_portfolio переехали на
 // row-per-item (migration 039). Доступ через pool.query в
 // producer-studio-routes.tsx.
-export const producerServicesStore = jsonbStore('producer_services');
-export const serviceOrdersStore = jsonbStore('service_orders');
-export const serviceOrdersByClientStore = jsonbStore('service_orders_by_client', 'client_id');
-export const serviceOrdersByProducerStore = jsonbStore('service_orders_by_producer', 'producer_id');
+
+// ─── producer_services / service_orders — native cols (migration 057) ─
+// 4 store wrappers DELETED (producerServicesStore / serviceOrdersStore /
+// serviceOrdersByClientStore / serviceOrdersByProducerStore). Tables
+// service_orders_by_client / service_orders_by_producer — DROPPED
+// (derived из service_orders.client_id / producer_id с native indexes).
+// Доступ — типизированные функции ниже.
+
+const PRODUCER_SERVICE_COLS = `id, producer_id, producer_name, title,
+  service_type, description, base_price, delivery_days, status,
+  orders_count, rating, extra, created_at, updated_at`;
+
+function mapProducerServiceRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    producerId: r.producer_id,
+    producer: r.producer_name,
+    title: r.title || '',
+    type: r.service_type,
+    description: r.description || '',
+    basePrice: Number(r.base_price || 0),
+    price: Number(r.base_price || 0),
+    deliveryDays: Number(r.delivery_days || 5),
+    status: r.status,
+    orders: Number(r.orders_count || 0),
+    rating: Number(r.rating || 0),
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+    ...(r.extra || {}),
+  };
+}
+
+export async function getProducerService(id: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${PRODUCER_SERVICE_COLS} FROM producer_services WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return r.rowCount ? mapProducerServiceRow(r.rows[0]) : null;
+}
+
+export async function listProducerServices(opts: {
+  status?: string;
+  producerId?: string;
+  serviceType?: string;
+} = {}): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const where: string[] = [];
+  const params: any[] = [];
+  if (opts.status) { params.push(opts.status); where.push(`status = $${params.length}`); }
+  if (opts.producerId) { params.push(opts.producerId); where.push(`producer_id = $${params.length}`); }
+  if (opts.serviceType) { params.push(opts.serviceType); where.push(`service_type = $${params.length}`); }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const r = await pool.query(
+    `SELECT ${PRODUCER_SERVICE_COLS} FROM producer_services
+       ${whereSql}
+       ORDER BY rating DESC, orders_count DESC`,
+    params
+  );
+  return r.rows.map(mapProducerServiceRow);
+}
+
+export async function upsertProducerService(id: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const extra = { ...value };
+  ['id','producerId','producer','title','type','description','basePrice','price',
+   'deliveryDays','status','orders','rating','createdAt','updatedAt'].forEach(k => delete extra[k]);
+  await pool.query(
+    `INSERT INTO producer_services
+       (id, producer_id, producer_name, title, service_type, description,
+        base_price, delivery_days, status, orders_count, rating, extra, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       producer_id   = COALESCE(EXCLUDED.producer_id, producer_services.producer_id),
+       producer_name = EXCLUDED.producer_name,
+       title         = EXCLUDED.title,
+       service_type  = EXCLUDED.service_type,
+       description   = EXCLUDED.description,
+       base_price    = EXCLUDED.base_price,
+       delivery_days = EXCLUDED.delivery_days,
+       status        = EXCLUDED.status,
+       orders_count  = EXCLUDED.orders_count,
+       rating        = EXCLUDED.rating,
+       extra         = EXCLUDED.extra,
+       updated_at    = NOW()`,
+    [
+      id,
+      value.producerId || null,
+      value.producer || null,
+      value.title || '',
+      value.type || null,
+      value.description || '',
+      Number(value.basePrice ?? value.price ?? 0),
+      Number(value.deliveryDays ?? 5),
+      value.status || 'active',
+      Number(value.orders ?? 0),
+      Number(value.rating ?? 0),
+      JSON.stringify(extra),
+    ]
+  );
+}
+
+export async function incrementProducerServiceOrders(serviceId: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE producer_services SET orders_count = orders_count + 1, updated_at = NOW()
+      WHERE id = $1`,
+    [serviceId]
+  );
+}
+
+export async function deleteProducerService(id: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(`DELETE FROM producer_services WHERE id = $1`, [id]);
+}
+
+const SERVICE_ORDER_COLS = `id, service_id, service_title, service_type,
+  producer_id, producer_name, client_id, client_name, message, details,
+  urgency, price, commission, producer_payout, status, progress,
+  status_message, delivery_days, deadline, completed_at, extra,
+  created_at, updated_at`;
+
+function mapServiceOrderRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    serviceId: r.service_id,
+    serviceTitle: r.service_title || '',
+    serviceType: r.service_type,
+    producerId: r.producer_id,
+    producerName: r.producer_name,
+    clientId: r.client_id,
+    clientName: r.client_name,
+    message: r.message || '',
+    details: r.details || '',
+    urgency: r.urgency,
+    price: Number(r.price || 0),
+    commission: Number(r.commission || 0),
+    producerPayout: Number(r.producer_payout || 0),
+    status: r.status,
+    progress: Number(r.progress || 0),
+    statusMessage: r.status_message || undefined,
+    deliveryDays: Number(r.delivery_days || 5),
+    deadline: iso(r.deadline),
+    completedAt: iso(r.completed_at),
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+    ...(r.extra || {}),
+  };
+}
+
+export async function getServiceOrder(id: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${SERVICE_ORDER_COLS} FROM service_orders WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return r.rowCount ? mapServiceOrderRow(r.rows[0]) : null;
+}
+
+export async function upsertServiceOrder(id: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const extra = { ...value };
+  ['id','serviceId','serviceTitle','serviceType','producerId','producerName',
+   'clientId','clientName','message','details','urgency','price','commission',
+   'producerPayout','status','progress','statusMessage','deliveryDays',
+   'deadline','completedAt','createdAt','updatedAt'].forEach(k => delete extra[k]);
+  await pool.query(
+    `INSERT INTO service_orders
+       (id, service_id, service_title, service_type, producer_id, producer_name,
+        client_id, client_name, message, details, urgency, price, commission,
+        producer_payout, status, progress, status_message, delivery_days,
+        deadline, completed_at, extra, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6,
+             $7, $8, $9, $10, $11, $12, $13,
+             $14, $15, $16, $17, $18,
+             $19, $20, $21::jsonb, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       service_id      = COALESCE(EXCLUDED.service_id, service_orders.service_id),
+       service_title   = EXCLUDED.service_title,
+       service_type    = EXCLUDED.service_type,
+       producer_id     = COALESCE(EXCLUDED.producer_id, service_orders.producer_id),
+       producer_name   = EXCLUDED.producer_name,
+       client_id       = COALESCE(EXCLUDED.client_id, service_orders.client_id),
+       client_name     = EXCLUDED.client_name,
+       message         = EXCLUDED.message,
+       details         = EXCLUDED.details,
+       urgency         = EXCLUDED.urgency,
+       price           = EXCLUDED.price,
+       commission      = EXCLUDED.commission,
+       producer_payout = EXCLUDED.producer_payout,
+       status          = EXCLUDED.status,
+       progress        = EXCLUDED.progress,
+       status_message  = EXCLUDED.status_message,
+       delivery_days   = EXCLUDED.delivery_days,
+       deadline        = EXCLUDED.deadline,
+       completed_at    = EXCLUDED.completed_at,
+       extra           = EXCLUDED.extra,
+       updated_at      = NOW()`,
+    [
+      id,
+      value.serviceId || null, value.serviceTitle || '', value.serviceType || null,
+      value.producerId || null, value.producerName || null,
+      value.clientId || null, value.clientName || null,
+      value.message || '', value.details || '',
+      value.urgency || 'normal',
+      Number(value.price ?? 0), Number(value.commission ?? 0), Number(value.producerPayout ?? 0),
+      value.status || 'pending', Number(value.progress ?? 0), value.statusMessage || null,
+      Number(value.deliveryDays ?? 5),
+      value.deadline || null, value.completedAt || null,
+      JSON.stringify(extra),
+    ]
+  );
+}
+
+export async function listServiceOrdersByClient(clientId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${SERVICE_ORDER_COLS} FROM service_orders
+      WHERE client_id = $1 ORDER BY created_at DESC`,
+    [clientId]
+  );
+  return r.rows.map(mapServiceOrderRow);
+}
+
+export async function listServiceOrdersByProducer(producerId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${SERVICE_ORDER_COLS} FROM service_orders
+      WHERE producer_id = $1 ORDER BY created_at DESC`,
+    [producerId]
+  );
+  return r.rows.map(mapServiceOrderRow);
+}
 export const bookingCalendarStore = jsonbStore('booking_calendar', 'performer_id');
 // payment_transactions переехал на row-per-tx (migration 037). Доступ
 // через pool.query из platform-revenue.tsx + track-test-routes.tsx.

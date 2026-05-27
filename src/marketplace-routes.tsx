@@ -52,7 +52,11 @@
 
 import { Hono } from 'hono';
 import { pool as mpPool } from './db-client.tsx';
-import { deleteBeat, getBeat, getBeatReview, getBeats, upsertBeat, upsertBeatReview, upsertNotification, beatFavoritesStore, beatReviewsIndexStore, contractsStore, digitalGoodsStore, platformRevenueLogStore, platformStatsStore, producerServicesStore, serviceOrdersByClientStore, serviceOrdersByProducerStore, serviceOrdersStore } from './db.tsx';
+import { deleteBeat, getBeat, getBeatReview, getBeats, upsertBeat, upsertBeatReview, upsertNotification, beatFavoritesStore, beatReviewsIndexStore, contractsStore, digitalGoodsStore, platformRevenueLogStore, platformStatsStore,
+  // Native producer_services / service_orders (migration 057):
+  getProducerService, listProducerServices, upsertProducerService, incrementProducerServiceOrders,
+  getServiceOrder, upsertServiceOrder, listServiceOrdersByClient, listServiceOrdersByProducer,
+} from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { getRevenueStats, recordRevenue } from './platform-revenue.tsx';
 
@@ -138,17 +142,11 @@ async function getAllBeats(): Promise<any[]> {
   }
 }
 
-/** Собрать все публичные услуги из DB */
+/** Собрать все услуги из DB (native cols — migration 057). */
 async function getAllServices(): Promise<any[]> {
   try {
-    const entries = await producerServicesStore.getAll();
-    if (!entries || entries.length === 0) return [];
-    return entries.map((raw: any) => {
-      if (typeof raw === 'string') {
-        try { return JSON.parse(raw); } catch { return null; }
-      }
-      return raw;
-    }).filter(Boolean);
+    // listProducerServices без фильтров — все услуги, sort by rating/orders.
+    return await listProducerServices();
   } catch (e) {
     console.log('getAllServices error:', e);
     return [];
@@ -894,9 +892,8 @@ app.get('/services/stats', async (c) => {
 app.get('/services/:id', async (c) => {
   try {
     const id = c.req.param('id');
-    const raw = await producerServicesStore.get(id);
-    if (!raw) return c.json({ success: false, error: 'Service not found' }, 404);
-    const service = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const service = await getProducerService(id);
+    if (!service) return c.json({ success: false, error: 'Service not found' }, 404);
     return c.json({ success: true, data: service });
   } catch (error) {
     console.log('GET /services/:id error:', error);
@@ -919,9 +916,8 @@ app.post('/services/:id/order', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Authorization required' }, 401);
     }
 
-    const raw = await producerServicesStore.get(serviceId);
-    if (!raw) return c.json({ success: false, error: 'Service not found' }, 404);
-    const service = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const service = await getProducerService(serviceId);
+    if (!service) return c.json({ success: false, error: 'Service not found' }, 404);
 
     if (service.status !== 'active') {
       return c.json({ success: false, error: 'Service is not available' }, 400);
@@ -956,23 +952,10 @@ app.post('/services/:id/order', requireAuth, async (c) => {
       createdAt: nowIso(),
     };
 
-    await serviceOrdersStore.set(orderId, JSON.stringify(order));
-
-    // Индекс клиента
-    const clientRaw = await serviceOrdersByClientStore.get(clientId);
-    const clientOrders: string[] = clientRaw
-      ? (typeof clientRaw === 'string' ? JSON.parse(clientRaw) : clientRaw)
-      : [];
-    clientOrders.unshift(orderId);
-    await serviceOrdersByClientStore.set(clientId, JSON.stringify(clientOrders));
-
-    // Индекс продюсера
-    const prodRaw = await serviceOrdersByProducerStore.get(service.producerId);
-    const prodOrders: string[] = prodRaw
-      ? (typeof prodRaw === 'string' ? JSON.parse(prodRaw) : prodRaw)
-      : [];
-    prodOrders.unshift(orderId);
-    await serviceOrdersByProducerStore.set(service.producerId, JSON.stringify(prodOrders));
+    // Single INSERT — раньше делалось 3 write'а (order + 2 index store'а)
+    // без транзакции. Native indexes (client_id, producer_id) теперь дают
+    // ту же enumeration без отдельных таблиц.
+    await upsertServiceOrder(orderId, order);
 
     // SSE уведомление продюсеру
     await sendSSE(service.producerId, 'service_order_new', {
@@ -1007,16 +990,11 @@ app.get('/orders', requireAuth, async (c) => {
 
     if (!userId) return c.json({ success: false, error: 'userId required' }, 400);
 
-    const raw = role === 'producer'
-      ? await serviceOrdersByProducerStore.get(userId)
-      : await serviceOrdersByClientStore.get(userId);
-    const orderIds: string[] = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
-
-    const orders: any[] = [];
-    for (const oid of orderIds) {
-      const o = await serviceOrdersStore.get(oid);
-      if (o) orders.push(typeof o === 'string' ? JSON.parse(o) : o);
-    }
+    // Single SQL query через native indexes — раньше делался
+    // index-lookup + N+1 fetch per order.
+    const orders = role === 'producer'
+      ? await listServiceOrdersByProducer(userId)
+      : await listServiceOrdersByClient(userId);
 
     return c.json({ success: true, data: orders });
   } catch (error) {
@@ -1037,9 +1015,8 @@ app.put('/orders/:id/status', requireAuth, async (c) => {
     const userId = c.get('userId'); // IDOR fix: from JWT
     const { status, progress, message } = body;
 
-    const raw = await serviceOrdersStore.get(orderId);
-    if (!raw) return c.json({ success: false, error: 'Order not found' }, 404);
-    const order = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const order = await getServiceOrder(orderId);
+    if (!order) return c.json({ success: false, error: 'Order not found' }, 404);
 
     // Проверка владельца (продюсер или клиент)
     if (order.producerId !== userId && order.clientId !== userId) {
@@ -1069,17 +1046,14 @@ app.put('/orders/:id/status', requireAuth, async (c) => {
       order.deadline = deadline.toISOString();
     }
 
-    // При завершении - обновить счётчик за��азов услуги
+    // При завершении - инкремент orders_count услуги (atomic, native col).
     if (status === 'completed') {
       order.completedAt = nowIso();
       order.progress = 100;
 
       try {
-        const svcRaw = await producerServicesStore.get(order.serviceId);
-        if (svcRaw) {
-          const svc = typeof svcRaw === 'string' ? JSON.parse(svcRaw) : svcRaw;
-          svc.orders = (svc.orders || 0) + 1;
-          await producerServicesStore.set(order.serviceId, JSON.stringify(svc));
+        if (order.serviceId) {
+          await incrementProducerServiceOrders(order.serviceId);
         }
       } catch {}
 
@@ -1103,7 +1077,7 @@ app.put('/orders/:id/status', requireAuth, async (c) => {
       }
     }
 
-    await serviceOrdersStore.set(orderId, JSON.stringify(order));
+    await upsertServiceOrder(orderId, order);
 
     // SSE уведомление клиенту
     const statusLabels: Record<string, string> = {
@@ -1148,9 +1122,8 @@ app.post('/orders/:id/contract', requireAuth, async (c) => {
       return c.json({ success: false, error: 'At least one milestone is required' }, 400);
     }
 
-    const orderRaw = await serviceOrdersStore.get(orderId);
-    if (!orderRaw) return c.json({ success: false, error: 'Order not found' }, 404);
-    const order = typeof orderRaw === 'string' ? JSON.parse(orderRaw) : orderRaw;
+    const order = await getServiceOrder(orderId);
+    if (!order) return c.json({ success: false, error: 'Order not found' }, 404);
 
     if (!['accepted', 'in_progress'].includes(order.status)) {
       return c.json({ success: false, error: 'Order must be accepted or in progress to create contract' }, 400);
@@ -1300,13 +1273,12 @@ app.put('/contracts/:id/milestones/:mid', requireAuth, async (c) => {
         contract.completedAt = nowIso();
 
         // Завершить заказ тоже
-        const orderRaw = await serviceOrdersStore.get(orderId);
-        if (orderRaw) {
-          const order = typeof orderRaw === 'string' ? JSON.parse(orderRaw) : orderRaw;
+        const order = await getServiceOrder(orderId);
+        if (order) {
           order.status = 'completed';
           order.progress = 100;
           order.completedAt = nowIso();
-          await serviceOrdersStore.set(orderId, JSON.stringify(order));
+          await upsertServiceOrder(orderId, order);
         }
       }
 
@@ -1359,11 +1331,10 @@ app.put('/contracts/:id/milestones/:mid', requireAuth, async (c) => {
     // Обновить прогресс заказа
     const approvedCount = contract.milestones.filter((m: any) => m.status === 'approved').length;
     const orderProgress = Math.round((approvedCount / contract.milestones.length) * 100);
-    const orderRaw2 = await serviceOrdersStore.get(orderId);
-    if (orderRaw2) {
-      const order = typeof orderRaw2 === 'string' ? JSON.parse(orderRaw2) : orderRaw2;
+    const order = await getServiceOrder(orderId);
+    if (order) {
       order.progress = orderProgress;
-      await serviceOrdersStore.set(orderId, JSON.stringify(order));
+      await upsertServiceOrder(orderId, order);
     }
 
     await contractsStore.set(orderId, JSON.stringify(contract));

@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { pool } from './db-client.tsx';
-import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, beatReviewsStore, chartSourcesStore, concertAgentStore, contactFormsStore, investorInquiriesStore, newsPublicStore, paymentBalancesStore, platformStatsStore, producerServicesStore, radioAnalyticsStore, serviceOrdersByProducerStore } from './db.tsx';
+import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, beatReviewsStore, chartSourcesStore, concertAgentStore, contactFormsStore, investorInquiriesStore, newsPublicStore, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer, radioAnalyticsStore } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { sanitizeString, sanitizeUrl } from './security.tsx';
@@ -1235,12 +1235,8 @@ landing.get('/producer-services', async (c) => {
     const limit = parseInt(c.req.query('limit') || '20');
     const type = c.req.query('type');
 
-    const allServices = await producerServicesStore.getAll();
-    let services = allServices.filter((s: any) => s && s.id && s.status === 'active');
-
-    if (type) {
-      services = services.filter((s: any) => s.type === type);
-    }
+    // Native cols (migration 057) — filter pushed to SQL.
+    let services = await listProducerServices({ status: 'active', serviceType: type || undefined });
 
     services.sort((a: any, b: any) => (b.orders || 0) - (a.orders || 0));
 
@@ -1312,9 +1308,8 @@ landing.get('/producer-orders/:producerId', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Access denied' }, 403);
     }
     const status = c.req.query('status');
-    const allOrders = await serviceOrdersByProducerStore.get(producerId);
-
-    let orders = allOrders.filter((o: any) => o && o.id);
+    // Native idx_service_orders_producer_created (migration 057).
+    let orders = await listServiceOrdersByProducer(producerId);
 
     if (status) {
       if (status === 'active') {
