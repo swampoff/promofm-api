@@ -1966,9 +1966,16 @@ landing.post('/build-albums', async (c) => {
 
   // === Billboard Global 200 (via Firecrawl) ===
   let worldAlbums: any[] = [];
+  // ВАЖНО: billboard-global-200 — это ЧАРТ СИНГЛОВ (Songs Chart),
+  // не альбомов. До этого фикса парсили его как «Альбомы недели» и
+  // получали Drake / Michael Jackson / Noah Kahan синглы как «альбомы».
+  // Юзер: «поправили ошибку, ничего не изменилось» — потому что
+  // PR #45 fix-albums-filter-singles чистил Yandex и Apple, а
+  // Billboard остался невидимым источником синглов.
+  // billboard-200 (без global) — это Top Albums Chart, что нам нужно.
   const billboardMd = await fetchMarkdown(
-    'billboard_global',
-    'https://www.billboard.com/charts/billboard-global-200/',
+    'billboard_200',
+    'https://www.billboard.com/charts/billboard-200/',
     8000
   );
 
