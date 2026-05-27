@@ -25,7 +25,6 @@
 
 import { Hono } from 'hono';
 import {
-  collabMessagesStore,
   collabOffersByArtistStore,
   collabOffersByProducerStore,
 } from './db.tsx';
@@ -344,7 +343,24 @@ app.get('/chat/:offerId', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Access denied' }, 403);
     }
 
-    const messages: CollabMessage[] = (await collabMessagesStore.get(offerId)) || [];
+    const r = await pool.query(
+      `SELECT app_id, offer_id, sender_id, sender_name, sender_role,
+              body, attachment, created_at
+         FROM collab_messages
+        WHERE offer_id = $1
+        ORDER BY created_at ASC`,
+      [offerId]
+    );
+    const messages: CollabMessage[] = r.rows.map((row: any) => ({
+      id: row.app_id,
+      offerId: row.offer_id,
+      senderId: row.sender_id,
+      senderName: row.sender_name,
+      senderRole: row.sender_role as 'producer' | 'artist',
+      text: row.body,
+      attachment: row.attachment || undefined,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    }));
     return c.json({ success: true, messages });
   } catch (err) {
     return c.json({ success: false, error: String(err) }, 500);
@@ -390,9 +406,19 @@ app.post('/chat/:offerId', requireAuth, async (c) => {
       createdAt: new Date().toISOString(),
     };
 
-    const messages: CollabMessage[] = (await collabMessagesStore.get(offerId)) || [];
-    messages.push(message);
-    await collabMessagesStore.set(offerId, messages);
+    // row-per-message (migration 038): INSERT — никаких race conditions.
+    await pool.query(
+      `INSERT INTO collab_messages
+         (app_id, offer_id, sender_id, sender_name, sender_role, body,
+          attachment, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+       ON CONFLICT (app_id) DO NOTHING`,
+      [
+        message.id, offerId, userId, message.senderName, senderRole, text,
+        attachment ? JSON.stringify(attachment) : null,
+        message.createdAt,
+      ]
+    );
 
     emitSSE(recipientId, {
       type: 'collab_message',

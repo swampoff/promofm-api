@@ -11,10 +11,10 @@
  */
 
 import { Hono } from 'hono';
-import { publishChatsStore, publishOrdersStore } from './db.tsx';
+import { publishOrdersStore } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { requireAuth } from './auth-middleware.tsx';
-import { getDbClient } from './db-client.tsx';
+import { getDbClient, pool } from './db-client.tsx';
 
 // ── Auth Helper ──
 
@@ -48,7 +48,25 @@ function genId(): string {
 app.get('/messages/:orderId', requireAuth, async (c) => {
   const orderId = c.req.param('orderId');
   try {
-    const messages: ChatMessage[] = (await publishChatsStore.get(orderId)) || [];
+    const r = await pool.query(
+      `SELECT app_id, order_id, sender_id, sender_name, sender_role,
+              body, attachment, is_read, created_at
+         FROM publish_chats
+        WHERE order_id = $1
+        ORDER BY created_at ASC`,
+      [orderId]
+    );
+    const messages: ChatMessage[] = r.rows.map((row: any) => ({
+      id: row.app_id,
+      orderId: row.order_id,
+      senderId: row.sender_id,
+      senderName: row.sender_name,
+      senderRole: row.sender_role as 'artist' | 'moderator',
+      text: row.body,
+      attachment: row.attachment || undefined,
+      read: row.is_read,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    }));
     return c.json({ success: true, messages });
   } catch (err) {
     return c.json({ success: false, error: String(err) }, 500);
@@ -82,9 +100,18 @@ app.post('/messages/:orderId', requireAuth, async (c) => {
       createdAt: new Date().toISOString(),
     };
 
-    const messages: ChatMessage[] = (await publishChatsStore.get(orderId)) || [];
-    messages.push(message);
-    await publishChatsStore.set(orderId, messages);
+    // row-per-message (migration 038): INSERT без race conditions.
+    await pool.query(
+      `INSERT INTO publish_chats
+         (app_id, order_id, sender_id, sender_name, sender_role,
+          body, attachment, is_read, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, FALSE, $8)
+       ON CONFLICT (app_id) DO NOTHING`,
+      [
+        message.id, orderId, senderId, message.senderName, message.senderRole,
+        text, attachment ? JSON.stringify(attachment) : null, message.createdAt,
+      ]
+    );
 
     // Определяем получателя для SSE
     // Ищем заказ чтобы узнать userId артиста
@@ -119,19 +146,16 @@ app.put('/messages/:orderId/read', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('orderId');
     const userId = c.get('userId');
-    const messages: any[] = (await publishChatsStore.get(orderId)) || [];
-    let updated = 0;
-    for (const msg of messages) {
-      if (msg.senderId !== userId && !msg.read) {
-        msg.read = true;
-        msg.readAt = new Date().toISOString();
-        updated++;
-      }
-    }
-    if (updated > 0) {
-      await publishChatsStore.set(orderId, messages);
-    }
-    return c.json({ success: true, updated });
+    // Помечаем как прочитанные все сообщения в заказе, написанные
+    // другим пользователем (свои сообщения остаются is_read=false
+    // относительно отправителя — это не его задача отмечать).
+    const r = await pool.query(
+      `UPDATE publish_chats
+          SET is_read = TRUE, read_at = NOW()
+        WHERE order_id = $1 AND sender_id != $2 AND is_read = FALSE`,
+      [orderId, userId]
+    );
+    return c.json({ success: true, updated: r.rowCount ?? 0 });
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
   }
@@ -162,12 +186,21 @@ app.get('/unread/:userId', requireAuth, async (c) => {
     let totalUnread = 0;
     const unreadByOrder: Record<string, number> = {};
 
-    for (const orderId of userOrderIds) {
-      const messages: ChatMessage[] = (await publishChatsStore.get(orderId)) || [];
-      const unread = messages.filter(m => !m.read && m.senderRole !== 'artist').length;
-      if (unread > 0) {
-        unreadByOrder[orderId] = unread;
-        totalUnread += unread;
+    if (userOrderIds.length > 0) {
+      // Один SELECT вместо N round-trip'ов. Считаем только сообщения
+      // от модератора (артисту неинтересны свои unread'ы у себя).
+      const r = await pool.query(
+        `SELECT order_id, COUNT(*)::int AS n
+           FROM publish_chats
+          WHERE order_id = ANY($1::text[])
+            AND is_read = FALSE
+            AND sender_role != 'artist'
+          GROUP BY order_id`,
+        [userOrderIds]
+      );
+      for (const row of r.rows) {
+        unreadByOrder[row.order_id] = row.n;
+        totalUnread += row.n;
       }
     }
 
