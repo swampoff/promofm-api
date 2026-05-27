@@ -2,19 +2,19 @@
  * TICKETS SYSTEM ROUTES
  * Система тикетов поддержки
  *
- * Uses support_tickets table via db.tsx functions + PostgreSQL queries.
- * Messages are stored as an array inside ticket.data.messages.
+ * Uses support_tickets table via db.tsx helpers + direct pool queries.
+ * Since migration 048 all top-level fields are native cols; only the
+ * conversation thread (`messages`), `attachments`, and `tags` remain
+ * jsonb arrays.
  */
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { getTicketsByUser, upsertTicket } from './db.tsx';
-import { getDbClient, pool } from './db-client.tsx';
+import { pool } from './db-client.tsx';
 import { notifySupportTicket } from './email-helper.tsx';
 
 const app = new Hono();
-
-const supaDb = () => getDbClient();
 
 // ============================================
 // TICKETS
@@ -62,15 +62,15 @@ app.get('/:ticketId', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
-    const { data: row, error } = await supaDb()
-      .from('support_tickets')
-      .select('*')
-      .eq('id', ticketId)
-      .maybeSingle();
-
-    if (error) console.error('[tickets] get ticket error:', error);
-
-    const ticket = row ? (row.data ?? row) : null;
+    // Native cols (migration 048) — row напрямую через pool.query.
+    const _q = await pool.query(
+      `SELECT id, user_id, subject, description, category, priority, status,
+              assigned_to, attachments, tags, messages, rating, feedback,
+              sla_due_date, resolved_at, closed_at, created_at, updated_at
+         FROM support_tickets WHERE id = $1 LIMIT 1`,
+      [ticketId]
+    );
+    const ticket = _q.rowCount ? _q.rows[0] : null;
 
     if (!ticket) {
       return c.json({
@@ -152,17 +152,26 @@ app.post('/create', requireAuth, async (c) => {
       messages: [firstMessage],
     };
 
-    // Save ticket with user_id as a top-level column for getTicketsByUser queries
-    const { error } = await supaDb()
-      .from('support_tickets')
-      .upsert({
-        id: ticketId,
-        user_id,
-        data: ticket,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'id' });
-
-    if (error) console.error('[tickets] create ticket error:', error);
+    // Native cols (migration 048) — INSERT all promoted fields.
+    try {
+      await pool.query(
+        `INSERT INTO support_tickets (
+           id, user_id, subject, description, category, priority, status,
+           attachments, tags, messages, sla_due_date
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, 'open',
+                 $7::jsonb, '[]'::jsonb, $8::jsonb, $9)`,
+        [
+          ticketId, user_id, subject, description, category,
+          priority || 'medium',
+          JSON.stringify(attachments || []),
+          JSON.stringify([firstMessage]),
+          ticket.sla_due_date || null,
+        ]
+      );
+    } catch (err: any) {
+      console.error('[tickets] create ticket error:', err?.message);
+    }
 
     // Notify admin (email + Telegram). Resolve user identity for the notification
     // so admins see real name/email instead of UUID.
@@ -208,16 +217,15 @@ app.put('/:ticketId', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
 
-    // Fetch existing ticket
-    const { data: row, error: fetchErr } = await supaDb()
-      .from('support_tickets')
-      .select('*')
-      .eq('id', ticketId)
-      .maybeSingle();
-
-    if (fetchErr) console.error('[tickets] fetch for update error:', fetchErr);
-
-    const ticket = row ? (row.data ?? row) : null;
+    // Fetch existing ticket — native cols (migration 048).
+    const _f = await pool.query(
+      `SELECT id, user_id, subject, description, category, priority, status,
+              assigned_to, attachments, tags, messages, rating, feedback,
+              sla_due_date, resolved_at, closed_at, created_at, updated_at
+         FROM support_tickets WHERE id = $1 LIMIT 1`,
+      [ticketId]
+    );
+    const ticket = _f.rowCount ? _f.rows[0] : null;
 
     if (!ticket) {
       return c.json({
@@ -268,33 +276,19 @@ app.delete('/:ticketId', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
-    // Fetch ticket to verify it exists
-    const { data: row, error: fetchErr } = await supaDb()
-      .from('support_tickets')
-      .select('*')
-      .eq('id', ticketId)
-      .maybeSingle();
-
-    if (fetchErr) console.error('[tickets] fetch for delete error:', fetchErr);
-
-    const ticket = row ? (row.data ?? row) : null;
-
-    if (!ticket) {
+    // Atomic existence-check + delete: single DELETE returns rowCount.
+    const del = await pool.query(
+      `DELETE FROM support_tickets WHERE id = $1`,
+      [ticketId]
+    );
+    if (del.rowCount === 0) {
       return c.json({
         success: false,
         error: 'Ticket not found'
       }, 404);
     }
 
-    // Delete ticket from support_tickets table
-    const { error: delErr } = await supaDb()
-      .from('support_tickets')
-      .delete()
-      .eq('id', ticketId);
-
-    if (delErr) console.error('[tickets] delete ticket error:', delErr);
-
-    // Messages are stored inside ticket.data.messages — deleted along with the row
+    // Messages live in ticket.messages jsonb — deleted along with the row.
 
     return c.json({
       success: true
@@ -320,16 +314,13 @@ app.get('/:ticketId/messages', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
-    const { data: row, error } = await supaDb()
-      .from('support_tickets')
-      .select('*')
-      .eq('id', ticketId)
-      .maybeSingle();
-
-    if (error) console.error('[tickets] get messages error:', error);
-
-    const ticket = row ? (row.data ?? row) : null;
-    const messages = (ticket?.messages || [])
+    // Native cols (migration 048) — select only the messages jsonb column.
+    const _q = await pool.query(
+      `SELECT messages FROM support_tickets WHERE id = $1 LIMIT 1`,
+      [ticketId]
+    );
+    const raw = _q.rowCount ? (_q.rows[0].messages || []) : [];
+    const messages = (Array.isArray(raw) ? raw : [])
       .sort((a: any, b: any) =>
         new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
       );
@@ -371,26 +362,7 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
       }, 400);
     }
 
-    // Fetch existing ticket
-    const { data: row, error: fetchErr } = await supaDb()
-      .from('support_tickets')
-      .select('*')
-      .eq('id', ticketId)
-      .maybeSingle();
-
-    if (fetchErr) console.error('[tickets] fetch for add message error:', fetchErr);
-
-    const ticket = row ? (row.data ?? row) : null;
-
-    if (!ticket) {
-      return c.json({
-        success: false,
-        error: 'Ticket not found'
-      }, 404);
-    }
-
     const messageId = `msg-${crypto.randomUUID()}`;
-
     const messageData = {
       id: messageId,
       ticket_id: ticketId,
@@ -402,22 +374,29 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
       created_at: new Date().toISOString(),
     };
 
-    // Append message to ticket's messages array
-    const messages = ticket.messages || [];
-    messages.push(messageData);
-
-    // Update ticket
-    ticket.messages = messages;
-    ticket.updated_at = new Date().toISOString();
-
-    // Если ответ от поддержки и тикет в статусе waiting_response
-    if (sender_type === 'support' || sender_type === 'admin') {
-      if (ticket.status === 'waiting_response') {
-        ticket.status = 'in_progress';
-      }
+    // Atomic append + auto-status-transition. Single UPDATE avoids the
+    // get-modify-set race that lost concurrent messages in the old impl.
+    //  - messages = messages || [new]   appends to jsonb array
+    //  - status moves waiting_response → in_progress when support/admin
+    //    posts; user posts leave status alone.
+    const bumpStatus = (sender_type === 'support' || sender_type === 'admin');
+    const upd = await pool.query(
+      `UPDATE support_tickets SET
+         messages   = COALESCE(messages, '[]'::jsonb) || $2::jsonb,
+         status     = CASE
+                        WHEN $3::boolean AND status = 'waiting_response' THEN 'in_progress'
+                        ELSE status
+                      END,
+         updated_at = NOW()
+       WHERE id = $1`,
+      [ticketId, JSON.stringify([messageData]), bumpStatus]
+    );
+    if (upd.rowCount === 0) {
+      return c.json({
+        success: false,
+        error: 'Ticket not found'
+      }, 404);
     }
-
-    await upsertTicket(ticketId, ticket);
 
     return c.json({
       success: true,
@@ -454,32 +433,28 @@ app.post('/:ticketId/rate', requireAuth, async (c) => {
       }, 400);
     }
 
-    const { data: row, error: fetchErr } = await supaDb()
-      .from('support_tickets')
-      .select('*')
-      .eq('id', ticketId)
-      .maybeSingle();
-
-    if (fetchErr) console.error('[tickets] fetch for rate error:', fetchErr);
-
-    const ticket = row ? (row.data ?? row) : null;
-
-    if (!ticket) {
+    // Atomic rating write — single UPDATE, then re-SELECT for response.
+    const upd = await pool.query(
+      `UPDATE support_tickets SET
+         rating     = $2,
+         feedback   = $3,
+         updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, user_id, subject, description, category, priority, status,
+                 assigned_to, attachments, tags, messages, rating, feedback,
+                 sla_due_date, resolved_at, closed_at, created_at, updated_at`,
+      [ticketId, rating, feedback || null]
+    );
+    if (upd.rowCount === 0) {
       return c.json({
         success: false,
         error: 'Ticket not found'
       }, 404);
     }
 
-    ticket.rating = rating;
-    ticket.feedback = feedback || null;
-    ticket.rated_at = new Date().toISOString();
-
-    await upsertTicket(ticketId, ticket);
-
     return c.json({
       success: true,
-      data: ticket
+      data: upd.rows[0]
     });
   } catch (error) {
     console.error('Error rating ticket:', error);
@@ -641,17 +616,35 @@ app.get('/admin/all', requireAuth, requireAdmin, async (c) => {
     const categoryFilter = c.req.query('category');
     const search = c.req.query('search');
 
-    // Fetch all tickets from support_tickets table
-    const { data: rows, error } = await supaDb()
-      .from('support_tickets')
-      .select('*')
-      .order('created_at', { ascending: false });
+    // Native cols (migration 048) — push status/priority/category filters
+    // into SQL; keep `search` in JS since it spans 6 fields incl. user_name
+    // which is joined from users below.
+    const whereClauses: string[] = [];
+    const params: any[] = [];
+    if (statusFilter && statusFilter !== 'all') {
+      params.push(statusFilter);
+      whereClauses.push(`status = $${params.length}`);
+    }
+    if (priorityFilter && priorityFilter !== 'all') {
+      params.push(priorityFilter);
+      whereClauses.push(`priority = $${params.length}`);
+    }
+    if (categoryFilter && categoryFilter !== 'all') {
+      params.push(categoryFilter);
+      whereClauses.push(`category = $${params.length}`);
+    }
+    const where = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
+    const { rows } = await pool.query(
+      `SELECT id, user_id, subject, description, category, priority, status,
+              assigned_to, attachments, tags, messages, rating, feedback,
+              sla_due_date, resolved_at, closed_at, created_at, updated_at
+         FROM support_tickets
+         ${where}
+         ORDER BY COALESCE(updated_at, created_at) DESC`,
+      params
+    );
 
-    if (error) console.error('[tickets] admin/all error:', error);
-
-    let tickets = (rows || [])
-      .map((r: any) => r.data ?? r)
-      .filter(Boolean);
+    let tickets: any[] = rows;
 
     // Enrich tickets with user_name / user_email / user_avatar from users table
     // so the admin UI doesn't have to fall back to showing the raw user UUID.
@@ -686,16 +679,7 @@ app.get('/admin/all', requireAuth, requireAdmin, async (c) => {
       };
     });
 
-    // Фильтрация
-    if (statusFilter && statusFilter !== 'all') {
-      tickets = tickets.filter((t: any) => t.status === statusFilter);
-    }
-    if (priorityFilter && priorityFilter !== 'all') {
-      tickets = tickets.filter((t: any) => t.priority === priorityFilter);
-    }
-    if (categoryFilter && categoryFilter !== 'all') {
-      tickets = tickets.filter((t: any) => t.category === categoryFilter);
-    }
+    // `search` spans user_name/user_email (joined above), keep in JS.
     if (search) {
       const s = search.toLowerCase();
       tickets = tickets.filter((t: any) =>
@@ -707,11 +691,6 @@ app.get('/admin/all', requireAuth, requireAdmin, async (c) => {
         t.user_email?.toLowerCase().includes(s)
       );
     }
-
-    // Сортировка: сначала новые
-    tickets.sort((a: any, b: any) =>
-      new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime()
-    );
 
     return c.json({
       success: true,
@@ -733,45 +712,62 @@ app.get('/admin/all', requireAuth, requireAdmin, async (c) => {
  */
 app.get('/admin/stats', requireAuth, requireAdmin, async (c) => {
   try {
-    // Fetch all tickets from support_tickets table
-    const { data: rows, error } = await supaDb()
-      .from('support_tickets')
-      .select('*')
-      .order('created_at', { ascending: false });
+    // Native cols (migration 048) — aggregate in SQL via conditional COUNTs.
+    // EPOCH math gives avg resolution in hours; rating is plain AVG.
+    const aggQuery = pool.query(
+      `SELECT
+         COUNT(*)                                                            AS total,
+         COUNT(*) FILTER (WHERE status = 'open')                             AS open,
+         COUNT(*) FILTER (WHERE status = 'in_progress')                      AS in_progress,
+         COUNT(*) FILTER (WHERE status = 'waiting_response')                 AS waiting_response,
+         COUNT(*) FILTER (WHERE status = 'resolved')                         AS resolved,
+         COUNT(*) FILTER (WHERE status = 'closed')                           AS closed,
+         COUNT(*) FILTER (WHERE priority = 'low')                            AS p_low,
+         COUNT(*) FILTER (WHERE priority = 'medium')                         AS p_medium,
+         COUNT(*) FILTER (WHERE priority = 'high')                           AS p_high,
+         COUNT(*) FILTER (WHERE priority = 'urgent')                         AS p_urgent,
+         COUNT(*) FILTER (
+           WHERE status NOT IN ('resolved','closed')
+             AND sla_due_date IS NOT NULL
+             AND sla_due_date < NOW()
+         )                                                                   AS overdue,
+         COALESCE(
+           AVG(EXTRACT(EPOCH FROM (resolved_at - created_at)) / 3600.0)
+             FILTER (WHERE resolved_at IS NOT NULL),
+           0
+         )                                                                   AS avg_resolution_hours,
+         COALESCE(AVG(rating::numeric) FILTER (WHERE rating IS NOT NULL), 0) AS avg_rating
+       FROM support_tickets`
+    );
+    const catQuery = pool.query(
+      `SELECT COALESCE(category, 'other') AS category, COUNT(*) AS n
+         FROM support_tickets
+        GROUP BY COALESCE(category, 'other')`
+    );
+    const [aggRes, catRes] = await Promise.all([aggQuery, catQuery]);
+    const a = aggRes.rows[0] || {};
 
-    if (error) console.error('[tickets] admin/stats error:', error);
-
-    const tickets = (rows || [])
-      .map((r: any) => r.data ?? r)
-      .filter(Boolean);
+    const by_category: Record<string, number> = {};
+    for (const r of catRes.rows) by_category[r.category] = Number(r.n);
 
     const stats = {
-      total: tickets.length,
-      open: tickets.filter((t: any) => t.status === 'open').length,
-      in_progress: tickets.filter((t: any) => t.status === 'in_progress').length,
-      waiting_response: tickets.filter((t: any) => t.status === 'waiting_response').length,
-      resolved: tickets.filter((t: any) => t.status === 'resolved').length,
-      closed: tickets.filter((t: any) => t.status === 'closed').length,
+      total: Number(a.total || 0),
+      open: Number(a.open || 0),
+      in_progress: Number(a.in_progress || 0),
+      waiting_response: Number(a.waiting_response || 0),
+      resolved: Number(a.resolved || 0),
+      closed: Number(a.closed || 0),
       by_priority: {
-        low: tickets.filter((t: any) => t.priority === 'low').length,
-        medium: tickets.filter((t: any) => t.priority === 'medium').length,
-        high: tickets.filter((t: any) => t.priority === 'high').length,
-        urgent: tickets.filter((t: any) => t.priority === 'urgent').length,
+        low: Number(a.p_low || 0),
+        medium: Number(a.p_medium || 0),
+        high: Number(a.p_high || 0),
+        urgent: Number(a.p_urgent || 0),
       },
-      by_category: {} as Record<string, number>,
-      overdue: tickets.filter((t: any) => {
-        if (t.status === 'resolved' || t.status === 'closed') return false;
-        return t.sla_due_date && new Date(t.sla_due_date) < new Date();
-      }).length,
-      avg_resolution_time: calculateAvgResolutionTime(tickets),
-      avg_rating: calculateAvgRating(tickets),
+      by_category,
+      overdue: Number(a.overdue || 0),
+      avg_resolution_time: Math.round(Number(a.avg_resolution_hours || 0)),
+      avg_rating: parseFloat(Number(a.avg_rating || 0).toFixed(1)),
     };
-
-    // Category breakdown
-    for (const t of tickets) {
-      const cat = t.category || 'other';
-      stats.by_category[cat] = (stats.by_category[cat] || 0) + 1;
-    }
 
     return c.json({ success: true, data: stats });
   } catch (error) {
