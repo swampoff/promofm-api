@@ -5,59 +5,62 @@
 (row-per-entity, native колонки, индексы по полям).
 
 **Почему:**
-- Тихие upsert-фейлы при отсутствии констрейнтов (см. dj_events
-  инцидент 2026-05 — POST 201, GET 404)
-- IDOR-уязвимости — нельзя check'ать ownership по индексу, только
-  full-scan jsonb
+- Тихие upsert-фейлы при отсутствии констрейнтов (см. dj_events инцидент 2026-05 — POST 201, GET 404)
+- IDOR-уязвимости — нельзя check'ать ownership по индексу, только full-scan jsonb
+- Race conditions: 2 одновременных write'а через `get-modify-set` → 1 потерян (особенно для chat/message таблиц)
 - Невозможно нормально индексировать поля внутри массива
-- Каждый write — read-modify-write всего массива → конкурентность ломается
+- Невозможна транзакционная гарантия для записи
+
+## Inventory (от laptop, 2026-05-27)
+
+- **80** `jsonbStore()` деклараций в `src/db.tsx`
+- **129** таблиц с jsonb колонкой `data` в БД
+- **47** чистых kv-store (только 4 колонки: pk + data + timestamps)
 
 ## Прогресс
 
 ### ✅ Готово (мигрированы)
 
-| Таблица | Миграция | Дата | Notes |
+| Таблица | Миграция | PR | Notes |
 |---|---|---|---|
-| `publish_orders` | 013_distribution_orders.sql | — | row-per-order, native cols |
+| `publish_orders` | 013 | — | row-per-order, native cols |
 | `subscriptions` | (исторически) | — | row-per-subscription |
-| `agent_queue` → `agent_tasks` | **036** | 2026-05-27 | row-per-task, jsonbStore-декларация удалена |
-| `dj_events` | **036** | 2026-05-27 | row-per-event, jsonbStore-декларация удалена. Backfill из jsonb-массива |
-| `venue_playlists` | **036** | 2026-05-27 | row-per-playlist, jsonbStore-декларация удалена. `content_items` остаётся jsonb (legit nested) |
+| `agent_queue` → `agent_tasks` | 036 | #51 | row-per-task, jsonbStore-декларация удалена |
+| `dj_events` | 036 | #51 | row-per-event |
+| `venue_playlists` | 036 | #51 | row-per-playlist, `content_items` остаётся jsonb (legit nested) |
 
-### ⏳ Ожидают миграции (jsonbStore declarations в `src/db.tsx`)
+### ⏳ Wave 1 — критичные деньги/комм (в работе)
 
-Полный список см. `grep -E "^export const.*jsonbStore" src/db.tsx`.
-Кандидаты на приоритезацию — те, что хранят **массивы** (видно по
-коду в handler'ах: `(await store.get(id)) || []; arr.push(...); store.set(id, arr)`).
+| Таблица | Риск | Приоритет |
+|---|---|---|
+| `payment_transactions` | 💰 деньги в чистом kv — track-test handler пишет через `set(user_id, oneTx)` (а не array), что **перетирает все предыдущие транзакции пользователя** | 1 |
+| `collab_messages` | 💬 race condition: 2 одновременных сообщения → 1 потеряно (get-modify-set) | 1 |
+| `publish_chats` | 💬 то же | 1 |
+| `dj_calendar` | 🧟 orphan — declaration есть, callers нет. Удалить декларацию + DROP TABLE если 0 rows | 1 |
+| `producer_custom_portfolio` | 📁 публичный портфель продюсера | 1 |
+| `producer_custom_services` | 📁 публичные услуги продюсера | 1 |
 
-Известные точно-массивные KV (приоритет высокий):
-- `dj_calendar` — массив букингов
-- `dj_collaborations` — массив коллабораций
-- `dj_pitches` — массив питчей
-- `dj_mixes` — частично уже мигрирован (миграции 005, 030, 031)
-- `radio_artist_requests` — массив заявок
-- `radio_venue_requests` — массив заявок
-- `radio_ad_slots` — массив рекламных слотов
-- `venue_ad_campaigns` — массив кампаний
-- `dj_withdrawals` — массив запросов на вывод
-- `dj_transactions` — массив транзакций
-- `dj_notifications` — массив уведомлений
-- `service_orders` — частично уже мигрирован
+### 🔜 Wave 2 — analytics/aggregation
 
-Single-value KV (низкий приоритет, можно оставлять как есть):
-- `producer_settings`, `producer_ai_last`, `producer_messages` — один объект на user
-- `email_history`, `email_templates`, `notification_settings` — settings-style
-- `system_config` — singleton
+`artist_analytics_cache`, `artist_tracks_stats`, `chart_aggregation`, `radio_analytics`, `venue_analytics` — perf-критично, нужны индексы.
+
+### 🔜 Wave 3 — гибриды (тривиальный refactor)
+
+Таблицы где native колонки уже всё закрывают, но `data jsonb` дублирует — просто удалить:
+`dj_collaborations`, `dj_bookings`, `dj_reviews`, `dj_mixes`, `dj_subscriptions`, `dj_notifications`, `notification_campaigns`, `pitching_requests`, `radio_ad_slots`, `track_analytics`, `user_subscriptions`, `track_moderation`, `track_test_requests`, `donations`, `support_tickets`, `bookings`, `payment_withdrawals`, `marketing_campaigns`.
+
+### 🔜 Wave 4 — settings/configs (можно отложить)
+
+Read-mostly singleton'ы где kv-store валиден:
+`system_config`, `accounting_data`, `elevenlabs_config`, `email_templates`, `email_history`, `notification_settings`, `producer_settings`, `producer_ai_last`.
 
 ### 🚫 Правило для cloud-сессий
 
-**НЕ СОЗДАВАТЬ** новые KV-таблицы с паттерном `entity_id PK + data JSONB`.
-Если handler'у нужна таблица, которой нет — мигрировать сразу на row-per-entity
-схему. См. `CLAUDE.md` → секция «FORBIDDEN: создавать новые KV-store таблицы».
+**НЕ СОЗДАВАТЬ** новые KV-таблицы с паттерном `entity_id PK + data JSONB`. См. `CLAUDE.md` → секция «⛔ FORBIDDEN: создавать новые KV-store таблицы».
 
 ## Шаблон миграции
 
-Канонический пример — `src/migrations/036_kv_to_sql_agent_queue_dj_events_venue_playlists.sql`:
+Канон — `src/migrations/036_kv_to_sql_agent_queue_dj_events_venue_playlists.sql`:
 
 1. `CREATE TEMP TABLE _backup ON COMMIT DROP AS SELECT * FROM <legacy>`
 2. `ALTER TABLE <legacy> DROP CONSTRAINT IF EXISTS …` (все PK/UNIQUE на entity_id)
