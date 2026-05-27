@@ -65,6 +65,35 @@ npx tsx src/index.ts            # Run dev server
 - All data stays on own VPS (PostgreSQL + Node.js + JWT)
 - Quality > Speed — always do it right, never cut corners
 
+## ⛔ FORBIDDEN: создавать новые KV-store таблицы
+
+Активный мандат сессии — **переезд KV-store на нормальный SQL**
+(см. `docs/kv-to-sql-migration.md`). Это значит:
+
+**НЕ ДЕЛАТЬ:**
+- `jsonbStore('<новая_таблица>', '<entity>_id')` для нового кода
+- `CREATE TABLE foo (entity_id TEXT PRIMARY KEY, data JSONB, …)` —
+  это паттерн «1 строка на entity, массив сущностей внутри jsonb»
+- «Залатать» отсутствующую KV-таблицу через `CREATE TABLE IF NOT EXISTS`
+  с тем же легаси-контрактом — это перпетуирует проблему
+
+**ДЕЛАТЬ для новых таблиц:**
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` — каждая сущность отдельная строка
+- `entity_id TEXT/UUID INDEX` (НЕ PK) — для группировки/owner-check
+- Нативные колонки на основные поля (`title`, `status`, `event_date`, …)
+- `extra JSONB DEFAULT '{}'::jsonb` — только для legit nested data
+- Доступ через `pool.query` из `db-client.tsx`, НЕ через jsonbStore-helper
+
+**ДЛЯ существующих KV-таблиц с багами:**
+- Не «латать» — мигрировать на row-per-entity вместе с handler'ами
+- Backfill из jsonb-массива через `jsonb_array_elements`
+- Удалить stale `jsonbStore(...)` declaration в `src/db.tsx`
+- Обновить tracker `docs/kv-to-sql-migration.md`
+
+**Если кажется что «временный KV ОК»:**
+- НЕТ, не ОК — спросить пользователя явно в чате до commit'а
+- KV не «временный», он сразу залипает на проде и потом «временно» живёт годами
+
 ## SQL writing pitfalls (READ BEFORE WRITING ANY QUERY)
 
 These caused two production reverts on 2026-05-23. CI has no integration

@@ -20,7 +20,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import {
   getDjProfile, upsertDjProfile,
-  djEventsStore, djNotificationsStore, djSubscriptionsStore,
+  djNotificationsStore, djSubscriptionsStore,
   djCampaignsStore, djWithdrawalsStore, djTransactionsStore,
   getCoinBalance,
 } from './db.tsx';
@@ -47,6 +47,63 @@ async function getUserId(c: any): Promise<string> {
 
 function generateId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
+}
+
+// dj_events row (row-per-event after migration 036) → внешний API контракт.
+// API исторически camelCase + плоский, БД snake_case + extra jsonb для
+// неосновных полей. `id` во внешнем API = app_id в БД ('ev-uuid').
+type DjEventRow = {
+  app_id: string;
+  dj_id: string;
+  title: string;
+  venue: string | null;
+  city: string | null;
+  event_date: Date | null;
+  fee: number;
+  capacity: number;
+  status: string;
+  event_type: string;
+  notes: string | null;
+  completed_at: Date | null;
+  cancelled_at: Date | null;
+  extra: Record<string, unknown>;
+  created_at: Date;
+  updated_at: Date;
+};
+
+function mapEventRow(row: DjEventRow): Record<string, any> {
+  const iso = (d: Date | null) => d ? (d instanceof Date ? d.toISOString() : String(d)) : undefined;
+  return {
+    ...(row.extra || {}),
+    id: row.app_id,
+    djId: row.dj_id,
+    title: row.title,
+    venue: row.venue || '',
+    city: row.city || '',
+    date: iso(row.event_date),
+    fee: row.fee,
+    capacity: row.capacity,
+    status: row.status,
+    type: row.event_type,
+    notes: row.notes || undefined,
+    completedAt: iso(row.completed_at),
+    cancelledAt: iso(row.cancelled_at),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  };
+}
+
+async function fetchDjEvents(djId: string): Promise<Record<string, any>[]> {
+  const r = await pool.query(
+    `SELECT app_id, dj_id, title, venue, city, event_date, fee, capacity,
+            status, event_type, notes, completed_at, cancelled_at, extra,
+            created_at, updated_at
+       FROM dj_events
+      WHERE dj_id = $1
+      ORDER BY event_date DESC NULLS LAST, created_at DESC`,
+    [djId]
+  );
+  return r.rows.map(mapEventRow);
 }
 
 // Self-heal dj_collab_invites — row-per-invite table replaces the old
@@ -241,13 +298,16 @@ app.put('/profile', requireAuth, requireDjRole, async (c) => {
 app.get('/events', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const events = await djEventsStore.get(userId) || [];
+    const events = await fetchDjEvents(userId);
     return c.json({ success: true, data: events });
   } catch (error) {
     console.error('Error fetching DJ events:', error);
     return c.json({ success: true, data: [] });
   }
 });
+
+const EVENT_STATUSES = new Set(['upcoming', 'confirmed', 'completed', 'cancelled']);
+const EVENT_TYPES    = new Set(['club', 'festival', 'private', 'stream']);
 
 // POST /events - создать событие
 app.post('/events', requireAuth, requireDjRole, async (c) => {
@@ -259,64 +319,68 @@ app.post('/events', requireAuth, requireDjRole, async (c) => {
     }
 
     // Enforce DJ-plan «events» quota (Starter=5/mo, Pro=50/mo,
-    // Agency=-1 unlimited). Matches the mix quota pattern at the
-    // bottom of this file. Counts events in the SAME calendar month
-    // as the requested date (or current month if no date set), so
-    // upcoming + completed in that month both count toward the cap.
+    // Agency=-1 unlimited). Counts events in the SAME calendar month
+    // as the requested date — upcoming + completed both count toward
+    // the cap, cancelled doesn't.
     const limits = await getDjPlanLimits(String(userId));
     if (limits.events !== -1) {
       const requestedDate = body.date ? new Date(body.date) : new Date();
-      const monthStart = new Date(requestedDate);
-      monthStart.setUTCDate(1);
-      monthStart.setUTCHours(0, 0, 0, 0);
+      const monthStart = new Date(Date.UTC(requestedDate.getUTCFullYear(), requestedDate.getUTCMonth(), 1));
       const monthEnd = new Date(monthStart);
       monthEnd.setUTCMonth(monthEnd.getUTCMonth() + 1);
 
-      const existingList: any[] = (await djEventsStore.get(String(userId))) || [];
-      const sameMonth = existingList.filter((e) => {
-        if (!e?.date) return false;
-        const d = new Date(e.date);
-        if (Number.isNaN(d.getTime())) return false;
-        if (e.status === 'cancelled') return false;
-        return d >= monthStart && d < monthEnd;
-      });
-      if (sameMonth.length >= limits.events) {
+      const cnt = await pool.query(
+        `SELECT COUNT(*)::int AS n
+           FROM dj_events
+          WHERE dj_id = $1
+            AND status != 'cancelled'
+            AND event_date >= $2 AND event_date < $3`,
+        [userId, monthStart.toISOString(), monthEnd.toISOString()]
+      );
+      const sameMonth = cnt.rows[0]?.n ?? 0;
+      if (sameMonth >= limits.events) {
         return c.json({
           success: false,
-          error: `Достигнут лимит событий (${sameMonth.length}/${limits.events}) на текущем тарифе. Обновите подписку или дождитесь следующего месяца.`,
+          error: `Достигнут лимит событий (${sameMonth}/${limits.events}) на текущем тарифе. Обновите подписку или дождитесь следующего месяца.`,
           limit: limits.events,
-          current: sameMonth.length,
+          current: sameMonth,
         }, 403);
       }
     }
 
-    const id = generateId('ev');
-    const now = new Date().toISOString();
-    const allowedStatuses = new Set(['upcoming', 'confirmed', 'completed', 'cancelled']);
-    const allowedTypes = new Set(['club', 'festival', 'private', 'stream']);
+    const appId = generateId('ev');
+    const title    = String(body.title).slice(0, 200).trim();
+    const venue    = String(body.venue || '').slice(0, 200);
+    const city     = String(body.city || '').slice(0, 100);
+    const fee      = Math.max(0, Number(body.fee) || 0);
+    const capacity = Math.max(0, Number(body.capacity) || 0);
+    const status   = EVENT_STATUSES.has(body.status) ? body.status : 'upcoming';
+    const evType   = EVENT_TYPES.has(body.type) ? body.type : 'club';
+    const notes    = typeof body.notes === 'string' ? body.notes : null;
+    const eventDate = body.date ? new Date(body.date).toISOString() : null;
 
-    const event = {
-      id,
-      ...body,
-      // Sanity-clamp numeric and enum fields so a sloppy client can't
-      // poison aggregates (negative fee → wrong totalEarnings, etc.)
-      title: String(body.title).slice(0, 200).trim(),
-      venue: String(body.venue || '').slice(0, 200),
-      city: String(body.city || '').slice(0, 100),
-      fee: Math.max(0, Number(body.fee) || 0),
-      capacity: Math.max(0, Number(body.capacity) || 0),
-      status: allowedStatuses.has(body.status) ? body.status : 'upcoming',
-      type: allowedTypes.has(body.type) ? body.type : 'club',
-      djId: userId,
-      createdAt: now,
-      updatedAt: now,
-    };
+    // Поля, которых нет в нативных колонках — складываем в `extra` jsonb.
+    const KNOWN = new Set([
+      'id','title','venue','city','date','fee','capacity','status','type',
+      'notes','djId','completedAt','cancelledAt','createdAt','updatedAt',
+    ]);
+    const extra: Record<string, unknown> = {};
+    for (const k of Object.keys(body)) {
+      if (!KNOWN.has(k)) extra[k] = body[k];
+    }
 
-    const events = (await djEventsStore.get(userId)) || [];
-    events.push(event);
-    await djEventsStore.set(userId, events);
-
-    return c.json({ success: true, data: event }, 201);
+    const r = await pool.query(
+      `INSERT INTO dj_events
+         (app_id, dj_id, title, venue, city, event_date, fee, capacity,
+          status, event_type, notes, extra, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+       RETURNING app_id, dj_id, title, venue, city, event_date, fee, capacity,
+                 status, event_type, notes, completed_at, cancelled_at, extra,
+                 created_at, updated_at`,
+      [appId, userId, title, venue || null, city || null, eventDate, fee, capacity,
+       status, evType, notes, JSON.stringify(extra)]
+    );
+    return c.json({ success: true, data: mapEventRow(r.rows[0]) }, 201);
   } catch (error) {
     console.error('Error creating DJ event:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -328,10 +392,16 @@ app.get('/events/:id', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const eventId = c.req.param('id');
-    const events = (await djEventsStore.get(userId)) || [];
-    const event = events.find((e: any) => e.id === eventId);
-    if (!event) return c.json({ success: false, error: 'Event not found' }, 404);
-    return c.json({ success: true, data: event });
+    const r = await pool.query(
+      `SELECT app_id, dj_id, title, venue, city, event_date, fee, capacity,
+              status, event_type, notes, completed_at, cancelled_at, extra,
+              created_at, updated_at
+         FROM dj_events
+        WHERE app_id = $1 AND dj_id = $2`,
+      [eventId, userId]
+    );
+    if (r.rowCount === 0) return c.json({ success: false, error: 'Event not found' }, 404);
+    return c.json({ success: true, data: mapEventRow(r.rows[0]) });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -343,41 +413,65 @@ app.put('/events/:id', requireAuth, requireDjRole, async (c) => {
     const userId = await getUserId(c);
     const eventId = c.req.param('id');
     const body = await c.req.json();
-    const events = (await djEventsStore.get(userId)) || [];
-    const idx = events.findIndex((e: any) => e.id === eventId);
-    if (idx === -1) return c.json({ success: false, error: 'Event not found' }, 404);
 
-    // Re-clamp the same fields POST does, so a status/fee tweak via PUT
-    // can't bypass the validation we apply on create.
-    const allowedStatuses = new Set(['upcoming', 'confirmed', 'completed', 'cancelled']);
-    const allowedTypes = new Set(['club', 'festival', 'private', 'stream']);
-    const patch: any = { ...body };
-    if (patch.fee !== undefined) patch.fee = Math.max(0, Number(patch.fee) || 0);
-    if (patch.capacity !== undefined) patch.capacity = Math.max(0, Number(patch.capacity) || 0);
-    if (patch.status !== undefined && !allowedStatuses.has(patch.status)) delete patch.status;
-    if (patch.type !== undefined && !allowedTypes.has(patch.type)) delete patch.type;
-    if (typeof patch.title === 'string') patch.title = patch.title.slice(0, 200);
-    // Cannot reassign event to another DJ via PUT.
-    delete patch.djId;
+    // Loaded current row for status-transition stamping + extra merge.
+    const cur = await pool.query(
+      `SELECT app_id, completed_at, cancelled_at, extra FROM dj_events
+        WHERE app_id = $1 AND dj_id = $2`,
+      [eventId, userId]
+    );
+    if (cur.rowCount === 0) return c.json({ success: false, error: 'Event not found' }, 404);
 
-    events[idx] = { ...events[idx], ...patch, updatedAt: new Date().toISOString() };
-    // Stamp completedAt/cancelledAt on the status transition, so analytics
-    // (monthEarnings filters by completedAt || date) and history get the
-    // real moment of completion — not the event's original calendar date.
-    if (patch.status === 'completed' && !events[idx].completedAt) {
-      events[idx].completedAt = events[idx].updatedAt;
+    // Re-clamp like POST does, plus reject any djId reassignment.
+    const sets: string[] = ['updated_at = NOW()'];
+    const params: any[] = [];
+    const push = (col: string, val: any) => { params.push(val); sets.push(`${col} = $${params.length}`); };
+
+    if (typeof body.title === 'string')                                        push('title',       body.title.slice(0, 200));
+    if (typeof body.venue === 'string')                                        push('venue',       body.venue.slice(0, 200));
+    if (typeof body.city === 'string')                                         push('city',        body.city.slice(0, 100));
+    if (body.date !== undefined)                                               push('event_date',  body.date ? new Date(body.date).toISOString() : null);
+    if (body.fee !== undefined)                                                push('fee',         Math.max(0, Number(body.fee) || 0));
+    if (body.capacity !== undefined)                                           push('capacity',    Math.max(0, Number(body.capacity) || 0));
+    if (typeof body.status === 'string' && EVENT_STATUSES.has(body.status))    push('status',      body.status);
+    if (typeof body.type === 'string' && EVENT_TYPES.has(body.type))           push('event_type',  body.type);
+    if (body.notes !== undefined)                                              push('notes',       typeof body.notes === 'string' ? body.notes : null);
+
+    // Status-transition stamps — synced to updated_at.
+    const newStatus = typeof body.status === 'string' && EVENT_STATUSES.has(body.status) ? body.status : undefined;
+    if (newStatus === 'completed' && !cur.rows[0].completed_at) push('completed_at', new Date().toISOString());
+    if (newStatus === 'cancelled' && !cur.rows[0].cancelled_at) push('cancelled_at', new Date().toISOString());
+    if (newStatus === 'upcoming' || newStatus === 'confirmed') {
+      push('completed_at', null);
+      push('cancelled_at', null);
     }
-    if (patch.status === 'cancelled' && !events[idx].cancelledAt) {
-      events[idx].cancelledAt = events[idx].updatedAt;
+
+    // Merge unknown fields into `extra`. djId is silently dropped.
+    const KNOWN = new Set([
+      'id','title','venue','city','date','fee','capacity','status','type',
+      'notes','djId','completedAt','cancelledAt','createdAt','updatedAt',
+    ]);
+    const extraPatch: Record<string, unknown> = {};
+    for (const k of Object.keys(body)) {
+      if (!KNOWN.has(k)) extraPatch[k] = body[k];
     }
-    // If the DJ flips it back to upcoming, drop the stale completion/cancel
-    // stamps so the filter doesn't mistakenly count it again.
-    if (patch.status === 'upcoming' || patch.status === 'confirmed') {
-      delete events[idx].completedAt;
-      delete events[idx].cancelledAt;
+    if (Object.keys(extraPatch).length > 0) {
+      const merged = { ...(cur.rows[0].extra || {}), ...extraPatch };
+      push('extra', JSON.stringify(merged));
     }
-    await djEventsStore.set(userId, events);
-    return c.json({ success: true, data: events[idx] });
+
+    params.push(eventId, userId);
+    const idxA = params.length - 1;
+    const idxB = params.length;
+    const r = await pool.query(
+      `UPDATE dj_events SET ${sets.join(', ')}
+        WHERE app_id = $${idxA} AND dj_id = $${idxB}
+       RETURNING app_id, dj_id, title, venue, city, event_date, fee, capacity,
+                 status, event_type, notes, completed_at, cancelled_at, extra,
+                 created_at, updated_at`,
+      params
+    );
+    return c.json({ success: true, data: mapEventRow(r.rows[0]) });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -388,9 +482,10 @@ app.delete('/events/:id', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const eventId = c.req.param('id');
-    const events = (await djEventsStore.get(userId)) || [];
-    const filtered = events.filter((e: any) => e.id !== eventId);
-    await djEventsStore.set(userId, filtered);
+    await pool.query(
+      `DELETE FROM dj_events WHERE app_id = $1 AND dj_id = $2`,
+      [eventId, userId]
+    );
     return c.json({ success: true });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -877,7 +972,7 @@ app.get('/dashboard/stats', requireAuth, requireDjRole, async (c) => {
     const [mixesAgg, reviewsAgg, events, planLimits] = await Promise.all([
       mixesAggPromise,
       reviewsAggPromise,
-      djEventsStore.get(userId).catch(() => []),
+      fetchDjEvents(userId).catch(() => []),
       getDjPlanLimits(String(userId)).catch(() => DJ_PLANS[0].limits),
     ]);
     const mixesCount = Number(mixesAgg.rows?.[0]?.cnt || 0);
@@ -941,7 +1036,7 @@ app.get('/finances/overview', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const [events, withdrawals, txs, planLimits] = await Promise.all([
-      djEventsStore.get(userId).catch(() => []),
+      fetchDjEvents(userId).catch(() => []),
       djWithdrawalsStore.get(userId).catch(() => []),
       djTransactionsStore.get(userId).catch(() => []),
       getDjPlanLimits(String(userId)).catch(() => DJ_PLANS[0].limits),
@@ -1000,7 +1095,7 @@ app.get('/finances/transactions', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
     const [events, txs, planLimits] = await Promise.all([
-      djEventsStore.get(userId).catch(() => []),
+      fetchDjEvents(userId).catch(() => []),
       djTransactionsStore.get(userId).catch(() => []),
       getDjPlanLimits(String(userId)).catch(() => DJ_PLANS[0].limits),
     ]);
@@ -1130,7 +1225,7 @@ app.post('/finances/withdrawals', requireAuth, requireDjRole, async (c) => {
     }
 
     // Проверим доступный баланс — резервируем под все pending/succeeded заявки
-    const events = (await djEventsStore.get(userId)) || [];
+    const events = await fetchDjEvents(userId);
     const withdrawalsExisting = (await djWithdrawalsStore.get(userId)) || [];
     const totalEarned = (events as any[])
       .filter((e: any) => e.status === 'completed')

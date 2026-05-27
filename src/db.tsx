@@ -1537,7 +1537,8 @@ export const radioVenueRequestsStore = jsonbStore('radio_venue_requests', 'radio
 export const radioFinanceStore = jsonbStore('radio_finance', 'radio_id');
 export const radioNotificationsStore = jsonbStore('radio_notifications', 'radio_id');
 export const radioTransactionsStore = jsonbStore('radio_transactions', 'radio_id');
-export const venuePlaylists = jsonbStore('venue_playlists', 'venue_id');
+// venue_playlists перевели на row-per-playlist (migration 036). Доступ
+// через pool.query в venue-routes.tsx / venue-api-routes.tsx.
 export const venueAdCampaignsStore = jsonbStore('venue_ad_campaigns', 'venue_id');
 export const venueAnalyticsStore = jsonbStore('venue_analytics', 'venue_id');
 export const venueRadioBrandStore = jsonbStore('venue_radio_brand', 'venue_id');
@@ -1552,7 +1553,8 @@ export const trackTestRequestReviewsStore = jsonbStore('track_test_request_revie
 export const newsPipelineStore = jsonbStore('news_pipeline', 'key');
 export const agentSessionsStore = jsonbStore('agent_sessions');
 export const agentSessionsIndexStore = jsonbStore('agent_sessions_index');
-export const agentQueueStore = jsonbStore('agent_queue');
+// agent_queue → agent_tasks (row-per-task, migration 036). Доступ через
+// pool.query в agents-routes.tsx.
 export const artistAnalyticsCacheStore = jsonbStore('artist_analytics_cache', 'artist_id');
 export const artistTracksStatsStore = jsonbStore('artist_tracks_stats', 'artist_id');
 export const notificationCampaignsStore = jsonbStore('notification_campaigns');

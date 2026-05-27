@@ -26,7 +26,8 @@
  */
 
 import { Hono } from 'hono';
-import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, venueAdCampaignsStore, venueAnalyticsStore, venuePlaylists, venueRadioBrandStore, radioVenueRequestsStore, radioNotificationsStore } from './db.tsx';
+import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, venueAdCampaignsStore, venueAnalyticsStore, venueRadioBrandStore, radioVenueRequestsStore, radioNotificationsStore } from './db.tsx';
+import { pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { notifyVenueRequest } from './email-helper.tsx';
@@ -485,6 +486,31 @@ app.put('/notifications/:id/read', requireAuth, async (c) => {
 // PLAYLISTS ENDPOINTS (for MusicSection)
 // =====================================================
 
+// venue_playlists row (row-per-playlist after migration 036) → API.
+// API исторически camelCase: id=app_id, venueId, ownerId, contentItems,
+// trackCount, totalDuration, isPublic, etc.
+function mapPlaylistRow(row: any): Record<string, any> {
+  const iso = (d: any) => d ? (d instanceof Date ? d.toISOString() : String(d)) : undefined;
+  return {
+    id: row.app_id,
+    venueId: row.venue_id,
+    ownerId: row.owner_id,
+    title: row.title,
+    description: row.description,
+    coverImageUrl: row.cover_image_url,
+    contentItems: row.content_items || [],
+    trackCount: row.track_count,
+    totalDuration: row.total_duration,
+    isPublic: row.is_public,
+    status: row.status,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  };
+}
+
+const PLAYLIST_COLS = `app_id, venue_id, owner_id, title, description, cover_image_url,
+  content_items, track_count, total_duration, is_public, status, created_at, updated_at`;
+
 // GET /playlists - Получить плейлисты заведения
 app.get('/playlists', requireAuth, async (c) => {
   try {
@@ -493,26 +519,17 @@ app.get('/playlists', requireAuth, async (c) => {
     if (!profile) {
       return c.json({ success: true, playlists: [] });
     }
-
-    const raw = await venuePlaylists.get(profile.id);
-    const playlists = parse(raw) || [];
-
-    return c.json({ success: true, playlists });
+    const r = await pool.query(
+      `SELECT ${PLAYLIST_COLS} FROM venue_playlists
+        WHERE venue_id = $1 ORDER BY created_at DESC`,
+      [profile.id]
+    );
+    return c.json({ success: true, playlists: r.rows.map(mapPlaylistRow) });
   } catch (error: any) {
     console.error('Error fetching venue playlists:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
-
-// Sum of contentItems.length across every playlist for a venue —
-// used to enforce VENUE_PLAN_LIMITS.maxTracks. The `trackCount` field
-// stored on each playlist is best-effort metadata (UI hint); we count
-// the actual array length so we can't be fooled by a stale or
-// hand-set value.
-function countTotalTracks(playlists: any[]): number {
-  return playlists.reduce((sum, p) =>
-    sum + (Array.isArray(p?.contentItems) ? p.contentItems.length : 0), 0);
-}
 
 // POST /playlists - Создать плейлист (gated by VENUE_PLAN_LIMITS.maxPlaylists)
 app.post('/playlists', requireAuth, async (c) => {
@@ -523,56 +540,61 @@ app.post('/playlists', requireAuth, async (c) => {
       return c.json({ error: 'Venue profile not found' }, 404);
     }
 
-    const raw = await venuePlaylists.get(profile.id);
-    const playlists = parse(raw) || [];
+    const limits = getEffectiveVenueLimits(profile);
 
     // Enforce the maxPlaylists quota for the venue's effective plan.
     // Trial → 'business' (20), Старт/free → 5, Сеть/enterprise → unlimited.
-    const limits = getEffectiveVenueLimits(profile);
-    if (limits.maxPlaylists !== -1 && playlists.length >= limits.maxPlaylists) {
-      return c.json(
-        quotaExceeded('playlists', playlists.length, limits.maxPlaylists, profile),
-        403,
+    if (limits.maxPlaylists !== -1) {
+      const cnt = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM venue_playlists WHERE venue_id = $1`,
+        [profile.id]
       );
+      const current = cnt.rows[0]?.n ?? 0;
+      if (current >= limits.maxPlaylists) {
+        return c.json(quotaExceeded('playlists', current, limits.maxPlaylists, profile), 403);
+      }
     }
 
     const body = await c.req.json();
     const contentItems = Array.isArray(body.contentItems) ? body.contentItems : [];
 
-    // Enforce maxTracks BEFORE inserting — count the would-be total
-    // across the existing playlists + this new one's items. Free/Старт
-    // = 500, Бизнес = 2000, Сеть/Enterprise = -1 (unlimited).
+    // Enforce maxTracks BEFORE inserting — sum existing tracks across
+    // venue + this new one. Considers contentItems.length, not trackCount,
+    // so a hand-set figure can't bypass it.
     if (limits.maxTracks !== -1 && contentItems.length > 0) {
-      const wouldBeTotal = countTotalTracks(playlists) + contentItems.length;
+      const sumRes = await pool.query(
+        `SELECT COALESCE(SUM(jsonb_array_length(content_items)), 0)::int AS n
+           FROM venue_playlists WHERE venue_id = $1`,
+        [profile.id]
+      );
+      const existingTotal = sumRes.rows[0]?.n ?? 0;
+      const wouldBeTotal = existingTotal + contentItems.length;
       if (wouldBeTotal > limits.maxTracks) {
-        return c.json(
-          quotaExceeded('tracks', wouldBeTotal, limits.maxTracks, profile),
-          403,
-        );
+        return c.json(quotaExceeded('tracks', wouldBeTotal, limits.maxTracks, profile), 403);
       }
     }
 
-    const now = new Date().toISOString();
-    const playlist = {
-      id: `pl-${crypto.randomUUID()}`,
-      venueId: profile.id,
-      ownerId: userId,
-      title: body.title || 'Новый плейлист',
-      description: body.description || null,
-      coverImageUrl: body.coverImageUrl || null,
-      contentItems,
-      trackCount: contentItems.length,
-      totalDuration: body.totalDuration || 0,
-      isPublic: body.isPublic ?? true,
-      status: body.status || 'draft',
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    playlists.push(playlist);
-    await venuePlaylists.set(profile.id, playlists);
-
-    return c.json({ success: true, playlist });
+    const appId = `pl-${crypto.randomUUID()}`;
+    const r = await pool.query(
+      `INSERT INTO venue_playlists
+         (app_id, venue_id, owner_id, title, description, cover_image_url,
+          content_items, track_count, total_duration, is_public, status,
+          created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, NOW(), NOW())
+       RETURNING ${PLAYLIST_COLS}`,
+      [
+        appId, profile.id, userId,
+        body.title || 'Новый плейлист',
+        body.description || null,
+        body.coverImageUrl || null,
+        JSON.stringify(contentItems),
+        contentItems.length,
+        body.totalDuration || 0,
+        body.isPublic ?? true,
+        body.status || 'draft',
+      ]
+    );
+    return c.json({ success: true, playlist: mapPlaylistRow(r.rows[0]) });
   } catch (error: any) {
     console.error('Error creating playlist:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -591,40 +613,53 @@ app.put('/playlists/:id', requireAuth, async (c) => {
     const playlistId = c.req.param('id');
     const body = await c.req.json();
 
-    const raw = await venuePlaylists.get(profile.id);
-    const playlists: any[] = parse(raw) || [];
-    const idx = playlists.findIndex((p: any) => p.id === playlistId);
-    if (idx === -1) {
-      return c.json({ error: 'Playlist not found' }, 404);
-    }
+    const cur = await pool.query(
+      `SELECT app_id FROM venue_playlists WHERE app_id = $1 AND venue_id = $2`,
+      [playlistId, profile.id]
+    );
+    if (cur.rowCount === 0) return c.json({ error: 'Playlist not found' }, 404);
 
-    // Enforce maxTracks if the update changes contentItems. We count
-    // the would-be total across every playlist (this one's NEW length
-    // + every OTHER playlist's existing length) and reject if it
-    // breaches the cap.
+    // Enforce maxTracks for new contentItems: SUM other playlists +
+    // this update's length.
     const limits = getEffectiveVenueLimits(profile);
     if (limits.maxTracks !== -1 && Array.isArray(body.contentItems)) {
-      const otherTotal = playlists.reduce((sum, p, i) =>
-        i === idx ? sum : sum + (Array.isArray(p?.contentItems) ? p.contentItems.length : 0), 0);
+      const sumRes = await pool.query(
+        `SELECT COALESCE(SUM(jsonb_array_length(content_items)), 0)::int AS n
+           FROM venue_playlists WHERE venue_id = $1 AND app_id != $2`,
+        [profile.id, playlistId]
+      );
+      const otherTotal = sumRes.rows[0]?.n ?? 0;
       const wouldBeTotal = otherTotal + body.contentItems.length;
       if (wouldBeTotal > limits.maxTracks) {
-        return c.json(
-          quotaExceeded('tracks', wouldBeTotal, limits.maxTracks, profile),
-          403,
-        );
+        return c.json(quotaExceeded('tracks', wouldBeTotal, limits.maxTracks, profile), 403);
       }
     }
 
-    const merged = { ...playlists[idx], ...body, updatedAt: new Date().toISOString() };
-    // Keep trackCount in sync with contentItems.length so the UI
-    // doesn't show a stale figure.
-    if (Array.isArray(merged.contentItems)) {
-      merged.trackCount = merged.contentItems.length;
-    }
-    playlists[idx] = merged;
-    await venuePlaylists.set(profile.id, playlists);
+    const sets: string[] = ['updated_at = NOW()'];
+    const params: any[] = [];
+    const push = (col: string, val: any) => { params.push(val); sets.push(`${col} = $${params.length}`); };
 
-    return c.json({ success: true, playlist: playlists[idx] });
+    if (typeof body.title === 'string')              push('title',           body.title);
+    if (body.description !== undefined)              push('description',     body.description);
+    if (body.coverImageUrl !== undefined)            push('cover_image_url', body.coverImageUrl);
+    if (Array.isArray(body.contentItems)) {
+      push('content_items', JSON.stringify(body.contentItems));
+      push('track_count',   body.contentItems.length);
+    }
+    if (body.totalDuration !== undefined)            push('total_duration',  Number(body.totalDuration) || 0);
+    if (body.isPublic !== undefined)                 push('is_public',       Boolean(body.isPublic));
+    if (typeof body.status === 'string')             push('status',          body.status);
+
+    params.push(playlistId, profile.id);
+    const idxA = params.length - 1;
+    const idxB = params.length;
+    const r = await pool.query(
+      `UPDATE venue_playlists SET ${sets.join(', ')}
+        WHERE app_id = $${idxA} AND venue_id = $${idxB}
+       RETURNING ${PLAYLIST_COLS}`,
+      params
+    );
+    return c.json({ success: true, playlist: mapPlaylistRow(r.rows[0]) });
   } catch (error: any) {
     console.error('Error updating playlist:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -641,11 +676,10 @@ app.delete('/playlists/:id', requireAuth, async (c) => {
     }
 
     const playlistId = c.req.param('id');
-    const raw = await venuePlaylists.get(profile.id);
-    const playlists: any[] = parse(raw) || [];
-    const filtered = playlists.filter((p: any) => p.id !== playlistId);
-    await venuePlaylists.set(profile.id, filtered);
-
+    await pool.query(
+      `DELETE FROM venue_playlists WHERE app_id = $1 AND venue_id = $2`,
+      [playlistId, profile.id]
+    );
     return c.json({ success: true });
   } catch (error: any) {
     console.error('Error deleting playlist:', error);
