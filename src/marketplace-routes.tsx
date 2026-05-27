@@ -332,10 +332,13 @@ app.get('/beats/:id', async (c) => {
 app.post('/beats', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { producerId, producer, title, genre, bpm, key, tags, duration, price, licenseTypes } = body;
+    const { producer, title, genre, bpm, key, tags, duration, price, licenseTypes } = body;
+    // owner from JWT — body.producerId ignored (IDOR + PUT/DELETE
+    // owner-check would 403 the creator otherwise)
+    const producerId = c.get('userId');
 
-    if (!producerId || !title || !genre || !bpm || !key || !price) {
-      return c.json({ success: false, error: 'producerId, title, genre, bpm, key, price required' }, 400);
+    if (!title || !genre || !bpm || !key || !price) {
+      return c.json({ success: false, error: 'title, genre, bpm, key, price required' }, 400);
     }
 
     const id = genId('beat');
