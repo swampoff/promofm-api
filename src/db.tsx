@@ -1718,7 +1718,9 @@ export const elevenlabsStore = jsonbStore('elevenlabs_config');
 export const platformRevenueLogStore = jsonbStore('platform_revenue_log');
 export const platformStatsStore = jsonbStore('platform_stats', 'id');
 export const trackTestExpertStatsStore = jsonbStore('track_test_expert_stats', 'expert_id');
-export const trackModerationStore = jsonbStore('track_moderation');
+// trackModerationStore DELETED — 0 callers. track_moderation пишется
+// напрямую через pool.query в src/ai-check.tsx (после migration 052 —
+// все native cols, jsonb остаётся только в ai_check_result).
 export const newsPublicStore = jsonbStore('news_public');
 export const contactFormsStore = jsonbStore('contact_forms');
 export const investorInquiriesStore = jsonbStore('investor_inquiries');

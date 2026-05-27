@@ -4,10 +4,13 @@
  *
  * Architecture: fire-and-forget from POST /tracks. The artist's
  * upload response is NOT blocked by the ~15s analyzer round-trip.
- * Results land in:
- *   - track_moderation.ai_check_status (text, e.g. "likely_ai" / "likely_human")
- *   - track_moderation.data->aiCheckResult (jsonb, full breakdown)
- *   - tracks.data->aiCheck (jsonb, mirror for cabinet UI)
+ * Results land in (track_moderation native cols since migration 052):
+ *   - ai_check_status        — 'pending' | 'likely_ai' | 'likely_human' | 'error' | …
+ *   - ai_check_started_at    — timestamptz
+ *   - ai_check_finished_at   — timestamptz
+ *   - ai_check_error         — text (only on error)
+ *   - ai_check_result        — jsonb (legit nested analyzer breakdown)
+ * Also mirrored into tracks.data->aiCheck (jsonb, for cabinet UI).
  *
  * Detector contract (POST 127.0.0.1:8085/analyze):
  *   body: { file_path: string, track_id?: string }
@@ -86,13 +89,13 @@ export async function runAiCheck(trackId: string, filePath: string): Promise<Ana
   // Mark pending so admin UI can show progress
   try {
     await pool.query(
-      `INSERT INTO track_moderation (id, track_id, ai_check_status, data, created_at, updated_at)
-       VALUES ($1, $2, 'pending', jsonb_build_object('aiCheckStartedAt', now()), now(), now())
+      `INSERT INTO track_moderation
+         (id, track_id, ai_check_status, ai_check_started_at, created_at, updated_at)
+       VALUES ($1, $2, 'pending', NOW(), NOW(), NOW())
        ON CONFLICT (id) DO UPDATE
-         SET ai_check_status = 'pending',
-             data = COALESCE(track_moderation.data, '{}'::jsonb)
-                    || jsonb_build_object('aiCheckStartedAt', now()),
-             updated_at = now()`,
+         SET ai_check_status     = 'pending',
+             ai_check_started_at = NOW(),
+             updated_at          = NOW()`,
       [`ai_${trackId}`, trackId],
     );
   } catch (e: any) {
@@ -122,10 +125,10 @@ export async function runAiCheck(trackId: string, filePath: string): Promise<Ana
     try {
       await pool.query(
         `UPDATE track_moderation
-            SET ai_check_status = 'error',
-                data = COALESCE(data, '{}'::jsonb)
-                       || jsonb_build_object('aiCheckError', $2::text, 'aiCheckFinishedAt', now()),
-                updated_at = now()
+            SET ai_check_status      = 'error',
+                ai_check_error       = $2,
+                ai_check_finished_at = NOW(),
+                updated_at           = NOW()
           WHERE id = $1`,
         [`ai_${trackId}`, errMsg],
       );
@@ -138,13 +141,10 @@ export async function runAiCheck(trackId: string, filePath: string): Promise<Ana
   try {
     await pool.query(
       `UPDATE track_moderation
-          SET ai_check_status = $2,
-              data = COALESCE(data, '{}'::jsonb)
-                     || jsonb_build_object(
-                          'aiCheckResult', $3::jsonb,
-                          'aiCheckFinishedAt', now()
-                        ),
-              updated_at = now()
+          SET ai_check_status      = $2,
+              ai_check_result      = $3::jsonb,
+              ai_check_finished_at = NOW(),
+              updated_at           = NOW()
         WHERE id = $1`,
       [`ai_${trackId}`, verdict, JSON.stringify(result)],
     );
