@@ -282,6 +282,16 @@ app.post('/submitTrack', requireAuth, async (c) => {
         code: 'COVER_REQUIRED'
       }, 400);
     }
+    // RULE: описание обязательно ≥20 символов. Раньше было opt-in и
+    // публичный профиль артиста показывал пустой блок «О треке».
+    // Минимум 20 символов чтобы отсечь спам "ok"/"new track"/"вышло".
+    const descriptionRaw = String(body.description || '').trim();
+    if (descriptionRaw.length < 20) {
+      return c.json({
+        error: 'Опишите трек минимум в 20 символах — это видно на публичном профиле',
+        code: 'DESCRIPTION_REQUIRED'
+      }, 400);
+    }
 
     const track = await typed.insertTrack({
       title: body.title || '',
