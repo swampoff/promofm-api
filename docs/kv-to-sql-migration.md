@@ -70,9 +70,12 @@ stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md
 объём работы похож на Wave 1.
 
 **🔴 Hybrid с active data writes (нужны новые native cols + handler refactor):**
-- `dj_mixes` — `data->>'payment_amount'`, `data->>'upcoming_until'`, `data->>'published_at'` активно используются
-- `bookings`, `support_tickets`, `marketing_campaigns` — `upsert*` пишет `data: fullObject`
-- `radio_ad_slots`, `notification_campaigns`, `track_test_requests`, `track_moderation` — все ещё через jsonbStore
+- ✅ `dj_mixes` — PR #62 (migration 046) — 17 fields promoted, hot-path indexes
+- ✅ `bookings` — PR #63 (migration 047) — ~30 fields promoted, quota bug fix
+- ✅ `support_tickets` — PR #64 (migration 048) — 15 native cols + 3 jsonb arrays, atomic message append
+- ✅ `marketing_campaigns` — PR #65 (no SQL needed, table уже native-cols) — удалены dead-code хелперы `getCampaignsByUser`/`upsertCampaign` в db.tsx (0 callers)
+- ✅ `notification_campaigns` — PR #65 (migration 049) — 17 native cols + 4 jsonb objects/arrays, 3 hot-path indexes. **Это реальный backing store за фичей «маркетинг-кампании»** (имя файла marketing-campaigns-routes.tsx сбивало с толку).
+- `radio_ad_slots`, `track_test_requests`, `track_moderation` — все ещё через jsonbStore
 
 **🟢 Truly trivial Wave 3 (write-only data, ready for DROP):**
 - `donations` — `createDonation` пишет только native cols, read `r.data \|\| r` works без data

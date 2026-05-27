@@ -923,28 +923,13 @@ export async function upsertTicket(ticketId: string, ticket: Record<string, any>
 }
 
 // ─── Marketing Campaigns ───
-
-export async function getCampaignsByUser(userId: string) {
-  const { data, error } = await db()
-    .from('marketing_campaigns')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false });
-  if (error) console.error('[db] getCampaignsByUser:', error);
-  return (data || []).map((r: any) => r.data || r);
-}
-
-export async function upsertCampaign(campaignId: string, campaign: Record<string, any>) {
-  const row = {
-    id: campaignId,
-    data: campaign,
-    updated_at: new Date().toISOString(),
-  };
-  const { error } = await db()
-    .from('marketing_campaigns')
-    .upsert(row, { onConflict: 'id' });
-  if (error) console.error('[db] upsertCampaign:', error);
-}
+// getCampaignsByUser / upsertCampaign DELETED — было 0 callers.
+// `marketing_campaigns` пишется напрямую в promotion-routes-sql.tsx и
+// читается analytics-эндпоинтами в marketing-campaigns-routes.tsx —
+// все на native cols (artist_id, campaign_name, campaign_type, budget,
+// platforms, metrics, roi, …), `data` колонки не использует никто.
+// (Реальный backing store за маркетинг-кампаниями — notification_campaigns,
+//  см. ниже после строки "Notification Campaigns".)
 
 // ─── Banner Ads ───
 
@@ -1709,7 +1694,10 @@ export const agentSessionsIndexStore = jsonbStore('agent_sessions_index');
 // (migration 041). Доступ — artist-analytics-routes.tsx.
 // artist_tracks_stats — orphan, DROP TABLE (migration 041, declaration
 // удалена).
-export const notificationCampaignsStore = jsonbStore('notification_campaigns');
+// notificationCampaignsStore: migration 049 promoted всё к native cols.
+// Доступ — через getNotificationCampaign / listNotificationCampaigns /
+// upsertNotificationCampaign / deleteNotificationCampaign helpers (см.
+// блок "Notification Campaigns" ниже).
 export const notificationSettingsKvStore = jsonbStore('notification_settings', 'user_id');
 export const systemConfigStore = jsonbStore('system_config', 'key');
 export const accountingStore = jsonbStore('accounting_data', 'key');
@@ -1897,23 +1885,156 @@ export async function setCcnUnreadCount(_userId: string, _count: number) {
   // Function preserved as no-op to avoid breaking callers.
 }
 
-// ─── Notification Campaigns ───
+// ─── Notification Campaigns (row-per-campaign, full native cols since migration 049) ───
+
+const NCAMP_NATIVE_COLS = `id, user_id, campaign_name, artist_name, description,
+  start_date, end_date, budget_preference, custom_budget, base_price, final_price,
+  discount_applied, status, rejection_reason, content_ids, channels, target_audience,
+  additional_materials, approved_at, rejected_at, launched_at, created_at, updated_at`;
+
+function mapNCampRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    user_id: r.user_id,
+    campaign_name: r.campaign_name || '',
+    artist_name: r.artist_name || '',
+    description: r.description || '',
+    start_date: iso(r.start_date),
+    end_date: iso(r.end_date),
+    budget_preference: r.budget_preference || 'medium',
+    custom_budget: Number(r.custom_budget || 0),
+    base_price: Number(r.base_price || 0),
+    final_price: Number(r.final_price || 0),
+    discount_applied: Number(r.discount_applied || 0),
+    status: r.status || 'pending_review',
+    rejection_reason: r.rejection_reason || null,
+    content_ids: r.content_ids || [],
+    channels: r.channels || [],
+    target_audience: r.target_audience || {},
+    additional_materials: r.additional_materials || {},
+    approved_at: iso(r.approved_at),
+    rejected_at: iso(r.rejected_at),
+    launched_at: iso(r.launched_at),
+    created_at: iso(r.created_at),
+    updated_at: iso(r.updated_at),
+  };
+}
 
 export async function getNotificationCampaignsByUser(userId: string) {
-  const { data, error } = await db()
-    .from('notification_campaigns')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false });
-  if (error) console.error('[db] getNotificationCampaignsByUser:', error);
-  return (data || []).map((r: any) => r.data ?? r);
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${NCAMP_NATIVE_COLS} FROM notification_campaigns
+      WHERE user_id = $1
+      ORDER BY created_at DESC`,
+    [userId]
+  );
+  return r.rows.map(mapNCampRow);
+}
+
+export async function getNotificationCampaign(campaignId: string) {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${NCAMP_NATIVE_COLS} FROM notification_campaigns WHERE id = $1 LIMIT 1`,
+    [campaignId]
+  );
+  return r.rowCount ? mapNCampRow(r.rows[0]) : null;
+}
+
+export async function listNotificationCampaigns(opts: { status?: string } = {}) {
+  const { pool } = await import('./db-client.tsx');
+  const params: any[] = [];
+  let where = '';
+  if (opts.status) {
+    params.push(opts.status);
+    where = `WHERE status = $${params.length}`;
+  }
+  const r = await pool.query(
+    `SELECT ${NCAMP_NATIVE_COLS} FROM notification_campaigns
+       ${where}
+       ORDER BY created_at DESC`,
+    params
+  );
+  return r.rows.map(mapNCampRow);
+}
+
+export async function deleteNotificationCampaign(campaignId: string) {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `DELETE FROM notification_campaigns WHERE id = $1`,
+    [campaignId]
+  );
+  return r.rowCount || 0;
 }
 
 export async function upsertNotificationCampaign(userId: string, campaignId: string, campaign: Record<string, any>) {
-  const { error } = await db()
-    .from('notification_campaigns')
-    .upsert({ id: campaignId, user_id: userId, data: campaign, updated_at: new Date().toISOString() }, { onConflict: 'id' });
-  if (error) console.error('[db] upsertNotificationCampaign:', error);
+  // Row-per-campaign (migration 049): native cols only, no data jsonb.
+  const { pool } = await import('./db-client.tsx');
+  const content_ids = Array.isArray(campaign.content_ids) ? campaign.content_ids : [];
+  const channels = Array.isArray(campaign.channels) ? campaign.channels : [];
+  const target_audience = campaign.target_audience && typeof campaign.target_audience === 'object' ? campaign.target_audience : {};
+  const additional_materials = campaign.additional_materials && typeof campaign.additional_materials === 'object' ? campaign.additional_materials : {};
+
+  await pool.query(
+    `INSERT INTO notification_campaigns (
+       id, user_id, campaign_name, artist_name, description,
+       start_date, end_date, budget_preference, custom_budget,
+       base_price, final_price, discount_applied, status, rejection_reason,
+       content_ids, channels, target_audience, additional_materials,
+       approved_at, rejected_at, launched_at, updated_at
+     )
+     VALUES ($1,$2,$3,$4,$5,
+             $6,$7,$8,$9,
+             $10,$11,$12,$13,$14,
+             $15::jsonb,$16::jsonb,$17::jsonb,$18::jsonb,
+             $19,$20,$21,NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       user_id              = COALESCE(EXCLUDED.user_id, notification_campaigns.user_id),
+       campaign_name        = EXCLUDED.campaign_name,
+       artist_name          = EXCLUDED.artist_name,
+       description          = EXCLUDED.description,
+       start_date           = EXCLUDED.start_date,
+       end_date             = EXCLUDED.end_date,
+       budget_preference    = EXCLUDED.budget_preference,
+       custom_budget        = EXCLUDED.custom_budget,
+       base_price           = EXCLUDED.base_price,
+       final_price          = EXCLUDED.final_price,
+       discount_applied     = EXCLUDED.discount_applied,
+       status               = EXCLUDED.status,
+       rejection_reason     = EXCLUDED.rejection_reason,
+       content_ids          = EXCLUDED.content_ids,
+       channels             = EXCLUDED.channels,
+       target_audience      = EXCLUDED.target_audience,
+       additional_materials = EXCLUDED.additional_materials,
+       approved_at          = EXCLUDED.approved_at,
+       rejected_at          = EXCLUDED.rejected_at,
+       launched_at          = EXCLUDED.launched_at,
+       updated_at           = NOW()`,
+    [
+      campaignId,
+      userId || campaign.user_id || null,
+      campaign.campaign_name || '',
+      campaign.artist_name || '',
+      campaign.description || '',
+      campaign.start_date || null,
+      campaign.end_date || null,
+      campaign.budget_preference || 'medium',
+      Number(campaign.custom_budget || 0),
+      Number(campaign.base_price || 0),
+      Number(campaign.final_price || 0),
+      Number(campaign.discount_applied || 0),
+      campaign.status || 'pending_review',
+      campaign.rejection_reason || null,
+      JSON.stringify(content_ids),
+      JSON.stringify(channels),
+      JSON.stringify(target_audience),
+      JSON.stringify(additional_materials),
+      campaign.approved_at || null,
+      campaign.rejected_at || null,
+      campaign.launched_at || null,
+    ]
+  );
 }
 
 // ─── Payment Balances (specific fields) ───

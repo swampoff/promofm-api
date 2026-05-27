@@ -16,7 +16,13 @@
  */
 
 import { Hono } from 'hono';
-import { notificationCampaignsStore, getNotificationCampaignsByUser, upsertNotificationCampaign } from './db.tsx';
+import {
+  getNotificationCampaignsByUser,
+  getNotificationCampaign,
+  listNotificationCampaigns,
+  deleteNotificationCampaign,
+  upsertNotificationCampaign,
+} from './db.tsx';
 import { notifyAllAdmins, notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { pool } from './db-client.tsx';
@@ -33,11 +39,9 @@ marketing.get('/campaigns/:userId', requireAuth, async (c) => {
   const userRole = c.get('userRole');
   if (userId !== authUserId && userRole !== 'admin') return c.json({ success: false, error: 'Access denied' }, 403);
   try {
+    // Native cols (migration 049) — ORDER BY created_at DESC done in SQL.
     const campaigns = await getNotificationCampaignsByUser(userId);
-    const valid = (campaigns || []).filter(Boolean);
-    // Sort by created_at desc
-    valid.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    return c.json({ success: true, data: valid });
+    return c.json({ success: true, data: campaigns });
   } catch (error) {
     console.log('Marketing GET /campaigns/:userId error:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -48,10 +52,8 @@ marketing.get('/campaigns/:userId', requireAuth, async (c) => {
 
 marketing.get('/campaigns/all', requireAuth, requireAdmin, async (c) => {
   try {
-    const campaigns = await notificationCampaignsStore.getAll();
-    const valid = (campaigns || []).filter(Boolean);
-    valid.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    return c.json({ success: true, data: valid });
+    const campaigns = await listNotificationCampaigns();
+    return c.json({ success: true, data: campaigns });
   } catch (error) {
     console.log('Marketing GET /campaigns/all error:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -62,9 +64,8 @@ marketing.get('/campaigns/all', requireAuth, requireAdmin, async (c) => {
 
 marketing.get('/campaigns/pending', requireAuth, requireAdmin, async (c) => {
   try {
-    const campaigns = await notificationCampaignsStore.getAll();
-    const pending = (campaigns || []).filter((c: any) => c && c.status === 'pending_review');
-    pending.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    // Status filter pushed into SQL (uses idx_notification_campaigns_pending).
+    const pending = await listNotificationCampaigns({ status: 'pending_review' });
     return c.json({ success: true, data: pending, count: pending.length });
   } catch (error) {
     console.log('Marketing GET /campaigns/pending error:', error);
@@ -77,7 +78,7 @@ marketing.get('/campaigns/pending', requireAuth, requireAdmin, async (c) => {
 marketing.get('/campaigns/detail/:campaignId', requireAuth, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
-    const campaign = await notificationCampaignsStore.get(campaignId);
+    const campaign = await getNotificationCampaign(campaignId);
     if (!campaign) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
     return c.json({ success: true, data: campaign });
   } catch (error) {
@@ -179,10 +180,10 @@ marketing.patch('/campaigns/:campaignId', requireAuth, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
     const body = await c.req.json();
-    const campaign = await notificationCampaignsStore.get(campaignId) as any;
+    const campaign = await getNotificationCampaign(campaignId);
     if (!campaign) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
 
-    const updated = { ...campaign, ...body, updated_at: new Date().toISOString() };
+    const updated = { ...campaign, ...body };
     await upsertNotificationCampaign(updated.user_id, campaignId, updated);
     return c.json({ success: true, data: updated });
   } catch (error) {
@@ -195,11 +196,9 @@ marketing.patch('/campaigns/:campaignId', requireAuth, async (c) => {
 marketing.delete('/campaigns/:campaignId', requireAuth, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
-    const campaign = await notificationCampaignsStore.get(campaignId) as any;
-    if (!campaign) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
-
-    await notificationCampaignsStore.del(campaignId);
-
+    // Atomic existence-check + delete: single DELETE returns rowCount.
+    const rowCount = await deleteNotificationCampaign(campaignId);
+    if (rowCount === 0) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
     return c.json({ success: true });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -212,24 +211,31 @@ marketing.post('/campaigns/:campaignId/approve', requireAuth, requireAdmin, asyn
   const campaignId = c.req.param('campaignId');
   try {
     const body = await c.req.json().catch(() => ({}));
-    const campaign = await notificationCampaignsStore.get(campaignId) as any;
-    if (!campaign) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
-
-    campaign.status = 'approved';
-    if (body.final_price) campaign.final_price = body.final_price;
-    campaign.approved_at = new Date().toISOString();
-    campaign.updated_at = new Date().toISOString();
-    await upsertNotificationCampaign(campaign.user_id, campaignId, campaign);
+    // Atomic transition: single UPDATE sets status + approved_at + optional
+    // final_price override; rowCount === 0 means not found.
+    const overridePrice = body.final_price !== undefined && body.final_price !== null;
+    const upd = await pool.query(
+      `UPDATE notification_campaigns SET
+         status      = 'approved',
+         approved_at = COALESCE(approved_at, NOW()),
+         final_price = CASE WHEN $2::boolean THEN $3::numeric ELSE final_price END,
+         updated_at  = NOW()
+       WHERE id = $1
+       RETURNING id, user_id, campaign_name, status`,
+      [campaignId, overridePrice, overridePrice ? Number(body.final_price) : 0]
+    );
+    if (upd.rowCount === 0) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
+    const campaign = await getNotificationCampaign(campaignId);
 
     // Cross-cabinet: notify artist
     try {
       await notifyCrossCabinet({
-        targetUserId: campaign.user_id,
+        targetUserId: upd.rows[0].user_id,
         targetRole: 'artist',
         sourceRole: 'admin',
         type: 'admin_action',
         title: 'Кампания одобрена',
-        message: `Ваша промо-кампания «${campaign.campaign_name}» одобрена администратором и готова к запуску`,
+        message: `Ваша промо-кампания «${upd.rows[0].campaign_name}» одобрена администратором и готова к запуску`,
         link: 'campaigns',
         metadata: { campaignId, status: 'approved' },
       });
@@ -249,26 +255,31 @@ marketing.post('/campaigns/:campaignId/reject', requireAuth, requireAdmin, async
   const campaignId = c.req.param('campaignId');
   try {
     const body = await c.req.json().catch(() => ({}));
-    const campaign = await notificationCampaignsStore.get(campaignId) as any;
-    if (!campaign) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
-
-    campaign.status = 'rejected';
-    campaign.rejection_reason = body.reason || 'Не указана';
-    campaign.rejected_at = new Date().toISOString();
-    campaign.updated_at = new Date().toISOString();
-    await upsertNotificationCampaign(campaign.user_id, campaignId, campaign);
+    const reason = body.reason || 'Не указана';
+    const upd = await pool.query(
+      `UPDATE notification_campaigns SET
+         status           = 'rejected',
+         rejection_reason = $2,
+         rejected_at      = COALESCE(rejected_at, NOW()),
+         updated_at       = NOW()
+       WHERE id = $1
+       RETURNING id, user_id, campaign_name`,
+      [campaignId, reason]
+    );
+    if (upd.rowCount === 0) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
+    const campaign = await getNotificationCampaign(campaignId);
 
     // Cross-cabinet: notify artist
     try {
       await notifyCrossCabinet({
-        targetUserId: campaign.user_id,
+        targetUserId: upd.rows[0].user_id,
         targetRole: 'artist',
         sourceRole: 'admin',
         type: 'admin_action',
         title: 'Кампания отклонена',
-        message: `Промо-кампания «${campaign.campaign_name}» отклонена. Причина: ${campaign.rejection_reason}`,
+        message: `Промо-кампания «${upd.rows[0].campaign_name}» отклонена. Причина: ${reason}`,
         link: 'campaigns',
-        metadata: { campaignId, status: 'rejected', reason: campaign.rejection_reason },
+        metadata: { campaignId, status: 'rejected', reason },
       });
     } catch (e) {
       console.log('Notify artist (reject) error:', e);
@@ -285,27 +296,37 @@ marketing.post('/campaigns/:campaignId/reject', requireAuth, requireAdmin, async
 marketing.post('/campaigns/:campaignId/launch', requireAuth, requireAdmin, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
-    const campaign = await notificationCampaignsStore.get(campaignId) as any;
-    if (!campaign) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
-
-    if (campaign.status !== 'approved') {
+    // Atomic guard + transition: only flip approved→active. If the row
+    // exists with a different status, WHERE rejects and rowCount===0.
+    // We then re-query to distinguish 404 vs «wrong status».
+    const upd = await pool.query(
+      `UPDATE notification_campaigns SET
+         status      = 'active',
+         launched_at = COALESCE(launched_at, NOW()),
+         updated_at  = NOW()
+       WHERE id = $1 AND status = 'approved'
+       RETURNING id, user_id, campaign_name`,
+      [campaignId]
+    );
+    if (upd.rowCount === 0) {
+      const exists = await pool.query(
+        `SELECT status FROM notification_campaigns WHERE id = $1`,
+        [campaignId]
+      );
+      if (exists.rowCount === 0) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
       return c.json({ success: false, error: 'Кампания должна быть одобрена перед запуском' }, 400);
     }
-
-    campaign.status = 'active';
-    campaign.launched_at = new Date().toISOString();
-    campaign.updated_at = new Date().toISOString();
-    await upsertNotificationCampaign(campaign.user_id, campaignId, campaign);
+    const campaign = await getNotificationCampaign(campaignId);
 
     // Cross-cabinet: notify artist about launch
     try {
       await notifyCrossCabinet({
-        targetUserId: campaign.user_id,
+        targetUserId: upd.rows[0].user_id,
         targetRole: 'artist',
         sourceRole: 'admin',
         type: 'admin_action',
         title: 'Кампания запущена!',
-        message: `Ваша промо-кампания «${campaign.campaign_name}» успешно запущена. Отслеживайте результаты в личном кабинете.`,
+        message: `Ваша промо-кампания «${upd.rows[0].campaign_name}» успешно запущена. Отслеживайте результаты в личном кабинете.`,
         link: 'campaigns',
         metadata: { campaignId, status: 'active' },
       });
