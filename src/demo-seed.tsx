@@ -4,7 +4,7 @@
  */
 
 import {
-  upsertBeat, producerServicesStore, digitalGoodsStore, platformStatsStore,
+  upsertBeat, upsertProducerService, digitalGoodsStore, platformStatsStore,
   systemConfigStore,
 } from './db.tsx';
 
@@ -166,7 +166,7 @@ export async function seedDemoData(): Promise<{ seeded: boolean; message: string
         includes: s.includes,
         createdAt: daysAgo(Math.floor(Math.random() * 60)),
       };
-      await producerServicesStore.set(id, service);
+      await upsertProducerService(id, service);
       servicesCreated++;
     }
 
