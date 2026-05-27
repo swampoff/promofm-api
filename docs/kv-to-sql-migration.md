@@ -51,10 +51,32 @@ stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md
 | `radio_analytics` | per-station объект (+ `.getAll()` для radio-partners) | **Оставлен как есть** на этом waves. ⚠️ Дуальное назначение (analytics + station-registry для landing) — стоит распутать в Wave 3 (вынести registry в `radio_stations` или дать landing запрос к нему). | — |
 | `venue_analytics` | per-venue объект, 4 `.get()` callers, 0 `.set()` в коде | **Оставлен как есть** — singleton cache, читается, пишется откуда-то ещё (cron?). Если будет cross-venue admin dashboard — добавить native cols. | — |
 
-### 🔜 Wave 3 — гибриды (тривиальный refactor)
+### ⏳ Wave 1.5 — array-stores
 
-Таблицы где native колонки уже всё закрывают, но `data jsonb` дублирует — просто удалить колонку `data` + рефактор handler'ов на native columns:
-`dj_collaborations`, `dj_bookings`, `dj_reviews`, `dj_mixes`, `dj_subscriptions`, `dj_notifications`, `notification_campaigns`, `pitching_requests`, `radio_ad_slots`, `track_analytics`, `user_subscriptions`, `track_moderation`, `track_test_requests`, `donations`, `support_tickets`, `bookings`, `payment_withdrawals`, `marketing_campaigns`.
+| Таблица | Composite UNIQUE | PR | Risk closed |
+|---|---|---|---|
+| `producer_convs/messages/sessions` | `(producer_id/conv_id, app_id)` | #58 v2 | race на conv/msg/session create + 69 orphan msgs wipe |
+| `payment_withdrawals` | `(user_id, app_id)` | #59 | 💰 race на withdrawal create (4 модуля) + radio prefix unpacked |
+| `dj_withdrawals` | `(dj_id, app_id)` | #60 | 💰 race + webhook update race; `yoo_payout_id` partial INDEX |
+| `dj_campaigns` | `(dj_id, app_id)` | #61 | race на campaign create |
+| `dj_notifications` | — DROP TABLE — | #61 | orphan: 0 writers (cross-cabinet-notify пишет в `cross_cabinet_notifications`). DJ /notifications handlers переписаны на `getCcnByUser` — **DJ теперь реально видит свои cross-cabinet уведомления** (была broken-fиature) |
+
+### 🔜 Wave 3 — гибриды
+
+Аудит 2026-05-27 показал что «гибрид» = native cols + active data jsonb writes
+(сохраняют full object). Просто `DROP COLUMN data` ломает чтения. Реальный
+объём работы похож на Wave 1.
+
+**🔴 Hybrid с active data writes (нужны новые native cols + handler refactor):**
+- `dj_mixes` — `data->>'payment_amount'`, `data->>'upcoming_until'`, `data->>'published_at'` активно используются
+- `bookings`, `support_tickets`, `marketing_campaigns` — `upsert*` пишет `data: fullObject`
+- `radio_ad_slots`, `notification_campaigns`, `track_test_requests`, `track_moderation` — все ещё через jsonbStore
+
+**🟢 Truly trivial Wave 3 (write-only data, ready for DROP):**
+- `donations` — `createDonation` пишет только native cols, read `r.data \|\| r` works без data
+
+**🤷 Возможные orphan'ы (нужна проверка):**
+- `dj_bookings`, `pitching_requests`, `user_subscriptions`, `track_analytics`, `dj_marketplace_index`, `dj_collaborations`, `dj_pitches` — нет active callers в grep, могут быть DROPpable если laptop confirm 0 rows
 
 ### 🔜 Wave 4 — settings/configs (можно отложить)
 

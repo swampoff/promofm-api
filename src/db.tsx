@@ -1510,10 +1510,13 @@ export const djReviewsStore = jsonbStore('dj_reviews', 'dj_id');
 // dj_calendar таблица + декларация удалены (migration 040). Был zombie
 // код, 0 callers — DJ-календарь как фича не реализован.
 export const djCollaborationsStore = jsonbStore('dj_collaborations', 'dj_id');
-export const djNotificationsStore = jsonbStore('dj_notifications', 'dj_id');
+// dj_notifications таблица DROPped (migration 045). Orphan — никто не
+// писал; DJ /notifications читает теперь cross_cabinet_notifications
+// через getCcnByUser().
 export const djSubscriptionsStore = jsonbStore('dj_subscriptions', 'dj_id');
 export const djPitchesStore = jsonbStore('dj_pitches', 'dj_id');
-export const djCampaignsStore = jsonbStore('dj_campaigns', 'dj_id');
+// dj_campaigns переехал на row-per-campaign (migration 045). Доступ
+// через pool.query из dj-studio-routes.tsx.
 export const djWithdrawalsStore = jsonbStore('dj_withdrawals', 'dj_id');
 export const djTransactionsStore = jsonbStore('dj_transactions', 'dj_id');
 export const collabOffersByArtistStore = jsonbStore('collab_offers_by_artist', 'artist_id');
