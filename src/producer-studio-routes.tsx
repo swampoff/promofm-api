@@ -938,15 +938,20 @@ app.post('/wallet/withdraw', requireAuth, async (c) => {
     bal.pending = Number(bal.pending || 0) + numAmount;
     bal.total = bal.available + bal.pending;
     await upsertPaymentBalance(producerId, bal);
-    const wd = { id: genId('wd'), producerId, amount: numAmount, method, methodLabel: methodLabel || method, status: 'pending', createdAt: nowIso() };
-    const _wq = await (await import('./db-client.tsx')).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [producerId]);
-    const list = (Array.isArray(_wq.rows[0]?.data) ? _wq.rows[0].data : []);
-    (list as any[]).unshift(wd);
+    // row-per-withdrawal (migration 043): атомарный INSERT, race-free.
+    const wdId = genId('wd');
+    const createdAt = nowIso();
     await (await import('./db-client.tsx')).pool.query(
-      `INSERT INTO payment_withdrawals (user_id, data, created_at, updated_at) VALUES ($1, $2::jsonb, NOW(), NOW())
-       ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
-      [producerId, JSON.stringify(list)]
+      `INSERT INTO payment_withdrawals
+         (app_id, user_id, source, amount, payment_method, method_label, status, created_at, updated_at)
+       VALUES ($1, $2, NULL, $3, $4, $5, 'pending', $6, $6)
+       ON CONFLICT (user_id, app_id) DO NOTHING`,
+      [wdId, producerId, numAmount, method, methodLabel || method, createdAt]
     );
+    const wd = {
+      id: wdId, producerId, amount: numAmount, method,
+      methodLabel: methodLabel || method, status: 'pending', createdAt,
+    };
     return c.json({ success: true, data: wd });
   } catch (error) { console.log(`Error creating withdrawal: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -958,8 +963,28 @@ app.get('/wallet/withdrawals/:producerId', requireAuth, async (c) => {
   if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
-    const _wq = await (await import('./db-client.tsx')).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [producerId]);
-    const list = (Array.isArray(_wq.rows[0]?.data) ? _wq.rows[0].data : []);
+    // row-per-withdrawal (migration 043). Producer-side scope: source IS NULL
+    // (donations и radio имеют свои source-фильтры).
+    const _wq = await (await import('./db-client.tsx')).pool.query(
+      `SELECT app_id, user_id, amount, payment_method, method_label, status,
+              created_at, updated_at
+         FROM payment_withdrawals
+        WHERE user_id = $1 AND source IS NULL
+        ORDER BY created_at DESC`,
+      [producerId]
+    );
+    const list = _wq.rows.map((r: any) => {
+      const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : undefined);
+      return {
+        id: r.app_id,
+        producerId: r.user_id,
+        amount: Number(r.amount),
+        method: r.payment_method,
+        methodLabel: r.method_label || r.payment_method,
+        status: r.status,
+        createdAt: iso(r.created_at),
+      };
+    });
     return c.json({ success: true, data: list });
   } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -979,7 +1004,14 @@ app.post('/ai/analyze', requireAuth, async (c) => {
       producerConvsStore.get(producerId),
       producerSessionsStore.get(producerId),
       producerSettingsStore.get(producerId),
-      (await import('./db-client.tsx')).pool.query(`SELECT data FROM payment_withdrawals WHERE user_id = $1`, [producerId]).then((r: any) => Array.isArray(r.rows[0]?.data) ? r.rows[0].data : []),
+      // row-per-withdrawal (migration 043): возвращаем массив строк.
+      pool.query(
+        `SELECT app_id, amount, payment_method, status
+           FROM payment_withdrawals
+          WHERE user_id = $1 AND source IS NULL
+          ORDER BY created_at DESC`,
+        [producerId]
+      ).then((r: any) => r.rows),
       pool.query(
         `SELECT ${SERVICE_COLS} FROM producer_custom_services
           WHERE producer_id = $1 ORDER BY created_at DESC`,
