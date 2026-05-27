@@ -95,6 +95,10 @@ ALTER TABLE dj_events DROP CONSTRAINT IF EXISTS dj_events_pkey;
 ALTER TABLE dj_events DROP CONSTRAINT IF EXISTS dj_events_dj_id_key;
 ALTER TABLE dj_events DROP CONSTRAINT IF EXISTS dj_events_dj_id_unique;
 ALTER TABLE dj_events DROP CONSTRAINT IF EXISTS uq_dj_events_dj_id;
+-- Защита от повторного запуска: если предыдущий запуск миграции
+-- уже добавил эти composite constraint — снять их перед новым ADD.
+ALTER TABLE dj_events DROP CONSTRAINT IF EXISTS dj_events_app_id_unique;
+ALTER TABLE dj_events DROP CONSTRAINT IF EXISTS dj_events_dj_app_unique;
 
 TRUNCATE dj_events;
 
@@ -119,7 +123,11 @@ ALTER TABLE dj_events
 ALTER TABLE dj_events ALTER COLUMN id SET DEFAULT gen_random_uuid();
 ALTER TABLE dj_events ALTER COLUMN id SET NOT NULL;
 ALTER TABLE dj_events ADD PRIMARY KEY (id);
-ALTER TABLE dj_events ADD CONSTRAINT dj_events_app_id_unique UNIQUE (app_id);
+-- Композитный UNIQUE: legacy app_id ('ev1', 'ev2', ...) генерился per-DJ,
+-- не глобально. То же значение может встречаться у разных djId. Per-laptop
+-- pre-flight на venue_playlists подтвердило паттерн.
+ALTER TABLE dj_events
+  ADD CONSTRAINT dj_events_dj_app_unique UNIQUE (dj_id, app_id);
 
 CREATE INDEX IF NOT EXISTS idx_dj_events_dj_id      ON dj_events(dj_id);
 CREATE INDEX IF NOT EXISTS idx_dj_events_status     ON dj_events(status);
@@ -179,6 +187,9 @@ SELECT * FROM venue_playlists;
 
 ALTER TABLE venue_playlists DROP CONSTRAINT IF EXISTS venue_playlists_pkey;
 ALTER TABLE venue_playlists DROP CONSTRAINT IF EXISTS venue_playlists_venue_id_key;
+-- Защита от повторного запуска:
+ALTER TABLE venue_playlists DROP CONSTRAINT IF EXISTS venue_playlists_app_id_unique;
+ALTER TABLE venue_playlists DROP CONSTRAINT IF EXISTS venue_playlists_venue_app_unique;
 
 TRUNCATE venue_playlists;
 
@@ -198,7 +209,12 @@ ALTER TABLE venue_playlists
 ALTER TABLE venue_playlists ALTER COLUMN id SET DEFAULT gen_random_uuid();
 ALTER TABLE venue_playlists ALTER COLUMN id SET NOT NULL;
 ALTER TABLE venue_playlists ADD PRIMARY KEY (id);
-ALTER TABLE venue_playlists ADD CONSTRAINT venue_playlists_app_id_unique UNIQUE (app_id);
+-- Композитный UNIQUE: laptop'овский dry-run показал что в существующих
+-- 4 строках venue_playlists есть playlists с одинаковым app_id='pl1'
+-- в разных venues (per-venue numbering, не глобальный). Global UNIQUE
+-- (app_id) падал бы. (venue_id, app_id) сохраняет legacy ids без коллизий.
+ALTER TABLE venue_playlists
+  ADD CONSTRAINT venue_playlists_venue_app_unique UNIQUE (venue_id, app_id);
 
 CREATE INDEX IF NOT EXISTS idx_venue_playlists_venue_id ON venue_playlists(venue_id);
 CREATE INDEX IF NOT EXISTS idx_venue_playlists_status   ON venue_playlists(status);
