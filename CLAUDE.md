@@ -160,12 +160,44 @@ exists. If you need a field that isn't there:
 are NOT applied on `systemctl restart promofm-api`. If your code
 expects new columns, you MUST:
 1. Land the migration file `src/migrations/NNN_xxx.sql` in the same PR
-2. Put `MANUAL DEPLOY STEPS` block in the commit message:
-   ```
-   sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 \
-     -f /opt/promofm-api/src/migrations/NNN_xxx.sql
-   ```
+2. Put `MANUAL DEPLOY STEPS` block in the commit message — use
+   the heredoc-with-BEGIN/COMMIT pattern below (NOT just `-f`).
 3. Specify that migration is applied BEFORE the code restart.
+
+### Migration files: NO `BEGIN/COMMIT` inside the file
+
+**Convention (Flyway-style):** the migration file contains DDL only.
+The runner wraps the file in a transaction.
+
+**Apply:**
+```bash
+sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+BEGIN;
+\i /opt/promofm-api/src/migrations/NNN_xxx.sql
+COMMIT;
+EOF
+```
+
+**Dry-run** (replace COMMIT with ROLLBACK):
+```bash
+sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+BEGIN;
+\i /opt/promofm-api/src/migrations/NNN_xxx.sql
+ROLLBACK;
+EOF
+```
+
+**Why this convention exists** (incident 2026-05-27, migration 039):
+- Old pattern had `BEGIN; …; COMMIT;` inside the file
+- Laptop tried `BEGIN; \i file; ROLLBACK;` for dry-run
+- File's inner `COMMIT;` ended the outer transaction → migration
+  was permanently applied to prod even though laptop expected a rollback
+- Recovery required emergency merge of the not-yet-reviewed PR to keep
+  DB and code in sync
+
+`DO $$ … END $$` PL/pgSQL blocks inside the file are fine — those
+are not transactions. Only top-level `BEGIN;` / `COMMIT;` statements
+are forbidden inside migration files.
 
 ### Pre-flight (mandatory for cloud sessions that can't ssh prod)
 
