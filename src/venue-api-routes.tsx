@@ -40,7 +40,32 @@ import { Hono } from 'hono';
 import crypto from 'crypto';
 import { pool } from './db-client.tsx';
 import { requireAuth } from './auth-middleware.tsx';
-import { getVenueProfile as dbGetVenueProfile, venuePlaylists } from './db.tsx';
+import { getVenueProfile as dbGetVenueProfile } from './db.tsx';
+
+// Row mapper для venue_playlists (row-per-playlist после миграции 036).
+// Дублирует mapPlaylistRow из venue-routes.tsx — здесь публичный API,
+// контракт идентичный. При расхождениях — синхронизировать оба.
+function mapPlaylistRow(row: any): Record<string, any> {
+  const iso = (d: any) => d ? (d instanceof Date ? d.toISOString() : String(d)) : undefined;
+  return {
+    id: row.app_id,
+    venueId: row.venue_id,
+    ownerId: row.owner_id,
+    title: row.title,
+    description: row.description,
+    coverImageUrl: row.cover_image_url,
+    contentItems: row.content_items || [],
+    trackCount: row.track_count,
+    totalDuration: row.total_duration,
+    isPublic: row.is_public,
+    status: row.status,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  };
+}
+
+const PLAYLIST_COLS = `app_id, venue_id, owner_id, title, description, cover_image_url,
+  content_items, track_count, total_duration, is_public, status, created_at, updated_at`;
 import { safeErrorMessage } from './security.tsx';
 import {
   getEffectiveVenueLimits,
@@ -449,10 +474,12 @@ publicApp.get('/zones/:id/current', requireScope('read:zones'), async (c) => {
   if (!playlistId) {
     return c.json({ success: true, currentPlaylist: null });
   }
-  const raw = await venuePlaylists.get(ctx.venueId);
-  const all: any[] = parse(raw) || [];
-  const playlist = all.find((p: any) => p.id === playlistId) || null;
-  return c.json({ success: true, currentPlaylist: playlist });
+  const pr = await pool.query(
+    `SELECT ${PLAYLIST_COLS} FROM venue_playlists
+      WHERE app_id = $1 AND venue_id = $2`,
+    [playlistId, ctx.venueId]
+  );
+  return c.json({ success: true, currentPlaylist: pr.rowCount ? mapPlaylistRow(pr.rows[0]) : null });
 });
 
 publicApp.put('/zones/:id/playlist', requireScope('write:zones'), async (c) => {
@@ -466,9 +493,11 @@ publicApp.put('/zones/:id/playlist', requireScope('write:zones'), async (c) => {
 
   // If a non-null playlistId is supplied, verify it belongs to this venue.
   if (playlistId !== null) {
-    const raw = await venuePlaylists.get(ctx.venueId);
-    const all: any[] = parse(raw) || [];
-    if (!all.some((p: any) => p.id === playlistId)) {
+    const exists = await pool.query(
+      `SELECT 1 FROM venue_playlists WHERE app_id = $1 AND venue_id = $2`,
+      [playlistId, ctx.venueId]
+    );
+    if (exists.rowCount === 0) {
       return c.json({ success: false, error: 'Playlist not found in this venue' }, 404);
     }
   }
@@ -497,23 +526,26 @@ publicApp.put('/zones/:id/playlist', requireScope('write:zones'), async (c) => {
 
 publicApp.get('/playlists', requireScope('read:playlists'), async (c) => {
   const ctx = (c as any).get('apiToken') as TokenContext;
-  const raw = await venuePlaylists.get(ctx.venueId);
-  const all: any[] = parse(raw) || [];
-  // Strip nothing — public-API consumers may want trackCount /
-  // totalDuration / cover for in-room UIs.
-  return c.json({ success: true, playlists: all });
+  const r = await pool.query(
+    `SELECT ${PLAYLIST_COLS} FROM venue_playlists
+      WHERE venue_id = $1 ORDER BY created_at DESC`,
+    [ctx.venueId]
+  );
+  return c.json({ success: true, playlists: r.rows.map(mapPlaylistRow) });
 });
 
 publicApp.get('/playlists/:id', requireScope('read:playlists'), async (c) => {
   const ctx = (c as any).get('apiToken') as TokenContext;
   const id = c.req.param('id');
-  const raw = await venuePlaylists.get(ctx.venueId);
-  const all: any[] = parse(raw) || [];
-  const playlist = all.find((p: any) => p.id === id);
-  if (!playlist) {
+  const r = await pool.query(
+    `SELECT ${PLAYLIST_COLS} FROM venue_playlists
+      WHERE app_id = $1 AND venue_id = $2`,
+    [id, ctx.venueId]
+  );
+  if (r.rowCount === 0) {
     return c.json({ success: false, error: 'Playlist not found' }, 404);
   }
-  return c.json({ success: true, playlist });
+  return c.json({ success: true, playlist: mapPlaylistRow(r.rows[0]) });
 });
 
 // ── Now-playing snapshot (all active zones with their playlists) ─
@@ -527,9 +559,11 @@ publicApp.get('/now-playing', requireScope('read:now'), async (c) => {
       ORDER BY sort_order ASC`,
     [ctx.userId, ctx.venueId]
   );
-  const raw = await venuePlaylists.get(ctx.venueId);
-  const all: any[] = parse(raw) || [];
-  const byId = new Map<string, any>(all.map((p: any) => [p.id, p]));
+  const pr = await pool.query(
+    `SELECT ${PLAYLIST_COLS} FROM venue_playlists WHERE venue_id = $1`,
+    [ctx.venueId]
+  );
+  const byId = new Map<string, any>(pr.rows.map((row: any) => [row.app_id, mapPlaylistRow(row)]));
   return c.json({
     success: true,
     zones: zr.rows.map((row) => ({

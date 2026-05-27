@@ -5,7 +5,8 @@
 
 import { Hono } from 'hono';
 import * as db from './db.tsx';
-import { agentQueueStore, agentSessionsIndexStore, agentSessionsStore } from './db.tsx';
+import { agentSessionsIndexStore, agentSessionsStore } from './db.tsx';
+import { pool } from './db-client.tsx';
 import { callLLM, getLLMStatus } from './llm-router.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
@@ -242,11 +243,28 @@ agentsRoutes.delete('/sessions/:id', requireAuth, async (c) => {
   }
 });
 
+// Row mapper для agent_tasks → внешний API контракт (id строкой, camelCase).
+function mapTaskRow(row: any): QueueItem {
+  return {
+    id: row.app_id,
+    task: row.task,
+    priority: row.priority,
+    addedAt: row.added_at instanceof Date ? row.added_at.toISOString() : String(row.added_at),
+    status: row.status,
+    ...(row.session_id ? { sessionId: row.session_id } : {}),
+  };
+}
+
 // GET /queue - очередь задач
 agentsRoutes.get('/queue', requireAuth, async (c) => {
   try {
-    const queue = (await agentQueueStore.get('singleton') as any) || [];
-    return c.json({ success: true, queue });
+    const r = await pool.query(
+      `SELECT app_id, task, priority, status, session_id, added_at
+         FROM agent_tasks
+        ORDER BY added_at ASC
+        LIMIT 50`
+    );
+    return c.json({ success: true, queue: r.rows.map(mapTaskRow) });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -256,18 +274,19 @@ agentsRoutes.get('/queue', requireAuth, async (c) => {
 agentsRoutes.post('/queue', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const queue: QueueItem[] = (await agentQueueStore.get('singleton') as any) || [];
-    const item: QueueItem = {
-      id: `q-${crypto.randomUUID()}`,
-      task: body.task?.trim(),
-      priority: body.priority || 'normal',
-      addedAt: new Date().toISOString(),
-      status: 'pending',
-    };
-    if (!item.task) return c.json({ success: false, error: 'Task required' }, 400);
-    queue.push(item);
-    await agentQueueStore.set('singleton', queue.slice(0, 50));
-    return c.json({ success: true, item });
+    const task = body.task?.trim();
+    if (!task) return c.json({ success: false, error: 'Task required' }, 400);
+
+    const priority = body.priority || 'normal';
+    const appId = `q-${crypto.randomUUID()}`;
+
+    const r = await pool.query(
+      `INSERT INTO agent_tasks (app_id, task, priority, status, added_at)
+       VALUES ($1, $2, $3, 'pending', NOW())
+       RETURNING app_id, task, priority, status, session_id, added_at`,
+      [appId, task, priority]
+    );
+    return c.json({ success: true, item: mapTaskRow(r.rows[0]) });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -280,19 +299,24 @@ agentsRoutes.post('/queue/process', requireAuth, requireAdmin, async (c) => {
     const processAll: boolean = body.all ?? false;
     const devlabContext: string = body.devlabContext || '';
 
-    let queue: QueueItem[] = (await agentQueueStore.get('singleton') as any) || [];
-    const pending = queue.filter(q => q.status === 'pending');
-
+    const pendingRes = await pool.query(
+      `SELECT app_id, task, priority, status, added_at
+         FROM agent_tasks
+        WHERE status = 'pending'
+        ORDER BY added_at ASC
+        ${processAll ? '' : 'LIMIT 1'}`
+    );
+    const pending = pendingRes.rows.map(mapTaskRow);
     if (pending.length === 0) return c.json({ success: true, processed: 0, sessions: [] });
 
-    const toProcess = processAll ? pending : [pending[0]];
     const processedSessions: Session[] = [];
 
-    for (const item of toProcess) {
+    for (const item of pending) {
       try {
-        // Mark as processing
-        queue = queue.map(q => q.id === item.id ? { ...q, status: 'processing' } : q);
-        await agentQueueStore.set('singleton', queue);
+        await pool.query(
+          `UPDATE agent_tasks SET status='processing', updated_at=NOW() WHERE app_id=$1`,
+          [item.id]
+        );
 
         const fullTask = devlabContext ? `${item.task}\n\n[DevLab context:\n${devlabContext}]` : item.task;
         const result = await callAI([{ role: 'user', content: fullTask }]);
@@ -308,15 +332,20 @@ agentsRoutes.post('/queue/process', requireAuth, requireAdmin, async (c) => {
         await agentSessionsStore.set(id, session);
         await updateSessionIndex(id, session.title, now);
 
-        // Mark queue item as done
-        queue = queue.map(q => q.id === item.id ? { ...q, status: 'done', sessionId: id } : q);
-        await agentQueueStore.set('singleton', queue);
+        await pool.query(
+          `UPDATE agent_tasks
+              SET status='done', session_id=$2, completed_at=NOW(), updated_at=NOW()
+            WHERE app_id=$1`,
+          [item.id, id]
+        );
 
         processedSessions.push(session);
       } catch (err) {
         console.log(`Queue item ${item.id} failed:`, err);
-        queue = queue.map(q => q.id === item.id ? { ...q, status: 'pending' } : q);
-        await agentQueueStore.set('singleton', queue);
+        await pool.query(
+          `UPDATE agent_tasks SET status='pending', updated_at=NOW() WHERE app_id=$1`,
+          [item.id]
+        );
       }
     }
 
@@ -331,8 +360,7 @@ agentsRoutes.post('/queue/process', requireAuth, requireAdmin, async (c) => {
 agentsRoutes.delete('/queue/:id', requireAuth, async (c) => {
   try {
     const { id } = c.req.param();
-    const queue: any[] = (await agentQueueStore.get('singleton') as any) || [];
-    await agentQueueStore.set('singleton', queue.filter((q: any) => q.id !== id));
+    await pool.query(`DELETE FROM agent_tasks WHERE app_id=$1`, [id]);
     return c.json({ success: true });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
