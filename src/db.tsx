@@ -1947,9 +1947,12 @@ export const paymentBalancesStore = jsonbStore('payment_balances', 'user_id');
 export const djMixesStore = jsonbStore('dj_mixes', 'dj_id');
 // dj_calendar таблица + декларация удалены (migration 040). Был zombie
 // код, 0 callers — DJ-календарь как фича не реализован.
-export const djNotificationsStore = jsonbStore('dj_notifications', 'dj_id');
-export const djSubscriptionsStore = jsonbStore('dj_subscriptions', 'dj_id');
-export const djCampaignsStore = jsonbStore('dj_campaigns', 'dj_id');
+// djNotificationsStore + djCampaignsStore — dead imports (0 method
+// invocations в коде). Удалены из db.tsx; таблицы dj_notifications /
+// dj_campaigns на проде НЕ DROP'нуты (могут писаться через прямой SQL —
+// проверка laptop'ом).
+// djSubscriptionsStore — native cols since migration 054.
+export const djSubscriptionsStore = makeDjSubscriptionsStore();
 // dj_withdrawals переехал на row-per-withdrawal (migration 044). Доступ
 // через pool.query из dj-studio-routes.tsx + checkout-routes.tsx webhook.
 export const djTransactionsStore = jsonbStore('dj_transactions', 'dj_id');

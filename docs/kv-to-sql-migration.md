@@ -82,8 +82,13 @@ stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md
 **🤷 Возможные orphan'ы (нужна проверка):**
 - `dj_bookings`, `pitching_requests`, `user_subscriptions`, `track_analytics` — нет active callers в grep, могут быть DROPpable
 
-**Wave 1.5 leftovers (kv-array, не Wave 3):**
-- `dj_reviews`, `dj_collaborations`, `dj_notifications`, `dj_subscriptions`, `dj_withdrawals` — array-stores из dj cabinet
+**Wave 1.5 leftovers — ACTUAL STATUS (audit 2026-05-27):**
+- ✅ `dj_reviews` — store declaration уже удалена (используется напрямую через pool.query)
+- ✅ `dj_collaborations` — declaration удалена (0 callers)
+- ✅ `dj_withdrawals` — migration 044, native cols
+- ✅ `dj_subscriptions` — PR #70 (migration 054) — 9 native cols + limits jsonb
+- 🗑 `dj_notifications`, `dj_campaigns` — dead imports в dj-studio-routes (0 method invocations), удалены из db.tsx PR #70. Таблицы оставлены на проде (могут писаться извне)
+- 🤷 `dj_transactions` — 2 read-only callers, 0 writes в коде. Оставлен jsonbStore до проверки источника данных (cron/admin?)
 
 ### 🔜 Wave 4 — settings/configs (можно отложить)
 

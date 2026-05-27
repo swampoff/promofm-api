@@ -20,8 +20,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import {
   getDjProfile, upsertDjProfile,
-  djNotificationsStore, djSubscriptionsStore,
-  djCampaignsStore, djTransactionsStore,
+  djSubscriptionsStore, djTransactionsStore,
   getCoinBalance,
 } from './db.tsx';
 import { pool } from './db-client.tsx';
