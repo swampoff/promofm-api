@@ -17,7 +17,7 @@
 
 import { Hono } from 'hono';
 import { notificationCampaignsStore, getNotificationCampaignsByUser, upsertNotificationCampaign } from './db.tsx';
-import { notifyAllAdmins } from './cross-cabinet-notify.tsx';
+import { notifyAllAdmins, notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
@@ -89,9 +89,10 @@ marketing.get('/campaigns/detail/:campaignId', requireAuth, async (c) => {
 
 marketing.post('/campaigns', requireAuth, async (c) => {
   try {
+    const authUserId = c.get('userId');
     const body = await c.req.json();
-    if (!body.campaign_name || !body.user_id) {
-      return c.json({ success: false, error: 'Обязательные поля: campaign_name, user_id' }, 400);
+    if (!body.campaign_name) {
+      return c.json({ success: false, error: 'Обязательное поле: campaign_name' }, 400);
     }
 
     const campaignId = `campaign-${crypto.randomUUID()}`;
@@ -124,7 +125,8 @@ marketing.post('/campaigns', requireAuth, async (c) => {
       updated_at: new Date().toISOString(),
     };
 
-    await upsertNotificationCampaign(body.user_id, campaignId, campaign);
+    // owner from JWT, not body — prevents impersonation
+    await upsertNotificationCampaign(authUserId, campaignId, campaign);
 
     // Cross-cabinet: notify ALL admins about new campaign (role-based broadcast).
     try {
