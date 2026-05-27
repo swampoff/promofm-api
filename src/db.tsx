@@ -1518,9 +1518,11 @@ export const djWithdrawalsStore = jsonbStore('dj_withdrawals', 'dj_id');
 export const djTransactionsStore = jsonbStore('dj_transactions', 'dj_id');
 export const collabOffersByArtistStore = jsonbStore('collab_offers_by_artist', 'artist_id');
 export const collabOffersByProducerStore = jsonbStore('collab_offers_by_producer', 'producer_id');
-export const collabMessagesStore = jsonbStore('collab_messages');
+// collab_messages переехал на row-per-message (migration 038). Доступ
+// через pool.query в collaboration-routes.tsx.
 export const publishOrdersStore = jsonbStore('publish_orders');
-export const publishChatsStore = jsonbStore('publish_chats', 'order_id');
+// publish_chats переехал на row-per-message (migration 038). Доступ
+// через pool.query в chat-routes.tsx.
 export const publishEmailPrefsStore = jsonbStore('publish_email_prefs', 'user_id');
 export const emailHistoryStore = jsonbStore('email_history');
 export const emailTemplatesStore = jsonbStore('email_templates');
