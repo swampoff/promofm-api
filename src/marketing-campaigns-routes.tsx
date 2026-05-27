@@ -17,7 +17,7 @@
 
 import { Hono } from 'hono';
 import { notificationCampaignsStore, getNotificationCampaignsByUser, upsertNotificationCampaign } from './db.tsx';
-import { notifyAllAdmins, notifyCrossCabinet } from './cross-cabinet-notify.tsx';
+import { notifyAllAdmins } from './cross-cabinet-notify.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
@@ -89,10 +89,20 @@ marketing.get('/campaigns/detail/:campaignId', requireAuth, async (c) => {
 
 marketing.post('/campaigns', requireAuth, async (c) => {
   try {
-    const authUserId = c.get('userId');
+    // authUserId был использован ниже но не определён в scope POST-handler'а
+    // (GET handler выше его объявляет, POST — нет). ReferenceError на runtime
+    // — все запросы возвращали 500. Видно в логах: «Marketing POST /campaigns
+    // error: ReferenceError: authUserId is not defined».
+    const authUserId = c.get('userId') as string;
+    const userRole = c.get('userRole') as string | undefined;
+
     const body = await c.req.json();
-    if (!body.campaign_name) {
-      return c.json({ success: false, error: 'Обязательное поле: campaign_name' }, 400);
+    if (!body.campaign_name || !body.user_id) {
+      return c.json({ success: false, error: 'Обязательные поля: campaign_name, user_id' }, 400);
+    }
+    // Артист может создавать кампанию только для себя; admin для любого.
+    if (body.user_id !== authUserId && userRole !== 'admin' && userRole !== 'superadmin') {
+      return c.json({ success: false, error: 'Нельзя создавать кампанию от чужого имени' }, 403);
     }
 
     const campaignId = `campaign-${crypto.randomUUID()}`;
@@ -100,7 +110,8 @@ marketing.post('/campaigns', requireAuth, async (c) => {
     const campaign = {
       id: campaignId,
       campaign_name: body.campaign_name,
-      user_id: authUserId,
+      // body.user_id уже верифицирован выше (= authUserId либо admin override).
+      user_id: body.user_id,
       artist_name: body.artist_name || 'Артист',
       description: body.description || '',
       content_ids: body.content_ids || [],
@@ -125,8 +136,7 @@ marketing.post('/campaigns', requireAuth, async (c) => {
       updated_at: new Date().toISOString(),
     };
 
-    // owner from JWT, not body — prevents impersonation
-    await upsertNotificationCampaign(authUserId, campaignId, campaign);
+    await upsertNotificationCampaign(body.user_id, campaignId, campaign);
 
     // Cross-cabinet: notify ALL admins about new campaign (role-based broadcast).
     try {

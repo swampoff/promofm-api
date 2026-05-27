@@ -323,9 +323,23 @@ app.post('/:id/manual-activate', requireAuth, requireAdmin, async (c) => {
 });
 
 // POST /expire — admin/cron endpoint. Переводит истекшие активные баннеры
-// в status='expired'. Запускается раз в час cron'ом на VPS (см.
-// MANUAL DEPLOY STEPS в commit-сообщении для setup).
-app.post('/expire', requireAuth, requireAdmin, async (c) => {
+// в status='expired'. Два режима auth:
+//   1. X-Internal-Key (для VPS cron — без JWT) — приоритет, как у /promote-upcoming.
+//   2. JWT admin (для админ-панели UI) — fallback.
+// Cron в crontab: 0 * * * * curl -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY"
+//   http://127.0.0.1:3000/server/api/banners/expire >> /var/log/promofm-banner-expire.log
+app.post('/expire', async (c, next) => {
+  // X-Internal-Key auth bypass для VPS-cron (по аналогии с
+  // /track-moderation/promote-upcoming). Если key валидный — пропускаем
+  // requireAuth + requireAdmin, иначе — стандартная JWT-проверка.
+  const internalKey = c.req.header('X-Internal-Key') || '';
+  const expectedKey = process.env.VPS_INTERNAL_KEY || '';
+  if (expectedKey && internalKey === expectedKey) {
+    return next();
+  }
+  // Иначе — admin JWT через middleware.
+  return requireAuth(c, () => requireAdmin(c, next));
+}, async (c) => {
   try {
     const r = await pool.query(
       `UPDATE banner_ads
