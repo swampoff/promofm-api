@@ -69,10 +69,13 @@ stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md
 (сохраняют full object). Просто `DROP COLUMN data` ломает чтения. Реальный
 объём работы похож на Wave 1.
 
-**🔴 Hybrid с active data writes (нужны новые native cols + handler refactor):**
-- `dj_mixes` — `data->>'payment_amount'`, `data->>'upcoming_until'`, `data->>'published_at'` активно используются
-- `bookings`, `support_tickets`, `marketing_campaigns` — `upsert*` пишет `data: fullObject`
-- `radio_ad_slots`, `notification_campaigns`, `track_test_requests`, `track_moderation` — все ещё через jsonbStore
+**🔴 Hybrid с active data writes:**
+- ✅ `dj_mixes` — PR #62 (migration 046) — 17 fields promoted
+- ✅ `bookings` — PR #63 (migration 047) — ~30 fields promoted
+- ✅ `support_tickets` — PR #64 (migration 048)
+- ✅ `notification_campaigns` + `marketing_campaigns` cleanup — PR #65 (migration 049)
+- ✅ `radio_ad_slots` — PR #66 (migration 050) — 8 native cols, DROP `radio_ad_slot_index` table (заменена на nativе индекс по `radio_id`), fix IDOR в DELETE
+- `track_test_requests`, `track_moderation` — все ещё через jsonbStore
 
 **🟢 Truly trivial Wave 3 (write-only data, ready for DROP):**
 - `donations` — `createDonation` пишет только native cols, read `r.data \|\| r` works без data
