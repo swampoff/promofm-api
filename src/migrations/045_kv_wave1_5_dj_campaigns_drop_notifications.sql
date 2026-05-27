@@ -52,6 +52,15 @@
 -- 1. dj_campaigns → row-per-campaign
 -- ════════════════════════════════════════════════════════════════════
 
+-- Bootstrap legacy kv-store table if missing (jsonbStore.set never called → table not created).
+-- Laptop pre-flight 2026-05-27: dj_campaigns не существовал на проде.
+CREATE TABLE IF NOT EXISTS dj_campaigns (
+  dj_id      TEXT        PRIMARY KEY,
+  data       JSONB                DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ          DEFAULT NOW(),
+  updated_at TIMESTAMPTZ          DEFAULT NOW()
+);
+
 CREATE TEMP TABLE _djc_backup ON COMMIT DROP AS
   SELECT dj_id AS legacy_dj_id, data, created_at FROM dj_campaigns;
 
