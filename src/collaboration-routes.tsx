@@ -412,7 +412,7 @@ app.post('/chat/:offerId', requireAuth, async (c) => {
          (app_id, offer_id, sender_id, sender_name, sender_role, body,
           attachment, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
-       ON CONFLICT (app_id) DO NOTHING`,
+       ON CONFLICT (offer_id, app_id) DO NOTHING`,
       [
         message.id, offerId, userId, message.senderName, senderRole, text,
         attachment ? JSON.stringify(attachment) : null,

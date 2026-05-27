@@ -106,7 +106,7 @@ app.post('/messages/:orderId', requireAuth, async (c) => {
          (app_id, order_id, sender_id, sender_name, sender_role,
           body, attachment, is_read, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, FALSE, $8)
-       ON CONFLICT (app_id) DO NOTHING`,
+       ON CONFLICT (order_id, app_id) DO NOTHING`,
       [
         message.id, orderId, senderId, message.senderName, message.senderRole,
         text, attachment ? JSON.stringify(attachment) : null, message.createdAt,

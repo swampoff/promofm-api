@@ -50,6 +50,9 @@ CREATE TEMP TABLE _cm_backup ON COMMIT DROP AS
 
 ALTER TABLE collab_messages DROP CONSTRAINT IF EXISTS collab_messages_pkey;
 ALTER TABLE collab_messages DROP CONSTRAINT IF EXISTS collab_messages_id_key;
+-- Защита от повторного запуска:
+ALTER TABLE collab_messages DROP CONSTRAINT IF EXISTS collab_messages_app_id_unique;
+ALTER TABLE collab_messages DROP CONSTRAINT IF EXISTS collab_messages_offer_app_unique;
 
 TRUNCATE collab_messages;
 
@@ -74,7 +77,10 @@ ALTER TABLE collab_messages
   ADD COLUMN IF NOT EXISTS attachment  JSONB;
 
 ALTER TABLE collab_messages ADD PRIMARY KEY (id);
-ALTER TABLE collab_messages ADD CONSTRAINT collab_messages_app_id_unique UNIQUE (app_id);
+-- Композитный UNIQUE: legacy app_id мог дублироваться между офферами
+-- (если в коде раньше был per-offer counter). (offer_id, app_id) разводит.
+ALTER TABLE collab_messages
+  ADD CONSTRAINT collab_messages_offer_app_unique UNIQUE (offer_id, app_id);
 
 CREATE INDEX IF NOT EXISTS idx_collab_messages_offer_id_created
   ON collab_messages(offer_id, created_at ASC);
@@ -111,6 +117,9 @@ CREATE TEMP TABLE _pc_backup ON COMMIT DROP AS
 
 ALTER TABLE publish_chats DROP CONSTRAINT IF EXISTS publish_chats_pkey;
 ALTER TABLE publish_chats DROP CONSTRAINT IF EXISTS publish_chats_order_id_key;
+-- Защита от повторного запуска:
+ALTER TABLE publish_chats DROP CONSTRAINT IF EXISTS publish_chats_app_id_unique;
+ALTER TABLE publish_chats DROP CONSTRAINT IF EXISTS publish_chats_order_app_unique;
 
 TRUNCATE publish_chats;
 
@@ -138,7 +147,9 @@ ALTER TABLE publish_chats
 ALTER TABLE publish_chats ALTER COLUMN order_id SET DEFAULT '';
 
 ALTER TABLE publish_chats ADD PRIMARY KEY (id);
-ALTER TABLE publish_chats ADD CONSTRAINT publish_chats_app_id_unique UNIQUE (app_id);
+-- Композит — defensive, как у collab_messages:
+ALTER TABLE publish_chats
+  ADD CONSTRAINT publish_chats_order_app_unique UNIQUE (order_id, app_id);
 
 CREATE INDEX IF NOT EXISTS idx_publish_chats_order_id_created
   ON publish_chats(order_id, created_at ASC);
