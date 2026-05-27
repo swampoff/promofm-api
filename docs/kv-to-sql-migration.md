@@ -34,6 +34,9 @@
 | `producer_custom_services` | `(producer_id, app_id)` | #54 (merged) | row-per-service |
 | `producer_custom_portfolio` | `(producer_id, app_id)` | #54 (merged) | row-per-entry |
 | `dj_calendar` | — | #55 | DROP TABLE (orphan, 0 callers) |
+| `producer_convs` | `(producer_id, app_id)` | Wave 1.5 (042) | row-per-conversation, unread updates через UPDATE column |
+| `producer_messages` | `(conversation_id, app_id)` | Wave 1.5 (042) | row-per-message, legacy pk='user_id' переименован в conversation_id (был misnamed) |
+| `producer_sessions` | `(producer_id, app_id)` | Wave 1.5 (042) | row-per-calendar-session, session_date DATE (был TEXT YYYY-MM-DD) |
 
 **Инцидент 2026-05-27:** все эти таблицы оказались уже в target state на проде
 к моменту code-refactor merge'a (миграции применились через путь вне cloud-сессии).
