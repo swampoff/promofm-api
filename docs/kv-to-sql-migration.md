@@ -83,10 +83,18 @@ stale `jsonbStore` declarations из `src/db.tsx`. См. `docs/OPERATIONS_LOG.md
 **Wave 1.5 leftovers (kv-array, не Wave 3):**
 - `dj_reviews`, `dj_collaborations`, `dj_notifications`, `dj_subscriptions`, `dj_withdrawals` — array-stores из dj cabinet
 
-### 🔜 Wave 4 — settings/configs (можно отложить)
+### 🔜 Wave 4 — settings/configs
 
-Read-mostly singleton'ы где kv-store валиден (один объект на user/system, не массив):
-`system_config`, `accounting_data`, `elevenlabs_config`, `email_templates`, `email_history`, `notification_settings`, `producer_settings`, `producer_ai_last`, `payment_balances`.
+**Mig'ировано отдельными PR'ами (NOT singleton-KV, were array-in-value):**
+- ✅ `accountingStore` → 5 native таблиц (PR #71, migration 055)
+- ✅ `radioArtistRequestsStore` + `radioVenueRequestsStore` + `radioNotificationsStore`
+  → row-per-entity (PR #72, migration 056)
+
+**Singleton-per-key/user (валидный KV — leave as-is):**
+`system_config`, `elevenlabs_config`, `email_templates`, `email_history`, `notification_settings`, `producer_settings`, `producer_ai_last`, `payment_balances`.
+
+**Read-only (источник записи извне — оставлены):**
+`radio_finance`, `radio_transactions`, `dj_transactions`, `venue_analytics`, `radio_analytics`.
 
 ### 🚫 Правило для cloud-сессий
 
