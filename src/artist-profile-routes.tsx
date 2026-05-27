@@ -505,44 +505,49 @@ app.get('/profile/:artistId/stats', async (c) => {
  * Источник: только реальные профили из VPS
  */
 app.get('/popular', async (c) => {
-  console.log('[ArtistProfile] GET /popular');
-
   try {
-    // Load from artist_profiles SQL table (has real data)
-    const { getDbClient } = await import('./db-client.tsx');
-    const dbClient = getDbClient();
-    const { data: sqlProfiles } = await dbClient
-      .from('artist_profiles')
-      .select('user_id, slug, artist_name, genre, sub_genres, city, avatar_url, total_plays, total_followers, is_verified, data')
-      .limit(2323);
+    // Источник 503-х (28 hits/period): раньше тянули limit(2323) всех
+    // артистов в JS-память, потом sort по data->>'track_count' и slice(12).
+    // На больших ростерах + slow disk это:
+    //   - дёргает 2323 строк (~10MB jsonb если у каждого богатый data)
+    //   - блочит pg-pool слот пока пишет JSON
+    //   - сериализует/десериализует jsonb 2323 раза в pg-node
+    //   - и иногда timeout'ит / OOM.
+    // Делаем сортировку и лимит на стороне SQL — ORDER BY
+    // (data->>'track_count')::int DESC NULLS LAST + LIMIT 12.
+    // pg-node binding на jsonb path не требует доп. cast'а.
+    const { pool } = await import('./db-client.tsx');
+    const { rows } = await pool.query(
+      `SELECT user_id, slug, artist_name, genre, sub_genres, city,
+              avatar_url, total_plays, total_followers, is_verified, data
+         FROM artist_profiles
+        WHERE artist_name IS NOT NULL AND artist_name <> ''
+        ORDER BY COALESCE(NULLIF(data->>'track_count', '')::int, 0) DESC NULLS LAST,
+                 total_followers DESC NULLS LAST
+        LIMIT 12`
+    );
 
-    const allProfiles = (sqlProfiles || [])
-      .filter((p: any) => p.artist_name)
-      .sort((a: any, b: any) => (b.data?.track_count || 0) - (a.data?.track_count || 0))
-      .slice(0, 12)
-      .map((p: any) => ({
-        id: p.user_id,
-        slug: p.slug || '',
-        name: p.artist_name,
-        genre: p.genre || 'Music',
-        genres: p.sub_genres || [],
-        city: p.city || '',
-        listeners: p.total_followers || 0,
-        plays: p.total_plays || 0,
-        tracks: p.data?.track_count || 0,
-        rating: 0,
-        avatarUrl: p.avatar_url || '',
-        isVerified: p.is_verified || false,
-      }));
+    const profiles = rows.map((p: any) => ({
+      id: p.user_id,
+      slug: p.slug || '',
+      name: p.artist_name,
+      genre: p.genre || 'Music',
+      genres: p.sub_genres || [],
+      city: p.city || '',
+      listeners: p.total_followers || 0,
+      plays: p.total_plays || 0,
+      tracks: Number(p.data?.track_count) || 0,
+      rating: 0,
+      avatarUrl: p.avatar_url || '',
+      isVerified: p.is_verified || false,
+    }));
 
-    console.log(`[ArtistProfile] Popular: ${allProfiles.length} artists`);
-    return c.json({ success: true, data: allProfiles });
+    return c.json({ success: true, data: profiles });
 
-  } catch (error) {
-    // Surface the failure with 503 instead of pretending we got an empty
-    // result set — the lander treats success:true+data:[] as "no artists yet"
-    // and stays silent, hiding real DB outages from monitoring.
-    console.error(`[ArtistProfile] Popular error: ${error}`);
+  } catch (error: any) {
+    // 503 чтобы лендинг отличал «нет артистов» (success:true, data:[])
+    // от настоящего сбоя БД. Логи нужны чтобы понять корневую причину.
+    console.error(`[ArtistProfile] Popular error: ${error?.message || error}`);
     return c.json({ success: false, error: 'Failed to load popular artists' }, 503);
   }
 });
