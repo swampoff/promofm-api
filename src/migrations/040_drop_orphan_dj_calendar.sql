@@ -13,6 +13,12 @@
 -- DJ-календарь — создавать row-per-event сразу (см. dj_events за пример
 -- proper relational schema).
 --
+-- ⚠️ КОНВЕНЦИЯ ТРАНЗАКЦИИ (важно для dry-run):
+-- Файл НЕ содержит BEGIN/COMMIT — wrapping управляется внешним runner'ом
+-- (Flyway-style). Apply: `BEGIN; \i <file>; COMMIT;`. Dry-run:
+-- `BEGIN; \i <file>; ROLLBACK;`. Inner BEGIN/COMMIT в файле ломал outer
+-- transaction → 039 случайно применилась к проду 2026-05-27.
+--
 -- ПРЕД-ПРОВЕРКА (laptop):
 --   \d dj_calendar
 --   SELECT COUNT(*) FROM dj_calendar;
@@ -23,12 +29,11 @@
 -- MANUAL DEPLOY STEPS:
 --   1. pg_dump -t dj_calendar promofm > /tmp/dj_calendar_$(date +%s).sql
 --      (на случай если там какие-то данные)
---   2. sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 \
---        -f /opt/promofm-api/src/migrations/040_drop_orphan_dj_calendar.sql
+--   2. sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+--      BEGIN;
+--      \i /opt/promofm-api/src/migrations/040_drop_orphan_dj_calendar.sql
+--      COMMIT;
+--      EOF
 --   3. cd /opt/promofm-api && git pull && sudo systemctl restart promofm-api
 
-BEGIN;
-
 DROP TABLE IF EXISTS dj_calendar;
-
-COMMIT;
