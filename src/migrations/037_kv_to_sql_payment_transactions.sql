@@ -34,11 +34,15 @@
 --
 -- MANUAL DEPLOY STEPS:
 --   1. pg_dump -t payment_transactions promofm > /tmp/payment_tx_backup_$(date +%s).sql
---   2. sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 \
---        -f /opt/promofm-api/src/migrations/037_kv_to_sql_payment_transactions.sql
+--   2. sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+--      BEGIN;
+--      \i /opt/promofm-api/src/migrations/037_kv_to_sql_payment_transactions.sql
+--      COMMIT;
+--      EOF
 --   3. cd /opt/promofm-api && git pull && sudo systemctl restart promofm-api
-
-BEGIN;
+--
+-- ⚠️ КОНВЕНЦИЯ ТРАНЗАКЦИИ: файл НЕ содержит BEGIN/COMMIT — wrapping
+-- управляется внешним runner'ом (см. MANUAL DEPLOY STEPS выше).
 
 CREATE TEMP TABLE _pt_backup ON COMMIT DROP AS SELECT * FROM payment_transactions;
 
@@ -141,5 +145,3 @@ FROM _pt_backup b
 WHERE jsonb_typeof(b.data) = 'object';
 
 ALTER TABLE payment_transactions DROP COLUMN IF EXISTS data;
-
-COMMIT;
