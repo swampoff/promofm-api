@@ -842,7 +842,7 @@ const AUTHOR_COVER_MAP: Record<string, string> = {
   'DJ Den': '/avatars/djden.png',
   'Лиана': '/avatars/liana.png',
   'Лиана Аналитик': '/avatars/liana.png',
-  'РадКат': '/avatars/avatar_radkat.png',
+  'РэдКэт': '/avatars/avatar_radkat.png',
   'Стелла': '/avatars/stella.png',
   'Редакция': '/avatars/avatar_radkat.png',
   'Редакция ПРОМО.МУЗЫКА': '/avatars/avatar_radkat.png',

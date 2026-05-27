@@ -732,7 +732,7 @@ app.post('/beats/:id/review', requireAuth, async (c) => {
     // SSE уведомление продюсеру
     await sendSSE(beat.producerId, 'beat_review_new', {
       title: 'Новый отзыв на бит',
-      message: `${userName || 'Поку��атель'} оценил "${beat.title}" на ${rating} из 5`,
+      message: `${userName || 'Покупатель'} оценил "${beat.title}" на ${rating} из 5`,
       reviewId,
       beatId,
       rating,
