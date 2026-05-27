@@ -686,44 +686,194 @@ export async function deleteBeat(beatId: string) {
 
 // ─── Bookings ───
 
+// bookings (row-per-booking, full native cols since migration 047).
+// API contract: camelCase booking object с populated performer/requester
+// (последнее — derived из profile tables, не stored snapshot).
+
+const BOOKING_NATIVE_COLS = `id, user_id, performer_id, venue_id,
+  requester_type, performer_type, event_type, event_title, event_description,
+  event_date, start_time, duration_hours, venue_name, venue_address,
+  venue_city, venue_type, expected_audience, audience_type,
+  total_price, performer_fee, platform_commission,
+  deposit_amount, deposit_percentage, deposit_paid, final_amount,
+  technical_requirements, special_requests, status,
+  accepted_at, rejected_at, cancelled_at, deposit_paid_at, final_paid_at,
+  cancelled_by, cancelled_by_role, cancellation_reason,
+  created_at, updated_at`;
+
+function mapBookingRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    requesterId: r.user_id,
+    requesterType: r.requester_type,
+    performerId: r.performer_id,
+    performerType: r.performer_type,
+    venueId: r.venue_id,
+    eventType: r.event_type,
+    eventTitle: r.event_title,
+    eventDescription: r.event_description,
+    eventDate: iso(r.event_date),
+    startTime: r.start_time,
+    durationHours: r.duration_hours !== null ? Number(r.duration_hours) : null,
+    venueName: r.venue_name,
+    venueAddress: r.venue_address,
+    venueCity: r.venue_city,
+    venueType: r.venue_type,
+    expectedAudience: r.expected_audience,
+    audienceType: r.audience_type,
+    offeredPrice: r.total_price !== null ? Number(r.total_price) : null,
+    performerFee: r.performer_fee !== null ? Number(r.performer_fee) : null,
+    platformCommission: r.platform_commission !== null ? Number(r.platform_commission) : null,
+    depositAmount: r.deposit_amount !== null ? Number(r.deposit_amount) : null,
+    depositPercentage: r.deposit_percentage !== null ? Number(r.deposit_percentage) : null,
+    depositPaid: !!r.deposit_paid,
+    finalAmount: r.final_amount !== null ? Number(r.final_amount) : null,
+    technicalRequirements: r.technical_requirements || {},
+    specialRequests: r.special_requests || '',
+    status: r.status,
+    acceptedAt: iso(r.accepted_at),
+    rejectedAt: iso(r.rejected_at),
+    cancelledAt: iso(r.cancelled_at),
+    depositPaidAt: iso(r.deposit_paid_at),
+    finalPaidAt: iso(r.final_paid_at),
+    cancelledBy: r.cancelled_by,
+    cancelledByRole: r.cancelled_by_role,
+    cancellationReason: r.cancellation_reason,
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+  };
+}
+
 export async function getBookingsByUser(userId: string) {
-  const { data, error } = await db()
-    .from('bookings')
-    .select('*')
-    .or(`performer_id.eq.${userId},user_id.eq.${userId}`)
-    .order('created_at', { ascending: false });
-  if (error) console.error('[db] getBookingsByUser:', error);
-  return (data || []).map((r: any) => r.data || r);
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${BOOKING_NATIVE_COLS} FROM bookings
+      WHERE performer_id = $1 OR user_id = $1
+      ORDER BY created_at DESC`,
+    [userId]
+  );
+  return r.rows.map(mapBookingRow);
 }
 
 export async function getBooking(bookingId: string) {
-  const { data, error } = await db()
-    .from('bookings')
-    .select('*')
-    .eq('id', bookingId)
-    .maybeSingle();
-  if (error) console.error('[db] getBooking:', error);
-  return data ? (data.data || data) : null;
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${BOOKING_NATIVE_COLS} FROM bookings WHERE id = $1`,
+    [bookingId]
+  );
+  return r.rowCount ? mapBookingRow(r.rows[0]) : null;
 }
 
 export async function upsertBooking(bookingId: string, booking: Record<string, any>) {
-  const row = {
-    id: bookingId,
-    user_id: booking.requesterId || null,
-    performer_id: booking.performerId || null,
-    venue_id: booking.venueId || null,
-    event_date: booking.eventDate || null,
-    status: booking.status || 'pending',
-    total_price: booking.offeredPrice || null,
-    deposit_amount: booking.depositAmount || null,
-    deposit_paid: booking.status === 'deposit_paid' || booking.status === 'confirmed' || booking.status === 'completed',
-    data: JSON.stringify(booking),
-    updated_at: new Date().toISOString(),
-  };
-  const { error } = await db()
-    .from('bookings')
-    .upsert(row, { onConflict: 'id' });
-  if (error) console.error('[db] upsertBooking:', error);
+  // Row-per-booking (migration 047): native cols only, no data jsonb.
+  const { pool } = await import('./db-client.tsx');
+  const tr = booking.technicalRequirements || {};
+  const techReq = typeof tr === 'string' ? tr : JSON.stringify(tr);
+  await pool.query(
+    `INSERT INTO bookings (
+       id, user_id, performer_id, venue_id,
+       requester_type, performer_type, event_type, event_title, event_description,
+       event_date, start_time, duration_hours,
+       venue_name, venue_address, venue_city, venue_type,
+       expected_audience, audience_type,
+       total_price, performer_fee, platform_commission,
+       deposit_amount, deposit_percentage, deposit_paid, final_amount,
+       technical_requirements, special_requests,
+       status,
+       accepted_at, rejected_at, cancelled_at, deposit_paid_at, final_paid_at,
+       cancelled_by, cancelled_by_role, cancellation_reason,
+       updated_at
+     )
+     VALUES ($1, $2, $3, $4,
+             $5, $6, $7, $8, $9,
+             $10, $11, $12,
+             $13, $14, $15, $16,
+             $17, $18,
+             $19, $20, $21,
+             $22, $23, $24, $25,
+             $26::jsonb, $27,
+             $28,
+             $29, $30, $31, $32, $33,
+             $34, $35, $36,
+             NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       user_id = EXCLUDED.user_id,
+       performer_id = EXCLUDED.performer_id,
+       venue_id = EXCLUDED.venue_id,
+       requester_type = EXCLUDED.requester_type,
+       performer_type = EXCLUDED.performer_type,
+       event_type = EXCLUDED.event_type,
+       event_title = EXCLUDED.event_title,
+       event_description = EXCLUDED.event_description,
+       event_date = EXCLUDED.event_date,
+       start_time = EXCLUDED.start_time,
+       duration_hours = EXCLUDED.duration_hours,
+       venue_name = EXCLUDED.venue_name,
+       venue_address = EXCLUDED.venue_address,
+       venue_city = EXCLUDED.venue_city,
+       venue_type = EXCLUDED.venue_type,
+       expected_audience = EXCLUDED.expected_audience,
+       audience_type = EXCLUDED.audience_type,
+       total_price = EXCLUDED.total_price,
+       performer_fee = EXCLUDED.performer_fee,
+       platform_commission = EXCLUDED.platform_commission,
+       deposit_amount = EXCLUDED.deposit_amount,
+       deposit_percentage = EXCLUDED.deposit_percentage,
+       deposit_paid = EXCLUDED.deposit_paid,
+       final_amount = EXCLUDED.final_amount,
+       technical_requirements = EXCLUDED.technical_requirements,
+       special_requests = EXCLUDED.special_requests,
+       status = EXCLUDED.status,
+       accepted_at = EXCLUDED.accepted_at,
+       rejected_at = EXCLUDED.rejected_at,
+       cancelled_at = EXCLUDED.cancelled_at,
+       deposit_paid_at = EXCLUDED.deposit_paid_at,
+       final_paid_at = EXCLUDED.final_paid_at,
+       cancelled_by = EXCLUDED.cancelled_by,
+       cancelled_by_role = EXCLUDED.cancelled_by_role,
+       cancellation_reason = EXCLUDED.cancellation_reason,
+       updated_at = NOW()`,
+    [
+      bookingId,
+      booking.requesterId || null,
+      booking.performerId || null,
+      booking.venueId || null,
+      booking.requesterType || null,
+      booking.performerType || null,
+      booking.eventType || null,
+      booking.eventTitle || null,
+      booking.eventDescription || null,
+      booking.eventDate || null,
+      booking.startTime || null,
+      booking.durationHours ?? null,
+      booking.venueName || null,
+      booking.venueAddress || null,
+      booking.venueCity || null,
+      booking.venueType || null,
+      booking.expectedAudience ?? null,
+      booking.audienceType || null,
+      booking.offeredPrice ?? null,
+      booking.performerFee ?? null,
+      booking.platformCommission ?? null,
+      booking.depositAmount ?? null,
+      booking.depositPercentage ?? null,
+      booking.status === 'deposit_paid' || booking.status === 'confirmed' || booking.status === 'completed',
+      booking.finalAmount ?? null,
+      techReq,
+      booking.specialRequests || null,
+      booking.status || 'pending',
+      booking.acceptedAt || null,
+      booking.rejectedAt || null,
+      booking.cancelledAt || null,
+      booking.depositPaidAt || null,
+      booking.finalPaidAt || null,
+      booking.cancelledBy || null,
+      booking.cancelledByRole || null,
+      booking.cancellationReason || null,
+    ]
+  );
 }
 
 // ─── Messaging ───

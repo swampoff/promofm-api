@@ -361,45 +361,34 @@ app.post('/djs/:id/book', async (c) => {
     const djName = djRow.dj_name || djRow.data?.djName || 'DJ';
     const djUserId = String(djRow.user_id || '');
 
-    // Букинг пишется в bookings — там сосуществуют (1) типизированные
-    // колонки legacy-формата и (2) поле data jsonb (см. booking-routes.tsx).
-    // Этот lightweight-flow заполняет ОБЕ стороны: типизированные поля
-    // для совместимости с SELECT в dj-marketplace-routes:220 (occupied
-    // dates), jsonb data — для админ-кабинета и любого нового JOIN'а.
+    // Bookings row-per-booking (migration 047): native cols only,
+    // никакого data jsonb. Используем `user_id` (не legacy `requester_id`).
+    // `message` фактически eventDescription для marketplace lightweight-flow.
     const bookingId = `bk-${crypto.randomUUID()}`;
     const eventTitle = `Заявка на букинг DJ ${djName}`;
 
-    const dataJsonb = {
-      djId: id,
-      djName,
-      djUserId,
-      requesterId,
-      requesterType: requesterId ? 'authenticated' : 'guest',
-      clientName,
-      clientEmail,
-      eventType,
-      eventTitle,
-      eventDate,
-      message,
-      status: 'pending',
-      source: 'marketplace',
-      createdAt: new Date().toISOString(),
-    };
-
     await pool.query(
       `INSERT INTO bookings
-         (id, performer_id, performer_type, requester_id, event_title, event_type, event_date, message, status, data, created_at)
-       VALUES ($1, $2, 'dj', $3, $4, $5, $6, $7, 'pending', $8, NOW())
+         (id, performer_id, performer_type, user_id,
+          requester_type, client_name, client_email,
+          event_title, event_type, event_date,
+          event_description, status, source, created_at)
+       VALUES ($1, $2, 'dj', $3,
+               $4, $5, $6,
+               $7, $8, $9,
+               $10, 'pending', 'marketplace', NOW())
        ON CONFLICT (id) DO NOTHING`,
       [
         bookingId,
         djUserId || id,
         requesterId || clientEmail || 'anonymous',
+        requesterId ? 'authenticated' : 'guest',
+        clientName || null,
+        clientEmail || null,
         eventTitle,
         eventType,
         eventDate,
         message,
-        dataJsonb,
       ]
     );
 
