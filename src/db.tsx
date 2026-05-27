@@ -538,13 +538,18 @@ export async function getUserSettings(userId: string) {
     .eq('user_id', userId)
     .maybeSingle();
   if (error) console.error('[db] getUserSettings:', error);
-  return data ? (data.settings || data.data || data) : null;
+  // Schema: user_id, theme, language, ..., data (jsonb). Settings лежат в `data`.
+  // Старый код пробовал .settings (несуществующее поле) — теперь читаем прямо .data.
+  return data ? (data.data || null) : null;
 }
 
 export async function upsertUserSettings(userId: string, settings: Record<string, any>) {
+  // Колонка в таблице user_settings — `data` (jsonb), а не `settings`.
+  // Прошлая версия писала в несуществующую колонку → upsert тихо игнорировал,
+  // юзер видел "сохранено" но после refresh всё сбрасывалось до дефолтов.
   const row = {
     user_id: userId,
-    settings,
+    data: settings,
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()
