@@ -193,6 +193,26 @@ expects new columns, you MUST:
    the heredoc-with-BEGIN/COMMIT pattern below (NOT just `-f`).
 3. Specify that migration is applied BEFORE the code restart.
 
+### Merge conflicts in `src/db.tsx` (parallel-PR-accumulator)
+
+`db.tsx` накапливает добавления от множества параллельных feature-веток
+(store factories, typed accessors, helpers). При merge'е нескольких PR'ов
+конфликты НЕ разрешать через naive union (просто склеить обе стороны).
+
+**Правильный подход:**
+1. Брать `main` как базу.
+2. Из branch'а извлекать **только branch-only additions** одним блоком
+   (новые функции / новые export'ы — целиком, не построчно).
+3. Инжектить через anchor-comment (`// ─── <feature> store ───` или
+   аналогичный header) — НЕ внутри существующих функций.
+4. Если git вывел conflict markers ВНУТРИ одной функции — это значит
+   ветки добавили **разные функции** в соседние строки, и naive concat
+   склеит их в одну сломанную. Нужно их разделить как 2 отдельных
+   declaration'а.
+
+Эта проблема возникла при merge'е серии KV-refactor PR'ов в мае 2026
+(PRs #73 — #75 все touch db.tsx с overlap'ом по factory functions).
+
 ### Migration files: NO `BEGIN/COMMIT` inside the file
 
 **Convention (Flyway-style):** the migration file contains DDL only.
