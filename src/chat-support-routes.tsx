@@ -252,6 +252,24 @@ app.post('/:sessionId/messages', async (c) => {
     // Push to admin dashboard
     emitSSE(ADMIN_BROADCAST_KEY, { type: 'chat_message_new', data: payload });
 
+    // Bell-уведомление админам. Title привязан к sessionId, поэтому
+    // dedup-окно (5 мин по target+type+title) поглотит десятки сообщений
+    // подряд — админ не увидит spam, только один пинг на сессию.
+    try {
+      const { notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
+      const preview = text.length > 120 ? text.slice(0, 117) + '...' : text;
+      await notifyAllAdmins({
+        sourceRole: 'artist',  // гость — не cabinet-роль, ставим placeholder
+        type: 'live_chat_message',
+        title: `Live-чат: ${session.guest_name || 'Гость'}`.slice(0, 200),
+        message: preview,
+        link: `/ctrl-pm7k2f?tab=live-chat&session=${sessionId}`,
+        metadata: { sessionId, guestName: session.guest_name, guestEmail: session.guest_email },
+      });
+    } catch (bellErr) {
+      console.error('[chat-support] bell notify failed:', bellErr);
+    }
+
     return c.json({ success: true, message: payload });
   } catch (err: any) {
     console.error('[chat-support] guest send error:', err);
