@@ -686,12 +686,12 @@ landing.get("/releases/upcoming", async (c) => {
       pool.query(
         `SELECT id, title, artist_name, genre,
                 cover_url,
-                data->>'upcoming_until' AS upcoming_until
+                upcoming_until::text AS upcoming_until
            FROM tracks
           WHERE moderation_status = 'upcoming'
             AND COALESCE(is_hidden, false) = false
-            AND data->>'upcoming_until' IS NOT NULL
-          ORDER BY (data->>'upcoming_until')::timestamptz ASC
+            AND upcoming_until IS NOT NULL
+          ORDER BY upcoming_until ASC
           LIMIT $1`,
         [limit]
       ).then((r) => r.rows).catch((e: any) => {
