@@ -3987,7 +3987,36 @@ export const radioNotificationsStore  = makeRadioRequestArrayStore('radio_notifi
 // venueAnalyticsStore — REMOVED (dead store, 0 writers anywhere; only 4 .get
 // reads которые возвращали {} / []). venue_analytics table candidate для
 // manual DROP via OPERATIONS_LOG.md.
-export const venueRadioBrandStore = makeJsonbKeyStore('venue_radio_brand', 'venue_id');
+// venue_radio_brand — typed access since this PR. Per-venue brand settings —
+// legit polymorphic shape (UI evolves), keep как jsonb но кill get→mutate→set
+// race через atomic jsonb || merge.
+export async function getVenueRadioBrand(venueId: string): Promise<Record<string, any> | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT data FROM venue_radio_brand WHERE venue_id = $1 LIMIT 1`, [venueId]
+  );
+  if (r.rows.length === 0) return null;
+  const raw = r.rows[0].data;
+  return typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : (raw || null);
+}
+/**
+ * Atomic partial update via jsonb || concatenation. Race-free vs legacy
+ * get→merge→set паттерн. Returns merged final data.
+ */
+export async function patchVenueRadioBrand(venueId: string, patch: Record<string, any>): Promise<Record<string, any>> {
+  const { pool } = await import('./db-client.tsx');
+  const enriched = { ...patch, updatedAt: new Date().toISOString() };
+  const r = await pool.query(
+    `INSERT INTO venue_radio_brand (venue_id, data, created_at, updated_at)
+     VALUES ($1, $2::jsonb, NOW(), NOW())
+     ON CONFLICT (venue_id) DO UPDATE SET
+       data = COALESCE(venue_radio_brand.data, '{}'::jsonb) || EXCLUDED.data,
+       updated_at = NOW()
+     RETURNING data`,
+    [venueId, JSON.stringify(enriched)]
+  );
+  return r.rows[0]?.data || enriched;
+}
 // ticketProvidersStore — DROPPED (0 callers; ticket_providers доступ
 // через `upsertTicketProvider` + `getTicketProvidersByConcert` функции
 // в db.tsx + ticketing-routes.tsx).
