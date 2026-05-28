@@ -6,7 +6,7 @@
 
 import { Hono } from 'hono';
 import * as db from './db.tsx';
-import { chartAggregationStore, chartSourcesStore, platformStatsStore, getTracksByUser } from './db.tsx';
+import { chartAggregationStore, getChartSource, upsertChartSource, listChartSources, platformStatsStore, getTracksByUser } from './db.tsx';
 import { getPublishedTracks } from './db-typed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { isUrlSafe } from './security.tsx';
@@ -385,7 +385,7 @@ ${sourceConfig.parsingHint}
     }
 
     // Load previous chart to calculate trends
-    const prevData: any = await chartSourcesStore.get(sourceConfig.id);
+    const prevData: any = await getChartSource(sourceConfig.id);
     const prevTracks: ChartTrackEntry[] = prevData?.tracks || [];
     const prevPositionMap = new Map<string, number>();
     prevTracks.forEach(t => {
@@ -511,7 +511,7 @@ async function aggregateSource(source: ChartSourceConfig): Promise<ExternalChart
 
   if (!pageText) {
     // Try to return cached data
-    const cached: any = await chartSourcesStore.get(source.id);
+    const cached: any = await getChartSource(source.id);
     if (cached && cached.tracks?.length > 0) {
       console.log(`Using cached chart data for ${source.id} (fetch failed)`);
       return { ...cached, error: 'Не удалось загрузить страницу, используются кэшированные данные' };
@@ -545,7 +545,7 @@ async function aggregateSource(source: ChartSourceConfig): Promise<ExternalChart
       });
       if (rawResp.ok) {
         const rawHtml = await rawResp.text();
-        const prevData: any = await chartSourcesStore.get(source.id);
+        const prevData: any = await getChartSource(source.id);
         const prevTracks: ChartTrackEntry[] = prevData?.tracks || [];
         tracks = await parseRusskoeRadioHTML(rawHtml, prevTracks);
         if (tracks.length > 0) {
@@ -561,7 +561,7 @@ async function aggregateSource(source: ChartSourceConfig): Promise<ExternalChart
 
   if (!tracks || tracks.length === 0) {
     // Return cached data if available
-    const cached: any = await chartSourcesStore.get(source.id);
+    const cached: any = await getChartSource(source.id);
     if (cached && cached.tracks?.length > 0) {
       console.log(`Using cached chart data for ${source.id} (extraction failed)`);
       return { ...cached, error: 'Извлечение не удалось, используются кэшированные данные' };
@@ -596,7 +596,7 @@ async function aggregateSource(source: ChartSourceConfig): Promise<ExternalChart
   };
 
   // Step 4: Save to KV
-  await chartSourcesStore.set(source.id, result);
+  await upsertChartSource({ id: source.id, ...result } as any);
   console.log(`Chart saved for ${source.id}: ${tracks.length} tracks`);
 
   return result;
@@ -624,7 +624,7 @@ async function aggregateYandexChart(): Promise<ExternalChartData> {
 
     if (!resp.ok) {
       console.log(`[charts] Yandex API failed: HTTP ${resp.status}`);
-      const cached: any = await chartSourcesStore.get(cfg.id);
+      const cached: any = await getChartSource(cfg.id);
       if (cached?.tracks?.length) return { ...cached, error: 'API failed, cached data' };
       return emptyChart(cfg, 'Не удалось загрузить чарт Яндекс Музыки');
     }
@@ -651,7 +651,7 @@ async function aggregateYandexChart(): Promise<ExternalChartData> {
     }
 
     // Загружаем предыдущий чарт для трендов
-    const prevData: any = await chartSourcesStore.get(cfg.id);
+    const prevData: any = await getChartSource(cfg.id);
     const prevTracks: ChartTrackEntry[] = prevData?.tracks || [];
     const prevPosMap = new Map<string, number>();
     prevTracks.forEach(t => prevPosMap.set(`${t.artist}|||${t.title}`.toLowerCase(), t.position));
@@ -699,7 +699,7 @@ async function aggregateYandexChart(): Promise<ExternalChartData> {
     // Если всё ещё 0 — попробуем через Mistral как fallback
     if (entries.length === 0) {
       console.log(`[charts] Yandex API: no tracks parsed from JSON, raw keys: ${Object.keys(json).join(', ')}`);
-      const cached: any = await chartSourcesStore.get(cfg.id);
+      const cached: any = await getChartSource(cfg.id);
       if (cached?.tracks?.length) return { ...cached, error: 'Parsing failed, cached data' };
       return emptyChart(cfg, 'Не удалось распарсить ответ Яндекс API');
     }
@@ -717,12 +717,12 @@ async function aggregateYandexChart(): Promise<ExternalChartData> {
       parsedBy: 'json_api' as any,
     };
 
-    await chartSourcesStore.set(cfg.id, result);
+    await upsertChartSource({ id: cfg.id, ...result } as any);
     console.log(`[charts] Yandex chart: ${entries.length} tracks from API`);
     return result;
   } catch (error) {
     console.log(`[charts] Yandex chart error: ${error}`);
-    const cached: any = await chartSourcesStore.get(cfg.id);
+    const cached: any = await getChartSource(cfg.id);
     if (cached?.tracks?.length) return { ...cached, error: safeErrorMessage(error) };
     return emptyChart(cfg, String(error));
   }
@@ -765,7 +765,7 @@ async function aggregateShazamChart(): Promise<ExternalChartData> {
 
     if (!resp.ok) {
       console.log(`[charts] Shazam failed: HTTP ${resp.status}`);
-      const cached: any = await chartSourcesStore.get(cfg.id);
+      const cached: any = await getChartSource(cfg.id);
       if (cached?.tracks?.length) return { ...cached, error: 'HTTP error, cached data' };
       return emptyChart(cfg, `HTTP ${resp.status}`);
     }
@@ -805,13 +805,13 @@ async function aggregateShazamChart(): Promise<ExternalChartData> {
 
     if (trackMap.size === 0) {
       console.log(`[charts] Shazam: no tracks parsed from HTML`);
-      const cached: any = await chartSourcesStore.get(cfg.id);
+      const cached: any = await getChartSource(cfg.id);
       if (cached?.tracks?.length) return { ...cached, error: 'Parsing failed, cached data' };
       return emptyChart(cfg, 'No tracks found in HTML');
     }
 
     // Load previous chart for trends
-    const prevData: any = await chartSourcesStore.get(cfg.id);
+    const prevData: any = await getChartSource(cfg.id);
     const prevTracks: ChartTrackEntry[] = prevData?.tracks || [];
     const prevPosMap = new Map<string, number>();
     prevTracks.forEach(t => prevPosMap.set(`${t.artist}|||${t.title}`.toLowerCase(), t.position));
@@ -850,12 +850,12 @@ async function aggregateShazamChart(): Promise<ExternalChartData> {
       parsedBy: 'html_parser' as any,
     };
 
-    await chartSourcesStore.set(cfg.id, result);
+    await upsertChartSource({ id: cfg.id, ...result } as any);
     console.log(`[charts] Shazam chart: ${entries.length} tracks from HTML`);
     return result;
   } catch (error) {
     console.log(`[charts] Shazam chart error: ${error}`);
-    const cached: any = await chartSourcesStore.get(cfg.id);
+    const cached: any = await getChartSource(cfg.id);
     if (cached?.tracks?.length) return { ...cached, error: safeErrorMessage(error) };
     return emptyChart(cfg, String(error));
   }
@@ -900,7 +900,7 @@ charts.get('/sources', async (c) => {
 
     const sourcesWithData = await Promise.all(
       allSources.map(async (source: any) => {
-        const data: any = await chartSourcesStore.get(source.id);
+        const data: any = await getChartSource(source.id);
         return {
           id: source.id,
           name: source.name,
@@ -934,7 +934,7 @@ charts.get('/all', async (c) => {
 
     // Radio sources
     for (const source of CHART_SOURCES) {
-      const data: any = await chartSourcesStore.get(source.id);
+      const data: any = await getChartSource(source.id);
       if (data && data.tracks?.length > 0) {
         allCharts.push(data);
       } else {
@@ -947,7 +947,7 @@ charts.get('/all', async (c) => {
     }
 
     // Yandex
-    const yandexData: any = await chartSourcesStore.get('yandex');
+    const yandexData: any = await getChartSource('yandex');
     if (yandexData?.tracks?.length > 0) {
       allCharts.push(yandexData);
     } else {
@@ -955,7 +955,7 @@ charts.get('/all', async (c) => {
     }
 
     // Shazam
-    const shazamData: any = await chartSourcesStore.get('shazam');
+    const shazamData: any = await getChartSource('shazam');
     if (shazamData?.tracks?.length > 0) {
       allCharts.push(shazamData);
     } else {
@@ -1046,7 +1046,7 @@ charts.get('/source/:id', async (c) => {
       return c.json({ success: false, error: `Chart source "${sourceId}" not found` }, 404);
     }
 
-    const data: any = await chartSourcesStore.get(sourceId);
+    const data: any = await getChartSource(sourceId);
     if (data && data.tracks?.length > 0) {
       return c.json({ success: true, data });
     }
@@ -1215,7 +1215,7 @@ async function buildPromoFMChart(): Promise<PromoFMChartEntry[]> {
   ];
 
   for (const source of allSourceIds) {
-    const data: any = await chartSourcesStore.get(source.id);
+    const data: any = await getChartSource(source.id);
     if (!data?.tracks?.length) continue;
 
     const weight = SOURCE_WEIGHTS[source.id] || 1;
@@ -1489,7 +1489,7 @@ charts.post('/build-new-releases', requireAdminOrKey, async (c) => {
     // Priority 2: "new" entries from external charts
     const allCharts: any[] = [];
     for (const src of ['shazam', 'nashe', 'dfm', 'europa', 'russkoe', 'yandex']) {
-      const chartData = await chartSourcesStore.get(src);
+      const chartData = await getChartSource(src);
       if (chartData?.tracks) {
         allCharts.push({ sourceId: src, tracks: chartData.tracks });
       }
@@ -1930,14 +1930,23 @@ async function fetchLastFmChart(limit = 50): Promise<IntlChartEntry[]> {
 
 async function saveIntlChart(platform: string, countryCode: string, entries: IntlChartEntry[]) {
   const key = `intl:${platform}:${countryCode}`;
-  await chartSourcesStore.set(key, {
-    platform, countryCode, entries, fetchedAt: new Date().toISOString(), tracksCount: entries.length,
+  // International chart shape отличается от русских (platform/countryCode
+  // вместо sourceName/logo/etc). Записываем компактно — tracks хранит
+  // entries[], остальные поля минимальные (type='streaming').
+  await upsertChartSource({
+    id: key,
+    sourceName: `${platform} ${countryCode.toUpperCase()}`,
+    sourceUrl: '',
+    type: 'streaming',
+    tracks: entries as any,
+    fetchedAt: new Date().toISOString(),
+    parsedBy: 'json_api',
   });
 }
 
 async function getIntlChart(platform: string, countryCode: string) {
   const key = `intl:${platform}:${countryCode}`;
-  return await chartSourcesStore.get(key) as any;
+  return await getChartSource(key) as any;
 }
 
 
