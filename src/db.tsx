@@ -3376,11 +3376,10 @@ export async function getConcertAgentStats(): Promise<{
   };
 }
 
-export const curatorReportsStore = makeJsonbKeyStore('curator_reports');
 // verification_tokens — native cols since migration 004; data jsonb
 // dropped в migration 070 вместе с sync trigger. Store wrapper удалён.
-// Доступ через typed функции ниже (vps-userdata.tsx использует их
-// напрямую вместо .set/.get на data jsonb).
+// curator_reports — native cols since migration 074; latest-pointer dual-write
+// убрано в пользу indexed SELECT (mapCuratorReportRow + insertCuratorReport ниже).
 
 export interface VerificationTokenRow {
   token: string;
@@ -3422,6 +3421,77 @@ export async function insertVerificationToken(params: {
   );
 }
 
+// curator_reports — native cols since migration 074. Legacy dual-write
+// (id row + 'latest:<role>' pointer row) replaced одним INSERT —
+// "latest per role" вычисляется через SELECT ORDER BY completed_at DESC
+// LIMIT 1 на index. См. typed functions ниже.
+
+export interface CuratorReportRow {
+  id: string;
+  role: string;
+  roleName: string;
+  startedAt: string;
+  completedAt: string;
+  totalEndpoints: number;
+  passed: number;
+  failed: number;
+  warnings: number;
+  setupDone: boolean;
+  summary: string;
+  results: any[];   // CuratorReportResult[] — legit polymorphic per CLAUDE.md
+}
+
+function mapCuratorReportRow(r: any): CuratorReportRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  return {
+    id: r.id,
+    role: r.role,
+    roleName: r.role_name,
+    startedAt: iso(r.started_at),
+    completedAt: iso(r.completed_at),
+    totalEndpoints: r.total_endpoints,
+    passed: r.passed,
+    failed: r.failed,
+    warnings: r.warnings,
+    setupDone: !!r.setup_done,
+    summary: r.summary,
+    results: r.results || [],
+  };
+}
+
+const CURATOR_REPORT_COLS = `id, role, role_name, started_at, completed_at,
+  total_endpoints, passed, failed, warnings, setup_done, summary, results`;
+
+export async function insertCuratorReport(report: CuratorReportRow): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO curator_reports
+       (id, role, role_name, started_at, completed_at, total_endpoints,
+        passed, failed, warnings, setup_done, summary, results)
+     VALUES ($1, $2, $3, $4::timestamptz, $5::timestamptz, $6, $7, $8, $9, $10, $11, $12::jsonb)
+     ON CONFLICT (id) DO UPDATE SET
+       role            = EXCLUDED.role,
+       role_name       = EXCLUDED.role_name,
+       started_at      = EXCLUDED.started_at,
+       completed_at    = EXCLUDED.completed_at,
+       total_endpoints = EXCLUDED.total_endpoints,
+       passed          = EXCLUDED.passed,
+       failed          = EXCLUDED.failed,
+       warnings        = EXCLUDED.warnings,
+       setup_done      = EXCLUDED.setup_done,
+       summary         = EXCLUDED.summary,
+       results         = EXCLUDED.results`,
+    [
+      report.id, report.role, report.roleName,
+      report.startedAt, report.completedAt,
+      report.totalEndpoints, report.passed, report.failed, report.warnings,
+      report.setupDone, report.summary,
+      JSON.stringify(report.results || []),
+    ]
+  );
+}
+
 /**
  * Lookup token — returns row только если token валиден (не expired,
  * не used). Сразу инкапсулирует все 3 валидационных gate которые
@@ -3459,6 +3529,36 @@ export async function markVerificationTokenUsed(token: string): Promise<boolean>
     [token]
   );
   return (r.rowCount ?? 0) > 0;
+}
+
+/**
+ * Latest report per role via indexed SELECT — replaces legacy
+ * 'latest:<role>' pointer-row pattern. Hot path: GET /curator/report/:roleId.
+ */
+export async function getLatestCuratorReport(role: string): Promise<CuratorReportRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${CURATOR_REPORT_COLS} FROM curator_reports
+      WHERE role = $1
+      ORDER BY completed_at DESC
+      LIMIT 1`,
+    [role]
+  );
+  return mapCuratorReportRow(r.rows[0]);
+}
+
+/**
+ * History list (admin browse). Default limit 50 mirrors legacy handler.
+ */
+export async function listCuratorReports(limit: number = 50): Promise<CuratorReportRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  const safeLimit = Math.max(1, Math.min(limit, 500));
+  const r = await pool.query(
+    `SELECT ${CURATOR_REPORT_COLS} FROM curator_reports
+      ORDER BY completed_at DESC
+      LIMIT ${safeLimit}`
+  );
+  return r.rows.map(mapCuratorReportRow).filter((x): x is CuratorReportRow => x !== null);
 }
 
 // ─── Coin Transactions (specific table) ───
