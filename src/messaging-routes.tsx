@@ -603,14 +603,32 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
       }
     }
 
-    // Telegram forward if recipient is admin
+    // Telegram forward + bell notification if recipient is admin
     try {
       const otherIds = participantIds.filter(id => id !== senderId);
+      let adminFound = false;
       for (const otherId of otherIds) {
         const u = await pool.query(`SELECT role::text FROM users WHERE id::text = $1`, [otherId]);
         if (u.rows[0]?.role === 'admin' || u.rows[0]?.role === 'superadmin') {
+          adminFound = true;
           await forwardToTelegramIfAdmin('admin', senderName || senderId, text);
           break;
+        }
+      }
+      if (adminFound) {
+        try {
+          const { notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
+          const preview = text.trim().length > 120 ? text.trim().slice(0, 117) + '...' : text.trim();
+          await notifyAllAdmins({
+            sourceRole: (senderRole as any) || 'artist',
+            type: 'new_direct_message',
+            title: `Сообщение от ${senderName || 'пользователя'}`.slice(0, 200),
+            message: preview,
+            link: `/ctrl-pm7k2f?tab=messages&conversation=${conversationId}`,
+            metadata: { conversationId, messageId: msgId, senderId },
+          });
+        } catch (bellErr) {
+          log.warn({ err: bellErr, conversationId }, 'admin_bell_notify_failed');
         }
       }
     } catch (err) {

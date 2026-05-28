@@ -175,23 +175,40 @@ app.post('/create', requireAuth, async (c) => {
 
     // Notify admin (email + Telegram). Resolve user identity for the notification
     // so admins see real name/email instead of UUID.
+    let userInfo: { email?: string; full_name?: string; display_name?: string } = {};
     try {
       const { rows } = await pool.query(
         'SELECT email, full_name, display_name FROM users WHERE id = $1 LIMIT 1',
         [user_id],
       );
-      const u = rows[0] || {};
+      userInfo = rows[0] || {};
       await notifySupportTicket({
         ticketId,
         subject,
         description,
         category,
         priority: priority || 'medium',
-        userName: u.full_name || u.display_name || undefined,
-        userEmail: u.email || undefined,
+        userName: userInfo.full_name || userInfo.display_name || undefined,
+        userEmail: userInfo.email || undefined,
       });
     } catch (notifyErr) {
       console.error('[tickets] admin notify failed:', notifyErr);
+    }
+
+    // Bell-уведомление админам (cross_cabinet_notifications)
+    try {
+      const { notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
+      const userLabel = userInfo.full_name || userInfo.display_name || userInfo.email || 'Пользователь';
+      await notifyAllAdmins({
+        sourceRole: 'artist',  // user role не всегда artist, но source-role здесь noise — это «не-админ»
+        type: 'support_ticket_new',
+        title: `Новый тикет: ${subject}`.slice(0, 200),
+        message: `${userLabel} (${category}, ${priority || 'medium'}): ${description}`.slice(0, 400),
+        link: `/ctrl-pm7k2f?tab=tickets&id=${ticketId}`,
+        metadata: { ticketId, category, priority: priority || 'medium', userId: user_id },
+      });
+    } catch (bellErr) {
+      console.error('[tickets] bell notify failed:', bellErr);
     }
 
     return c.json({
