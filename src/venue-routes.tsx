@@ -165,6 +165,53 @@ app.put('/profile', requireAuth, async (c) => {
   }
 });
 
+/**
+ * POST /request-verification — venue submits a verification request.
+ *
+ * Mirrors artist's POST /artist-profile/request-verification (added
+ * by migration 058). Admin then processes via POST /auth/admin/
+ * verify-profile { role: 'venue', isVerified, rejectionReason? }.
+ *
+ * Idempotent: re-clicking refreshes verification_requested_at and
+ * clears any previous rejection_reason — a venue that was rejected
+ * can submit a corrected request without admin intervention.
+ *
+ * Migration 062 added the underlying columns.
+ */
+app.post('/request-verification', requireAuth, async (c) => {
+  const userId = c.get('userId' as never) as string | undefined;
+  if (!userId) {
+    return c.json({ success: false, error: 'Не авторизован' }, 401);
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT is_verified FROM venue_profiles WHERE user_id = $1 LIMIT 1`,
+      [userId],
+    );
+    if (rows.length === 0) {
+      return c.json({ success: false, error: 'Venue profile not found' }, 404);
+    }
+    if (rows[0].is_verified) {
+      return c.json({ success: false, error: 'Профиль уже верифицирован' }, 400);
+    }
+    await pool.query(
+      `UPDATE venue_profiles
+          SET verification_requested_at     = NOW(),
+              verification_rejection_reason = NULL
+        WHERE user_id = $1`,
+      [userId],
+    );
+    console.log(`[VenueProfile] Verification requested by ${userId}`);
+    return c.json({
+      success: true,
+      message: 'Заявка на верификацию отправлена. Ожидайте рассмотрения администратором.',
+    });
+  } catch (error) {
+    console.error('[VenueProfile] request-verification error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 // POST /profile/logo - Загрузить логотип (placeholder)
 app.post('/profile/logo', requireAuth, async (c) => {
   try {

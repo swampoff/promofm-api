@@ -912,47 +912,38 @@ auth.post("/admin/verify-profile", requireAuth, requireAdmin, async (c) => {
   try {
     const { userId, role, isVerified, rejectionReason } = await c.req.json();
     if (!userId) return c.json({ success: false, error: 'userId обязателен' }, 400);
-    if (role !== 'radio_station' && role !== 'venue' && role !== 'artist') {
-      return c.json({ success: false, error: "role должно быть 'radio_station', 'venue' или 'artist'" }, 400);
+    // Migration 062 promoted venue/radio/producer to the same
+    // extended verification flow as artist (058). Accept all four
+    // roles. Producer was a no-op before 062 — the column didn't
+    // exist on producer_profiles.
+    if (role !== 'radio_station' && role !== 'venue' && role !== 'artist' && role !== 'producer') {
+      return c.json({ success: false, error: "role должно быть 'radio_station', 'venue', 'artist' или 'producer'" }, 400);
     }
     if (typeof isVerified !== 'boolean') {
       return c.json({ success: false, error: 'isVerified должно быть boolean' }, 400);
     }
 
-    if (role === 'artist') {
-      // Artists carry extended verification state (approved_at + rejection_reason).
-      // On approve: stamp approved_at, clear any previous rejection_reason so
-      //   stale rejection messages don't appear after a re-request.
-      // On reject: keep the existing verification_requested_at so the UI shows
-      //   "your request was reviewed" rather than reverting to "not started";
-      //   stash the optional reason in verification_rejection_reason.
-      const result = await sql(
-        `UPDATE artist_profiles
-            SET is_verified                   = $1,
-                verification_approved_at      = CASE WHEN $1 THEN NOW() ELSE verification_approved_at END,
-                verification_rejection_reason = CASE WHEN $1 THEN NULL ELSE $3 END
-          WHERE user_id = $2
-         RETURNING user_id, is_verified, verification_rejection_reason`,
-        [isVerified, userId, rejectionReason || null]
-      );
-      if (result.rows.length === 0) {
-        return c.json({ success: false, error: 'Профиль не найден' }, 404);
-      }
-      return c.json({
-        success: true,
-        data: result.rows[0],
-        message: isVerified ? 'Профиль верифицирован' : 'Заявка отклонена',
-      });
-    }
+    // All four roles now use the same extended state shape:
+    //   On approve: stamp approved_at, clear any previous rejection_reason
+    //     so stale rejection messages don't appear after a re-request.
+    //   On reject:  keep the existing verification_requested_at so the
+    //     UI shows "your request was reviewed" rather than reverting
+    //     to "not started"; stash the optional reason in
+    //     verification_rejection_reason.
+    const table =
+      role === 'artist'        ? 'artist_profiles' :
+      role === 'radio_station' ? 'radio_profiles'  :
+      role === 'venue'         ? 'venue_profiles'  :
+                                 'producer_profiles';
 
-    // radio_station / venue — simple boolean toggle (no request flow).
-    const table = role === 'radio_station' ? 'radio_profiles' : 'venue_profiles';
     const result = await sql(
       `UPDATE ${table}
-          SET is_verified = $1
+          SET is_verified                   = $1,
+              verification_approved_at      = CASE WHEN $1 THEN NOW() ELSE verification_approved_at END,
+              verification_rejection_reason = CASE WHEN $1 THEN NULL ELSE $3 END
         WHERE user_id = $2
-       RETURNING user_id, is_verified`,
-      [isVerified, userId]
+       RETURNING user_id, is_verified, verification_rejection_reason`,
+      [isVerified, userId, rejectionReason || null]
     );
     if (result.rows.length === 0) {
       return c.json({ success: false, error: 'Профиль не найден' }, 404);
@@ -960,7 +951,7 @@ auth.post("/admin/verify-profile", requireAuth, requireAdmin, async (c) => {
     return c.json({
       success: true,
       data: result.rows[0],
-      message: isVerified ? 'Профиль верифицирован' : 'Верификация снята',
+      message: isVerified ? 'Профиль верифицирован' : (rejectionReason ? 'Заявка отклонена' : 'Верификация снята'),
     });
   } catch (error) {
     console.error('[admin/verify-profile] error:', error);
