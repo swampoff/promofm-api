@@ -25,7 +25,7 @@
 
 import { Hono } from 'hono';
 import {
-  getArtistProfile, getNotificationsByUser, publishEmailPrefsStore, upsertNotification,
+  getArtistProfile, getNotificationsByUser, getPublishEmailPrefs, setPublishEmailPrefs, upsertNotification,
   // publish_orders — native cols since migration 078:
   getPublishOrder, insertPublishOrder, updatePublishOrder, deletePublishOrder,
   listPublishOrdersByUser, listPublishOrders, getPublishOrderStats,
@@ -1184,8 +1184,8 @@ const EMAIL_STATUS_PREF_MAP: Record<string, string> = {
 };
 
 async function getEmailPrefs(userId: string) {
-  const data = await publishEmailPrefsStore.get(userId);
-  if (data) return typeof data === 'string' ? JSON.parse(data) : data;
+  const data = await getPublishEmailPrefs(userId);
+  if (data) return data;
   // Defaults: all critical statuses enabled
   return {
     email: '',
@@ -1262,7 +1262,7 @@ async function sendCriticalEmailNotification(
     emailLog.unshift(emailRecord);
     // Keep last 100 email log entries
     if (emailLog.length > 100) emailLog.length = 100;
-    await publishEmailPrefsStore.set(userId, JSON.stringify({ ...currentPrefs, emailLog }));
+    await setPublishEmailPrefs(userId, { ...currentPrefs, emailLog });
 
     console.log(`Email notification ${emailRecord.status} for user ${userId}: ${subject} -> ${emailRecord.toEmail}`);
   } catch (err) {
@@ -1297,7 +1297,7 @@ app.put('/email-prefs/:userId', requireAuth, async (c) => {
       updatedAt: new Date().toISOString(),
     };
 
-    await publishEmailPrefsStore.set(userId, JSON.stringify(updated));
+    await setPublishEmailPrefs(userId, updated);
     console.log(`Email prefs updated for user ${userId}`);
     return c.json({ success: true, prefs: updated });
   } catch (error: any) {
