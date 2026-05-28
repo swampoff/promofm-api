@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { pool } from './db-client.tsx';
-import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, listChartSources, createInvestorInquiry, newsPublicStore, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer, radioAnalyticsStore } from './db.tsx';
+import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, listChartSources, createInvestorInquiry, listNewsPublic, listAllNewsPublic, getNewsPublic, upsertNewsPublic, deleteNewsPublic, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer, radioAnalyticsStore } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { sanitizeString, sanitizeUrl } from './security.tsx';
@@ -866,10 +866,11 @@ landing.get('/news', async (c) => {
     const limit = parseInt(c.req.query('limit') || '10');
     const tag = c.req.query('tag');
 
-    const allNews = await newsPublicStore.getAll();
-    let news = allNews.filter((n: any) => {
-      if (!n || !n.id || n.status !== 'published') return false;
-      // Filter out English-only titles (platform is Russian)
+    // Native SQL filter — status='published' + (tag через ANY(tags)) +
+    // ORDER BY published_at DESC — hits idx_news_public_published.
+    let news = await listNewsPublic({ status: 'published', tag: tag || undefined, limit: limit * 2 });
+    // English-only title filter — оставляем JS-side (нет cheap SQL pattern).
+    news = news.filter(n => {
       const title = n.title || '';
       const cyrillic = (title.match(/[а-яА-ЯёЁ]/g) || []).length;
       const latin = (title.match(/[a-zA-Z]/g) || []).length;
@@ -877,12 +878,6 @@ landing.get('/news', async (c) => {
       if (total > 10 && latin / total > 0.8) return false; // >80% Latin = English title
       return true;
     });
-
-    if (tag) {
-      news = news.filter((n: any) => n.tag === tag);
-    }
-
-    news.sort((a: any, b: any) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
 
     return c.json({ success: true, data: news.slice(0, limit).map(normalizeNews) });
   } catch (error) {
@@ -894,7 +889,7 @@ landing.get('/news', async (c) => {
 landing.get('/news/:id', async (c) => {
   try {
     const id = c.req.param('id');
-    const raw = await newsPublicStore.get(id);
+    const raw = await getNewsPublic(id);
     if (!raw) {
       return c.json({ success: false, error: 'Новость не найдена' }, 404);
     }
@@ -1685,7 +1680,7 @@ landing.post('/admin/news', requireAdminOrKey, async (c) => {
       publishedAt: body.publishedAt || new Date().toISOString(),
       status: body.status || 'published', createdAt: new Date().toISOString(),
     };
-    await newsPublicStore.set(id, newsItem);
+    await upsertNewsPublic(newsItem);
     // Auto-ping search engines
     pingSitemapAsync(id).catch(() => {});
     return c.json({ success: true, data: newsItem });
@@ -1697,11 +1692,11 @@ landing.post('/admin/news', requireAdminOrKey, async (c) => {
 landing.put('/admin/news/:id', requireAdminOrKey, async (c) => {
   try {
     const id = c.req.param('id');
-    const existing = await newsPublicStore.get(id);
+    const existing = await getNewsPublic(id);
     if (!existing) return c.json({ success: false, error: 'Not found' }, 404);
     const body = await c.req.json();
     const updated = { ...existing, ...body, id, updatedAt: new Date().toISOString() };
-    await newsPublicStore.set(id, updated);
+    await upsertNewsPublic(updated);
     // Auto-ping search engines
     pingSitemapAsync(id).catch(() => {});
     return c.json({ success: true, data: updated });
@@ -1713,7 +1708,7 @@ landing.put('/admin/news/:id', requireAdminOrKey, async (c) => {
 landing.delete('/admin/news/:id', requireAdminOrKey, async (c) => {
   try {
     const id = c.req.param('id');
-    await newsPublicStore.del(id);
+    await deleteNewsPublic(id);
     return c.json({ success: true });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -1722,7 +1717,8 @@ landing.delete('/admin/news/:id', requireAdminOrKey, async (c) => {
 
 landing.get('/admin/news', requireAdminOrKey, async (c) => {
   try {
-    const all = await newsPublicStore.getAll();
+    // Admin sees ALL statuses (pending/published/rejected) — wildcard.
+    const all = await listNewsPublic({ status: '*', limit: 200 });
     return c.json({ success: true, data: all });
   } catch (error) {
     return c.json({ success: true, data: [] });

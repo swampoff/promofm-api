@@ -4,7 +4,7 @@
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { newsPublicStore } from './db.tsx';
+import { listAllNewsPublic, deleteNewsPublic } from './db.tsx';
 import { fetchAllNews, fetchNewsFromSource, NEWS_SOURCES } from './news-agent.tsx';
 import { safeErrorMessage } from './security.tsx';
 
@@ -98,8 +98,8 @@ newsAgent.get('/sources', requireAdminOrKey, async (c) => {
  */
 newsAgent.get('/status', requireAdminOrKey, async (c) => {
   try {
-    const allNews = await newsPublicStore.getAll();
-    const published = allNews.filter((n: any) => n.status === 'published');
+    const allNews = await listAllNewsPublic();
+    const published = allNews.filter(n => n.status === 'published');
 
     // Count by source
     const bySource: Record<string, number> = {};
@@ -135,11 +135,11 @@ newsAgent.get('/status', requireAdminOrKey, async (c) => {
  */
 newsAgent.delete('/clear', requireAdminOrKey, async (c) => {
   try {
-    const allNews = await newsPublicStore.getAll();
+    const allNews = await listAllNewsPublic();
     let deleted = 0;
     for (const n of allNews) {
-      if ((n as any).id) {
-        await newsPublicStore.del((n as any).id);
+      if (n.id) {
+        await deleteNewsPublic(n.id);
         deleted++;
       }
     }
