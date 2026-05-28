@@ -33,6 +33,10 @@
 --   3. cd /opt/promofm-api && git pull && sudo systemctl restart promofm-api
 
 -- Bootstrap legacy schema if missing.
+-- Existing beat_reviews on prod has reviewer_id/comment columns;
+-- cloud's migration expects user_id/review_text. 0 rows + 0 FK → DROP+rebuild safe.
+DROP TABLE IF EXISTS beat_reviews CASCADE;
+
 CREATE TABLE IF NOT EXISTS beat_reviews (
   id TEXT PRIMARY KEY,
   beat_id TEXT,

@@ -49,6 +49,10 @@
 
 -- ─── Создаём новую row-per-offer таблицу ──────────────────────────────
 
+-- Existing collab_offers table on prod has different schema (sender_id/recipient_id);
+-- since 0 rows + 0 FK refs, safe to DROP. Cloud's CREATE TABLE recreates clean.
+DROP TABLE IF EXISTS collab_offers CASCADE;
+
 CREATE TABLE IF NOT EXISTS collab_offers (
   id                TEXT PRIMARY KEY,
   producer_id       TEXT          NOT NULL,
