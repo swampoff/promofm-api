@@ -3488,7 +3488,131 @@ export async function getPublishOrderStats(): Promise<{
 // publish_chats переехал на row-per-message (migration 038). Доступ
 // через pool.query в chat-routes.tsx.
 export const publishEmailPrefsStore = makeUserSingletonStore('publish_email_prefs');
-export const emailHistoryStore = makeJsonbKeyStore('email_history');
+// ─── email_history (native cols since migration 079) ───
+// Transactional emails + campaign send/open/click tracking. Replaces
+// compound-key patterns в email-campaigns-routes.tsx через native
+// (campaign_id, kind, to_email) tuple lookups.
+
+export interface EmailHistoryRow {
+  id: string;
+  userId?: string | null;
+  campaignId?: string | null;
+  kind: string;           // 'transactional' | 'sent' | 'open' | 'click'
+  toEmail?: string | null;
+  subject?: string | null;
+  template?: string | null;
+  content?: string | null;
+  type?: string | null;
+  status?: string | null;
+  sentAt?: string | null;
+  opened: boolean;
+  clicked: boolean;
+  openedAt?: string | null;
+  clickedAt?: string | null;
+  metadata: Record<string, any>;
+  createdAt?: string | null;
+}
+
+function mapEmailHistoryRow(r: any): EmailHistoryRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  const isoOrNull = (d: any) => d == null ? null : iso(d);
+  return {
+    id: r.id,
+    userId: r.user_id,
+    campaignId: r.campaign_id,
+    kind: r.kind,
+    toEmail: r.to_email,
+    subject: r.subject,
+    template: r.template,
+    content: r.content,
+    type: r.type,
+    status: r.status,
+    sentAt: isoOrNull(r.sent_at),
+    opened: !!r.opened,
+    clicked: !!r.clicked,
+    openedAt: isoOrNull(r.opened_at),
+    clickedAt: isoOrNull(r.clicked_at),
+    metadata: r.metadata || {},
+    createdAt: isoOrNull(r.created_at),
+  };
+}
+
+const EMAIL_HISTORY_COLS = `id, user_id, campaign_id, kind, to_email, subject,
+  template, content, type, status, sent_at, opened, clicked, opened_at, clicked_at,
+  metadata, created_at`;
+
+export async function getEmailHistory(id: string): Promise<EmailHistoryRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${EMAIL_HISTORY_COLS} FROM email_history WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return mapEmailHistoryRow(r.rows[0]);
+}
+
+/** Native (campaign_id, kind, to_email) lookup — replaces compound-key
+ *  dedup checks в email-campaigns-routes.tsx (lines 244/342/577). */
+export async function findCampaignEmailEvent(
+  campaignId: string, kind: string, toEmail: string,
+): Promise<EmailHistoryRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${EMAIL_HISTORY_COLS} FROM email_history
+      WHERE campaign_id = $1 AND kind = $2 AND to_email = $3
+      LIMIT 1`,
+    [campaignId, kind, toEmail]
+  );
+  return mapEmailHistoryRow(r.rows[0]);
+}
+
+export async function listEmailHistoryByUser(userId: string): Promise<EmailHistoryRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${EMAIL_HISTORY_COLS} FROM email_history
+      WHERE user_id = $1
+      ORDER BY sent_at DESC NULLS LAST`,
+    [userId]
+  );
+  return r.rows.map(mapEmailHistoryRow).filter((x): x is EmailHistoryRow => x !== null);
+}
+
+export async function upsertEmailHistory(row: Partial<EmailHistoryRow> & { id: string; kind: string }): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO email_history
+       (id, user_id, campaign_id, kind, to_email, subject, template, content,
+        type, status, sent_at, opened, clicked, opened_at, clicked_at, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+             COALESCE($11::timestamptz, NOW()), $12, $13, $14::timestamptz, $15::timestamptz, $16::jsonb)
+     ON CONFLICT (id) DO UPDATE SET
+       user_id    = COALESCE(EXCLUDED.user_id, email_history.user_id),
+       campaign_id= COALESCE(EXCLUDED.campaign_id, email_history.campaign_id),
+       kind       = EXCLUDED.kind,
+       to_email   = COALESCE(EXCLUDED.to_email, email_history.to_email),
+       subject    = COALESCE(EXCLUDED.subject, email_history.subject),
+       template   = COALESCE(EXCLUDED.template, email_history.template),
+       content    = COALESCE(EXCLUDED.content, email_history.content),
+       type       = COALESCE(EXCLUDED.type, email_history.type),
+       status     = COALESCE(EXCLUDED.status, email_history.status),
+       sent_at    = COALESCE(EXCLUDED.sent_at, email_history.sent_at),
+       opened     = EXCLUDED.opened,
+       clicked    = EXCLUDED.clicked,
+       opened_at  = COALESCE(EXCLUDED.opened_at, email_history.opened_at),
+       clicked_at = COALESCE(EXCLUDED.clicked_at, email_history.clicked_at),
+       metadata   = COALESCE(EXCLUDED.metadata, email_history.metadata),
+       updated_at = NOW()`,
+    [
+      row.id, row.userId ?? null, row.campaignId ?? null, row.kind,
+      row.toEmail ?? null, row.subject ?? null, row.template ?? null,
+      row.content ?? null, row.type ?? null, row.status ?? null,
+      row.sentAt ?? null,
+      row.opened ?? false, row.clicked ?? false,
+      row.openedAt ?? null, row.clickedAt ?? null,
+      JSON.stringify(row.metadata || {}),
+    ]
+  );
+}
 
 // ─── email_templates (native cols since migration 073) ───
 // Was: makeJsonbKeyStore('email_templates'). Now: typed functions ниже.

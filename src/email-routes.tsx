@@ -4,7 +4,11 @@
  */
 
 import { Hono } from 'hono';
-import { publishEmailPrefsStore, emailHistoryStore, listEmailTemplates, getEmailTemplate, upsertEmailTemplate, type EmailTemplate } from './db.tsx';
+import {
+  publishEmailPrefsStore,
+  getEmailHistory, listEmailHistoryByUser, upsertEmailHistory, type EmailHistoryRow,
+  listEmailTemplates, getEmailTemplate, upsertEmailTemplate, type EmailTemplate,
+} from './db.tsx';
 import { requireAuth, requireAdmin, requireOwner } from './auth-middleware.tsx';
 import { smtpSendEmail } from './smtp-sender.tsx';
 
@@ -110,12 +114,9 @@ app.get('/history/:userId', requireAuth, requireOwner('userId'), async (c) => {
   const userId = c.req.param('userId');
   
   try {
-    const emails = await emailHistoryStore.getByCol('user_id', userId);
-
-    emails.sort((a: any, b: any) =>
-      new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime()
-    );
-
+    // SQL pushdown — индексованный SELECT WHERE user_id ORDER BY sent_at DESC
+    // через idx_email_history_user_recent (migration 079).
+    const emails = await listEmailHistoryByUser(userId);
     return c.json({ success: true, data: emails });
   } catch (error) {
     console.error('Error loading email history:', error);
@@ -184,7 +185,13 @@ app.post('/send', requireAuth, requireAdmin, async (c) => {
       emailData.metadata = { ...emailData.metadata, sendError: String(sendErr) };
     }
 
-    await emailHistoryStore.set(emailId, emailData, { user_id });
+    await upsertEmailHistory({
+      id: emailId, userId: user_id, kind: 'transactional',
+      toEmail: to_email, subject, template: template || null, content,
+      type: type || 'notification', status: emailData.status,
+      sentAt: emailData.sent_at, opened: false, clicked: false,
+      metadata: emailData.metadata || {},
+    });
 
     return c.json({ 
       success: emailData.status === 'sent', 
@@ -212,17 +219,17 @@ app.put('/history/:emailId/opened', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Missing userId' }, 400);
     }
     
-    const email = await emailHistoryStore.get(emailId);
-
+    const email = await getEmailHistory(emailId);
     if (!email) {
       return c.json({ success: false, error: 'Email not found' }, 404);
     }
-
-    email.opened = true;
-    email.opened_at = new Date().toISOString();
-    await emailHistoryStore.set(emailId, email, { user_id: userId });
-
-    return c.json({ success: true, data: email });
+    // Atomic UPDATE через upsertEmailHistory с opened=true + opened_at=NOW.
+    const openedAt = new Date().toISOString();
+    await upsertEmailHistory({
+      id: emailId, userId: email.userId || userId, kind: email.kind,
+      opened: true, openedAt,
+    });
+    return c.json({ success: true, data: { ...email, opened: true, openedAt } });
   } catch (error) {
     console.error('Error marking email as opened:', error);
     return c.json({ 
@@ -339,7 +346,12 @@ app.get('/stats/:userId', requireAuth, requireOwner('userId'), async (c) => {
   const userId = c.req.param('userId');
   
   try {
-    const emails = await emailHistoryStore.getByCol('user_id', userId);
+    // SQL pushdown через idx_email_history_user_recent.
+    const emailsTyped = await listEmailHistoryByUser(userId);
+    // Backwards-compatible projection — handler ниже читает snake_case.
+    const emails = emailsTyped.map(e => ({
+      sent_at: e.sentAt, opened: e.opened, clicked: e.clicked, type: e.type,
+    }));
     
     const stats = {
       total_sent: emails.length,

@@ -6,9 +6,9 @@
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-// emailTemplatesStore — removed (migration 073 promoted на native cols);
-// этот файл его никогда не использовал, only emailHistoryStore + publishEmailPrefsStore.
-import { emailHistoryStore, publishEmailPrefsStore } from './db.tsx';
+// email_history — native cols since migration 079. Compound keys '<campaignId>_<kind>_<email>'
+// decomposed на (campaign_id, kind, to_email) tuple — см. findCampaignEmailEvent.
+import { findCampaignEmailEvent, upsertEmailHistory, publishEmailPrefsStore } from './db.tsx';
 import { upsertEmailCampaign, getEmailCampaigns } from './db.tsx';
 import { smtpSendEmail, smtpSendBatch } from './smtp-sender.tsx';
 import { vpsListProfiles } from './vps-userdata.tsx';
@@ -240,13 +240,13 @@ app.get('/track/open', async (c) => {
 
         // Also update email history
         if (email) {
-          const historyKey = `${campaignId}_open_${email}`;
-          const existing = await emailHistoryStore.get(historyKey);
+          // Native (campaign_id, kind, to_email) dedup через partial index.
+          const existing = await findCampaignEmailEvent(campaignId, 'open', email);
           if (!existing) {
-            await emailHistoryStore.set(historyKey, {
-              campaign_id: campaignId,
-              email,
-              opened_at: new Date().toISOString(),
+            const now = new Date().toISOString();
+            await upsertEmailHistory({
+              id: `${campaignId}_open_${email}`, campaignId, kind: 'open',
+              toEmail: email, opened: true, openedAt: now, sentAt: now,
             });
           }
         }
@@ -288,13 +288,12 @@ app.get('/track/click', async (c) => {
   if (campaignId && email) {
     (async () => {
       try {
-        const clickKey = `${campaignId}_click_${email}_${Date.now()}`;
-        await emailHistoryStore.set(clickKey, {
-          campaign_id: campaignId,
-          email,
-          url,
-          clicked_at: new Date().toISOString(),
-          type: 'click',
+        const now = new Date().toISOString();
+        await upsertEmailHistory({
+          id: `${campaignId}_click_${email}_${Date.now()}`,
+          campaignId, kind: 'click', toEmail: email,
+          type: 'click', clicked: true, clickedAt: now, sentAt: now,
+          metadata: { url },
         });
 
         // Update campaign click count
@@ -338,8 +337,7 @@ app.post('/campaigns/:id/resend-unopened', requireAuth, requireAdmin, async (c) 
     // Find who opened — check email history
     const openedEmails = new Set<string>();
     for (const r of recipients) {
-      const historyKey = `${campaign.id}_open_${r.email}`;
-      const opened = await emailHistoryStore.get(historyKey);
+      const opened = await findCampaignEmailEvent(campaign.id, 'open', r.email);
       if (opened) openedEmails.add(r.email);
     }
 
@@ -573,8 +571,7 @@ app.post('/campaigns/:id/resume', requireAuth, requireAdmin, async (c) => {
     // Skip already-sent emails based on history
     const alreadySent = new Set<string>();
     for (const r of recipients) {
-      const historyKey = `${campaign.id}_sent_${r.email}`;
-      const existing = await emailHistoryStore.get(historyKey);
+      const existing = await findCampaignEmailEvent(campaign.id, 'sent', r.email);
       if (existing) alreadySent.add(r.email);
     }
     const remaining = recipients.filter(r => !alreadySent.has(r.email));
@@ -764,14 +761,11 @@ app.post('/campaigns/:id/send', requireAuth, requireAdmin, async (c) => {
             if (result.success) {
               sent++;
               // Track sent email
-              await emailHistoryStore.set(`${campaign.id}_sent_${r.email}`, {
-                campaign_id: campaign.id,
-                to_email: r.email,
-                subject: campaign.subject,
-                type: 'campaign',
-                status: 'sent',
-                sent_at: new Date().toISOString(),
-                opened: false,
+              await upsertEmailHistory({
+                id: `${campaign.id}_sent_${r.email}`,
+                campaignId: campaign.id, kind: 'sent', toEmail: r.email,
+                subject: campaign.subject, type: 'campaign', status: 'sent',
+                sentAt: new Date().toISOString(), opened: false, clicked: false,
               });
             } else {
               failed++;
