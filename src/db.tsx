@@ -3667,12 +3667,14 @@ export async function listChartSources(opts: { type?: string } = {}): Promise<Ch
 }
 // radioAdSlotsStore + radioAdSlotIndexStore — заменены на нативные хелперы
 // после migration 050. См. блок «Radio Ad Slots» ниже.
-export const radioAnalyticsStore = makeJsonbKeyStore('radio_analytics', 'radio_id');
+// radioAnalyticsStore — REMOVED (0 writers; read-only placeholder возвращал
+// `{}` default). Tables remain on prod (verify empty + manual DROP TABLE
+// через OPERATIONS_LOG).
+// radioFinanceStore — REMOVED (same — 0 writers anywhere в codebase).
+// radioTransactionsStore — REMOVED (same).
 export const radioArtistRequestsStore = makeRadioRequestArrayStore('radio_artist_requests', mapArtistRequestRow, normalizeArtistRequestForInsert);
 export const radioVenueRequestsStore  = makeRadioRequestArrayStore('radio_venue_requests',  mapVenueRequestRow,  normalizeVenueRequestForInsert);
-export const radioFinanceStore = makeJsonbKeyStore('radio_finance', 'radio_id');
 export const radioNotificationsStore  = makeRadioRequestArrayStore('radio_notifications',   mapRadioNotificationRow, normalizeRadioNotificationForInsert);
-export const radioTransactionsStore = makeJsonbKeyStore('radio_transactions', 'radio_id');
 // venue_playlists перевели на row-per-playlist (migration 036). Доступ
 // через pool.query в venue-routes.tsx / venue-api-routes.tsx.
 export const venueAdCampaignsStore = makeJsonbKeyStore('venue_ad_campaigns', 'venue_id');

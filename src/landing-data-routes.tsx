@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { pool } from './db-client.tsx';
-import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, listChartSources, createInvestorInquiry, listNewsPublic, listAllNewsPublic, getNewsPublic, upsertNewsPublic, deleteNewsPublic, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer, radioAnalyticsStore } from './db.tsx';
+import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, listChartSources, createInvestorInquiry, listNewsPublic, listAllNewsPublic, getNewsPublic, upsertNewsPublic, deleteNewsPublic, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { sanitizeString, sanitizeUrl } from './security.tsx';
@@ -1064,23 +1064,36 @@ landing.get('/concerts', async (c) => {
 
 landing.get('/radio-partners', async (c) => {
   try {
-    const allStations = await radioAnalyticsStore.getAll();
-    const stations = allStations
-      .filter((s: any) => s && s.stationName)
-      .map((s: any) => ({
-        id: s.id,
-        stationName: s.stationName,
-        description: s.description || '',
-        frequency: s.frequency || '',
-        city: s.city || '',
-        country: s.country || 'Россия',
-        formats: s.formats || [],
-        audienceSize: s.audienceSize || 0,
-        logoUrl: s.logoUrl || '',
-        isOnline: s.isOnline ?? true,
-        createdAt: s.createdAt,
-      }));
-    stations.sort((a: any, b: any) => (b.audienceSize || 0) - (a.audienceSize || 0));
+    // radio_analytics dead store (0 writers). Pull station list напрямую из
+    // radio_profiles (canonical source). Native cols since migration 060
+    // already cover все surface fields для landing.
+    const { pool: lpPool } = await import('./db-client.tsx');
+    const rp = await lpPool.query(
+      `SELECT user_id, station_name, description, frequency, city, country,
+              formats, audience_size, logo_url, is_online, created_at, data
+         FROM radio_profiles`
+    );
+    const stations = rp.rows
+      .map(r => {
+        const d = r.data || {};
+        const stationName = r.station_name || d.stationName;
+        if (!stationName) return null;
+        return {
+          id: r.user_id,
+          stationName,
+          description: r.description || d.description || '',
+          frequency: r.frequency || d.frequency || '',
+          city: r.city || d.city || '',
+          country: r.country || d.country || 'Россия',
+          formats: Array.isArray(r.formats) ? r.formats : (d.formats || []),
+          audienceSize: Number(r.audience_size ?? d.audienceSize ?? 0),
+          logoUrl: r.logo_url || d.logoUrl || '',
+          isOnline: r.is_online ?? d.isOnline ?? true,
+          createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : (r.created_at || d.createdAt),
+        };
+      })
+      .filter((s): s is NonNullable<typeof s> => s !== null);
+    stations.sort((a, b) => (b.audienceSize || 0) - (a.audienceSize || 0));
 
     return c.json({
       success: true,
@@ -1599,14 +1612,17 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
 
     // 2. Platform Stats — use real SQL counts
     const trackStats = await typed.getTrackModerationStats();
-    const radioStations = await radioAnalyticsStore.getAll();
+    // radio_analytics dead store; pull count напрямую из radio_profiles.
+    const { pool: rsPool } = await import('./db-client.tsx');
+    const radioCountRes = await rsPool.query(`SELECT COUNT(*)::int AS n FROM radio_profiles`);
+    const radioStationsCount = radioCountRes.rows[0]?.n || 0;
     const publishedTracks = await typed.getPublishedTracks(999);
     const stats = {
       totalArtists: allArtists.length,
       totalTracks: trackStats.total,
       publishedTracks: trackStats.approved,
       totalPlays: publishedTracks.reduce((sum: number, t: any) => sum + (t?.plays_count || 0), 0),
-      totalRadioStations: radioStations.length,
+      totalRadioStations: radioStationsCount,
       updatedAt: new Date().toISOString(),
     };
     await platformStatsStore.set('platform', stats);
