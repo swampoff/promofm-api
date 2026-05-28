@@ -63,7 +63,7 @@ import {
   // digital_goods — native cols since migration 075:
   listDigitalGoods, getDigitalGood, insertDigitalGood,
   incrementDigitalGoodViews, type DigitalGood, type ListDigitalGoodsOpts,
-  platformRevenueLogStore, platformStatsStore,
+  platformStatsStore,
   // Native producer_services / service_orders (migration 063):
   getProducerService, listProducerServices, upsertProducerService, incrementProducerServiceOrders,
   getServiceOrder, upsertServiceOrder, listServiceOrdersByClient, listServiceOrdersByProducer,
@@ -1495,21 +1495,16 @@ app.post('/digital-goods/:id/purchase', requireAuth, async (c) => {
  */
 app.get('/admin/transactions', requireAuth, requireAdmin, async (c) => {
   try {
-    const raw = await platformRevenueLogStore.get('singleton');
-    let txs: any[] = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
-
-    const channelFilter = c.req.query('type') || c.req.query('channel');
-    if (channelFilter) txs = txs.filter(t => t.channel === channelFilter);
-
-    txs.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-
+    const channelFilter = c.req.query('type') || c.req.query('channel') || undefined;
     const limit = Math.min(Number(c.req.query('limit') || 100), 500);
     const offset = Number(c.req.query('offset') || 0);
-    const total = txs.length;
-    const paged = txs.slice(offset, offset + limit);
 
-    // Маппинг в формат, совместимый с фронтом
-    const mapped = paged.map((t: any) => ({
+    // SQL pushdown — index hit on (channel, created_at) + LIMIT/OFFSET.
+    // Заменяет load-entire-array + JS filter+sort+slice.
+    const { listPlatformRevenue } = await import('./db.tsx');
+    const { rows: txs, total } = await listPlatformRevenue({ channel: channelFilter, limit, offset });
+
+    const mapped = txs.map(t => ({
       id: t.id,
       type: t.channel,
       itemTitle: t.description,
@@ -1522,9 +1517,9 @@ app.get('/admin/transactions', requireAuth, requireAdmin, async (c) => {
       buyerName: t.payerName,
       status: t.status,
       createdAt: t.createdAt,
-      orderId: t.metadata?.orderId,
-      milestoneId: t.metadata?.milestoneId,
-      contractId: t.metadata?.contractId,
+      orderId: (t.metadata as any)?.orderId,
+      milestoneId: (t.metadata as any)?.milestoneId,
+      contractId: (t.metadata as any)?.contractId,
     }));
 
     return c.json({

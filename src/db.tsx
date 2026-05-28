@@ -3720,7 +3720,8 @@ export const systemConfigStore = makeJsonbKeyStore('system_config', 'key');
 export const guideDataStore = makeJsonbKeyStore('promo_guide_data', 'key');
 // elevenlabsStore — DROPPED (0 callers AND 0 direct refs к elevenlabs_config
 // таблице. Кандидат на DROP TABLE после ручной проверки laptop'ом).
-export const platformRevenueLogStore = makeJsonbKeyStore('platform_revenue_log');
+// platform_revenue_log — row-per-entry, native cols since migration 084.
+// Доступ через typed functions (см. anchor "platform_revenue_log native").
 export const platformStatsStore = makeJsonbKeyStore('platform_stats', 'id');
 export const trackTestExpertStatsStore = makeJsonbKeyStore('track_test_expert_stats', 'expert_id');
 // trackModerationStore DELETED — 0 callers. track_moderation пишется
@@ -5342,4 +5343,155 @@ export async function listPromoAirDjQueuePending(venueId: string): Promise<Promo
     [venueId],
   );
   return r.rows.map(mapPromoAirDjQueueItem);
+}
+
+// ─── platform_revenue_log native (migration 084) ───
+// Row-per-revenue-entry. Replaces singleton-array KV store. Atomic INSERT,
+// SQL aggregation для stats, индексированный admin listing.
+
+export interface PlatformRevenueRow {
+  id: string;
+  channel: string;
+  description?: string | null;
+  grossAmount: number;
+  platformRevenue: number;
+  payoutAmount: number;
+  commissionRate: number;
+  payerId?: string | null;
+  payerName?: string | null;
+  payeeId?: string | null;
+  payeeName?: string | null;
+  status: string;
+  metadata: Record<string, any>;
+  createdAt: string;
+}
+
+function mapPlatformRevenueRow(r: any): PlatformRevenueRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  return {
+    id: r.id,
+    channel: r.channel,
+    description: r.description ?? null,
+    grossAmount: Number(r.gross_amount || 0),
+    platformRevenue: Number(r.platform_revenue || 0),
+    payoutAmount: Number(r.payout_amount || 0),
+    commissionRate: Number(r.commission_rate || 0),
+    payerId: r.payer_id ?? null,
+    payerName: r.payer_name ?? null,
+    payeeId: r.payee_id ?? null,
+    payeeName: r.payee_name ?? null,
+    status: r.status,
+    metadata: r.metadata || {},
+    createdAt: iso(r.created_at),
+  };
+}
+
+const PRL_COLS = `id, channel, description, gross_amount, platform_revenue,
+  payout_amount, commission_rate, payer_id, payer_name, payee_id, payee_name,
+  status, metadata, created_at`;
+
+export async function insertPlatformRevenueEntry(e: PlatformRevenueRow): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO platform_revenue_log
+       (id, channel, description, gross_amount, platform_revenue,
+        payout_amount, commission_rate, payer_id, payer_name,
+        payee_id, payee_name, status, metadata, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,
+             COALESCE($14::timestamptz, NOW()))
+     ON CONFLICT (id) DO NOTHING`,
+    [
+      e.id, e.channel, e.description ?? null,
+      e.grossAmount || 0, e.platformRevenue || 0, e.payoutAmount || 0,
+      e.commissionRate || 0,
+      e.payerId ?? null, e.payerName ?? null,
+      e.payeeId ?? null, e.payeeName ?? null,
+      e.status || 'completed',
+      JSON.stringify(e.metadata || {}),
+      e.createdAt ?? null,
+    ]
+  );
+}
+
+/**
+ * Лист последних N entries — для recentTransactions в stats endpoint.
+ */
+export async function listPlatformRevenueRecent(limit: number = 50): Promise<PlatformRevenueRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  const safe = Math.max(1, Math.min(limit, 500));
+  const r = await pool.query(
+    `SELECT ${PRL_COLS} FROM platform_revenue_log
+      ORDER BY created_at DESC LIMIT ${safe}`
+  );
+  return r.rows.map(mapPlatformRevenueRow).filter((x): x is PlatformRevenueRow => x !== null);
+}
+
+/**
+ * Filtered + paginated listing для admin /admin/transactions.
+ * SQL pushdown заменяет JS filter+sort+slice по entire log array.
+ */
+export async function listPlatformRevenue(opts: {
+  channel?: string; limit?: number; offset?: number;
+} = {}): Promise<{ rows: PlatformRevenueRow[]; total: number }> {
+  const { pool } = await import('./db-client.tsx');
+  const limit = Math.max(1, Math.min(opts.limit ?? 100, 500));
+  const offset = Math.max(0, opts.offset ?? 0);
+  const conds: string[] = [];
+  const vals: any[] = [];
+  if (opts.channel) { conds.push(`channel = $${vals.length + 1}`); vals.push(opts.channel); }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  const [rowsRes, countRes] = await Promise.all([
+    pool.query(
+      `SELECT ${PRL_COLS} FROM platform_revenue_log ${where}
+        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`,
+      vals,
+    ),
+    pool.query(`SELECT COUNT(*)::int AS n FROM platform_revenue_log ${where}`, vals),
+  ]);
+  return {
+    rows: rowsRes.rows.map(mapPlatformRevenueRow).filter((x): x is PlatformRevenueRow => x !== null),
+    total: countRes.rows[0]?.n || 0,
+  };
+}
+
+/**
+ * SQL aggregation для admin dashboard stats. Заменяет JS reduce по entire array.
+ */
+export async function getPlatformRevenueStats(): Promise<{
+  totalGross: number; totalRevenue: number; totalPayouts: number; transactionCount: number;
+  byChannel: Array<{ channel: string; count: number; gross: number; revenue: number }>;
+}> {
+  const { pool } = await import('./db-client.tsx');
+  const [totalsRes, channelRes] = await Promise.all([
+    pool.query(
+      `SELECT
+         COALESCE(SUM(gross_amount), 0)::numeric AS total_gross,
+         COALESCE(SUM(platform_revenue), 0)::numeric AS total_revenue,
+         COALESCE(SUM(payout_amount), 0)::numeric AS total_payouts,
+         COUNT(*)::int AS tx_count
+       FROM platform_revenue_log`
+    ),
+    pool.query(
+      `SELECT channel,
+              COUNT(*)::int AS cnt,
+              COALESCE(SUM(gross_amount), 0)::numeric AS gross,
+              COALESCE(SUM(platform_revenue), 0)::numeric AS revenue
+         FROM platform_revenue_log
+        GROUP BY channel`
+    ),
+  ]);
+  const t = totalsRes.rows[0] || {};
+  return {
+    totalGross: Number(t.total_gross || 0),
+    totalRevenue: Number(t.total_revenue || 0),
+    totalPayouts: Number(t.total_payouts || 0),
+    transactionCount: Number(t.tx_count || 0),
+    byChannel: channelRes.rows.map(r => ({
+      channel: r.channel,
+      count: Number(r.cnt || 0),
+      gross: Number(r.gross || 0),
+      revenue: Number(r.revenue || 0),
+    })),
+  };
 }

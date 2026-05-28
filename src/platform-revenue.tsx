@@ -23,7 +23,11 @@
  *   await recordRevenue({ channel: 'dj_booking', ... });
  */
 
-import { platformRevenueLogStore, paymentBalancesStore } from './db.tsx';
+import {
+  paymentBalancesStore,
+  insertPlatformRevenueEntry, listPlatformRevenueRecent,
+  getPlatformRevenueStats,
+} from './db.tsx';
 import { pool } from './db-client.tsx';
 
 export interface RevenueEntry {
@@ -115,12 +119,20 @@ export async function recordRevenue(params: {
     bal.total = bal.available + bal.pending;
     await paymentBalancesStore.set('platform', bal);
 
-    // 3. Общий реестр доходов — пока остаётся kv-array (Wave 2 будет
-    // мигрировать platform_revenue_log на row-per-entry).
-    const logRaw = await platformRevenueLogStore.get('singleton');
-    const log: RevenueEntry[] = Array.isArray(logRaw) ? logRaw : [];
-    log.push(entry);
-    await platformRevenueLogStore.set('singleton', log);
+    // 3. Реестр доходов — native row-per-entry since migration 084.
+    // Atomic INSERT — заменяет get-push-set entire array (race + O(N) на каждый payment).
+    await insertPlatformRevenueEntry({
+      id, channel: params.channel, description: params.description,
+      grossAmount: params.grossAmount,
+      platformRevenue: params.platformRevenue,
+      payoutAmount: entry.payoutAmount,
+      commissionRate: entry.commissionRate,
+      payerId: params.payerId, payerName: params.payerName,
+      payeeId: params.payeeId ?? null, payeeName: params.payeeName ?? null,
+      status: 'completed',
+      metadata: params.metadata || {},
+      createdAt: now,
+    });
 
     // 4. Дублирующая запись в 'marketplace' bucket для совместимости
     // с legacy marketplace-Финансы вьюхами. После Wave 2 (когда
@@ -178,14 +190,12 @@ export async function getRevenueStats(): Promise<{
   byChannel: Array<{ channel: string; label: string; count: number; gross: number; revenue: number }>;
   recentTransactions: RevenueEntry[];
 }> {
-  const logRaw = await platformRevenueLogStore.get('singleton');
-  const log: RevenueEntry[] = Array.isArray(logRaw) ? logRaw : [];
-
-  const totalGross = log.reduce((s, e) => s + e.grossAmount, 0);
-  const totalRevenue = log.reduce((s, e) => s + e.platformRevenue, 0);
-  const totalPayouts = log.reduce((s, e) => s + e.payoutAmount, 0);
-
-  const balRaw = await paymentBalancesStore.get('platform');
+  // SQL aggregation + indexed recentTransactions — заменяет load-entire-array + JS reduce.
+  const [stats, recent, balRaw] = await Promise.all([
+    getPlatformRevenueStats(),
+    listPlatformRevenueRecent(50),
+    paymentBalancesStore.get('platform'),
+  ]);
   const bal = (balRaw && typeof balRaw === 'object' && !Array.isArray(balRaw)) ? balRaw as any : { available: 0 };
 
   const CHANNEL_LABELS: Record<string, string> = {
@@ -200,32 +210,17 @@ export async function getRevenueStats(): Promise<{
     donation: 'Донаты',
   };
 
-  const channelMap = new Map<string, { count: number; gross: number; revenue: number }>();
-  for (const e of log) {
-    const existing = channelMap.get(e.channel) || { count: 0, gross: 0, revenue: 0 };
-    existing.count++;
-    existing.gross += e.grossAmount;
-    existing.revenue += e.platformRevenue;
-    channelMap.set(e.channel, existing);
-  }
-
-  const byChannel = Array.from(channelMap.entries()).map(([channel, data]) => ({
-    channel,
-    label: CHANNEL_LABELS[channel] || channel,
-    ...data,
-  }));
-
-  const recentTransactions = [...log]
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(0, 50);
-
   return {
-    totalGross,
-    totalRevenue,
-    totalPayouts,
+    totalGross: stats.totalGross,
+    totalRevenue: stats.totalRevenue,
+    totalPayouts: stats.totalPayouts,
     platformBalance: bal.available || 0,
-    transactionCount: log.length,
-    byChannel,
-    recentTransactions,
+    transactionCount: stats.transactionCount,
+    byChannel: stats.byChannel.map(c => ({
+      channel: c.channel,
+      label: CHANNEL_LABELS[c.channel] || c.channel,
+      count: c.count, gross: c.gross, revenue: c.revenue,
+    })),
+    recentTransactions: recent as unknown as RevenueEntry[],
   };
 }
