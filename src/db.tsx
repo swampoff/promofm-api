@@ -2454,7 +2454,182 @@ export async function countBeatFavoriters(beatId: string): Promise<number> {
 // 2 store wrappers DELETED. Доступ — getBeatReview / upsertBeatReview /
 // listBeatReviewsByBeat / getBeatReviewsAggregateStats ниже.
 export const contractsStore = makeJsonbKeyStore('contracts');
-export const digitalGoodsStore = makeJsonbKeyStore('digital_goods');
+// digital_goods — native cols since migration 075. Store removed,
+// typed functions ниже (SQL filter + sort pushdown + atomic counters).
+// 8 callers across marketplace-routes / checkout-routes / demo-seed.
+
+export interface DigitalGood {
+  id: string;
+  title: string;
+  producer: string;
+  producerId: string;
+  category: string;
+  description: string;
+  price: number;
+  tags: string[];
+  fileSize: string;
+  format: string;
+  rating: number;
+  sales: number;
+  views: number;
+  status: string;
+  createdAt: string;
+}
+
+function mapDigitalGoodRow(r: any): DigitalGood | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  return {
+    id: r.id,
+    title: r.title,
+    producer: r.producer,
+    producerId: r.producer_id,
+    category: r.category,
+    description: r.description,
+    price: Number(r.price),
+    tags: r.tags || [],
+    fileSize: r.file_size,
+    format: r.format,
+    rating: Number(r.rating),
+    sales: Number(r.sales),
+    views: Number(r.views),
+    status: r.status,
+    createdAt: iso(r.created_at),
+  };
+}
+
+const DIGITAL_GOOD_COLS = `id, title, producer, producer_id, category, description,
+  price, tags, file_size, format, rating, sales, views, status, created_at`;
+
+export interface ListDigitalGoodsOpts {
+  search?: string;
+  category?: string;
+  producerId?: string;
+  priceMin?: number;
+  priceMax?: number;
+  status?: string;     // default 'active'
+  sort?: 'new' | 'popular' | 'rating' | 'price_asc' | 'price_desc';
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * List + filter + sort + paginate в SQL (replaces JS-side .filter/.sort
+ * on getAll(). Default ORDER BY (sales DESC, rating DESC) — hot path
+ * на partial index idx_digital_goods_active_popular.
+ */
+export async function listDigitalGoods(opts: ListDigitalGoodsOpts = {}): Promise<{ items: DigitalGood[]; total: number }> {
+  const { pool } = await import('./db-client.tsx');
+  const where: string[] = [];
+  const params: any[] = [];
+  let i = 1;
+
+  const status = opts.status ?? 'active';
+  where.push(`status = $${i++}`); params.push(status);
+
+  if (opts.search) {
+    where.push(`(title ILIKE $${i} OR description ILIKE $${i} OR producer ILIKE $${i} OR EXISTS (SELECT 1 FROM unnest(tags) t WHERE t ILIKE $${i}))`);
+    params.push(`%${opts.search}%`); i++;
+  }
+  if (opts.category)   { where.push(`category = $${i++}`);     params.push(opts.category); }
+  if (opts.producerId) { where.push(`producer_id = $${i++}`);  params.push(opts.producerId); }
+  if (opts.priceMin != null) { where.push(`price >= $${i++}`); params.push(opts.priceMin); }
+  if (opts.priceMax != null) { where.push(`price <= $${i++}`); params.push(opts.priceMax); }
+
+  const whereSql = `WHERE ${where.join(' AND ')}`;
+
+  const sortMap: Record<string, string> = {
+    new:        'created_at DESC',
+    popular:    'sales DESC, rating DESC',
+    rating:     'rating DESC, sales DESC',
+    price_asc:  'price ASC',
+    price_desc: 'price DESC',
+  };
+  const orderBy = sortMap[opts.sort || 'popular'] || sortMap.popular;
+
+  const limit = Math.max(1, Math.min(opts.limit ?? 50, 100));
+  const offset = Math.max(0, opts.offset ?? 0);
+
+  const [itemsR, totalR] = await Promise.all([
+    pool.query(
+      `SELECT ${DIGITAL_GOOD_COLS} FROM digital_goods
+        ${whereSql}
+        ORDER BY ${orderBy}
+        LIMIT ${limit} OFFSET ${offset}`,
+      params
+    ),
+    pool.query(
+      `SELECT COUNT(*)::int AS total FROM digital_goods ${whereSql}`,
+      params
+    ),
+  ]);
+
+  return {
+    items: itemsR.rows.map(mapDigitalGoodRow).filter((x): x is DigitalGood => x !== null),
+    total: totalR.rows[0]?.total ?? 0,
+  };
+}
+
+export async function getDigitalGood(id: string): Promise<DigitalGood | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${DIGITAL_GOOD_COLS} FROM digital_goods WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return mapDigitalGoodRow(r.rows[0]);
+}
+
+export async function insertDigitalGood(good: DigitalGood): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO digital_goods
+       (id, title, producer, producer_id, category, description, price,
+        tags, file_size, format, rating, sales, views, status, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+             COALESCE($15::timestamptz, NOW()))`,
+    [
+      good.id, good.title, good.producer, good.producerId, good.category,
+      good.description || '', good.price, good.tags || [],
+      good.fileSize || '0 MB', good.format || '',
+      good.rating || 0, good.sales || 0, good.views || 0,
+      good.status || 'active', good.createdAt || null,
+    ]
+  );
+}
+
+/**
+ * Atomic view increment. Replaces legacy get-modify-set паттерн на /:id
+ * который терял views под concurrent load (2 параллельных GET'а
+ * читали тот же `views`, оба писали +1 → один lost).
+ */
+export async function incrementDigitalGoodViews(id: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE digital_goods SET views = views + 1 WHERE id = $1`,
+    [id]
+  );
+}
+
+/**
+ * Atomic sales increment. Webhook'и от YooKassa могут retry'иться —
+ * native UPDATE гарантирует atomic +1 (vs legacy get+JSON.stringify+set
+ * который под retry мог LOST count).
+ */
+export async function incrementDigitalGoodSales(id: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE digital_goods SET sales = sales + 1 WHERE id = $1`,
+    [id]
+  );
+}
+
+export async function setDigitalGoodStatus(id: string, status: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE digital_goods SET status = $1 WHERE id = $2`,
+    [status, id]
+  );
+}
 export const producerSettingsStore = makeUserSingletonStore('producer_settings');
 export const producerProfileEditStore = makeUserSingletonStore('producer_profile_edit');
 export const producerAiLastStore = makeUserSingletonStore('producer_ai_last');

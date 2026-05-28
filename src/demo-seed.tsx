@@ -4,8 +4,8 @@
  */
 
 import {
-  upsertBeat, upsertProducerService, digitalGoodsStore, platformStatsStore,
-  systemConfigStore,
+  upsertBeat, upsertProducerService, insertDigitalGood, type DigitalGood,
+  platformStatsStore, systemConfigStore,
 } from './db.tsx';
 
 const SEED_VERSION = 'marketplace_v1';
@@ -174,7 +174,7 @@ export async function seedDemoData(): Promise<{ seeded: boolean; message: string
     for (const g of SEED_DIGITAL_GOODS) {
       const id = genId('dg');
       const producerId = getProducerId(g.producer);
-      const good = {
+      const good: DigitalGood = {
         id,
         title: g.title,
         producer: g.producer,
@@ -191,7 +191,7 @@ export async function seedDemoData(): Promise<{ seeded: boolean; message: string
         status: 'active',
         createdAt: daysAgo(Math.floor(Math.random() * 45)),
       };
-      await digitalGoodsStore.set(id, good);
+      await insertDigitalGood(good);
       goodsCreated++;
     }
 
