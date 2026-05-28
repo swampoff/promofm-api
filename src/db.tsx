@@ -2357,7 +2357,7 @@ function makeRadioRequestArrayStore(
 
 // ─── Store instances for all tables ───
 
-// beat_favorites — row-per-favorite native cols (migration 062).
+// beat_favorites — row-per-favorite native cols (migration 068).
 // Store DELETED. Доступ — типизированные функции ниже.
 
 export async function listBeatFavorites(userId: string): Promise<string[]> {
@@ -2399,7 +2399,7 @@ export async function countBeatFavoriters(beatId: string): Promise<number> {
   );
   return Number(r.rows[0]?.n || 0);
 }
-// beat_reviews — native cols + UNIQUE (beat_id, user_id) since migration 060.
+// beat_reviews — native cols + UNIQUE (beat_id, user_id) since migration 066.
 // beat_reviews_index DROPPED — derived через idx_beat_reviews_beat_created.
 // 2 store wrappers DELETED. Доступ — getBeatReview / upsertBeatReview /
 // listBeatReviewsByBeat / getBeatReviewsAggregateStats ниже.
@@ -2519,7 +2519,7 @@ export const djSubscriptionsStore = makeDjSubscriptionsStore();
 // dj_withdrawals переехал на row-per-withdrawal (migration 044). Доступ
 // через pool.query из dj-studio-routes.tsx + checkout-routes.tsx webhook.
 export const djTransactionsStore = jsonbStore('dj_transactions', 'dj_id');
-// collab_offers — row-per-offer native cols (migration 058).
+// collab_offers — row-per-offer native cols (migration 064).
 // collab_offers_by_artist + collab_offers_by_producer таблицы DROPPED
 // — derived из collab_offers.artist_id / producer_id с native indexes.
 // Доступ — типизированные функции ниже.
@@ -3082,7 +3082,7 @@ export async function upsertTicketSale(concertId: string, saleId: string, sale: 
   if (error) console.error('[db] upsertTicketSale:', error);
 }
 
-// ─── Beat Reviews (native cols since migration 060) ───
+// ─── Beat Reviews (native cols since migration 066) ───
 // PK = review.id (TEXT, format 'brev-...'). UNIQUE (beat_id, user_id) —
 // DB-level constraint предотвращает 2 отзыва от одного user'а на 1 beat.
 
