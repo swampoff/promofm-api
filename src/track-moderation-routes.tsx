@@ -57,9 +57,8 @@ async function resolveTrackPublicationPrice(userId: string, currentTrackId: stri
           WHERE user_id = $1
             AND id::text <> $2
             AND (
-              (moderation_status IN ('upcoming', 'published')
-                AND COALESCE(NULLIF(data->>'payment_amount', '')::numeric, 0) > 0)
-              OR (data->>'first_track_free_applied' = 'true')
+              (moderation_status IN ('upcoming', 'published') AND COALESCE(payment_amount, 0) > 0)
+              OR first_track_free_applied = TRUE
             )
        )::int AS used_quota`,
       [userId, currentTrackId]
@@ -992,18 +991,17 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
       }
 
       const result = await pool.query(
+        // Native cols after migration 062 — upcoming_until/approved_for_release_at
+        // в native; payment_amount читаем тоже из native.
         `UPDATE tracks
-            SET moderation_status = 'upcoming',
-                is_hidden         = false,
-                data              = COALESCE(data, '{}'::jsonb)
-                                    || jsonb_build_object(
-                                         'upcoming_until', $2::text,
-                                         'approved_for_release_at', $3::text
-                                       ),
-                updated_at        = $4
+            SET moderation_status         = 'upcoming',
+                is_hidden                 = false,
+                upcoming_until            = $2::timestamptz,
+                approved_for_release_at   = $3::timestamptz,
+                updated_at                = $4::timestamptz
           WHERE id = $1
             AND moderation_status = 'paid'
-          RETURNING moderation_status, data->>'payment_amount' AS amount`,
+          RETURNING moderation_status, payment_amount AS amount`,
         [trackId, upcomingUntil, approvedAt, nowIso]
       );
 
@@ -1273,7 +1271,7 @@ app.post('/send-payment-reminders', async (c) => {
       WHERE t.moderation_status = 'approved'
         AND t.created_at < NOW() - ($1::int || ' days')::interval
         AND t.user_id IS NOT NULL AND t.user_id::text NOT LIKE 'sys-%%'
-        AND COALESCE((t.data->>'last_payment_reminder_at')::timestamptz, '1970-01-01'::timestamptz)
+        AND COALESCE(t.last_payment_reminder_at, '1970-01-01'::timestamptz)
             < NOW() - ($2::int || ' days')::interval
       ORDER BY t.created_at ASC
       LIMIT 100
@@ -1301,7 +1299,7 @@ app.post('/send-payment-reminders', async (c) => {
         await sendEmail({ to: email, subject, html });
         sent++;
         // Stamp reminder
-        await pool.query(`UPDATE tracks SET data = COALESCE(data,'{}'::jsonb) || jsonb_build_object('last_payment_reminder_at', NOW()::text) WHERE id = $1`, [t.id]);
+        await pool.query(`UPDATE tracks SET last_payment_reminder_at = NOW() WHERE id = $1`, [t.id]);
 
         // SSE
         try {

@@ -612,22 +612,22 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       // moderation somehow), upcoming/published (already advanced) — we
       // skip the write and log loudly. RETURNING tells us which case hit.
       const result = await tpPool.query(
+        // Native cols после migration 062 — payment_amount/payment_completed/
+        // payment_order_id/payment_gateway/paid_at промоутнуты из data jsonb.
+        // SET native + dual-write в data для legacy readers (удалим в follow-up).
         `UPDATE tracks
             SET moderation_status = 'paid',
                 is_paid           = true,
                 is_hidden         = false,
-                data              = COALESCE(data, '{}'::jsonb)
-                                    || jsonb_build_object(
-                                         'payment_completed', true,
-                                         'payment_amount',   $2::numeric,
-                                         'payment_order_id', $3::text,
-                                         'payment_gateway',  $4::text,
-                                         'paid_at',          $5::text
-                                       ),
-                updated_at        = $6
+                payment_completed = TRUE,
+                payment_amount    = $2::numeric,
+                payment_order_id  = $3::text,
+                payment_gateway   = $4::text,
+                paid_at           = $5::timestamptz,
+                updated_at        = $6::timestamptz
           WHERE id = $1
             AND moderation_status = 'approved'
-          RETURNING data->>'payment_amount' AS amount, moderation_status`,
+          RETURNING payment_amount AS amount, moderation_status`,
         [trackId, session.amount, session.orderId, session.gateway, now, now]
       );
 
