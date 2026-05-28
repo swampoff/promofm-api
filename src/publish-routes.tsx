@@ -24,7 +24,13 @@
  */
 
 import { Hono } from 'hono';
-import { getArtistProfile, getNotificationsByUser, publishEmailPrefsStore, publishOrdersStore, upsertNotification } from './db.tsx';
+import {
+  getArtistProfile, getNotificationsByUser, publishEmailPrefsStore, upsertNotification,
+  // publish_orders — native cols since migration 078:
+  getPublishOrder, insertPublishOrder, updatePublishOrder, deletePublishOrder,
+  listPublishOrdersByUser, listPublishOrders, getPublishOrderStats,
+  type PublishOrderRow,
+} from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { notifyModerationSubmitted } from './email-helper.tsx';
@@ -168,13 +174,14 @@ async function countUsedFreeVideoQuota(userId: string, excludeOrderId?: string):
       params.push(excludeOrderId);
       exclude = ' AND id != $3';
     }
+    // Native cols since migration 078 — direct SQL уходит на индексы.
     const r = await pool.query(
       `SELECT COUNT(*)::int AS n FROM publish_orders
        WHERE user_id = $1
-         AND (data->>'type') = 'video'
-         AND (data->>'subscriptionApplied') = 'true'
-         AND (data->>'status') NOT IN ('draft', 'rejected', 'cancelled', 'revision')
-         AND COALESCE(data->>'paidAt', data->>'createdAt') >= $2${exclude}`,
+         AND type = 'video'
+         AND subscription_applied = true
+         AND status NOT IN ('draft', 'rejected', 'cancelled', 'revision')
+         AND COALESCE(paid_at, created_at) >= $2::timestamptz${exclude}`,
       params
     );
     return Number(r.rows[0]?.n || 0);
@@ -460,8 +467,8 @@ app.post('/orders', requireAuth, async (c) => {
       }),
     };
 
-    // Save order
-    await publishOrdersStore.set(order.id, JSON.stringify(order), { user_id: userId });
+    // Save order (native cols since migration 078)
+    await insertPublishOrder({ ...order, tags: (order as any).tags || [], extra: {} } as PublishOrderRow);
 
     console.log(`Publish order created: ${order.id} (${type}/${plan}) by user ${userId}`);
 
@@ -481,11 +488,8 @@ app.get('/orders', requireAuth, async (c) => {
       return c.json({ success: false, error: 'userId is required' }, 400);
     }
 
-    const rawOrders = await publishOrdersStore.getByCol('user_id', userId);
-    const orders = rawOrders
-      .map((v: any) => (typeof v === 'string' ? JSON.parse(v) : v))
-      .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
+    // SQL pushdown — sort + filter в DB через idx_publish_orders_user_recent.
+    const orders = await listPublishOrdersByUser(userId);
     return c.json({ success: true, orders });
   } catch (error: any) {
     console.error('Error fetching publish orders:', error);
@@ -498,7 +502,7 @@ app.get('/orders', requireAuth, async (c) => {
 app.get('/orders/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
-    const data = await publishOrdersStore.get(id);
+    const data = await getPublishOrder(id);
     if (!data) {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
@@ -516,7 +520,7 @@ app.put('/orders/:id', requireAuth, async (c) => {
     const body = await c.req.json();
     const authUserId = c.get('userId');
     const authRole = c.get('userRole');
-    const data = await publishOrdersStore.get(id);
+    const data = await getPublishOrder(id);
     if (!data) {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
@@ -560,8 +564,8 @@ app.put('/orders/:id', requireAuth, async (c) => {
       updatedAt: new Date().toISOString(),
     };
 
-    await publishOrdersStore.set(id, JSON.stringify(updatedOrder), { user_id: updatedOrder.userId });
-
+    // Atomic UPDATE (migration 078): только sanitized поля идут в SET, race-free.
+    await updatePublishOrder(id, sanitized as Partial<PublishOrderRow>);
     return c.json({ success: true, order: updatedOrder });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -573,12 +577,12 @@ app.put('/orders/:id', requireAuth, async (c) => {
 app.put('/orders/:id/submit', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
-    const data = await publishOrdersStore.get(id);
+    const data = await getPublishOrder(id);
     if (!data) {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
 
-    const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
+    const order = data as unknown as PublishOrder;
 
     if (!['draft', 'revision'].includes(order.status)) {
       return c.json({ success: false, error: 'Only draft/revision orders can be submitted' }, 400);
@@ -587,7 +591,8 @@ app.put('/orders/:id/submit', requireAuth, async (c) => {
     order.status = 'pending_review';
     order.updatedAt = new Date().toISOString();
 
-    await publishOrdersStore.set(id, JSON.stringify(order), { user_id: order.userId });
+    // Atomic status transition (migration 078).
+    await updatePublishOrder(id, { status: 'pending_review' });
 
     console.log(`Publish order submitted for review: ${id}`);
 
@@ -619,12 +624,12 @@ app.put('/orders/:id/submit', requireAuth, async (c) => {
 app.put('/orders/:id/pay', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
-    const data = await publishOrdersStore.get(id);
+    const data = await getPublishOrder(id);
     if (!data) {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
 
-    const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
+    const order = data as unknown as PublishOrder;
 
     if (order.status !== 'approved' && order.status !== 'pending_payment') {
       return c.json({ success: false, error: 'Order must be approved before payment' }, 400);
@@ -633,10 +638,12 @@ app.put('/orders/:id/pay', requireAuth, async (c) => {
     // Free order (e.g. subscription bypass) — skip payment but DON'T auto-publish.
     // Pipeline must end with explicit admin publish step, same as paid orders.
     if (!order.price || order.price === 0) {
+      const paidAt = new Date().toISOString();
       order.status = 'paid';
-      order.paidAt = new Date().toISOString();
-      order.updatedAt = new Date().toISOString();
-      await publishOrdersStore.set(id, JSON.stringify(order), { user_id: order.userId });
+      order.paidAt = paidAt;
+      order.updatedAt = paidAt;
+      // Atomic UPDATE (migration 078).
+      await updatePublishOrder(id, { status: 'paid', paidAt });
       console.log(`Publish order marked as paid (free, awaiting admin publish): ${id}`);
       return c.json({ success: true, order, free: true });
     }
@@ -685,11 +692,11 @@ app.put('/orders/:id/pay', requireAuth, async (c) => {
        order.id]
     );
 
-    // Mark order as pending_payment if not already
+    // Mark order as pending_payment if not already (atomic).
     if (order.status !== 'pending_payment') {
       order.status = 'pending_payment';
       order.updatedAt = new Date().toISOString();
-      await publishOrdersStore.set(id, JSON.stringify(order), { user_id: order.userId });
+      await updatePublishOrder(id, { status: 'pending_payment' });
     }
 
     console.log(`Publish order pay session created: ${id}, amount=${order.price}`);
@@ -718,12 +725,12 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
     const body = await c.req.json();
     const { status, comment, reason } = body;
 
-    const data = await publishOrdersStore.get(id);
+    const data = await getPublishOrder(id);
     if (!data) {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
 
-    const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
+    const order = data as unknown as PublishOrder;
 
     const validTransitions: Record<string, string[]> = {
       // Admin can directly approve/reject/send-for-revision from initial state —
@@ -793,7 +800,21 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
       order.publishedAt = new Date().toISOString();
     }
 
-    await publishOrdersStore.set(id, JSON.stringify(order), { user_id: order.userId });
+    // Atomic UPDATE (migration 078) — only changed fields go to SET.
+    // Race-free против concurrent admin actions (lost-update closed).
+    await updatePublishOrder(id, {
+      status: order.status,
+      ...(order.plan !== undefined         ? { plan: order.plan } : {}),
+      ...(order.price !== undefined        ? { price: order.price } : {}),
+      ...(order.priceBase !== undefined    ? { priceBase: order.priceBase } : {}),
+      ...(order.subscriptionApplied !== undefined ? { subscriptionApplied: order.subscriptionApplied } : {}),
+      ...(order.moderatedAt           ? { moderatedAt: order.moderatedAt } : {}),
+      ...(order.moderatorComment !== undefined    ? { moderatorComment: order.moderatorComment } : {}),
+      ...(order.paidAt                ? { paidAt: order.paidAt } : {}),
+      ...(order.rejectionReason       ? { rejectionReason: order.rejectionReason } : {}),
+      ...(order.revisionNotes         ? { revisionNotes: order.revisionNotes } : {}),
+      ...(order.publishedAt           ? { publishedAt: order.publishedAt } : {}),
+    });
 
     // Create notification for the artist
     // If the approve handler bumped the video price (subscriber's monthly free
@@ -858,7 +879,7 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
 app.delete('/orders/:id', requireAuth, async (c) => {
   try {
     const id = c.req.param('id');
-    const data = await publishOrdersStore.get(id);
+    const data = await getPublishOrder(id);
     if (!data) {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
@@ -872,7 +893,7 @@ app.delete('/orders/:id', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Forbidden' }, 403);
     }
 
-    await publishOrdersStore.del(id);
+    await deletePublishOrder(id);
 
     console.log(`Publish order deleted: ${id}`);
 
@@ -886,11 +907,8 @@ app.delete('/orders/:id', requireAuth, async (c) => {
 
 app.get('/admin/all', requireAuth, requireAdmin, async (c) => {
   try {
-    const rawValues = await publishOrdersStore.getAll();
-    const orders = rawValues
-      .map((v: any) => (typeof v === 'string' ? JSON.parse(v) : v))
-      .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
+    // SQL pushdown через listPublishOrders (ORDER BY created_at DESC index).
+    const orders = await listPublishOrders({ limit: 1000 });
     return c.json({ success: true, orders });
   } catch (error: any) {
     console.error('Error fetching all publish orders:', error);
@@ -902,24 +920,13 @@ app.get('/admin/all', requireAuth, requireAdmin, async (c) => {
 
 app.get('/admin/stats', requireAuth, requireAdmin, async (c) => {
   try {
-    const rawValues = await publishOrdersStore.getAll();
-    const orders = rawValues
-      .map((v: any) => (typeof v === 'string' ? JSON.parse(v) : v));
-
+    // SQL aggregation (COUNT FILTER + SUM) — single query вместо getAll+10
+    // JS .filter().length проходов. См. getPublishOrderStats() в db.tsx.
+    const agg = await getPublishOrderStats();
     const stats = {
-      total: orders.length,
-      draft: orders.filter((o) => o.status === 'draft').length,
-      pending_review: orders.filter((o) => o.status === 'pending_review').length,
-      in_review: orders.filter((o) => o.status === 'in_review').length,
-      revision: orders.filter((o) => o.status === 'revision').length,
-      approved: orders.filter((o) => o.status === 'approved').length,
-      pending_payment: orders.filter((o) => o.status === 'pending_payment').length,
-      paid: orders.filter((o) => o.status === 'paid').length,
-      published: orders.filter((o) => o.status === 'published').length,
-      rejected: orders.filter((o) => o.status === 'rejected').length,
-      cancelled: orders.filter((o) => o.status === 'cancelled').length,
+      total: agg.total,
+      ...agg.byStatus,
     };
-
     return c.json({ success: true, stats });
   } catch (error: any) {
     console.error('Error fetching publish order stats:', error);
@@ -959,13 +966,13 @@ app.put('/admin/batch-status', requireAuth, requireAdmin, async (c) => {
 
     for (const orderId of orderIds) {
       try {
-        const data = await publishOrdersStore.get(orderId);
+        const data = await getPublishOrder(orderId);
         if (!data) {
           results.push({ id: orderId, success: false, error: 'Order not found' });
           continue;
         }
 
-        const order: PublishOrder = typeof data === 'string' ? JSON.parse(data) : (data as any);
+        const order = data as unknown as PublishOrder;
         const allowed = validTransitions[order.status] || [];
 
         if (!allowed.includes(status)) {
@@ -1018,7 +1025,20 @@ app.put('/admin/batch-status', requireAuth, requireAdmin, async (c) => {
           order.publishedAt = new Date().toISOString();
         }
 
-        await publishOrdersStore.set(orderId, JSON.stringify(order), { user_id: order.userId });
+        // Atomic UPDATE per order — mirrors single-order endpoint.
+        await updatePublishOrder(orderId, {
+          status: order.status,
+          ...(order.plan !== undefined         ? { plan: order.plan } : {}),
+          ...(order.price !== undefined        ? { price: order.price } : {}),
+          ...(order.priceBase !== undefined    ? { priceBase: order.priceBase } : {}),
+          ...(order.subscriptionApplied !== undefined ? { subscriptionApplied: order.subscriptionApplied } : {}),
+          ...(order.moderatedAt           ? { moderatedAt: order.moderatedAt } : {}),
+          ...(order.moderatorComment !== undefined    ? { moderatorComment: order.moderatorComment } : {}),
+          ...(order.paidAt                ? { paidAt: order.paidAt } : {}),
+          ...(order.rejectionReason       ? { rejectionReason: order.rejectionReason } : {}),
+          ...(order.revisionNotes         ? { revisionNotes: order.revisionNotes } : {}),
+          ...(order.publishedAt           ? { publishedAt: order.publishedAt } : {}),
+        });
 
         // Same quota-bump explanation as in the single-order handler.
         let notificationComment = comment || reason;
@@ -1309,7 +1329,7 @@ app.post('/webhook/status-change', async (c) => {
     }
 
     // Fetch order for title
-    const orderData = await publishOrdersStore.get(orderId);
+    const orderData = await getPublishOrder(orderId);
     const orderTitle = orderData
       ? (typeof orderData === 'string' ? JSON.parse(orderData) : orderData).title || orderId
       : orderId;

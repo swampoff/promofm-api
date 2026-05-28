@@ -3010,7 +3010,306 @@ export async function getCollabOfferStatsByUser(userId: string): Promise<any> {
 }
 // collab_messages переехал на row-per-message (migration 038). Доступ
 // через pool.query в collaboration-routes.tsx.
-export const publishOrdersStore = makeJsonbKeyStore('publish_orders');
+// ─── publish_orders (native cols since migration 078) ───
+// Video/concert publication orders. ~22 callers across publish-routes.tsx
+// + 2 in chat-routes.tsx. Store removed, typed functions ниже.
+
+export interface PublishOrderExtra {
+  distributionData?: any;
+  statusHistory?: Array<{ status: string; at: string; by?: string; comment?: string }>;
+  [k: string]: any;
+}
+
+export interface PublishOrderRow {
+  id: string;
+  userId: string;
+  type: string;        // 'video' | 'concert'
+  status: string;
+  title: string;
+  description: string;
+  plan?: string | null;
+  price: number;
+  priceBase?: number | null;
+  subscriptionApplied?: boolean | null;
+  currency: string;
+  paidAt?: string | null;
+  paymentMethod?: string | null;
+  moderatorId?: string | null;
+  moderatorComment?: string | null;
+  moderatedAt?: string | null;
+  rejectionReason?: string | null;
+  revisionNotes?: string | null;
+  publishedAt?: string | null;
+  // Video
+  videoUrl?: string | null;
+  videoSource?: string | null;
+  videoCategory?: string | null;
+  thumbnailUrl?: string | null;
+  tags: string[];
+  // Concert
+  eventDate?: string | null;
+  eventTime?: string | null;
+  city?: string | null;
+  venueName?: string | null;
+  venueAddress?: string | null;
+  ticketPriceMin?: number | null;
+  ticketPriceMax?: number | null;
+  ticketUrl?: string | null;
+  posterUrl?: string | null;
+  genre?: string | null;
+  // Label-on-behalf
+  actingForArtistId?: string | null;
+  actingForArtistUserId?: string | null;
+  labelId?: string | null;
+  // Nested polymorphic
+  extra: PublishOrderExtra;
+  createdAt: string;
+  updatedAt?: string | null;
+}
+
+function mapPublishOrderRow(r: any): PublishOrderRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  const isoOrNull = (d: any) => d == null ? null : iso(d);
+  const dateStr = (d: any) =>
+    d == null ? null : (d instanceof Date ? d.toISOString().split('T')[0] : String(d));
+  return {
+    id: r.id,
+    userId: r.user_id,
+    type: r.type,
+    status: r.status,
+    title: r.title,
+    description: r.description || '',
+    plan: r.plan,
+    price: Number(r.price || 0),
+    priceBase: r.price_base == null ? null : Number(r.price_base),
+    subscriptionApplied: r.subscription_applied,
+    currency: r.currency || 'RUB',
+    paidAt: isoOrNull(r.paid_at),
+    paymentMethod: r.payment_method,
+    moderatorId: r.moderator_id,
+    moderatorComment: r.moderator_comment,
+    moderatedAt: isoOrNull(r.moderated_at),
+    rejectionReason: r.rejection_reason,
+    revisionNotes: r.revision_notes,
+    publishedAt: isoOrNull(r.published_at),
+    videoUrl: r.video_url,
+    videoSource: r.video_source,
+    videoCategory: r.video_category,
+    thumbnailUrl: r.thumbnail_url,
+    tags: r.tags || [],
+    eventDate: dateStr(r.event_date),
+    eventTime: r.event_time,
+    city: r.city,
+    venueName: r.venue_name,
+    venueAddress: r.venue_address,
+    ticketPriceMin: r.ticket_price_min == null ? null : Number(r.ticket_price_min),
+    ticketPriceMax: r.ticket_price_max == null ? null : Number(r.ticket_price_max),
+    ticketUrl: r.ticket_url,
+    posterUrl: r.poster_url,
+    genre: r.genre,
+    actingForArtistId: r.acting_for_artist_id,
+    actingForArtistUserId: r.acting_for_artist_user_id,
+    labelId: r.label_id,
+    extra: r.extra || {},
+    createdAt: iso(r.created_at),
+    updatedAt: isoOrNull(r.updated_at),
+  };
+}
+
+const PUBLISH_ORDER_COLS = `id, user_id, type, status, title, description, plan,
+  price, price_base, subscription_applied, currency, paid_at, payment_method,
+  moderator_id, moderator_comment, moderated_at, rejection_reason, revision_notes,
+  published_at, video_url, video_source, video_category, thumbnail_url, tags,
+  event_date, event_time, city, venue_name, venue_address, ticket_price_min,
+  ticket_price_max, ticket_url, poster_url, genre, acting_for_artist_id,
+  acting_for_artist_user_id, label_id, extra, created_at, updated_at`;
+
+export async function getPublishOrder(id: string): Promise<PublishOrderRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${PUBLISH_ORDER_COLS} FROM publish_orders WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return mapPublishOrderRow(r.rows[0]);
+}
+
+export async function insertPublishOrder(order: PublishOrderRow): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO publish_orders
+       (id, user_id, type, status, title, description, plan, price, price_base,
+        subscription_applied, currency, paid_at, payment_method, moderator_id,
+        moderator_comment, moderated_at, rejection_reason, revision_notes,
+        published_at, video_url, video_source, video_category, thumbnail_url, tags,
+        event_date, event_time, city, venue_name, venue_address, ticket_price_min,
+        ticket_price_max, ticket_url, poster_url, genre, acting_for_artist_id,
+        acting_for_artist_user_id, label_id, extra, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, $13,
+             $14, $15, $16::timestamptz, $17, $18, $19::timestamptz, $20, $21, $22,
+             $23, $24, $25::date, $26, $27, $28, $29, $30, $31, $32, $33, $34,
+             $35, $36, $37, $38::jsonb, COALESCE($39::timestamptz, NOW()))`,
+    [
+      order.id, order.userId, order.type, order.status, order.title,
+      order.description || '', order.plan ?? null, order.price ?? 0,
+      order.priceBase ?? null, order.subscriptionApplied ?? null,
+      order.currency || 'RUB', order.paidAt ?? null, order.paymentMethod ?? null,
+      order.moderatorId ?? null, order.moderatorComment ?? null,
+      order.moderatedAt ?? null, order.rejectionReason ?? null,
+      order.revisionNotes ?? null, order.publishedAt ?? null,
+      order.videoUrl ?? null, order.videoSource ?? null, order.videoCategory ?? null,
+      order.thumbnailUrl ?? null, order.tags || [],
+      order.eventDate ?? null, order.eventTime ?? null, order.city ?? null,
+      order.venueName ?? null, order.venueAddress ?? null,
+      order.ticketPriceMin ?? null, order.ticketPriceMax ?? null,
+      order.ticketUrl ?? null, order.posterUrl ?? null, order.genre ?? null,
+      order.actingForArtistId ?? null, order.actingForArtistUserId ?? null,
+      order.labelId ?? null, JSON.stringify(order.extra || {}),
+      order.createdAt ?? null,
+    ]
+  );
+}
+
+/**
+ * Update mutable fields atomically. Принимает partial patch — undefined
+ * поля игнорятся. updated_at = NOW() автоматически.
+ * Заменяет legacy get→mutate→set паттерн (race-prone на concurrent admin
+ * actions). Single UPDATE statement — atomic, lost-update safe.
+ */
+export async function updatePublishOrder(
+  id: string,
+  patch: Partial<PublishOrderRow>,
+): Promise<void> {
+  const FIELD_MAP: Record<string, string> = {
+    type: 'type', status: 'status', title: 'title', description: 'description',
+    plan: 'plan', price: 'price', priceBase: 'price_base',
+    subscriptionApplied: 'subscription_applied', currency: 'currency',
+    paidAt: 'paid_at', paymentMethod: 'payment_method',
+    moderatorId: 'moderator_id', moderatorComment: 'moderator_comment',
+    moderatedAt: 'moderated_at', rejectionReason: 'rejection_reason',
+    revisionNotes: 'revision_notes', publishedAt: 'published_at',
+    videoUrl: 'video_url', videoSource: 'video_source',
+    videoCategory: 'video_category', thumbnailUrl: 'thumbnail_url',
+    tags: 'tags',
+    eventDate: 'event_date', eventTime: 'event_time', city: 'city',
+    venueName: 'venue_name', venueAddress: 'venue_address',
+    ticketPriceMin: 'ticket_price_min', ticketPriceMax: 'ticket_price_max',
+    ticketUrl: 'ticket_url', posterUrl: 'poster_url', genre: 'genre',
+    actingForArtistId: 'acting_for_artist_id',
+    actingForArtistUserId: 'acting_for_artist_user_id',
+    labelId: 'label_id', extra: 'extra',
+  };
+  const sets: string[] = [];
+  const vals: any[] = [];
+  let i = 1;
+  for (const [field, col] of Object.entries(FIELD_MAP)) {
+    if ((patch as any)[field] === undefined) continue;
+    const v = (patch as any)[field];
+    if (col === 'extra') {
+      sets.push(`${col} = $${i++}::jsonb`); vals.push(JSON.stringify(v || {}));
+    } else if (col === 'event_date') {
+      sets.push(`${col} = $${i++}::date`); vals.push(v || null);
+    } else if (
+      col === 'paid_at' || col === 'moderated_at' ||
+      col === 'published_at'
+    ) {
+      sets.push(`${col} = $${i++}::timestamptz`); vals.push(v || null);
+    } else {
+      sets.push(`${col} = $${i++}`); vals.push(v);
+    }
+  }
+  if (sets.length === 0) return;
+  sets.push('updated_at = NOW()');
+  vals.push(id);
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE publish_orders SET ${sets.join(', ')} WHERE id = $${i}`,
+    vals,
+  );
+}
+
+export async function deletePublishOrder(id: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(`DELETE FROM publish_orders WHERE id = $1`, [id]);
+}
+
+export async function listPublishOrdersByUser(userId: string): Promise<PublishOrderRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${PUBLISH_ORDER_COLS} FROM publish_orders
+      WHERE user_id = $1
+      ORDER BY created_at DESC`,
+    [userId]
+  );
+  return r.rows.map(mapPublishOrderRow).filter((x): x is PublishOrderRow => x !== null);
+}
+
+export async function listPublishOrders(opts: {
+  status?: string; type?: string; limit?: number; offset?: number;
+} = {}): Promise<PublishOrderRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  const where: string[] = [];
+  const params: any[] = [];
+  let i = 1;
+  if (opts.status) { where.push(`status = $${i++}`); params.push(opts.status); }
+  if (opts.type)   { where.push(`type = $${i++}`);   params.push(opts.type); }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const limit = Math.max(1, Math.min(opts.limit ?? 500, 1000));
+  const offset = Math.max(0, opts.offset ?? 0);
+  const r = await pool.query(
+    `SELECT ${PUBLISH_ORDER_COLS} FROM publish_orders
+      ${whereSql}
+      ORDER BY created_at DESC
+      LIMIT ${limit} OFFSET ${offset}`,
+    params
+  );
+  return r.rows.map(mapPublishOrderRow).filter((x): x is PublishOrderRow => x !== null);
+}
+
+/**
+ * Stats aggregation — SQL pushdown (COUNT FILTER WHERE status=...).
+ * Заменяет 6 JS .filter().length в GET /admin/stats (publish-routes.tsx:905).
+ */
+export async function getPublishOrderStats(): Promise<{
+  total: number;
+  byStatus: Record<string, number>;
+  totalRevenue: number;
+}> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT
+       COUNT(*)::int                                                        AS total,
+       COUNT(*) FILTER (WHERE status = 'draft')::int                        AS draft,
+       COUNT(*) FILTER (WHERE status = 'pending_review')::int               AS pending_review,
+       COUNT(*) FILTER (WHERE status = 'in_review')::int                    AS in_review,
+       COUNT(*) FILTER (WHERE status = 'revision')::int                     AS revision,
+       COUNT(*) FILTER (WHERE status = 'approved')::int                     AS approved,
+       COUNT(*) FILTER (WHERE status = 'pending_payment')::int              AS pending_payment,
+       COUNT(*) FILTER (WHERE status = 'paid')::int                         AS paid,
+       COUNT(*) FILTER (WHERE status = 'published')::int                    AS published,
+       COUNT(*) FILTER (WHERE status = 'rejected')::int                     AS rejected,
+       COUNT(*) FILTER (WHERE status = 'cancelled')::int                    AS cancelled,
+       COALESCE(SUM(price) FILTER (WHERE status IN ('paid','published')), 0)::numeric AS total_revenue
+     FROM publish_orders`
+  );
+  const row = r.rows[0] || {};
+  return {
+    total: Number(row.total || 0),
+    byStatus: {
+      draft:           Number(row.draft || 0),
+      pending_review:  Number(row.pending_review || 0),
+      in_review:       Number(row.in_review || 0),
+      revision:        Number(row.revision || 0),
+      approved:        Number(row.approved || 0),
+      pending_payment: Number(row.pending_payment || 0),
+      paid:            Number(row.paid || 0),
+      published:       Number(row.published || 0),
+      rejected:        Number(row.rejected || 0),
+      cancelled:       Number(row.cancelled || 0),
+    },
+    totalRevenue: Number(row.total_revenue || 0),
+  };
+}
 // publish_chats переехал на row-per-message (migration 038). Доступ
 // через pool.query в chat-routes.tsx.
 export const publishEmailPrefsStore = makeUserSingletonStore('publish_email_prefs');
