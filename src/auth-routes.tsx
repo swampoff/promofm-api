@@ -10,7 +10,7 @@ import bcrypt from 'bcryptjs';
 import { Pool } from 'pg';
 import { upsertNotification } from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsStoreToken, vpsGetToken, vpsUseToken } from './vps-userdata.tsx';
-import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendVenueRadioWelcomeEmail, sendActivationEmail } from "./email-helper.tsx";
+import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendVenueRadioWelcomeEmail, sendActivationEmail, sendProfileVerifiedEmail, sendProfileVerificationRejectedEmail } from "./email-helper.tsx";
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { isValidRole } from './roles.tsx';
 import {
@@ -962,6 +962,33 @@ auth.post("/admin/verify-profile", requireAuth, requireAdmin, async (c) => {
     if (result.rows.length === 0) {
       return c.json({ success: false, error: 'Профиль не найден' }, 404);
     }
+
+    // Fire-and-forget notification email. Distinct from
+    // sendAccount{Approved,Rejected}Email which fire on USER-level
+    // account approval (users.status='active'). These fire on
+    // PROFILE verification (is_verified flag). On rejection without
+    // a reason ("unverify" — admin demoting an already-verified
+    // profile) we skip the email — no user-facing decision happened.
+    try {
+      const userRow = await sql(
+        `SELECT email, full_name FROM users WHERE id = $1 LIMIT 1`,
+        [userId]
+      );
+      const userEmail = userRow.rows[0]?.email;
+      const userName = userRow.rows[0]?.full_name || '';
+      if (userEmail) {
+        if (isVerified) {
+          sendProfileVerifiedEmail(userEmail, userName, role)
+            .catch((e) => log.warn({ err: e, userId, role }, 'profile_verified_email_failed'));
+        } else if (rejectionReason) {
+          sendProfileVerificationRejectedEmail(userEmail, userName, role, rejectionReason)
+            .catch((e) => log.warn({ err: e, userId, role }, 'profile_rejection_email_failed'));
+        }
+      }
+    } catch (notifyErr) {
+      log.warn({ err: notifyErr, userId, role }, 'profile_verification_notify_failed');
+    }
+
     return c.json({
       success: true,
       data: result.rows[0],

@@ -271,6 +271,67 @@ export async function sendAccountRejectedEmail(email: string, name: string, reas
   return sendEmail({ to: email, subject: 'Заявка отклонена — ПРОМО.МУЗЫКА', html });
 }
 
+// ── Profile verification (migration 058 artist + 062 cross-role) ──
+//
+// Sent by POST /auth/admin/verify-profile when admin approves or
+// rejects a user's verification request. Distinct from
+// sendAccount{Approved,Rejected}Email above — those fire on USER
+// approval (users.status='active'); these fire on PROFILE
+// verification (is_verified flag on the role-specific profile row,
+// independent of account status).
+
+const PROFILE_ROLE_LABELS: Record<string, string> = {
+  artist: 'артиста',
+  venue: 'заведения',
+  radio_station: 'радиостанции',
+  producer: 'продюсера',
+};
+
+function profileRoleLabel(role: string): string {
+  return PROFILE_ROLE_LABELS[role] || 'профиля';
+}
+
+export async function sendProfileVerifiedEmail(
+  email: string,
+  name: string,
+  role: string,
+): Promise<boolean> {
+  const roleLabel = profileRoleLabel(role);
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #10B981;">Профиль верифицирован!</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(name)}</strong>!</p>
+    <p>Ваш профиль ${escapeHtml(roleLabel)} прошёл проверку администратором. Значок верификации теперь виден всем пользователям платформы.</p>
+    <p style="text-align: center; margin: 28px 0;"><a href="${SITE_URL}/cabinet" style="${buttonStyle}">Открыть кабинет</a></p>
+  `);
+  return sendEmail({
+    to: email,
+    subject: 'Профиль верифицирован — ПРОМО.МУЗЫКА',
+    html,
+  });
+}
+
+export async function sendProfileVerificationRejectedEmail(
+  email: string,
+  name: string,
+  role: string,
+  reason: string,
+): Promise<boolean> {
+  const roleLabel = profileRoleLabel(role);
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #EF4444;">Заявка на верификацию отклонена</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(name)}</strong>!</p>
+    <p>К сожалению, ваша заявка на верификацию профиля ${escapeHtml(roleLabel)} была отклонена.</p>
+    ${reason ? `<p style="padding: 12px; background: #1a1a2e; border-left: 3px solid #EF4444; border-radius: 4px;"><strong>Причина:</strong> ${escapeHtml(reason)}</p>` : ''}
+    <p>Вы можете подать новую заявку из кабинета после устранения причин.</p>
+    <p style="text-align: center; margin: 28px 0;"><a href="${SITE_URL}/cabinet" style="${buttonStyle}">Открыть кабинет</a></p>
+  `);
+  return sendEmail({
+    to: email,
+    subject: 'Заявка на верификацию отклонена — ПРОМО.МУЗЫКА',
+    html,
+  });
+}
+
 
 // ── Admin Notifications: uploads & payments ──
 
