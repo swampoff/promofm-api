@@ -7,7 +7,7 @@
 import { pool, rlsQuery } from './db-client.tsx';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-import { verificationTokensStore } from './db.tsx';
+import { insertVerificationToken, getVerificationToken, markVerificationTokenUsed } from './db.tsx';
 
 // ── Profiles ──
 
@@ -274,12 +274,11 @@ export async function vpsStoreToken(
 ): Promise<void> {
   const expires = new Date(Date.now() + expiresInHours * 3600_000).toISOString();
   try {
-    await verificationTokensStore.set(token, {
-      id: token,
-      user_id: userId,
-      type,
-      expires_at: expires,
-      created_at: new Date().toISOString(),
+    await insertVerificationToken({
+      token,
+      userId,
+      tokenType: type,
+      expiresAt: expires,
     });
   } catch (err) {
     console.error(`[token] storeToken error:`, err);
@@ -288,21 +287,16 @@ export async function vpsStoreToken(
 
 export async function vpsGetToken(token: string): Promise<{ userId: string; type: string; expiresAt: string; createdAt: string; [k: string]: unknown } | null> {
   try {
-    const kvData = await verificationTokensStore.get(token) as any;
-    if (kvData && kvData.user_id) {
-      if (new Date() > new Date(kvData.expires_at)) {
-        return null;
-      }
-      // Reject already-used tokens
-      if (kvData.used_at) {
-        return null;
-      }
+    const row = await getVerificationToken(token);
+    // getVerificationToken уже фильтрует expired + used_at, так что
+    // если row !== null — token валиден и готов к использованию.
+    if (row) {
       return {
-        userId: kvData.user_id,
-        type: kvData.type,
-        expiresAt: kvData.expires_at,
-        createdAt: kvData.created_at,
-        usedAt: kvData.used_at,
+        userId: row.userId,
+        type: row.tokenType,
+        expiresAt: row.expiresAt,
+        createdAt: row.createdAt,
+        usedAt: row.usedAt,
       };
     }
   } catch (err) {
@@ -312,16 +306,16 @@ export async function vpsGetToken(token: string): Promise<{ userId: string; type
 }
 
 export async function vpsUseToken(token: string): Promise<boolean> {
+  // Atomic UPDATE ... WHERE used_at IS NULL AND expires_at > NOW()
+  // — закрывает race window между .get и .set в legacy реализации:
+  // 2 concurrent клика на одну ссылку email верификации больше не
+  // могут оба «успешно» отметить token использованным.
   try {
-    const kvData = await verificationTokensStore.get(token) as any;
-    if (kvData && kvData.user_id) {
-      await verificationTokensStore.set(token, { ...kvData, used_at: new Date().toISOString() });
-      return true;
-    }
+    return await markVerificationTokenUsed(token);
   } catch (err) {
     console.error(`[token] useToken error:`, err);
+    return false;
   }
-  return false;
 }
 
 // ── Auth Logs (write to local PG) ──

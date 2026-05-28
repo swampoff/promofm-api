@@ -3253,7 +3253,89 @@ export async function getConcertAgentStats(): Promise<{
 }
 
 export const curatorReportsStore = makeJsonbKeyStore('curator_reports');
-export const verificationTokensStore = makeJsonbKeyStore('verification_tokens');
+// verification_tokens — native cols since migration 004; data jsonb
+// dropped в migration 070 вместе с sync trigger. Store wrapper удалён.
+// Доступ через typed функции ниже (vps-userdata.tsx использует их
+// напрямую вместо .set/.get на data jsonb).
+
+export interface VerificationTokenRow {
+  token: string;
+  userId: string;
+  tokenType: string;
+  expiresAt: string;
+  usedAt: string | null;
+  createdAt: string;
+}
+
+function mapVerificationTokenRow(r: any): VerificationTokenRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    token: r.id,
+    userId: r.user_id,
+    tokenType: r.token_type,
+    expiresAt: iso(r.expires_at) || '',
+    usedAt: iso(r.used_at),
+    createdAt: iso(r.created_at) || '',
+  };
+}
+
+export async function insertVerificationToken(params: {
+  token: string;
+  userId: string;
+  tokenType?: string;
+  expiresAt: string;
+}): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO verification_tokens (id, user_id, token_type, expires_at, created_at)
+     VALUES ($1, $2, $3, $4::timestamptz, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       user_id    = EXCLUDED.user_id,
+       token_type = EXCLUDED.token_type,
+       expires_at = EXCLUDED.expires_at`,
+    [params.token, params.userId, params.tokenType || 'email_verify', params.expiresAt]
+  );
+}
+
+/**
+ * Lookup token — returns row только если token валиден (не expired,
+ * не used). Сразу инкапсулирует все 3 валидационных gate которые
+ * раньше handler делал вручную после .get + checks.
+ */
+export async function getVerificationToken(token: string): Promise<VerificationTokenRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT id, user_id, token_type, expires_at, used_at, created_at
+       FROM verification_tokens
+      WHERE id = $1
+        AND used_at IS NULL
+        AND expires_at > NOW()
+      LIMIT 1`,
+    [token]
+  );
+  return mapVerificationTokenRow(r.rows[0]);
+}
+
+/**
+ * Atomic mark-used: UPDATE ... WHERE used_at IS NULL AND expires_at > NOW().
+ * Returns true только если row был валидным и теперь помечен. False если
+ * token не существует, истёк, или уже использован — race-free для replay
+ * attempts на одну и ту же ссылку (раньше get+set с window'ом между).
+ */
+export async function markVerificationTokenUsed(token: string): Promise<boolean> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `UPDATE verification_tokens
+        SET used_at = NOW()
+      WHERE id = $1
+        AND used_at IS NULL
+        AND expires_at > NOW()
+      RETURNING id`,
+    [token]
+  );
+  return (r.rowCount ?? 0) > 0;
+}
 
 // ─── Coin Transactions (specific table) ───
 
