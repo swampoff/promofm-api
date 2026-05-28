@@ -5,7 +5,8 @@
  */
 
 import {
-  curatorReportsStore,
+  insertCuratorReport, getLatestCuratorReport,
+  type CuratorReportRow,
   upsertRadioProfile,
   upsertVenueProfile,
   upsertArtistProfile,
@@ -617,9 +618,10 @@ function makeReport(role: RoleId, roleName: string, startedAt: string, setupDone
     summary: lines.join('\n'),
   };
 
-  // Fire-and-forget save
-  curatorReportsStore.set(report.id, report).catch(() => {});
-  curatorReportsStore.set(`latest:${role}`, report).catch(() => {});
+  // Fire-and-forget save. Single INSERT — "latest per role" auto-derived
+  // через SELECT ORDER BY completed_at DESC LIMIT 1 на indexed col.
+  // Killed legacy dual-write (id row + 'latest:<role>' pointer row).
+  insertCuratorReport(report as unknown as CuratorReportRow).catch(() => {});
 
   console.log(`[curator:${role}] Done: ${passed}/${total} OK, setup=${setupDone}`);
   return report;
@@ -661,7 +663,8 @@ export async function runAllCurators(): Promise<{
 export async function getLatestReports(): Promise<Record<string, CuratorReport | null>> {
   const result: Record<string, CuratorReport | null> = {};
   for (const role of CURATOR_ROLES) {
-    result[role.id] = await curatorReportsStore.get(`latest:${role.id}`) as CuratorReport | null;
+    // SELECT ORDER BY completed_at DESC LIMIT 1 — replaces 'latest:' pointer.
+    result[role.id] = await getLatestCuratorReport(role.id) as unknown as CuratorReport | null;
   }
   return result;
 }

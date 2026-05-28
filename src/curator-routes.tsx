@@ -4,7 +4,7 @@
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { curatorReportsStore } from './db.tsx';
+import { getLatestCuratorReport, listCuratorReports } from './db.tsx';
 import {
   runCurator,
   runAllCurators,
@@ -112,7 +112,8 @@ curatorRoutes.get('/status', requireAdminOrKey, async (c) => {
 curatorRoutes.get('/report/:roleId', requireAdminOrKey, async (c) => {
   try {
     const roleId = c.req.param('roleId');
-    const report = await curatorReportsStore.get(`latest:${roleId}`);
+    // Native SELECT ORDER BY completed_at DESC LIMIT 1 (migration 074).
+    const report = await getLatestCuratorReport(roleId);
     if (!report) {
       return c.json({ success: false, error: 'Отчёт не найден. Запустите куратора.' }, 404);
     }
@@ -141,21 +142,19 @@ curatorRoutes.get('/roles', requireAdminOrKey, async (c) => {
  */
 curatorRoutes.get('/history', requireAdminOrKey, async (c) => {
   try {
-    const all = await curatorReportsStore.getAll();
-    const reports = all
-      .filter((r: any) => r.id && !r.id.startsWith('latest:'))
-      .sort((a: any, b: any) => (b.completedAt || '').localeCompare(a.completedAt || ''))
-      .slice(0, 50)
-      .map((r: any) => ({
-        id: r.id,
-        role: r.role,
-        roleName: r.roleName,
-        completedAt: r.completedAt,
-        passed: r.passed,
-        failed: r.failed,
-        warnings: r.warnings,
-        totalEndpoints: r.totalEndpoints,
-      }));
+    // Native SELECT с index pushdown. 'latest:' filter больше не нужен
+    // — migration 074 DROP'нула pointer rows; теперь только historical.
+    const all = await listCuratorReports(50);
+    const reports = all.map(r => ({
+      id: r.id,
+      role: r.role,
+      roleName: r.roleName,
+      completedAt: r.completedAt,
+      passed: r.passed,
+      failed: r.failed,
+      warnings: r.warnings,
+      totalEndpoints: r.totalEndpoints,
+    }));
 
     return c.json({ success: true, data: reports });
   } catch (error) {
@@ -172,7 +171,7 @@ curatorRoutes.post('/email-report/:roleId', requireAdminOrKey, async (c) => {
     const { to } = await c.req.json().catch(() => ({ to: '' }));
     const toEmail = to || 'info@promofm.ru';
 
-    const report = await curatorReportsStore.get(`latest:${roleId}`) as any;
+    const report = await getLatestCuratorReport(roleId) as any;
     if (!report) {
       return c.json({ success: false, error: 'Отчёт не найден' }, 404);
     }
