@@ -937,6 +937,21 @@ app.put('/profile/update/:producerId', requireAuth, async (c) => {
     const existing = await producerProfileEditStore.get(producerId) || {};
     const updated = { ...(existing as any), ...body, updatedAt: nowIso() };
     await producerProfileEditStore.set(producerId, updated);
+
+    // Migration 061: mirror editor writes to the public `producer_profiles`
+    // table so cross-cabinet listings (landing-data-routes /landing/
+    // producer-profiles, /landing/producer-profile/:id) and the public
+    // producer page see what the editor saved. Same pattern as
+    // persistProducerImage() at line 1333 — keeps both stores in sync.
+    // Without this, editor changes were trapped in producer_profile_edit
+    // and the public row stayed empty of name/city/bio/workPhilosophy.
+    try {
+      const pubExisting = (await db.getProducerProfile(producerId)) || {};
+      await db.upsertProducerProfile(producerId, { ...(pubExisting as any), ...body });
+    } catch (mirrorErr) {
+      console.log(`[producer-profile] mirror to producer_profiles failed (non-fatal):`, mirrorErr);
+    }
+
     return c.json({ success: true, data: updated });
   } catch (error) { console.log(`Error updating profile: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
