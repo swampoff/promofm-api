@@ -3015,7 +3015,77 @@ export const publishOrdersStore = makeJsonbKeyStore('publish_orders');
 // через pool.query в chat-routes.tsx.
 export const publishEmailPrefsStore = makeUserSingletonStore('publish_email_prefs');
 export const emailHistoryStore = makeJsonbKeyStore('email_history');
-export const emailTemplatesStore = makeJsonbKeyStore('email_templates');
+
+// ─── email_templates (native cols since migration 073) ───
+// Was: makeJsonbKeyStore('email_templates'). Now: typed functions ниже.
+// 3 callers in src/email-routes.tsx (list / get / seed defaults).
+
+export interface EmailTemplate {
+  id: string;
+  name: string;
+  subject: string;
+  content: string;
+  type: string;            // 'transactional' | 'notification' | 'newsletter'
+  variables: string[];
+  createdAt: string;
+}
+
+function mapEmailTemplateRow(r: any): EmailTemplate | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  return {
+    id: r.id,
+    name: r.name,
+    subject: r.subject,
+    content: r.content,
+    type: r.type,
+    variables: r.variables || [],
+    createdAt: iso(r.created_at),
+  };
+}
+
+const EMAIL_TEMPLATE_COLS = `id, name, subject, content, type, variables, created_at`;
+
+export async function listEmailTemplates(): Promise<EmailTemplate[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${EMAIL_TEMPLATE_COLS} FROM email_templates ORDER BY created_at DESC`
+  );
+  return r.rows.map(mapEmailTemplateRow).filter((x): x is EmailTemplate => x !== null);
+}
+
+export async function getEmailTemplate(id: string): Promise<EmailTemplate | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${EMAIL_TEMPLATE_COLS} FROM email_templates WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return mapEmailTemplateRow(r.rows[0]);
+}
+
+/**
+ * Upsert template. Used both для seed defaults (handler creates 4
+ * стартовых templates when table empty) и admin save в future.
+ */
+export async function upsertEmailTemplate(t: EmailTemplate): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO email_templates (id, name, subject, content, type, variables, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, NOW()))
+     ON CONFLICT (id) DO UPDATE SET
+       name      = EXCLUDED.name,
+       subject   = EXCLUDED.subject,
+       content   = EXCLUDED.content,
+       type      = EXCLUDED.type,
+       variables = EXCLUDED.variables`,
+    [
+      t.id, t.name, t.subject, t.content, t.type,
+      t.variables || [],
+      t.createdAt || null,
+    ]
+  );
+}
+
 export const chartAggregationStore = makeJsonbKeyStore('chart_aggregation');
 export const chartSourcesStore = makeJsonbKeyStore('chart_sources');
 // radioAdSlotsStore + radioAdSlotIndexStore — заменены на нативные хелперы
