@@ -19,7 +19,7 @@ import {
   producerAiLastStore,
   producerProfileEditStore,
   producerSettingsStore,
-  producerServicesStore,
+  upsertProducerService, deleteProducerService,
 } from './db.tsx';
 import { getPaymentBalance, upsertPaymentBalance } from './db.tsx';
 import { getDbClient, pool } from "./db-client.tsx";
@@ -492,37 +492,33 @@ app.post('/settings/:producerId', requireAuth, async (c) => {
 
 
 // ════════════════════════════════════════
-// BRIDGE: sync custom services → marketplace producerServicesStore
+// BRIDGE: sync custom services → marketplace producer_services (native cols, migration 057)
 // ════════════════════════════════════════
 async function syncServiceToMarketplace(svc: CustomService, producerName?: string) {
   if (svc.status !== 'active') {
     // Remove from marketplace if paused/deleted
-    try { await producerServicesStore.set(svc.id, null as any); } catch {}
+    try { await deleteProducerService(svc.id); } catch {}
     return;
   }
-  const marketplaceSvc = {
-    id: svc.id,
+  await upsertProducerService(svc.id, {
     producerId: svc.producerId,
-    producerName: producerName || svc.producerId,
+    producer: producerName || svc.producerId,
     title: svc.title,
     type: svc.type,
-    price: svc.basePrice,
     basePrice: svc.basePrice,
     description: svc.description,
     deliveryDays: svc.deliveryDays,
-    revisions: svc.revisions,
-    includes: svc.includes,
     status: 'active',
     orders: svc.orders || 0,
     rating: svc.rating || 5.0,
-    createdAt: svc.createdAt,
-    updatedAt: nowIso(),
-  };
-  await producerServicesStore.set(svc.id, JSON.stringify(marketplaceSvc));
+    // residual fields (revisions, includes) уйдут в extra jsonb
+    revisions: svc.revisions,
+    includes: svc.includes,
+  });
 }
 
 async function removeServiceFromMarketplace(serviceId: string) {
-  try { await producerServicesStore.set(serviceId, null as any); } catch {}
+  try { await deleteProducerService(serviceId); } catch {}
 }
 
 // ════════════════════════════════════════
