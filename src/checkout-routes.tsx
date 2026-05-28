@@ -981,9 +981,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // ─── Fulfill production_360_payment (Production 360 Marketplace) ───
   if (session.metadata?.type === 'production_360_payment' && session.metadata?.productionOrderId) {
     try {
-      const { production360OrdersStore } = await import('./db.tsx');
+      const { getProduction360Order, upsertProduction360Order } = await import('./db.tsx');
       const productionOrderId = session.metadata.productionOrderId;
-      const order: any = await production360OrdersStore.get(productionOrderId);
+      const order: any = await getProduction360Order(productionOrderId);
       if (order && order.status === 'pending_payment') {
         order.status = 'paid';
         order.statusEnteredAt = now;
@@ -991,7 +991,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         order.updatedAt = now;
         order.paymentOrderId = session.orderId;
         order.paymentGateway = session.gateway;
-        await production360OrdersStore.set(productionOrderId, order);
+        await upsertProduction360Order(productionOrderId, order);
 
         try {
           const { emitSSE } = await import('./sse-routes.tsx');

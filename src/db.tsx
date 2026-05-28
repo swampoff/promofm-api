@@ -1526,29 +1526,9 @@ export async function getAllEngineerProfiles() {
 }
 
 // ─── Collaboration ───
-
-export async function getCollabOffers(userId: string, role: 'artist' | 'producer') {
-  const column = role === 'artist' ? 'artist_id' : 'producer_id';
-  const { data, error } = await db()
-    .from('collab_offers')
-    .select('*')
-    .eq(column, userId)
-    .order('created_at', { ascending: false });
-  if (error) console.error('[db] getCollabOffers:', error);
-  return (data || []).map((r: any) => r.data || r);
-}
-
-export async function upsertCollabOffer(offerId: string, offer: Record<string, any>) {
-  const row = {
-    id: offerId,
-    data: offer,
-    updated_at: new Date().toISOString(),
-  };
-  const { error } = await db()
-    .from('collab_offers')
-    .upsert(row, { onConflict: 'id' });
-  if (error) console.error('[db] upsertCollabOffer:', error);
-}
+// Native row-per-offer schema since migration 064. См.
+// listCollabOffersByArtist / listCollabOffersByProducer / upsertCollabOffer
+// ниже (new typed factory functions).
 
 // ─── Content Orders ───
 
@@ -2357,9 +2337,52 @@ function makeRadioRequestArrayStore(
 
 // ─── Store instances for all tables ───
 
-export const beatFavoritesStore = jsonbStore('beat_favorites', 'user_id');
-export const beatReviewsStore = jsonbStore('beat_reviews');
-export const beatReviewsIndexStore = jsonbStore('beat_reviews_index', 'beat_id');
+// beat_favorites — row-per-favorite native cols (migration 068).
+// Store DELETED. Доступ — типизированные функции ниже.
+
+export async function listBeatFavorites(userId: string): Promise<string[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT beat_id FROM beat_favorites
+      WHERE user_id = $1 ORDER BY created_at DESC`,
+    [userId]
+  );
+  return r.rows.map((row: any) => row.beat_id);
+}
+
+export async function toggleBeatFavorite(userId: string, beatId: string): Promise<{ added: boolean }> {
+  // Atomic toggle через INSERT ON CONFLICT DO NOTHING + проверка rowCount.
+  // Если 1 — INSERT прошёл (added). Иначе уже было — DELETE.
+  const { pool } = await import('./db-client.tsx');
+  const ins = await pool.query(
+    `INSERT INTO beat_favorites (user_id, beat_id, created_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (user_id, beat_id) DO NOTHING`,
+    [userId, beatId]
+  );
+  if (ins.rowCount && ins.rowCount > 0) {
+    return { added: true };
+  }
+  // Уже было — DELETE.
+  await pool.query(
+    `DELETE FROM beat_favorites WHERE user_id = $1 AND beat_id = $2`,
+    [userId, beatId]
+  );
+  return { added: false };
+}
+
+export async function countBeatFavoriters(beatId: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM beat_favorites WHERE beat_id = $1`,
+    [beatId]
+  );
+  return Number(r.rows[0]?.n || 0);
+}
+// beat_reviews — native cols + UNIQUE (beat_id, user_id) since migration 066.
+// beat_reviews_index DROPPED — derived через idx_beat_reviews_beat_created.
+// 2 store wrappers DELETED. Доступ — getBeatReview / upsertBeatReview /
+// listBeatReviewsByBeat / getBeatReviewsAggregateStats ниже.
 export const contractsStore = jsonbStore('contracts');
 export const digitalGoodsStore = jsonbStore('digital_goods');
 export const producerSettingsStore = jsonbStore('producer_settings', 'user_id');
@@ -2709,8 +2732,164 @@ export const djSubscriptionsStore = makeDjSubscriptionsStore();
 // dj_withdrawals переехал на row-per-withdrawal (migration 044). Доступ
 // через pool.query из dj-studio-routes.tsx + checkout-routes.tsx webhook.
 export const djTransactionsStore = jsonbStore('dj_transactions', 'dj_id');
-export const collabOffersByArtistStore = jsonbStore('collab_offers_by_artist', 'artist_id');
-export const collabOffersByProducerStore = jsonbStore('collab_offers_by_producer', 'producer_id');
+// collab_offers — row-per-offer native cols (migration 064).
+// collab_offers_by_artist + collab_offers_by_producer таблицы DROPPED
+// — derived из collab_offers.artist_id / producer_id с native indexes.
+// Доступ — типизированные функции ниже.
+
+const COLLAB_OFFER_COLS = `id, producer_id, producer_name, producer_avatar,
+  artist_id, artist_name, offer_type, title, description, price, currency,
+  audio_preview_url, bpm, music_key, genre, tags, status, deadline,
+  responded_at, completed_at, artist_comment, extra,
+  created_at, updated_at`;
+
+function mapCollabOfferRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : undefined);
+  return {
+    id: r.id,
+    producerId: r.producer_id,
+    producerName: r.producer_name,
+    producerAvatar: r.producer_avatar || undefined,
+    artistId: r.artist_id,
+    artistName: r.artist_name,
+    type: r.offer_type,
+    title: r.title || '',
+    description: r.description || '',
+    price: r.price !== null && r.price !== undefined ? Number(r.price) : undefined,
+    currency: r.currency || 'RUB',
+    audioPreviewUrl: r.audio_preview_url || undefined,
+    bpm: r.bpm !== null && r.bpm !== undefined ? Number(r.bpm) : undefined,
+    key: r.music_key || undefined,
+    genre: r.genre || undefined,
+    tags: r.tags || [],
+    status: r.status,
+    deadline: iso(r.deadline),
+    respondedAt: iso(r.responded_at),
+    completedAt: iso(r.completed_at),
+    artistComment: r.artist_comment || undefined,
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+    ...(r.extra || {}),
+  };
+}
+
+export async function getCollabOffer(id: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${COLLAB_OFFER_COLS} FROM collab_offers WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return r.rowCount ? mapCollabOfferRow(r.rows[0]) : null;
+}
+
+export async function upsertCollabOffer(id: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const extra = { ...value };
+  ['id','producerId','producerName','producerAvatar','artistId','artistName',
+   'type','title','description','price','currency','audioPreviewUrl','bpm',
+   'key','genre','tags','status','deadline','respondedAt','completedAt',
+   'artistComment','createdAt','updatedAt'].forEach(k => delete extra[k]);
+  const tags = Array.isArray(value.tags) ? value.tags : [];
+  await pool.query(
+    `INSERT INTO collab_offers
+       (id, producer_id, producer_name, producer_avatar,
+        artist_id, artist_name, offer_type, title, description, price, currency,
+        audio_preview_url, bpm, music_key, genre, tags, status, deadline,
+        responded_at, completed_at, artist_comment, extra, updated_at)
+     VALUES ($1, $2, $3, $4,
+             $5, $6, $7, $8, $9, $10, $11,
+             $12, $13, $14, $15, $16::jsonb, $17, $18,
+             $19, $20, $21, $22::jsonb, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       producer_id       = COALESCE(EXCLUDED.producer_id,   collab_offers.producer_id),
+       producer_name     = EXCLUDED.producer_name,
+       producer_avatar   = EXCLUDED.producer_avatar,
+       artist_id         = COALESCE(EXCLUDED.artist_id,     collab_offers.artist_id),
+       artist_name       = EXCLUDED.artist_name,
+       offer_type        = EXCLUDED.offer_type,
+       title             = EXCLUDED.title,
+       description       = EXCLUDED.description,
+       price             = EXCLUDED.price,
+       currency          = EXCLUDED.currency,
+       audio_preview_url = EXCLUDED.audio_preview_url,
+       bpm               = EXCLUDED.bpm,
+       music_key         = EXCLUDED.music_key,
+       genre             = EXCLUDED.genre,
+       tags              = EXCLUDED.tags,
+       status            = EXCLUDED.status,
+       deadline          = EXCLUDED.deadline,
+       responded_at      = EXCLUDED.responded_at,
+       completed_at      = EXCLUDED.completed_at,
+       artist_comment    = EXCLUDED.artist_comment,
+       extra             = EXCLUDED.extra,
+       updated_at        = NOW()`,
+    [
+      id,
+      value.producerId || null, value.producerName || null, value.producerAvatar || null,
+      value.artistId || null, value.artistName || null,
+      value.type || 'beat', value.title || '', value.description || '',
+      value.price !== undefined && value.price !== null ? Number(value.price) : null,
+      value.currency || 'RUB',
+      value.audioPreviewUrl || null,
+      value.bpm !== undefined && value.bpm !== null ? Number(value.bpm) : null,
+      value.key || null,
+      value.genre || null,
+      JSON.stringify(tags),
+      value.status || 'pending',
+      value.deadline || null,
+      value.respondedAt || null, value.completedAt || null,
+      value.artistComment || null,
+      JSON.stringify(extra),
+    ]
+  );
+}
+
+export async function listCollabOffersByArtist(artistId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${COLLAB_OFFER_COLS} FROM collab_offers
+      WHERE artist_id = $1 ORDER BY created_at DESC`,
+    [artistId]
+  );
+  return r.rows.map(mapCollabOfferRow);
+}
+
+export async function listCollabOffersByProducer(producerId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${COLLAB_OFFER_COLS} FROM collab_offers
+      WHERE producer_id = $1 ORDER BY created_at DESC`,
+    [producerId]
+  );
+  return r.rows.map(mapCollabOfferRow);
+}
+
+export async function getCollabOfferStatsByUser(userId: string): Promise<any> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE artist_id = $1)                                     AS total_received,
+       COUNT(*) FILTER (WHERE producer_id = $1)                                   AS total_sent,
+       COUNT(*) FILTER (WHERE (artist_id = $1 OR producer_id = $1) AND status = 'pending')    AS pending,
+       COUNT(*) FILTER (WHERE (artist_id = $1 OR producer_id = $1) AND status = 'accepted')   AS accepted,
+       COUNT(*) FILTER (WHERE (artist_id = $1 OR producer_id = $1) AND status = 'declined')   AS declined,
+       COUNT(*) FILTER (WHERE (artist_id = $1 OR producer_id = $1) AND status = 'discussion') AS in_discussion,
+       COUNT(*) FILTER (WHERE (artist_id = $1 OR producer_id = $1) AND status = 'completed')  AS completed
+     FROM collab_offers`,
+    [userId]
+  );
+  const row = r.rows[0] || {};
+  return {
+    totalReceived: Number(row.total_received || 0),
+    totalSent:     Number(row.total_sent || 0),
+    pending:       Number(row.pending || 0),
+    accepted:      Number(row.accepted || 0),
+    declined:      Number(row.declined || 0),
+    inDiscussion:  Number(row.in_discussion || 0),
+    completed:     Number(row.completed || 0),
+  };
+}
 // collab_messages переехал на row-per-message (migration 038). Доступ
 // через pool.query в collaboration-routes.tsx.
 export const publishOrdersStore = jsonbStore('publish_orders');
@@ -2787,8 +2966,174 @@ export const newsPublicStore = jsonbStore('news_public');
 // напрямую через pool.query в landing-data-routes.tsx).
 export const investorInquiriesStore = jsonbStore('investor_inquiries');
 // djEditorProfileStore — DROPPED (0 callers; `dj_editor_profiles` доступ
-// напрямую через pool.query).
-export const concertAgentStore = jsonbStore('concert_agent_data');
+// напрямую через pool.query). DO NOT re-add (was previously removed by #73
+// dead-stores cleanup).
+//
+// concert_agent_data — native cols (migration 067, renumbered from 061
+// pre-rebase). Store DELETED. Доступ — типизированные функции ниже.
+
+const CONCERT_AGENT_COLS = `id, source_id, source_name, title, artist, venue,
+  city, event_date, event_time, price, ticket_url, image_url, description,
+  genre, status, extra, created_at, updated_at`;
+
+function mapConcertAgentRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  // event_date is DATE — return as 'YYYY-MM-DD' string.
+  const dateStr = r.event_date instanceof Date
+    ? r.event_date.toISOString().split('T')[0]
+    : (r.event_date ? String(r.event_date) : '');
+  return {
+    id: r.id,
+    sourceId: r.source_id,
+    source: r.source_name,
+    title: r.title || '',
+    artist: r.artist || '',
+    venue: r.venue || '',
+    city: r.city || '',
+    date: dateStr,
+    time: r.event_time || '',
+    price: r.price || '',
+    ticketUrl: r.ticket_url || '',
+    imageUrl: r.image_url || '',
+    description: r.description || '',
+    genre: r.genre || '',
+    status: r.status,
+    createdAt: iso(r.created_at),
+    ...(r.extra || {}),
+  };
+}
+
+export async function getConcertAgentItem(id: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${CONCERT_AGENT_COLS} FROM concert_agent_data WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return r.rowCount ? mapConcertAgentRow(r.rows[0]) : null;
+}
+
+export async function upsertConcertAgentItem(id: string, concert: Record<string, any>): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const extra = { ...concert };
+  ['id','sourceId','source','title','artist','venue','city','date','time',
+   'price','ticketUrl','imageUrl','description','genre','status',
+   'createdAt','updatedAt'].forEach(k => delete extra[k]);
+  await pool.query(
+    `INSERT INTO concert_agent_data
+       (id, source_id, source_name, title, artist, venue, city, event_date,
+        event_time, price, ticket_url, image_url, description, genre,
+        status, extra, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, '')::date,
+             $9, $10, $11, $12, $13, $14,
+             $15, $16::jsonb, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       source_id   = EXCLUDED.source_id,
+       source_name = EXCLUDED.source_name,
+       title       = EXCLUDED.title,
+       artist      = EXCLUDED.artist,
+       venue       = EXCLUDED.venue,
+       city        = EXCLUDED.city,
+       event_date  = EXCLUDED.event_date,
+       event_time  = EXCLUDED.event_time,
+       price       = EXCLUDED.price,
+       ticket_url  = EXCLUDED.ticket_url,
+       image_url   = EXCLUDED.image_url,
+       description = EXCLUDED.description,
+       genre       = EXCLUDED.genre,
+       status      = EXCLUDED.status,
+       extra       = EXCLUDED.extra,
+       updated_at  = NOW()`,
+    [
+      id,
+      concert.sourceId || null, concert.source || null,
+      concert.title || '', concert.artist || '', concert.venue || '',
+      concert.city || '',
+      concert.date || '',
+      concert.time || '', concert.price || '', concert.ticketUrl || '',
+      concert.imageUrl || '', concert.description || '', concert.genre || '',
+      concert.status || 'published',
+      JSON.stringify(extra),
+    ]
+  );
+}
+
+export async function deleteConcertAgentItem(id: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(`DELETE FROM concert_agent_data WHERE id = $1`, [id]);
+}
+
+export async function listConcertAgentItems(opts: {
+  status?: string;
+  city?: string;
+  dateFrom?: string;  // 'YYYY-MM-DD' inclusive
+  limit?: number;
+} = {}): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const where: string[] = [];
+  const params: any[] = [];
+  if (opts.status) { params.push(opts.status); where.push(`status = $${params.length}`); }
+  if (opts.city)   { params.push(opts.city);   where.push(`city = $${params.length}`); }
+  if (opts.dateFrom) {
+    params.push(opts.dateFrom);
+    where.push(`(event_date IS NULL OR event_date >= $${params.length}::date)`);
+  }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const limitSql = opts.limit ? `LIMIT ${Math.max(1, Math.min(opts.limit, 1000))}` : '';
+  const r = await pool.query(
+    `SELECT ${CONCERT_AGENT_COLS} FROM concert_agent_data
+       ${whereSql}
+       ORDER BY event_date ASC NULLS LAST, created_at DESC
+       ${limitSql}`,
+    params
+  );
+  return r.rows.map(mapConcertAgentRow);
+}
+
+export async function getConcertAgentStats(): Promise<{
+  total: number; published: number; upcoming: number;
+  bySource: Record<string, number>; byCity: Record<string, number>;
+}> {
+  const { pool } = await import('./db-client.tsx');
+  const today = new Date().toISOString().split('T')[0];
+  const [tot, src, cty] = await Promise.all([
+    pool.query(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE status = 'published')::int AS published,
+         COUNT(*) FILTER (WHERE status = 'published'
+                           AND (event_date IS NULL OR event_date >= $1::date))::int AS upcoming
+       FROM concert_agent_data`,
+      [today]
+    ),
+    pool.query(
+      `SELECT COALESCE(source_id, 'unknown') AS k, COUNT(*)::int AS n
+         FROM concert_agent_data WHERE status = 'published'
+        GROUP BY COALESCE(source_id, 'unknown')`
+    ),
+    pool.query(
+      `SELECT COALESCE(city, 'unknown') AS k, COUNT(*)::int AS n
+         FROM concert_agent_data
+        WHERE status = 'published'
+          AND (event_date IS NULL OR event_date >= $1::date)
+        GROUP BY COALESCE(city, 'unknown')`,
+      [today]
+    ),
+  ]);
+  const bySource: Record<string, number> = {};
+  for (const row of src.rows) bySource[row.k] = Number(row.n);
+  const byCity: Record<string, number> = {};
+  for (const row of cty.rows) byCity[row.k] = Number(row.n);
+  const t = tot.rows[0] || {};
+  return {
+    total: Number(t.total || 0),
+    published: Number(t.published || 0),
+    upcoming: Number(t.upcoming || 0),
+    bySource,
+    byCity,
+  };
+}
+
 export const curatorReportsStore = jsonbStore('curator_reports');
 export const verificationTokensStore = jsonbStore('verification_tokens');
 
@@ -2950,23 +3295,141 @@ export async function upsertTicketSale(concertId: string, saleId: string, sale: 
   if (error) console.error('[db] upsertTicketSale:', error);
 }
 
-// ─── Beat Reviews (compound key: beatId:userId) ───
+// ─── Beat Reviews (native cols since migration 066) ───
+// PK = review.id (TEXT, format 'brev-...'). UNIQUE (beat_id, user_id) —
+// DB-level constraint предотвращает 2 отзыва от одного user'а на 1 beat.
 
-export async function getBeatReview(beatId: string, userId: string) {
-  const { data, error } = await db()
-    .from('beat_reviews')
-    .select('*')
-    .eq('id', `${beatId}:${userId}`)
-    .maybeSingle();
-  if (error) console.error('[db] getBeatReview:', error);
-  return data ? (data.data ?? data) : null;
+const BEAT_REVIEW_COLS = `id, beat_id, user_id, user_name, rating, title,
+  review_text, license_type, helpful_count, helpful_users,
+  created_at, updated_at`;
+
+function mapBeatReviewRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    beatId: r.beat_id,
+    userId: r.user_id,
+    userName: r.user_name || 'Покупатель',
+    rating: Number(r.rating || 0),
+    title: r.title || '',
+    text: r.review_text || '',
+    licenseType: r.license_type || 'basic',
+    helpful: Number(r.helpful_count || 0),
+    helpfulUsers: r.helpful_users || [],
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+  };
 }
 
-export async function upsertBeatReview(beatId: string, userId: string, review: Record<string, any>) {
-  const { error } = await db()
-    .from('beat_reviews')
-    .upsert({ id: `${beatId}:${userId}`, beat_id: beatId, user_id: userId, data: review, updated_at: new Date().toISOString() }, { onConflict: 'id' });
-  if (error) console.error('[db] upsertBeatReview:', error);
+// Legacy signature preserved: getBeatReview(beatId, reviewId) — callers
+// в marketplace-routes.tsx уже передают reviewId (несмотря на парам name).
+// id = review id (TEXT 'brev-...'). beatId — для belt-and-suspenders проверки.
+export async function getBeatReview(beatId: string, reviewId: string) {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${BEAT_REVIEW_COLS} FROM beat_reviews
+      WHERE id = $1 AND beat_id = $2 LIMIT 1`,
+    [reviewId, beatId]
+  );
+  return r.rowCount ? mapBeatReviewRow(r.rows[0]) : null;
+}
+
+export async function upsertBeatReview(beatId: string, reviewId: string, review: Record<string, any> | string) {
+  const { pool } = await import('./db-client.tsx');
+  const rev: any = typeof review === 'string' ? JSON.parse(review) : review;
+  const helpfulUsers = Array.isArray(rev.helpfulUsers) ? rev.helpfulUsers : [];
+  await pool.query(
+    `INSERT INTO beat_reviews
+       (id, beat_id, user_id, user_name, rating, title, review_text,
+        license_type, helpful_count, helpful_users, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
+             COALESCE($11::timestamptz, NOW()), NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       beat_id       = COALESCE(EXCLUDED.beat_id, beat_reviews.beat_id),
+       user_id       = COALESCE(EXCLUDED.user_id, beat_reviews.user_id),
+       user_name     = EXCLUDED.user_name,
+       rating        = EXCLUDED.rating,
+       title         = EXCLUDED.title,
+       review_text   = EXCLUDED.review_text,
+       license_type  = EXCLUDED.license_type,
+       helpful_count = EXCLUDED.helpful_count,
+       helpful_users = EXCLUDED.helpful_users,
+       updated_at    = NOW()`,
+    [
+      reviewId,
+      beatId,
+      rev.userId || null,
+      rev.userName || 'Покупатель',
+      Number(rev.rating || 0),
+      rev.title || '',
+      rev.text || '',
+      rev.licenseType || 'basic',
+      Number(rev.helpful || 0),
+      JSON.stringify(helpfulUsers),
+      rev.createdAt || null,
+    ]
+  );
+}
+
+export async function listBeatReviewsByBeat(beatId: string, opts: { limit?: number; offset?: number } = {}): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
+  const offset = Math.max(opts.offset ?? 0, 0);
+  const r = await pool.query(
+    `SELECT ${BEAT_REVIEW_COLS} FROM beat_reviews
+      WHERE beat_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3`,
+    [beatId, limit, offset]
+  );
+  return r.rows.map(mapBeatReviewRow);
+}
+
+export async function getBeatReviewsAggregateStats(beatId: string): Promise<{
+  total: number; avgRating: number; distribution: Record<number, number>;
+}> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT
+       COUNT(*)::int                                                       AS total,
+       COALESCE(AVG(rating)::numeric, 0)                                   AS avg_rating,
+       COUNT(*) FILTER (WHERE rating = 1)::int                             AS r1,
+       COUNT(*) FILTER (WHERE rating = 2)::int                             AS r2,
+       COUNT(*) FILTER (WHERE rating = 3)::int                             AS r3,
+       COUNT(*) FILTER (WHERE rating = 4)::int                             AS r4,
+       COUNT(*) FILTER (WHERE rating = 5)::int                             AS r5
+     FROM beat_reviews
+     WHERE beat_id = $1`,
+    [beatId]
+  );
+  const row = r.rows[0] || {};
+  return {
+    total: Number(row.total || 0),
+    avgRating: Number(Number(row.avg_rating || 0).toFixed(1)),
+    distribution: {
+      1: Number(row.r1 || 0), 2: Number(row.r2 || 0), 3: Number(row.r3 || 0),
+      4: Number(row.r4 || 0), 5: Number(row.r5 || 0),
+    },
+  };
+}
+
+export async function listAllBeatReviews(): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${BEAT_REVIEW_COLS} FROM beat_reviews ORDER BY created_at DESC`
+  );
+  return r.rows.map(mapBeatReviewRow);
+}
+
+export async function findBeatReviewByUser(beatId: string, userId: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${BEAT_REVIEW_COLS} FROM beat_reviews
+      WHERE beat_id = $1 AND user_id = $2 LIMIT 1`,
+    [beatId, userId]
+  );
+  return r.rowCount ? mapBeatReviewRow(r.rows[0]) : null;
 }
 
 // ─── CCN (Cross-Cabinet Notifications) — native SQL ───
@@ -3264,10 +3727,218 @@ export async function upsertPaymentBalance(userId: string, balance: { available?
 
 // ── Audio Branding stores ──
 
-// ── Production 360 stores ──
-export const production360OrdersStore = jsonbStore('production_360_orders');
-export const production360ByStatusStore = jsonbStore('production_360_by_status');
-export const production360ByArtistStore = jsonbStore('production_360_by_artist');
+// ── Production 360 — row-per-order native cols (migration 059) ──
+// production_360_by_status + production_360_by_artist таблицы DROPPED
+// — derived из native indexes на production_360_orders.status / artist_id.
+// 3 store wrapper'а DELETED. Доступ — типизированные функции ниже.
+
+const P360_ORDER_COLS = `id, artist_id, artist_name, service_type, project_title,
+  project_description, project_goals, target_audience, genre,
+  service_price, addons_total, discount, final_price, estimated_full_price,
+  subscription, status, status_entered_at, current_stage, completed_percentage,
+  estimated_completion, deadline, admin_comment, client_feedback,
+  revision_notes, revision_count, rejection_reason, existing_material,
+  paid_at, approved_date, completed_date,
+  services, addons, "references", stage_progress, assigned_team, files, extra,
+  created_at, updated_at`;
+
+function mapP360OrderRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : undefined);
+  return {
+    id: r.id,
+    artistId: r.artist_id,
+    artistName: r.artist_name,
+    serviceType: r.service_type,
+    projectTitle: r.project_title,
+    projectDescription: r.project_description,
+    projectGoals: r.project_goals || undefined,
+    targetAudience: r.target_audience || undefined,
+    genre: r.genre || undefined,
+    services: r.services || {},
+    addons: r.addons || [],
+    references: r["references"] || [],
+    existingMaterial: r.existing_material || undefined,
+    deadline: iso(r.deadline),
+    servicePrice: Number(r.service_price || 0),
+    addonsTotal: Number(r.addons_total || 0),
+    discount: Number(r.discount || 0),
+    finalPrice: Number(r.final_price || 0),
+    subscription: r.subscription,
+    estimatedFullPrice: r.estimated_full_price !== null && r.estimated_full_price !== undefined
+      ? Number(r.estimated_full_price) : undefined,
+    status: r.status,
+    statusEnteredAt: iso(r.status_entered_at),
+    progress: {
+      currentStage: r.current_stage || 'concept',
+      completedPercentage: Number(r.completed_percentage || 0),
+      stageProgress: r.stage_progress || {},
+      estimatedCompletion: iso(r.estimated_completion),
+    },
+    assignedTeam: r.assigned_team || [],
+    files: r.files || [],
+    adminComment: r.admin_comment || undefined,
+    clientFeedback: r.client_feedback || undefined,
+    revisionNotes: r.revision_notes || undefined,
+    revisionCount: Number(r.revision_count || 0),
+    rejectionReason: r.rejection_reason || undefined,
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+    paidAt: iso(r.paid_at),
+    approvedDate: iso(r.approved_date),
+    completedDate: iso(r.completed_date),
+    ...(r.extra || {}),
+  };
+}
+
+export async function getProduction360Order(id: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${P360_ORDER_COLS} FROM production_360_orders WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return r.rowCount ? mapP360OrderRow(r.rows[0]) : null;
+}
+
+export async function upsertProduction360Order(id: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const extra = { ...value };
+  ['id','artistId','artistName','serviceType','projectTitle','projectDescription',
+   'projectGoals','targetAudience','genre','services','addons','references',
+   'existingMaterial','deadline','servicePrice','addonsTotal','discount',
+   'finalPrice','subscription','estimatedFullPrice','status','statusEnteredAt',
+   'progress','assignedTeam','files','adminComment','clientFeedback',
+   'revisionNotes','revisionCount','rejectionReason','createdAt','updatedAt',
+   'paidAt','approvedDate','completedDate'].forEach(k => delete extra[k]);
+  const progress = value.progress || {};
+  await pool.query(
+    `INSERT INTO production_360_orders (
+       id, artist_id, artist_name, service_type, project_title, project_description,
+       project_goals, target_audience, genre,
+       service_price, addons_total, discount, final_price, estimated_full_price,
+       subscription, status, status_entered_at, current_stage,
+       completed_percentage, estimated_completion, deadline,
+       admin_comment, client_feedback, revision_notes, revision_count,
+       rejection_reason, existing_material, paid_at, approved_date, completed_date,
+       services, addons, "references", stage_progress, assigned_team, files, extra,
+       updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6,
+             $7, $8, $9,
+             $10, $11, $12, $13, $14,
+             $15, $16, $17, $18,
+             $19, $20, $21,
+             $22, $23, $24, $25,
+             $26, $27, $28, $29, $30,
+             $31::jsonb, $32::jsonb, $33::jsonb, $34::jsonb, $35::jsonb, $36::jsonb, $37::jsonb,
+             NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       artist_id            = COALESCE(EXCLUDED.artist_id, production_360_orders.artist_id),
+       artist_name          = EXCLUDED.artist_name,
+       service_type         = EXCLUDED.service_type,
+       project_title        = EXCLUDED.project_title,
+       project_description  = EXCLUDED.project_description,
+       project_goals        = EXCLUDED.project_goals,
+       target_audience      = EXCLUDED.target_audience,
+       genre                = EXCLUDED.genre,
+       service_price        = EXCLUDED.service_price,
+       addons_total         = EXCLUDED.addons_total,
+       discount             = EXCLUDED.discount,
+       final_price          = EXCLUDED.final_price,
+       estimated_full_price = EXCLUDED.estimated_full_price,
+       subscription         = EXCLUDED.subscription,
+       status               = EXCLUDED.status,
+       status_entered_at    = EXCLUDED.status_entered_at,
+       current_stage        = EXCLUDED.current_stage,
+       completed_percentage = EXCLUDED.completed_percentage,
+       estimated_completion = EXCLUDED.estimated_completion,
+       deadline             = EXCLUDED.deadline,
+       admin_comment        = EXCLUDED.admin_comment,
+       client_feedback      = EXCLUDED.client_feedback,
+       revision_notes       = EXCLUDED.revision_notes,
+       revision_count       = EXCLUDED.revision_count,
+       rejection_reason     = EXCLUDED.rejection_reason,
+       existing_material    = EXCLUDED.existing_material,
+       paid_at              = EXCLUDED.paid_at,
+       approved_date        = EXCLUDED.approved_date,
+       completed_date       = EXCLUDED.completed_date,
+       services             = EXCLUDED.services,
+       addons               = EXCLUDED.addons,
+       "references"         = EXCLUDED."references",
+       stage_progress       = EXCLUDED.stage_progress,
+       assigned_team        = EXCLUDED.assigned_team,
+       files                = EXCLUDED.files,
+       extra                = EXCLUDED.extra,
+       updated_at           = NOW()`,
+    [
+      id,
+      value.artistId || null, value.artistName || null, value.serviceType || null,
+      value.projectTitle || null, value.projectDescription || null,
+      value.projectGoals || null, value.targetAudience || null, value.genre || null,
+      Number(value.servicePrice || 0), Number(value.addonsTotal || 0),
+      Number(value.discount || 0), Number(value.finalPrice || 0),
+      value.estimatedFullPrice !== undefined && value.estimatedFullPrice !== null
+        ? Number(value.estimatedFullPrice) : null,
+      value.subscription || 'none',
+      value.status || 'draft',
+      value.statusEnteredAt || null,
+      progress.currentStage || null,
+      Number(progress.completedPercentage || 0),
+      progress.estimatedCompletion || null,
+      value.deadline || null,
+      value.adminComment || null,
+      value.clientFeedback || null,
+      value.revisionNotes || null,
+      Number(value.revisionCount || 0),
+      value.rejectionReason || null,
+      value.existingMaterial || null,
+      value.paidAt || null,
+      value.approvedDate || null,
+      value.completedDate || null,
+      JSON.stringify(value.services || {}),
+      JSON.stringify(Array.isArray(value.addons) ? value.addons : []),
+      JSON.stringify(Array.isArray(value.references) ? value.references : []),
+      JSON.stringify(progress.stageProgress || {}),
+      JSON.stringify(Array.isArray(value.assignedTeam) ? value.assignedTeam : []),
+      JSON.stringify(Array.isArray(value.files) ? value.files : []),
+      JSON.stringify(extra),
+    ]
+  );
+}
+
+export async function deleteProduction360Order(id: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(`DELETE FROM production_360_orders WHERE id = $1`, [id]);
+  return r.rowCount || 0;
+}
+
+export async function listProduction360OrdersByArtist(artistId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${P360_ORDER_COLS} FROM production_360_orders
+      WHERE artist_id = $1 ORDER BY created_at DESC`,
+    [artistId]
+  );
+  return r.rows.map(mapP360OrderRow);
+}
+
+export async function listProduction360OrdersByStatus(statuses: string[]): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${P360_ORDER_COLS} FROM production_360_orders
+      WHERE status = ANY($1::text[]) ORDER BY created_at DESC`,
+    [statuses]
+  );
+  return r.rows.map(mapP360OrderRow);
+}
+
+export async function listAllProduction360Orders(): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${P360_ORDER_COLS} FROM production_360_orders ORDER BY created_at DESC`
+  );
+  return r.rows.map(mapP360OrderRow);
+}
 
 // ── Promo.Air AI DJ stores ──
 export const promoAirDjScriptsStore = jsonbStore('promo_air_dj_scripts');

@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { pool } from './db-client.tsx';
-import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, beatReviewsStore, chartSourcesStore, concertAgentStore, investorInquiriesStore, newsPublicStore, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer, radioAnalyticsStore } from './db.tsx';
+import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, chartSourcesStore, investorInquiriesStore, newsPublicStore, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer, radioAnalyticsStore } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { sanitizeString, sanitizeUrl } from './security.tsx';
@@ -945,9 +945,9 @@ landing.get('/concerts', async (c) => {
 
     // 2. External concerts from concert-agent (KudaGo etc.)
     try {
-      const agentConcerts = await concertAgentStore.getAll();
+      // Native idx_concerts_published_date — filter в SQL, не JS.
+      const agentConcerts = await listConcertAgentItems({ status: 'published' });
       const mapped = agentConcerts
-        .filter((c: any) => c && c.status === 'published')
         .map((c: any) => ({
           id: c.id,
           title: c.title || '',
@@ -1290,9 +1290,8 @@ landing.get('/producer-profile/:id', async (c) => {
 
 landing.get('/producer-reviews/:producerId', async (c) => {
   try {
-    const allReviews = await beatReviewsStore.getAll();
-    const reviews = allReviews.filter((r: any) => r && r.id)
-      .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    // listAllBeatReviews уже sorted DESC by created_at в SQL.
+    const reviews = await listAllBeatReviews();
     return c.json({ success: true, data: reviews });
   } catch (error) {
     return c.json({ success: true, data: [] });

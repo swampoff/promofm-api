@@ -23,9 +23,9 @@
 import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
 import {
-  production360OrdersStore,
-  production360ByStatusStore,
-  production360ByArtistStore,
+  getProduction360Order, upsertProduction360Order, deleteProduction360Order,
+  listProduction360OrdersByArtist, listProduction360OrdersByStatus,
+  listAllProduction360Orders,
 } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
@@ -169,15 +169,9 @@ function notifyAdmin(order: Production360Order, step: string, details?: string) 
   });
 }
 
-async function updateStatusIndex(orderId: string, oldStatus: string, newStatus: string) {
-  const oldList: string[] = await production360ByStatusStore.get(oldStatus) || [];
-  await production360ByStatusStore.set(oldStatus, oldList.filter(id => id !== orderId));
-  const newList: string[] = await production360ByStatusStore.get(newStatus) || [];
-  if (!newList.includes(orderId)) {
-    newList.push(orderId);
-    await production360ByStatusStore.set(newStatus, newList);
-  }
-}
+// updateStatusIndex DELETED — после migration 059 status это native col
+// с index idx_p360_status_created. Изменение через upsertProduction360Order
+// автоматически обновляет index без отдельного write.
 
 function defaultStageProgress(): Record<ProductionStage, number> {
   return { concept: 0, recording: 0, mixing: 0, video_production: 0, distribution: 0, promotion: 0 };
@@ -262,16 +256,9 @@ app.post('/orders', requireAuth, async (c) => {
       updatedAt: now,
     };
 
-    await production360OrdersStore.set(orderId, order);
-
-    // Index
-    const artistOrders: string[] = await production360ByArtistStore.get(artistId) || [];
-    artistOrders.push(orderId);
-    await production360ByArtistStore.set(artistId, artistOrders);
-
-    const draftList: string[] = await production360ByStatusStore.get('draft') || [];
-    draftList.push(orderId);
-    await production360ByStatusStore.set('draft', draftList);
+    // Single INSERT — раньше делалось 3 write'а (order + by_artist index + by_status index)
+    // без транзакции. Native indexes (artist_id, status) auto-syncуются.
+    await upsertProduction360Order(orderId, order);
 
     logAudit({
       pipeline_type: 'production_360',
@@ -327,41 +314,21 @@ app.get('/orders', requireAuth, async (c) => {
     const artistId = c.req.query('artistId');
     const status = c.req.query('status');
 
-    let orderIds: string[] = [];
-
+    // Native indexes (idx_p360_artist_created, idx_p360_status_created) —
+    // single SQL query взамен «get-index-ids + N+1 store.get loop».
+    let orders: Production360Order[];
     if (role === 'admin') {
-      if (status) {
-        orderIds = await production360ByStatusStore.get(status) || [];
-      } else {
-        const allStatuses = [
-          'draft', 'pending_payment', 'paid', 'pending_review', 'rejected', 'approved',
-          'concept', 'recording', 'mixing', 'video_production', 'distribution', 'promotion',
-          'ready_for_review', 'revision', 'client_approved', 'completed', 'cancelled',
-        ];
-        for (const s of allStatuses) {
-          const ids = await production360ByStatusStore.get(s) || [];
-          orderIds.push(...ids);
-        }
-      }
+      orders = status
+        ? await listProduction360OrdersByStatus([status])
+        : await listAllProduction360Orders();
     } else if (artistId) {
-      orderIds = await production360ByArtistStore.get(artistId) || [];
+      orders = await listProduction360OrdersByArtist(artistId);
+      if (status) orders = orders.filter(o => o.status === status);
     } else {
       return c.json({ success: false, error: 'artistId or role=admin required' }, 400);
     }
 
-    const orders: Production360Order[] = [];
-    for (const id of orderIds) {
-      const order = await production360OrdersStore.get(id);
-      if (order) orders.push(order);
-    }
-
-    const filtered = status && role !== 'admin'
-      ? orders.filter(o => o.status === status)
-      : orders;
-
-    filtered.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-    const withSla = filtered.map(order => ({
+    const withSla = orders.map(order => ({
       ...order,
       sla: calculateSLA('production_360', order.id, order.status, order.statusEnteredAt),
     }));
@@ -380,7 +347,7 @@ app.get('/orders', requireAuth, async (c) => {
 app.get('/orders/:id', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
-    const order = await production360OrdersStore.get(orderId) as Production360Order | null;
+    const order = await getProduction360Order(orderId) as Production360Order | null;
     if (!order) return c.json({ success: false, error: 'Project not found' }, 404);
 
     const sla = calculateSLA('production_360', order.id, order.status, order.statusEnteredAt);
@@ -397,7 +364,7 @@ app.get('/orders/:id', requireAuth, async (c) => {
 app.post('/orders/:id/pay', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
-    const order = await production360OrdersStore.get(orderId) as Production360Order | null;
+    const order = await getProduction360Order(orderId) as Production360Order | null;
     if (!order) return c.json({ success: false, error: 'Project not found' }, 404);
 
     const userId = c.get('userId');
@@ -411,8 +378,8 @@ app.post('/orders/:id/pay', requireAuth, async (c) => {
       order.status = 'pending_payment';
       order.statusEnteredAt = new Date().toISOString();
       order.updatedAt = new Date().toISOString();
-      await updateStatusIndex(orderId, 'draft', 'pending_payment');
-      await production360OrdersStore.set(orderId, order);
+      // updateStatusIndex DELETED — status native col auto-syncуется через upsert.
+      await upsertProduction360Order(orderId, order);
     }
 
     if (order.status !== 'pending_payment') {
@@ -490,7 +457,7 @@ app.post('/orders/:id/transition', requireAuth, async (c) => {
       return c.json({ success: false, error: 'toStatus and actorId required' }, 400);
     }
 
-    const order = await production360OrdersStore.get(orderId) as Production360Order | null;
+    const order = await getProduction360Order(orderId) as Production360Order | null;
     if (!order) return c.json({ success: false, error: 'Project not found' }, 404);
 
     const result = executeTransition({
@@ -528,8 +495,7 @@ app.post('/orders/:id/transition', requireAuth, async (c) => {
     if (toStatus === 'rejected' && rejectionReason) order.rejectionReason = rejectionReason;
     if (assignTeam && Array.isArray(assignTeam)) order.assignedTeam = assignTeam;
 
-    await updateStatusIndex(orderId, oldStatus, toStatus);
-    await production360OrdersStore.set(orderId, order);
+    await upsertProduction360Order(orderId, order);
 
     notifyClient(order, toStatus === 'completed' ? 'Проект завершён!' : `Статус: ${toStatus}`);
 
@@ -554,7 +520,7 @@ app.post('/orders/:id/progress', requireAuth, async (c) => {
       return c.json({ success: false, error: 'stage, percentage, actorId required' }, 400);
     }
 
-    const order = await production360OrdersStore.get(orderId) as Production360Order | null;
+    const order = await getProduction360Order(orderId) as Production360Order | null;
     if (!order) return c.json({ success: false, error: 'Project not found' }, 404);
 
     const pct = Math.max(0, Math.min(100, parseInt(percentage)));
@@ -563,7 +529,7 @@ app.post('/orders/:id/progress', requireAuth, async (c) => {
     if (estimatedCompletion) order.progress.estimatedCompletion = estimatedCompletion;
     order.updatedAt = new Date().toISOString();
 
-    await production360OrdersStore.set(orderId, order);
+    await upsertProduction360Order(orderId, order);
 
     logAudit({
       pipeline_type: 'production_360',
@@ -600,7 +566,7 @@ app.post('/orders/:id/revision', requireAuth, async (c) => {
       return c.json({ success: false, error: 'artistId and revisionNotes required' }, 400);
     }
 
-    const order = await production360OrdersStore.get(orderId) as Production360Order | null;
+    const order = await getProduction360Order(orderId) as Production360Order | null;
     if (!order) return c.json({ success: false, error: 'Project not found' }, 404);
 
     if (order.artistId !== artistId) {
@@ -626,14 +592,14 @@ app.post('/orders/:id/revision', requireAuth, async (c) => {
     if (!result.success) return c.json({ success: false, error: result.error }, 400);
 
     const now = new Date().toISOString();
-    await updateStatusIndex(orderId, order.status, 'revision');
+    // status='revision' будет применён через upsert ниже.
     order.status = 'revision';
     order.statusEnteredAt = now;
     order.updatedAt = now;
     order.revisionNotes = revisionNotes;
     order.revisionCount += 1;
     order.clientFeedback = revisionNotes;
-    await production360OrdersStore.set(orderId, order);
+    await upsertProduction360Order(orderId, order);
 
     notifyAdmin(order, 'Доработка', `${order.artistName} запросил доработку (#${order.revisionCount}): ${revisionNotes.slice(0, 100)}`);
 
@@ -655,7 +621,7 @@ app.post('/orders/:id/approve', requireAuth, async (c) => {
 
     if (!artistId) return c.json({ success: false, error: 'artistId required' }, 400);
 
-    const order = await production360OrdersStore.get(orderId) as Production360Order | null;
+    const order = await getProduction360Order(orderId) as Production360Order | null;
     if (!order) return c.json({ success: false, error: 'Project not found' }, 404);
 
     if (order.artistId !== artistId) {
@@ -681,12 +647,12 @@ app.post('/orders/:id/approve', requireAuth, async (c) => {
     if (!result.success) return c.json({ success: false, error: result.error }, 400);
 
     const now = new Date().toISOString();
-    await updateStatusIndex(orderId, order.status, 'client_approved');
+    // status='client_approved' будет применён через upsert ниже.
     order.status = 'client_approved';
     order.statusEnteredAt = now;
     order.updatedAt = now;
     if (feedback) order.clientFeedback = feedback;
-    await production360OrdersStore.set(orderId, order);
+    await upsertProduction360Order(orderId, order);
 
     notifyAdmin(order, 'Утверждён артистом', `${order.artistName} утвердил проект «${order.projectTitle}»`);
 
@@ -710,7 +676,7 @@ app.post('/orders/:id/upload', requireAuth, async (c) => {
       return c.json({ success: false, error: 'fileUrl and actorId required' }, 400);
     }
 
-    const order = await production360OrdersStore.get(orderId) as Production360Order | null;
+    const order = await getProduction360Order(orderId) as Production360Order | null;
     if (!order) return c.json({ success: false, error: 'Project not found' }, 404);
 
     order.files.push({
@@ -721,7 +687,7 @@ app.post('/orders/:id/upload', requireAuth, async (c) => {
       description,
     });
     order.updatedAt = new Date().toISOString();
-    await production360OrdersStore.set(orderId, order);
+    await upsertProduction360Order(orderId, order);
 
     logAudit({
       pipeline_type: 'production_360',
@@ -751,20 +717,16 @@ app.post('/orders/:id/upload', requireAuth, async (c) => {
 app.delete('/orders/:id', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
-    const order = await production360OrdersStore.get(orderId) as Production360Order | null;
+    const order = await getProduction360Order(orderId) as Production360Order | null;
     if (!order) return c.json({ success: false, error: 'Project not found' }, 404);
 
     if (order.paidAt) {
       return c.json({ success: false, error: 'Нельзя удалить оплаченный проект' }, 400);
     }
 
-    await production360OrdersStore.del(orderId);
-
-    const artistOrders: string[] = await production360ByArtistStore.get(order.artistId) || [];
-    await production360ByArtistStore.set(order.artistId, artistOrders.filter(id => id !== orderId));
-
-    const statusList: string[] = await production360ByStatusStore.get(order.status) || [];
-    await production360ByStatusStore.set(order.status, statusList.filter(id => id !== orderId));
+    // Atomic DELETE — раньше делалось 3 write'а (main + 2 index'а).
+    // Native indexes (by_artist, by_status) auto-syncуются при удалении row.
+    await deleteProduction360Order(orderId);
 
     logAudit({
       pipeline_type: 'production_360',
@@ -790,27 +752,27 @@ app.delete('/orders/:id', requireAuth, async (c) => {
 
 app.get('/stats', requireAuth, async (c) => {
   try {
-    const allStatuses = [
-      'draft', 'pending_payment', 'paid', 'pending_review', 'rejected', 'approved',
-      'concept', 'recording', 'mixing', 'video_production', 'distribution', 'promotion',
-      'ready_for_review', 'revision', 'client_approved', 'completed', 'cancelled',
-    ];
-
+    // SQL aggregation вместо N+1 (раньше: get index per status + per-order
+    // fetch для total revenue). Single round-trip.
+    const { pool: p360Pool } = await import('./db-client.tsx');
+    const aggQ = p360Pool.query(
+      `SELECT status, COUNT(*)::int AS n,
+              COALESCE(SUM(final_price) FILTER (WHERE status = 'completed'), 0) AS revenue_completed
+         FROM production_360_orders
+        GROUP BY status`
+    );
+    const totalQ = p360Pool.query(
+      `SELECT COUNT(*)::int AS total,
+              COALESCE(SUM(final_price) FILTER (WHERE status = 'completed'), 0) AS total_revenue
+         FROM production_360_orders`
+    );
+    const [agg, totals] = await Promise.all([aggQ, totalQ]);
     const stats: Record<string, number> = {};
-    let total = 0;
-    let totalRevenue = 0;
-
-    for (const status of allStatuses) {
-      const ids: string[] = await production360ByStatusStore.get(status) || [];
-      stats[status] = ids.length;
-      total += ids.length;
+    for (const row of agg.rows) {
+      stats[row.status] = Number(row.n || 0);
     }
-
-    const completedIds: string[] = await production360ByStatusStore.get('completed') || [];
-    for (const id of completedIds) {
-      const order = await production360OrdersStore.get(id) as Production360Order | null;
-      if (order) totalRevenue += order.finalPrice;
-    }
+    const total = Number(totals.rows[0]?.total || 0);
+    const totalRevenue = Number(totals.rows[0]?.total_revenue || 0);
 
     const productionStatuses = ['concept', 'recording', 'mixing', 'video_production', 'distribution', 'promotion'];
     const inProduction = productionStatuses.reduce((sum, s) => sum + (stats[s] || 0), 0);
