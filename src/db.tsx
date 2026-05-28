@@ -2383,7 +2383,9 @@ export const paymentBalancesStore = jsonbStore('payment_balances', 'user_id');
 // dj_marketplace_index, dj_collaborations, dj_pitches — 0 callers;
 // dj_reviews / dj_editor_profiles используются напрямую через
 // pool.query / db().from(), store-helper не нужен.
-export const djMixesStore = jsonbStore('dj_mixes', 'dj_id');
+// djMixesStore — DROPPED (0 callers; migration 046 promoted dj_mixes to
+// native cols. Доступ — напрямую через pool.query в dj-marketplace-routes.tsx
+// и других местах).
 // dj_calendar таблица + декларация удалены (migration 040). Был zombie
 // код, 0 callers — DJ-календарь как фича не реализован.
 // djNotificationsStore + djCampaignsStore — dead imports (0 method
@@ -2499,7 +2501,9 @@ export const radioTransactionsStore = jsonbStore('radio_transactions', 'radio_id
 export const venueAdCampaignsStore = jsonbStore('venue_ad_campaigns', 'venue_id');
 export const venueAnalyticsStore = jsonbStore('venue_analytics', 'venue_id');
 export const venueRadioBrandStore = jsonbStore('venue_radio_brand', 'venue_id');
-export const ticketProvidersStore = jsonbStore('ticket_providers');
+// ticketProvidersStore — DROPPED (0 callers; ticket_providers доступ
+// через `upsertTicketProvider` + `getTicketProvidersByConcert` функции
+// в db.tsx + ticketing-routes.tsx).
 export const ticketSalesStore = jsonbStore('ticket_sales');
 // track_test_requests — row-per-request, native cols since migration 051.
 // Interface (.get / .set / .del / .getAll) preserved для совместимости
@@ -2527,7 +2531,9 @@ export const agentSessionsIndexStore = jsonbStore('agent_sessions_index');
 // Доступ — через getNotificationCampaign / listNotificationCampaigns /
 // upsertNotificationCampaign / deleteNotificationCampaign helpers (см.
 // блок "Notification Campaigns" ниже).
-export const notificationSettingsKvStore = jsonbStore('notification_settings', 'user_id');
+// notificationSettingsKvStore — DROPPED (0 callers; notification_settings
+// доступ через `getNotificationSettings` / `upsertNotificationSettings`
+// функции в db.tsx).
 export const systemConfigStore = jsonbStore('system_config', 'key');
 // accountingStore — split на 5 native таблиц (migration 055):
 //   accounting_reports / accounting_documents / accounting_ledger /
@@ -2535,7 +2541,8 @@ export const systemConfigStore = jsonbStore('system_config', 'key');
 //   через pool.query в payments-routes.tsx. accounting_data таблица
 //   оставлена на проде для legacy non-accounting:* keys (если есть).
 export const guideDataStore = jsonbStore('promo_guide_data', 'key');
-export const elevenlabsStore = jsonbStore('elevenlabs_config');
+// elevenlabsStore — DROPPED (0 callers AND 0 direct refs к elevenlabs_config
+// таблице. Кандидат на DROP TABLE после ручной проверки laptop'ом).
 export const platformRevenueLogStore = jsonbStore('platform_revenue_log');
 export const platformStatsStore = jsonbStore('platform_stats', 'id');
 export const trackTestExpertStatsStore = jsonbStore('track_test_expert_stats', 'expert_id');
@@ -2543,9 +2550,11 @@ export const trackTestExpertStatsStore = jsonbStore('track_test_expert_stats', '
 // напрямую через pool.query в src/ai-check.tsx (после migration 052 —
 // все native cols, jsonb остаётся только в ai_check_result).
 export const newsPublicStore = jsonbStore('news_public');
-export const contactFormsStore = jsonbStore('contact_forms');
+// contactFormsStore — DROPPED (0 callers; `contact_forms` table читается
+// напрямую через pool.query в landing-data-routes.tsx).
 export const investorInquiriesStore = jsonbStore('investor_inquiries');
-export const djEditorProfileStore = jsonbStore('dj_editor_profiles', 'user_id');
+// djEditorProfileStore — DROPPED (0 callers; `dj_editor_profiles` доступ
+// напрямую через pool.query).
 export const concertAgentStore = jsonbStore('concert_agent_data');
 export const curatorReportsStore = jsonbStore('curator_reports');
 export const verificationTokensStore = jsonbStore('verification_tokens');
