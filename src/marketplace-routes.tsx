@@ -52,7 +52,16 @@
 
 import { Hono } from 'hono';
 import { pool as mpPool } from './db-client.tsx';
-import { deleteBeat, getBeat, getBeatReview, getBeats, upsertBeat, upsertBeatReview, upsertNotification, beatFavoritesStore, beatReviewsIndexStore, contractsStore, digitalGoodsStore, platformRevenueLogStore, platformStatsStore, producerServicesStore, serviceOrdersByClientStore, serviceOrdersByProducerStore, serviceOrdersStore } from './db.tsx';
+import {
+  deleteBeat, getBeat, getBeats, upsertBeat, upsertNotification,
+  // beat_reviews (native cols since migration 060):
+  getBeatReview, upsertBeatReview, listBeatReviewsByBeat,
+  getBeatReviewsAggregateStats, findBeatReviewByUser,
+  beatFavoritesStore, contractsStore, digitalGoodsStore,
+  platformRevenueLogStore, platformStatsStore,
+  producerServicesStore, serviceOrdersByClientStore,
+  serviceOrdersByProducerStore, serviceOrdersStore,
+} from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { getRevenueStats, recordRevenue } from './platform-revenue.tsx';
 
@@ -599,42 +608,20 @@ app.get('/beats/:id/reviews', async (c) => {
     const limit = Math.min(Number(c.req.query('limit') || 50), 100);
     const offset = Number(c.req.query('offset') || 0);
 
-    const indexRaw = await beatReviewsIndexStore.get(beatId);
-    const reviewIds: string[] = indexRaw
-      ? (typeof indexRaw === 'string' ? JSON.parse(indexRaw) : indexRaw)
-      : [];
-
-    const total = reviewIds.length;
-    const paged = reviewIds.slice(offset, offset + limit);
-
-    const reviews: any[] = [];
-    for (const rid of paged) {
-      const r = await getBeatReview(beatId, rid);
-      if (r) reviews.push(typeof r === 'string' ? JSON.parse(r) : r);
-    }
-
-    // Aggregate stats
-    const allReviews: any[] = [];
-    for (const rid of reviewIds) {
-      const r = await getBeatReview(beatId, rid);
-      if (r) allReviews.push(typeof r === 'string' ? JSON.parse(r) : r);
-    }
-    const avgRating = allReviews.length > 0
-      ? +(allReviews.reduce((s, r) => s + (r.rating || 0), 0) / allReviews.length).toFixed(1)
-      : 0;
-    const ratingDistribution: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-    allReviews.forEach(r => {
-      const star = Math.min(5, Math.max(1, Math.round(r.rating || 0)));
-      ratingDistribution[star] = (ratingDistribution[star] || 0) + 1;
-    });
+    // Native idx_beat_reviews_beat_created + SQL aggregation —
+    // 2 SELECT'а взамен «get index → N+1 reads → JS aggregate».
+    const [reviews, stats] = await Promise.all([
+      listBeatReviewsByBeat(beatId, { limit, offset }),
+      getBeatReviewsAggregateStats(beatId),
+    ]);
 
     return c.json({
       success: true,
       data: {
         reviews,
-        stats: { total, avgRating, distribution: ratingDistribution },
+        stats: { total: stats.total, avgRating: stats.avgRating, distribution: stats.distribution },
       },
-      pagination: { total, limit, offset, hasMore: offset + limit < total },
+      pagination: { total: stats.total, limit, offset, hasMore: offset + limit < stats.total },
     });
   } catch (error) {
     console.log('GET /beats/:id/reviews error:', error);
@@ -679,20 +666,11 @@ app.post('/beats/:id/review', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Only buyers can leave reviews' }, 403);
     }
 
-    // Проверить, не оставлял ли уже отзыв
-    const indexRaw = await beatReviewsIndexStore.get(beatId);
-    const reviewIds: string[] = indexRaw
-      ? (typeof indexRaw === 'string' ? JSON.parse(indexRaw) : indexRaw)
-      : [];
-
-    for (const rid of reviewIds) {
-      const existing = await getBeatReview(beatId, rid);
-      if (existing) {
-        const rev = typeof existing === 'string' ? JSON.parse(existing) : existing;
-        if (rev.userId === userId) {
-          return c.json({ success: false, error: 'You already reviewed this beat' }, 409);
-        }
-      }
+    // DB-level dedup: UNIQUE (beat_id, user_id) constraint (migration 060)
+    // ловит 2 concurrent отзыва от одного user'а. Pre-check для friendly 409.
+    const existingByUser = await findBeatReviewByUser(beatId, userId);
+    if (existingByUser) {
+      return c.json({ success: false, error: 'You already reviewed this beat' }, 409);
     }
 
     // Создать отзыв
@@ -710,26 +688,20 @@ app.post('/beats/:id/review', requireAuth, async (c) => {
       createdAt: nowIso(),
     };
 
-    await upsertBeatReview(beatId, reviewId, JSON.stringify(review));
-
-    // Обновить индекс (новые сверху)
-    reviewIds.unshift(reviewId);
-    await beatReviewsIndexStore.set(beatId, JSON.stringify(reviewIds));
-
-    // Пересчитать рейтинг бита
-    const allRatings: number[] = [];
-    for (const rid of reviewIds) {
-      const r = await getBeatReview(beatId, rid);
-      if (r) {
-        const rev = typeof r === 'string' ? JSON.parse(r) : r;
-        allRatings.push(rev.rating || 0);
+    try {
+      await upsertBeatReview(beatId, reviewId, review);
+    } catch (e: any) {
+      // UNIQUE constraint violation (concurrent insert) — race protection.
+      if (String(e?.message || '').includes('uq_beat_reviews_beat_user')) {
+        return c.json({ success: false, error: 'You already reviewed this beat' }, 409);
       }
+      throw e;
     }
-    const newAvg = allRatings.length > 0
-      ? +(allRatings.reduce((a, b) => a + b, 0) / allRatings.length).toFixed(1)
-      : 0;
-    beat.rating = newAvg;
-    beat.reviewsCount = allRatings.length;
+
+    // Single SQL aggregate взамен loop через index + N+1 reads.
+    const stats = await getBeatReviewsAggregateStats(beatId);
+    beat.rating = stats.avgRating;
+    beat.reviewsCount = stats.total;
     await upsertBeat(beatId, JSON.stringify(beat));
 
     // SSE уведомление продюсеру
@@ -745,8 +717,8 @@ app.post('/beats/:id/review', requireAuth, async (c) => {
       success: true,
       data: {
         review,
-        newRating: newAvg,
-        totalReviews: allRatings.length,
+        newRating: stats.avgRating,
+        totalReviews: stats.total,
         message: 'Отзыв успешно опубликован',
       },
     });
@@ -768,11 +740,12 @@ app.post('/beats/:id/reviews/:reviewId/helpful', requireAuth, async (c) => {
 
     if (!userId) return c.json({ success: false, error: 'Authorization required' }, 401);
 
-    const raw = await getBeatReview(beatId, reviewId);
-    if (!raw) return c.json({ success: false, error: 'Review not found' }, 404);
-    const review = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const review = await getBeatReview(beatId, reviewId);
+    if (!review) return c.json({ success: false, error: 'Review not found' }, 404);
 
-    // Toggle helpful
+    // Toggle helpful — get-modify-set остаётся (jsonb массив helpful_users
+    // в native col). Race remaining: 2 concurrent vote'а могут потерять
+    // друг друга. Acceptable для helpful counter (не критический).
     const helpfulUsers: string[] = review.helpfulUsers || [];
     const idx = helpfulUsers.indexOf(userId);
     if (idx === -1) {
@@ -784,7 +757,7 @@ app.post('/beats/:id/reviews/:reviewId/helpful', requireAuth, async (c) => {
     }
     review.helpfulUsers = helpfulUsers;
 
-    await upsertBeatReview(beatId, reviewId, JSON.stringify(review));
+    await upsertBeatReview(beatId, reviewId, review);
 
     return c.json({
       success: true,

@@ -2181,8 +2181,10 @@ function makeRadioRequestArrayStore(
 // ─── Store instances for all tables ───
 
 export const beatFavoritesStore = jsonbStore('beat_favorites', 'user_id');
-export const beatReviewsStore = jsonbStore('beat_reviews');
-export const beatReviewsIndexStore = jsonbStore('beat_reviews_index', 'beat_id');
+// beat_reviews — native cols + UNIQUE (beat_id, user_id) since migration 060.
+// beat_reviews_index DROPPED — derived через idx_beat_reviews_beat_created.
+// 2 store wrappers DELETED. Доступ — getBeatReview / upsertBeatReview /
+// listBeatReviewsByBeat / getBeatReviewsAggregateStats ниже.
 export const contractsStore = jsonbStore('contracts');
 export const digitalGoodsStore = jsonbStore('digital_goods');
 export const producerSettingsStore = jsonbStore('producer_settings', 'user_id');
@@ -2687,23 +2689,141 @@ export async function upsertTicketSale(concertId: string, saleId: string, sale: 
   if (error) console.error('[db] upsertTicketSale:', error);
 }
 
-// ─── Beat Reviews (compound key: beatId:userId) ───
+// ─── Beat Reviews (native cols since migration 060) ───
+// PK = review.id (TEXT, format 'brev-...'). UNIQUE (beat_id, user_id) —
+// DB-level constraint предотвращает 2 отзыва от одного user'а на 1 beat.
 
-export async function getBeatReview(beatId: string, userId: string) {
-  const { data, error } = await db()
-    .from('beat_reviews')
-    .select('*')
-    .eq('id', `${beatId}:${userId}`)
-    .maybeSingle();
-  if (error) console.error('[db] getBeatReview:', error);
-  return data ? (data.data ?? data) : null;
+const BEAT_REVIEW_COLS = `id, beat_id, user_id, user_name, rating, title,
+  review_text, license_type, helpful_count, helpful_users,
+  created_at, updated_at`;
+
+function mapBeatReviewRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: r.id,
+    beatId: r.beat_id,
+    userId: r.user_id,
+    userName: r.user_name || 'Покупатель',
+    rating: Number(r.rating || 0),
+    title: r.title || '',
+    text: r.review_text || '',
+    licenseType: r.license_type || 'basic',
+    helpful: Number(r.helpful_count || 0),
+    helpfulUsers: r.helpful_users || [],
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+  };
 }
 
-export async function upsertBeatReview(beatId: string, userId: string, review: Record<string, any>) {
-  const { error } = await db()
-    .from('beat_reviews')
-    .upsert({ id: `${beatId}:${userId}`, beat_id: beatId, user_id: userId, data: review, updated_at: new Date().toISOString() }, { onConflict: 'id' });
-  if (error) console.error('[db] upsertBeatReview:', error);
+// Legacy signature preserved: getBeatReview(beatId, reviewId) — callers
+// в marketplace-routes.tsx уже передают reviewId (несмотря на парам name).
+// id = review id (TEXT 'brev-...'). beatId — для belt-and-suspenders проверки.
+export async function getBeatReview(beatId: string, reviewId: string) {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${BEAT_REVIEW_COLS} FROM beat_reviews
+      WHERE id = $1 AND beat_id = $2 LIMIT 1`,
+    [reviewId, beatId]
+  );
+  return r.rowCount ? mapBeatReviewRow(r.rows[0]) : null;
+}
+
+export async function upsertBeatReview(beatId: string, reviewId: string, review: Record<string, any> | string) {
+  const { pool } = await import('./db-client.tsx');
+  const rev: any = typeof review === 'string' ? JSON.parse(review) : review;
+  const helpfulUsers = Array.isArray(rev.helpfulUsers) ? rev.helpfulUsers : [];
+  await pool.query(
+    `INSERT INTO beat_reviews
+       (id, beat_id, user_id, user_name, rating, title, review_text,
+        license_type, helpful_count, helpful_users, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
+             COALESCE($11::timestamptz, NOW()), NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       beat_id       = COALESCE(EXCLUDED.beat_id, beat_reviews.beat_id),
+       user_id       = COALESCE(EXCLUDED.user_id, beat_reviews.user_id),
+       user_name     = EXCLUDED.user_name,
+       rating        = EXCLUDED.rating,
+       title         = EXCLUDED.title,
+       review_text   = EXCLUDED.review_text,
+       license_type  = EXCLUDED.license_type,
+       helpful_count = EXCLUDED.helpful_count,
+       helpful_users = EXCLUDED.helpful_users,
+       updated_at    = NOW()`,
+    [
+      reviewId,
+      beatId,
+      rev.userId || null,
+      rev.userName || 'Покупатель',
+      Number(rev.rating || 0),
+      rev.title || '',
+      rev.text || '',
+      rev.licenseType || 'basic',
+      Number(rev.helpful || 0),
+      JSON.stringify(helpfulUsers),
+      rev.createdAt || null,
+    ]
+  );
+}
+
+export async function listBeatReviewsByBeat(beatId: string, opts: { limit?: number; offset?: number } = {}): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
+  const offset = Math.max(opts.offset ?? 0, 0);
+  const r = await pool.query(
+    `SELECT ${BEAT_REVIEW_COLS} FROM beat_reviews
+      WHERE beat_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3`,
+    [beatId, limit, offset]
+  );
+  return r.rows.map(mapBeatReviewRow);
+}
+
+export async function getBeatReviewsAggregateStats(beatId: string): Promise<{
+  total: number; avgRating: number; distribution: Record<number, number>;
+}> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT
+       COUNT(*)::int                                                       AS total,
+       COALESCE(AVG(rating)::numeric, 0)                                   AS avg_rating,
+       COUNT(*) FILTER (WHERE rating = 1)::int                             AS r1,
+       COUNT(*) FILTER (WHERE rating = 2)::int                             AS r2,
+       COUNT(*) FILTER (WHERE rating = 3)::int                             AS r3,
+       COUNT(*) FILTER (WHERE rating = 4)::int                             AS r4,
+       COUNT(*) FILTER (WHERE rating = 5)::int                             AS r5
+     FROM beat_reviews
+     WHERE beat_id = $1`,
+    [beatId]
+  );
+  const row = r.rows[0] || {};
+  return {
+    total: Number(row.total || 0),
+    avgRating: Number(Number(row.avg_rating || 0).toFixed(1)),
+    distribution: {
+      1: Number(row.r1 || 0), 2: Number(row.r2 || 0), 3: Number(row.r3 || 0),
+      4: Number(row.r4 || 0), 5: Number(row.r5 || 0),
+    },
+  };
+}
+
+export async function listAllBeatReviews(): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${BEAT_REVIEW_COLS} FROM beat_reviews ORDER BY created_at DESC`
+  );
+  return r.rows.map(mapBeatReviewRow);
+}
+
+export async function findBeatReviewByUser(beatId: string, userId: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${BEAT_REVIEW_COLS} FROM beat_reviews
+      WHERE beat_id = $1 AND user_id = $2 LIMIT 1`,
+    [beatId, userId]
+  );
+  return r.rowCount ? mapBeatReviewRow(r.rows[0]) : null;
 }
 
 // ─── CCN (Cross-Cabinet Notifications) — native SQL ───

@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { pool } from './db-client.tsx';
-import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, beatReviewsStore, chartSourcesStore, concertAgentStore, contactFormsStore, investorInquiriesStore, newsPublicStore, paymentBalancesStore, platformStatsStore, producerServicesStore, radioAnalyticsStore, serviceOrdersByProducerStore } from './db.tsx';
+import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, chartSourcesStore, concertAgentStore, contactFormsStore, investorInquiriesStore, newsPublicStore, paymentBalancesStore, platformStatsStore, producerServicesStore, radioAnalyticsStore, serviceOrdersByProducerStore } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { sanitizeString, sanitizeUrl } from './security.tsx';
@@ -1294,9 +1294,8 @@ landing.get('/producer-profile/:id', async (c) => {
 
 landing.get('/producer-reviews/:producerId', async (c) => {
   try {
-    const allReviews = await beatReviewsStore.getAll();
-    const reviews = allReviews.filter((r: any) => r && r.id)
-      .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    // listAllBeatReviews уже sorted DESC by created_at в SQL.
+    const reviews = await listAllBeatReviews();
     return c.json({ success: true, data: reviews });
   } catch (error) {
     return c.json({ success: true, data: [] });
