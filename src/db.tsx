@@ -2712,8 +2712,174 @@ export const newsPublicStore = jsonbStore('news_public');
 // напрямую через pool.query в landing-data-routes.tsx).
 export const investorInquiriesStore = jsonbStore('investor_inquiries');
 // djEditorProfileStore — DROPPED (0 callers; `dj_editor_profiles` доступ
-// напрямую через pool.query).
-export const concertAgentStore = jsonbStore('concert_agent_data');
+// напрямую через pool.query). DO NOT re-add (was previously removed by #73
+// dead-stores cleanup).
+//
+// concert_agent_data — native cols (migration 067, renumbered from 061
+// pre-rebase). Store DELETED. Доступ — типизированные функции ниже.
+
+const CONCERT_AGENT_COLS = `id, source_id, source_name, title, artist, venue,
+  city, event_date, event_time, price, ticket_url, image_url, description,
+  genre, status, extra, created_at, updated_at`;
+
+function mapConcertAgentRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  // event_date is DATE — return as 'YYYY-MM-DD' string.
+  const dateStr = r.event_date instanceof Date
+    ? r.event_date.toISOString().split('T')[0]
+    : (r.event_date ? String(r.event_date) : '');
+  return {
+    id: r.id,
+    sourceId: r.source_id,
+    source: r.source_name,
+    title: r.title || '',
+    artist: r.artist || '',
+    venue: r.venue || '',
+    city: r.city || '',
+    date: dateStr,
+    time: r.event_time || '',
+    price: r.price || '',
+    ticketUrl: r.ticket_url || '',
+    imageUrl: r.image_url || '',
+    description: r.description || '',
+    genre: r.genre || '',
+    status: r.status,
+    createdAt: iso(r.created_at),
+    ...(r.extra || {}),
+  };
+}
+
+export async function getConcertAgentItem(id: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${CONCERT_AGENT_COLS} FROM concert_agent_data WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return r.rowCount ? mapConcertAgentRow(r.rows[0]) : null;
+}
+
+export async function upsertConcertAgentItem(id: string, concert: Record<string, any>): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const extra = { ...concert };
+  ['id','sourceId','source','title','artist','venue','city','date','time',
+   'price','ticketUrl','imageUrl','description','genre','status',
+   'createdAt','updatedAt'].forEach(k => delete extra[k]);
+  await pool.query(
+    `INSERT INTO concert_agent_data
+       (id, source_id, source_name, title, artist, venue, city, event_date,
+        event_time, price, ticket_url, image_url, description, genre,
+        status, extra, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, '')::date,
+             $9, $10, $11, $12, $13, $14,
+             $15, $16::jsonb, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       source_id   = EXCLUDED.source_id,
+       source_name = EXCLUDED.source_name,
+       title       = EXCLUDED.title,
+       artist      = EXCLUDED.artist,
+       venue       = EXCLUDED.venue,
+       city        = EXCLUDED.city,
+       event_date  = EXCLUDED.event_date,
+       event_time  = EXCLUDED.event_time,
+       price       = EXCLUDED.price,
+       ticket_url  = EXCLUDED.ticket_url,
+       image_url   = EXCLUDED.image_url,
+       description = EXCLUDED.description,
+       genre       = EXCLUDED.genre,
+       status      = EXCLUDED.status,
+       extra       = EXCLUDED.extra,
+       updated_at  = NOW()`,
+    [
+      id,
+      concert.sourceId || null, concert.source || null,
+      concert.title || '', concert.artist || '', concert.venue || '',
+      concert.city || '',
+      concert.date || '',
+      concert.time || '', concert.price || '', concert.ticketUrl || '',
+      concert.imageUrl || '', concert.description || '', concert.genre || '',
+      concert.status || 'published',
+      JSON.stringify(extra),
+    ]
+  );
+}
+
+export async function deleteConcertAgentItem(id: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(`DELETE FROM concert_agent_data WHERE id = $1`, [id]);
+}
+
+export async function listConcertAgentItems(opts: {
+  status?: string;
+  city?: string;
+  dateFrom?: string;  // 'YYYY-MM-DD' inclusive
+  limit?: number;
+} = {}): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const where: string[] = [];
+  const params: any[] = [];
+  if (opts.status) { params.push(opts.status); where.push(`status = $${params.length}`); }
+  if (opts.city)   { params.push(opts.city);   where.push(`city = $${params.length}`); }
+  if (opts.dateFrom) {
+    params.push(opts.dateFrom);
+    where.push(`(event_date IS NULL OR event_date >= $${params.length}::date)`);
+  }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const limitSql = opts.limit ? `LIMIT ${Math.max(1, Math.min(opts.limit, 1000))}` : '';
+  const r = await pool.query(
+    `SELECT ${CONCERT_AGENT_COLS} FROM concert_agent_data
+       ${whereSql}
+       ORDER BY event_date ASC NULLS LAST, created_at DESC
+       ${limitSql}`,
+    params
+  );
+  return r.rows.map(mapConcertAgentRow);
+}
+
+export async function getConcertAgentStats(): Promise<{
+  total: number; published: number; upcoming: number;
+  bySource: Record<string, number>; byCity: Record<string, number>;
+}> {
+  const { pool } = await import('./db-client.tsx');
+  const today = new Date().toISOString().split('T')[0];
+  const [tot, src, cty] = await Promise.all([
+    pool.query(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE status = 'published')::int AS published,
+         COUNT(*) FILTER (WHERE status = 'published'
+                           AND (event_date IS NULL OR event_date >= $1::date))::int AS upcoming
+       FROM concert_agent_data`,
+      [today]
+    ),
+    pool.query(
+      `SELECT COALESCE(source_id, 'unknown') AS k, COUNT(*)::int AS n
+         FROM concert_agent_data WHERE status = 'published'
+        GROUP BY COALESCE(source_id, 'unknown')`
+    ),
+    pool.query(
+      `SELECT COALESCE(city, 'unknown') AS k, COUNT(*)::int AS n
+         FROM concert_agent_data
+        WHERE status = 'published'
+          AND (event_date IS NULL OR event_date >= $1::date)
+        GROUP BY COALESCE(city, 'unknown')`,
+      [today]
+    ),
+  ]);
+  const bySource: Record<string, number> = {};
+  for (const row of src.rows) bySource[row.k] = Number(row.n);
+  const byCity: Record<string, number> = {};
+  for (const row of cty.rows) byCity[row.k] = Number(row.n);
+  const t = tot.rows[0] || {};
+  return {
+    total: Number(t.total || 0),
+    published: Number(t.published || 0),
+    upcoming: Number(t.upcoming || 0),
+    bySource,
+    byCity,
+  };
+}
+
 export const curatorReportsStore = jsonbStore('curator_reports');
 export const verificationTokensStore = jsonbStore('verification_tokens');
 

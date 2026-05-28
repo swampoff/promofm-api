@@ -421,12 +421,10 @@ function deduplicateConcerts(concerts: ParsedConcert[]): ParsedConcert[] {
 
 // ─── Public API ─────────────────────────────────────────
 
-import { concertAgentStore } from './db.tsx';
+import {
+  listConcertAgentItems, upsertConcertAgentItem, deleteConcertAgentItem,
+} from './db.tsx';
 import { isUrlSafe } from './security.tsx';
-
-function getConcertStore() {
-  return concertAgentStore;
-}
 
 export async function fetchConcertsFromSource(sourceId: string): Promise<{ added: number; total: number; errors: string[] }> {
   const source = CONCERT_SOURCES.find(s => s.id === sourceId);
@@ -446,9 +444,8 @@ export async function fetchConcertsFromSource(sourceId: string): Promise<{ added
     return { added: 0, total: 0, errors };
   }
 
-  // Load existing for dedup
-  const store = getConcertStore();
-  const existing = await store.getAll();
+  // Load existing for dedup (native cols since migration 061).
+  const existing = await listConcertAgentItems();
   const existingKeys = new Set(existing.map((c: any) => concertKey(c)));
 
   let added = 0;
@@ -464,7 +461,7 @@ export async function fetchConcertsFromSource(sourceId: string): Promise<{ added
       createdAt: new Date().toISOString(),
     };
 
-    await store.set(id, record);
+    await upsertConcertAgentItem(id, record);
     existingKeys.add(key);
     added++;
 
@@ -495,44 +492,30 @@ export async function fetchAllConcerts(): Promise<{
 }
 
 export async function getPublishedConcerts(city?: string): Promise<any[]> {
-  const store = getConcertStore();
-  const all = await store.getAll();
-  let concerts = all.filter((c: any) => c.status === 'published');
-
-  if (city) {
-    concerts = concerts.filter((c: any) =>
-      (c.city || '').toLowerCase().includes(city.toLowerCase())
-    );
-  }
-
-  // Sort by date ascending (nearest first)
-  concerts.sort((a: any, b: any) => {
-    const da = a.date || '9999';
-    const db = b.date || '9999';
-    return da.localeCompare(db);
-  });
-
-  // Filter out past concerts
+  // Native indexes (idx_concerts_published_date / idx_concerts_city_date) —
+  // SQL push filter + ORDER BY вместо .getAll() + JS filter+sort.
   const today = new Date().toISOString().split('T')[0];
-  concerts = concerts.filter((c: any) => !c.date || c.date >= today);
-
+  let concerts = await listConcertAgentItems({
+    status: 'published',
+    dateFrom: today,
+  });
+  if (city) {
+    const cityLower = city.toLowerCase();
+    concerts = concerts.filter((c: any) => (c.city || '').toLowerCase().includes(cityLower));
+  }
   return concerts;
 }
 
 export async function clearOldConcerts(): Promise<number> {
-  const store = getConcertStore();
-  const all = await store.getAll();
+  // Single SQL DELETE через native event_date col. Раньше — getAll() +
+  // loop per-id del'ы.
+  const { pool } = await import('./db-client.tsx');
   const today = new Date().toISOString().split('T')[0];
-  let deleted = 0;
-
-  for (const c of all) {
-    if ((c as any).date && (c as any).date < today) {
-      await store.del((c as any).id);
-      deleted++;
-    }
-  }
-
-  return deleted;
+  const r = await pool.query(
+    `DELETE FROM concert_agent_data WHERE event_date IS NOT NULL AND event_date < $1::date`,
+    [today]
+  );
+  return r.rowCount || 0;
 }
 
 
@@ -767,9 +750,8 @@ export async function fetchAllConcertsExtended(): Promise<{
       continue;
     }
 
-    // Dedup against existing
-    const store = getConcertStore();
-    const existing = await store.getAll();
+    // Dedup against existing (native cols since migration 061).
+    const existing = await listConcertAgentItems();
     const existingKeys = new Set(existing.map((c: any) => concertKey(c)));
 
     let added = 0;
@@ -778,10 +760,10 @@ export async function fetchAllConcertsExtended(): Promise<{
       if (existingKeys.has(key)) continue;
 
       const id = `concert-curated-${crypto.randomUUID()}`;
-      await store.set(id, {
+      await upsertConcertAgentItem(id, {
         id,
         ...concert,
-        status: 'published' as const,
+        status: 'published',
         createdAt: new Date().toISOString(),
       });
       existingKeys.add(key);

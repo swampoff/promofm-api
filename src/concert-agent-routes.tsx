@@ -4,7 +4,7 @@
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { concertAgentStore } from './db.tsx';
+import { getConcertAgentStats, listConcertAgentItems, deleteConcertAgentItem } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 import {
   fetchAllConcerts,
@@ -105,33 +105,17 @@ concertAgent.get('/sources', requireAdminOrKey, async (c) => {
  */
 concertAgent.get('/status', requireAdminOrKey, async (c) => {
   try {
-    const all = await concertAgentStore.getAll();
-    const published = all.filter((c: any) => c.status === 'published');
-    const today = new Date().toISOString().split('T')[0];
-    const upcoming = published.filter((c: any) => !c.date || c.date >= today);
-
-    // Count by source
-    const bySource: Record<string, number> = {};
-    for (const concert of published) {
-      const src = (concert as any).sourceId || 'unknown';
-      bySource[src] = (bySource[src] || 0) + 1;
-    }
-
-    // Count by city
-    const byCity: Record<string, number> = {};
-    for (const concert of upcoming) {
-      const city = (concert as any).city || 'unknown';
-      byCity[city] = (byCity[city] || 0) + 1;
-    }
-
+    // SQL aggregation (COUNT FILTER + GROUP BY) — single round-trip
+    // вместо getAll() + JS filter+group.
+    const stats = await getConcertAgentStats();
     return c.json({
       success: true,
       data: {
-        totalConcerts: all.length,
-        published: published.length,
-        upcoming: upcoming.length,
-        bySource,
-        byCity,
+        totalConcerts: stats.total,
+        published: stats.published,
+        upcoming: stats.upcoming,
+        bySource: stats.bySource,
+        byCity: stats.byCity,
         sourcesCount: CONCERT_SOURCES.length,
       },
     });
@@ -157,15 +141,10 @@ concertAgent.post('/cleanup', requireAdminOrKey, async (c) => {
  */
 concertAgent.delete('/clear', requireAdminOrKey, async (c) => {
   try {
-    const all = await concertAgentStore.getAll();
-    let deleted = 0;
-    for (const concert of all) {
-      if ((concert as any).id) {
-        await concertAgentStore.del((concert as any).id);
-        deleted++;
-      }
-    }
-    return c.json({ success: true, deleted });
+    // Single SQL DELETE — раньше getAll + N per-id del.
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(`DELETE FROM concert_agent_data`);
+    return c.json({ success: true, deleted: r.rowCount || 0 });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
