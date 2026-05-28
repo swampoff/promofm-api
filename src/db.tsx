@@ -3722,7 +3722,73 @@ export const guideDataStore = makeJsonbKeyStore('promo_guide_data', 'key');
 // таблице. Кандидат на DROP TABLE после ручной проверки laptop'ом).
 export const platformRevenueLogStore = makeJsonbKeyStore('platform_revenue_log');
 export const platformStatsStore = makeJsonbKeyStore('platform_stats', 'id');
-export const trackTestExpertStatsStore = makeJsonbKeyStore('track_test_expert_stats', 'expert_id');
+// track_test_expert_stats — native cols since migration 053 (data column DROPPED).
+// trackTestExpertStatsStore wrapper REMOVED — был broken на проде. Доступ через
+// typed atomic helpers (см. ниже): getExpertStats, incrementExpertAssigned,
+// completeExpertReviewAndReward.
+export interface ExpertStatsRow {
+  expertId: string;
+  totalAssigned: number;
+  totalCompleted: number;
+  totalCoins: number;
+  ratingBonus: number;
+  joinedAt: string | null;
+}
+function mapExpertStatsRow(r: any): ExpertStatsRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    expertId: r.expert_id,
+    totalAssigned: Number(r.total_assigned || 0),
+    totalCompleted: Number(r.total_completed || 0),
+    totalCoins: Number(r.total_coins || 0),
+    ratingBonus: Number(r.rating_bonus || 0),
+    joinedAt: iso(r.joined_at),
+  };
+}
+export async function getExpertStats(expertId: string): Promise<ExpertStatsRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT expert_id, total_assigned, total_completed, total_coins,
+            rating_bonus, joined_at
+       FROM track_test_expert_stats WHERE expert_id = $1 LIMIT 1`, [expertId]
+  );
+  return mapExpertStatsRow(r.rows[0]);
+}
+/** Atomic +1 на total_assigned. Создаёт row если не существует. */
+export async function incrementExpertAssigned(expertId: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO track_test_expert_stats
+       (expert_id, total_assigned, joined_at, updated_at)
+     VALUES ($1, 1, NOW(), NOW())
+     ON CONFLICT (expert_id) DO UPDATE SET
+       total_assigned = track_test_expert_stats.total_assigned + 1,
+       updated_at = NOW()`,
+    [expertId]
+  );
+}
+/**
+ * Atomic completion: +1 total_completed, +rewardPoints total_coins,
+ * recompute rating_bonus = total_completed * 0.05. Race-free vs legacy
+ * get→mutate→set паттерн (concurrent review completions могли терять обновления).
+ */
+export async function completeExpertReviewAndReward(
+  expertId: string, rewardPoints: number,
+): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO track_test_expert_stats
+       (expert_id, total_completed, total_coins, rating_bonus, joined_at, updated_at)
+     VALUES ($1, 1, $2, 0.05, NOW(), NOW())
+     ON CONFLICT (expert_id) DO UPDATE SET
+       total_completed = track_test_expert_stats.total_completed + 1,
+       total_coins     = track_test_expert_stats.total_coins + $2,
+       rating_bonus    = ROUND(((track_test_expert_stats.total_completed + 1) * 0.05)::numeric, 2),
+       updated_at      = NOW()`,
+    [expertId, rewardPoints || 50]
+  );
+}
 // trackModerationStore DELETED — 0 callers. track_moderation пишется
 // напрямую через pool.query в src/ai-check.tsx (после migration 052 —
 // все native cols, jsonb остаётся только в ai_check_result).

@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { trackTestAllRequestsStore, trackTestExpertsStore, trackTestExpertStatsStore, trackTestRequestReviewsStore, trackTestRequestsStore, trackTestReviewsStore, trackTestUserRequestsStore } from './db.tsx';
+import { trackTestAllRequestsStore, trackTestExpertsStore, getExpertStats, incrementExpertAssigned, completeExpertReviewAndReward, trackTestRequestReviewsStore, trackTestRequestsStore, trackTestReviewsStore, trackTestUserRequestsStore } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { quickLLM, getLLMStatus } from './llm-router.tsx';
@@ -659,18 +659,10 @@ app.post('/submit-review', requireAuth, async (c) => {
     review.reward_paid = true;
     await trackTestReviewsStore.set(review_id, review);
 
-    // Обновить статистику эксперта в DB
-    const expertStats: any = (await trackTestExpertStatsStore.get(review.expert_email)) || {
-      expert_id: review.expert_email,
-      total_assigned: 0,
-      total_completed: 0,
-      total_coins: 0,
-      rating_bonus: 0,
-    };
-    expertStats.total_completed += 1;
-    expertStats.total_coins += review.reward_points || 50;
-    expertStats.rating_bonus = Number((expertStats.total_completed * 0.05).toFixed(2));
-    await trackTestExpertStatsStore.set(review.expert_email, expertStats);
+    // Atomic completion: +1 completed, +reward_points coins, recompute rating.
+    // Race-free vs legacy get→mutate→set паттерн (concurrent review completions
+    // могли терять updates).
+    await completeExpertReviewAndReward(review.expert_email, review.reward_points || 50);
 
     console.log(`Reward (${review.reward_points} coins) paid to expert: ${review.expert_email}`);
 
@@ -1294,17 +1286,8 @@ app.post('/claim-review', requireAuth, async (c) => {
     req.updated_at = now;
     await trackTestRequestsStore.set(request_id, req);
 
-    // Обновляем статистику эксперта
-    const stats: any = (await trackTestExpertStatsStore.get(expert_id)) || {
-      expert_id,
-      total_assigned: 0,
-      total_completed: 0,
-      total_coins: 0,
-      rating_bonus: 0,
-      joined_at: now,
-    };
-    stats.total_assigned += 1;
-    await trackTestExpertStatsStore.set(expert_id, stats);
+    // Atomic +1 total_assigned. Создаёт row если не существует.
+    await incrementExpertAssigned(expert_id);
 
     // Регистрируем эксперта для SSE-рассылок
     const registeredExperts = (await trackTestExpertsStore.get('singleton') || []) as string[];
@@ -1347,7 +1330,14 @@ app.get('/expert/stats', requireAuth, async (c) => {
     const expertId = c.req.query('expert_id');
     if (!expertId) return c.json({ error: 'expert_id required' }, 400);
 
-    const stats: any = (await trackTestExpertStatsStore.get(expertId)) || {
+    const statsRow = await getExpertStats(expertId);
+    const stats: any = statsRow ? {
+      expert_id: statsRow.expertId,
+      total_assigned: statsRow.totalAssigned,
+      total_completed: statsRow.totalCompleted,
+      total_coins: statsRow.totalCoins,
+      rating_bonus: statsRow.ratingBonus,
+    } : {
       expert_id: expertId,
       total_assigned: 0,
       total_completed: 0,
