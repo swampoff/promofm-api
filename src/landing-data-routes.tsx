@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { pool } from './db-client.tsx';
-import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, chartSourcesStore, investorInquiriesStore, newsPublicStore, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer, radioAnalyticsStore } from './db.tsx';
+import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, chartSourcesStore, createInvestorInquiry, newsPublicStore, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer, radioAnalyticsStore } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { sanitizeString, sanitizeUrl } from './security.tsx';
@@ -1492,14 +1492,9 @@ landing.post("/investor-inquiry", async (c) => {
       return c.json({ success: false, error: 'Имя и email обязательны' }, 400);
     }
 
-    const id = `investor-${crypto.randomUUID()}`;
-    await investorInquiriesStore.set(id, {
-      id, name, email,
-      company: company || '',
-      message: message || 'Прошу направить инвестиционную презентацию.',
-      createdAt: new Date().toISOString(),
-      status: 'new',
-    });
+    // Native INSERT через typed function (migration 072). Id auto-generated
+    // в createInvestorInquiry; defaults для company/message применяются там.
+    await createInvestorInquiry({ name, email, company, message });
 
     return c.json({ success: true, message: 'Запрос успешно отправлен' });
   } catch (error) {

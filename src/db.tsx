@@ -3082,7 +3082,61 @@ export const trackTestExpertStatsStore = makeJsonbKeyStore('track_test_expert_st
 export const newsPublicStore = makeJsonbKeyStore('news_public');
 // contactFormsStore — DROPPED (0 callers; `contact_forms` table читается
 // напрямую через pool.query в landing-data-routes.tsx).
-export const investorInquiriesStore = makeJsonbKeyStore('investor_inquiries');
+// investor_inquiries — native cols since migration 072 (data jsonb dropped).
+// Single writer: POST /landing-data/investor-inquiry. Readers — admin reads
+// через psql напрямую (нет UI пока); если появится — добавить
+// listInvestorInquiries({ status, limit }) рядом.
+
+export interface InvestorInquiry {
+  id: string;
+  name: string;
+  email: string;
+  company: string;
+  message: string;
+  status: string;
+  createdAt: string;
+}
+
+function mapInvestorInquiryRow(r: any): InvestorInquiry | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  return {
+    id: r.id,
+    name: r.name,
+    email: r.email,
+    company: r.company,
+    message: r.message,
+    status: r.status,
+    createdAt: iso(r.created_at),
+  };
+}
+
+/**
+ * Insert lead form submission. Returns the created row (с auto-generated
+ * id если caller не передал). Defaults: company='', message='', status='new'.
+ */
+export async function createInvestorInquiry(input: {
+  name: string;
+  email: string;
+  company?: string;
+  message?: string;
+}): Promise<InvestorInquiry> {
+  const { pool } = await import('./db-client.tsx');
+  const id = `investor-${crypto.randomUUID()}`;
+  const r = await pool.query(
+    `INSERT INTO investor_inquiries (id, name, email, company, message, status)
+     VALUES ($1, $2, $3, $4, $5, 'new')
+     RETURNING id, name, email, company, message, status, created_at`,
+    [
+      id,
+      input.name,
+      input.email,
+      input.company || '',
+      input.message || 'Прошу направить инвестиционную презентацию.',
+    ],
+  );
+  return mapInvestorInquiryRow(r.rows[0])!;
+}
 // djEditorProfileStore — DROPPED (0 callers; `dj_editor_profiles` доступ
 // напрямую через pool.query). DO NOT re-add (was previously removed by #73
 // dead-stores cleanup).
