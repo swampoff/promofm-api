@@ -5,7 +5,7 @@
 
 import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
-import { getAllConcerts, getTicketProvidersByConcert, getTicketSalesByConcert, ticketSalesStore, upsertTicketProvider, upsertTicketSale } from './db.tsx';
+import { getAllConcerts, getTicketProvidersByConcert, getTicketSalesByConcert, upsertTicketProvider, upsertTicketSale, updateTicketSaleStatus } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const ticketing = new Hono();
@@ -174,8 +174,8 @@ ticketing.post('/sales', requireAuth, async (c) => {
       sale.netAmount = sale.totalAmount;
     }
     
-    await upsertTicketSale(sale.concertId, sale.id, sale);
-    
+    await upsertTicketSale({ ...sale, metadata: sale.metadata || {} });
+
     return c.json({ success: true, data: sale });
   } catch (error) {
     console.error('Error creating sale:', error);
@@ -294,19 +294,14 @@ ticketing.get('/funnel/:concertId', requireAuth, async (c) => {
 ticketing.put('/sales/:saleId/cancel', requireAuth, async (c) => {
   try {
     const saleId = c.req.param('saleId');
-    const body = await c.req.json();
-    const concertId = body.concertId;
-    
-    const sale = await ticketSalesStore.get(saleId) as TicketSale;
-    
-    if (!sale) {
+
+    // Atomic UPDATE — race-free vs legacy get→mutate→upsert.
+    const updated = await updateTicketSaleStatus(saleId, 'cancelled');
+    if (!updated) {
       return c.json({ success: false, error: 'Sale not found' }, 404);
     }
-    
-    sale.status = 'cancelled';
-    await upsertTicketSale(concertId, saleId, sale);
-    
-    return c.json({ success: true, data: sale });
+
+    return c.json({ success: true, data: updated });
   } catch (error) {
     console.error('Error cancelling sale:', error);
     return c.json({ 

@@ -3681,7 +3681,7 @@ export const venueRadioBrandStore = makeJsonbKeyStore('venue_radio_brand', 'venu
 // ticketProvidersStore — DROPPED (0 callers; ticket_providers доступ
 // через `upsertTicketProvider` + `getTicketProvidersByConcert` функции
 // в db.tsx + ticketing-routes.tsx).
-export const ticketSalesStore = makeJsonbKeyStore('ticket_sales');
+// ticket_sales — native cols since migration 083. См. typed functions ниже.
 // track_test_requests — row-per-request, native cols since migration 051.
 // Interface (.get / .set / .del / .getAll) preserved для совместимости
 // с handler'ами; backed by pool.query на native cols.
@@ -4432,20 +4432,107 @@ export async function upsertTicketProvider(concertId: string, providerId: string
   if (error) console.error('[db] upsertTicketProvider:', error);
 }
 
-export async function getTicketSalesByConcert(concertId: string) {
-  const { data, error } = await db()
-    .from('ticket_sales')
-    .select('*')
-    .eq('concert_id', concertId);
-  if (error) console.error('[db] getTicketSalesByConcert:', error);
-  return (data || []).map((r: any) => r.data ?? r);
+// ─── ticket_sales (native cols since migration 083) ───
+
+export interface TicketSaleRow {
+  id: string;
+  concertId: string;
+  artistId?: string | null;
+  provider: string;
+  quantity: number;
+  price: number;
+  totalAmount: number;
+  commission: number;
+  netAmount: number;
+  buyerEmail?: string | null;
+  status: string;
+  purchasedAt: string;
+  metadata: Record<string, any>;
 }
 
-export async function upsertTicketSale(concertId: string, saleId: string, sale: Record<string, any>) {
-  const { error } = await db()
-    .from('ticket_sales')
-    .upsert({ id: saleId, concert_id: concertId, data: sale, updated_at: new Date().toISOString() }, { onConflict: 'id' });
-  if (error) console.error('[db] upsertTicketSale:', error);
+function mapTicketSaleRow(r: any): TicketSaleRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  return {
+    id: r.id,
+    concertId: r.concert_id,
+    artistId: r.artist_id ?? null,
+    provider: r.provider,
+    quantity: Number(r.quantity || 0),
+    price: Number(r.price || 0),
+    totalAmount: Number(r.total_amount || 0),
+    commission: Number(r.commission || 0),
+    netAmount: Number(r.net_amount || 0),
+    buyerEmail: r.buyer_email ?? null,
+    status: r.status,
+    purchasedAt: iso(r.purchased_at),
+    metadata: r.metadata || {},
+  };
+}
+
+const TICKET_SALE_COLS = `id, concert_id, artist_id, provider, quantity, price,
+  total_amount, commission, net_amount, buyer_email, status, purchased_at, metadata`;
+
+export async function getTicketSale(id: string): Promise<TicketSaleRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${TICKET_SALE_COLS} FROM ticket_sales WHERE id = $1 LIMIT 1`, [id]
+  );
+  return mapTicketSaleRow(r.rows[0]);
+}
+
+export async function getTicketSalesByConcert(concertId: string): Promise<TicketSaleRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${TICKET_SALE_COLS} FROM ticket_sales
+      WHERE concert_id = $1 ORDER BY purchased_at DESC`, [concertId]
+  );
+  return r.rows.map(mapTicketSaleRow).filter((x): x is TicketSaleRow => x !== null);
+}
+
+export async function upsertTicketSale(sale: TicketSaleRow): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO ticket_sales
+       (id, concert_id, artist_id, provider, quantity, price, total_amount,
+        commission, net_amount, buyer_email, status, purchased_at, metadata)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+             COALESCE($12::timestamptz, NOW()), $13::jsonb)
+     ON CONFLICT (id) DO UPDATE SET
+       concert_id   = EXCLUDED.concert_id,
+       artist_id    = EXCLUDED.artist_id,
+       provider     = EXCLUDED.provider,
+       quantity     = EXCLUDED.quantity,
+       price        = EXCLUDED.price,
+       total_amount = EXCLUDED.total_amount,
+       commission   = EXCLUDED.commission,
+       net_amount   = EXCLUDED.net_amount,
+       buyer_email  = EXCLUDED.buyer_email,
+       status       = EXCLUDED.status,
+       purchased_at = EXCLUDED.purchased_at,
+       metadata     = EXCLUDED.metadata,
+       updated_at   = NOW()`,
+    [
+      sale.id, sale.concertId, sale.artistId ?? null,
+      sale.provider || 'manual', sale.quantity || 0, sale.price || 0,
+      sale.totalAmount || 0, sale.commission || 0, sale.netAmount || 0,
+      sale.buyerEmail ?? null, sale.status || 'confirmed',
+      sale.purchasedAt ?? null, JSON.stringify(sale.metadata || {}),
+    ]
+  );
+}
+
+/**
+ * Atomic single-statement status update — race-free vs legacy get→mutate→upsert.
+ */
+export async function updateTicketSaleStatus(id: string, status: string): Promise<TicketSaleRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `UPDATE ticket_sales SET status = $2, updated_at = NOW()
+      WHERE id = $1 RETURNING ${TICKET_SALE_COLS}`,
+    [id, status]
+  );
+  return mapTicketSaleRow(r.rows[0]);
 }
 
 // ─── Beat Reviews (native cols since migration 066) ───
