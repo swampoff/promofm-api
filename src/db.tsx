@@ -1283,16 +1283,83 @@ export async function getRadioProfile(userId: string) {
     .eq('user_id', userId)
     .maybeSingle();
   if (error) console.error('[db] getRadioProfile:', error);
-  return data ? (data.data || data) : null;
+  if (!data) return null;
+
+  // Overlay native columns (migration 060) on top of legacy `data` jsonb.
+  // After 060, native columns are source-of-truth for the 17 promoted
+  // fields when populated; jsonb fallback covers legacy rows pre-060
+  // backfill, plus stats fields (tracksInRotation, partners, revenue,
+  // ...) which are managed by radio_stats helpers and never get native
+  // columns.
+  const inner = (data.data || {}) as Record<string, any>;
+  return {
+    ...inner,
+    name:             data.name              ?? inner.name,
+    city:             data.city              ?? inner.city,
+    country:          data.country           ?? inner.country,
+    frequency:        data.frequency         ?? inner.frequency,
+    description:      data.description       ?? inner.description,
+    founded:          data.founded           ?? inner.founded,
+    website:          data.website           ?? inner.website,
+    address:          data.address           ?? inner.address,
+    streamUrl:        data.stream_url        ?? inner.streamUrl,
+    backupStreamUrl:  data.backup_stream_url ?? inner.backupStreamUrl,
+    bitrate:          data.bitrate           ?? inner.bitrate,
+    audioFormat:      data.audio_format      ?? inner.audioFormat,
+    listeners:        data.listeners         ?? inner.listeners,
+    status:           data.status            ?? inner.status,
+    broadcast_cities: (Array.isArray(data.broadcast_cities) && data.broadcast_cities.length > 0)
+                        ? data.broadcast_cities : (inner.broadcast_cities || []),
+    formats:          (Array.isArray(data.formats) && data.formats.length > 0)
+                        ? data.formats : (inner.formats || []),
+    socials:          (data.socials && Object.keys(data.socials).length > 0)
+                        ? data.socials : (inner.socials || {}),
+    logoUrl:          data.logo_url          ?? inner.logoUrl,
+    coverUrl:         data.cover_url         ?? inner.coverUrl,
+    isVerified:       data.is_verified       ?? inner.isVerified ?? false,
+    email:            data.email             ?? inner.email,
+    phone:            data.phone             ?? inner.phone,
+  };
 }
 
 export async function upsertRadioProfile(userId: string, profile: Record<string, any>) {
   // Зеркало фикса 8652379 — см. upsertVenueProfile выше.
   // Migration 027 добавляет UNIQUE на user_id.
+  //
+  // Migration 060 promoted 17 fields from `data` jsonb to native
+  // columns — extract them here. Mirrors upsertVenueProfile / 059
+  // pattern. `data: profile` is preserved for backward compat with
+  // stats writers and editor-rehydration flow.
+  //
+  // Accept both camelCase (frontend payload) and snake_case (legacy
+  // KV-roundtrip via getRadioProfile) for stream URLs / audio format.
+  // broadcast_cities is snake_case on the wire already.
   const row = {
-    user_id: userId,
-    data: profile,
-    updated_at: new Date().toISOString(),
+    user_id:           userId,
+    name:              profile.name ?? null,
+    city:              profile.city ?? null,
+    country:           profile.country ?? null,
+    frequency:         profile.frequency ?? null,
+    description:       profile.description ?? null,
+    founded:           profile.founded ?? null,
+    website:           profile.website ?? null,
+    address:           profile.address ?? null,
+    stream_url:        profile.streamUrl       ?? profile.stream_url        ?? null,
+    backup_stream_url: profile.backupStreamUrl ?? profile.backup_stream_url ?? null,
+    bitrate:           profile.bitrate ?? null,
+    audio_format:      profile.audioFormat ?? profile.audio_format ?? null,
+    listeners:         profile.listeners != null ? String(profile.listeners) : null,
+    status:            profile.status ?? null,
+    broadcast_cities:  Array.isArray(profile.broadcast_cities)
+                         ? profile.broadcast_cities
+                         : (Array.isArray(profile.broadcastCities) ? profile.broadcastCities : []),
+    formats:           Array.isArray(profile.formats) ? profile.formats : [],
+    socials:           (profile.socials && typeof profile.socials === 'object')
+                         ? profile.socials : {},
+    logo_url:          profile.logoUrl  ?? profile.logo_url  ?? null,
+    cover_url:         profile.coverUrl ?? profile.cover_url ?? null,
+    data:              profile,
+    updated_at:        new Date().toISOString(),
   };
   const { error } = await db()
     .from('radio_profiles')
