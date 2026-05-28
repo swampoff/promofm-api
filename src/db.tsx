@@ -4058,7 +4058,10 @@ export async function listAllProduction360Orders(): Promise<any[]> {
   return r.rows.map(mapP360OrderRow);
 }
 
-// ── Promo.Air AI DJ stores ──
-export const promoAirDjScriptsStore = makeJsonbKeyStore('promo_air_dj_scripts');
-export const promoAirDjSettingsStore = makeJsonbKeyStore('promo_air_dj_settings');
-export const promoAirDjQueueStore = makeJsonbKeyStore('promo_air_dj_queue');
+// ── Promo.Air AI DJ stores ── DROPPED
+// 3 orphan KV-tables (promo_air_dj_scripts/settings/queue) с 0
+// callers в коде. Migration 069 DROP'ает таблицы; declarations
+// удалены, чтобы grep по db.tsx больше не показывал их как «KV».
+// Feature "promo air AI DJ" не реализована — таблицы залипли от
+// ранней спекулятивной попытки. См. CLAUDE.md: «временный KV ОК»
+// — это никогда не было OK.
