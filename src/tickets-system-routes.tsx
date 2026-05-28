@@ -405,7 +405,8 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
                         ELSE status
                       END,
          updated_at = NOW()
-       WHERE id = $1`,
+       WHERE id = $1
+       RETURNING user_id, subject`,
       [ticketId, JSON.stringify([messageData]), bumpStatus]
     );
     if (upd.rowCount === 0) {
@@ -413,6 +414,36 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
         success: false,
         error: 'Ticket not found'
       }, 404);
+    }
+
+    // Bell-уведомление автору тикета, когда отвечает поддержка/админ.
+    // internal_note пропускаем — это заметка для команды, юзер её не видит.
+    if (bumpStatus && !internal_note) {
+      const ticket = upd.rows[0] as { user_id: string; subject: string };
+      if (ticket?.user_id && ticket.user_id !== sender_id) {
+        try {
+          const ur = await pool.query(
+            'SELECT role::text AS role FROM users WHERE id::text = $1 LIMIT 1',
+            [ticket.user_id]
+          );
+          const userRole = (ur.rows[0]?.role || 'artist') as
+            'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer' | 'label';
+          const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+          const preview = String(message).trim();
+          await notifyCrossCabinet({
+            targetUserId: ticket.user_id,
+            targetRole: userRole,
+            sourceRole: 'admin',
+            type: 'support_ticket_new',
+            title: `Ответ на тикет: ${ticket.subject || 'обращение'}`.slice(0, 200),
+            message: (preview.length > 200 ? preview.slice(0, 197) + '...' : preview),
+            link: `/profile?tab=support&ticket=${ticketId}`,
+            metadata: { ticketId, replyFromAdmin: true },
+          });
+        } catch (bellErr) {
+          console.error('[tickets] user-reply bell notify failed:', bellErr);
+        }
+      }
     }
 
     return c.json({

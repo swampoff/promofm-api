@@ -603,22 +603,43 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
       }
     }
 
-    // Telegram forward + bell notification if recipient is admin
+    // Bell-уведомления для всех non-sender участников + Telegram forward к админам.
+    // Симметрично: artist→dj, admin→artist, etc. — у каждого recipient
+    // загорится колокольчик. Dedup-окно 5 мин по (target+type+title)
+    // гасит spam при шквале сообщений в одной беседе.
     try {
       const otherIds = participantIds.filter(id => id !== senderId);
+      const { notifyCrossCabinet, notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
+      const preview = text.trim().length > 120 ? text.trim().slice(0, 117) + '...' : text.trim();
       let adminFound = false;
       for (const otherId of otherIds) {
         const u = await pool.query(`SELECT role::text FROM users WHERE id::text = $1`, [otherId]);
-        if (u.rows[0]?.role === 'admin' || u.rows[0]?.role === 'superadmin') {
+        const role = (u.rows[0]?.role || 'artist') as
+          'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer' | 'label';
+        if (role === 'admin' || (u.rows[0]?.role === 'superadmin')) {
           adminFound = true;
           await forwardToTelegramIfAdmin('admin', senderName || senderId, text);
-          break;
+          // Админам — через notifyAllAdmins (он выбирает всех с role admin/superadmin)
+          continue;
+        }
+        // Обычные кабинеты — точечно
+        try {
+          await notifyCrossCabinet({
+            targetUserId: otherId,
+            targetRole: role,
+            sourceRole: (senderRole as any) || 'artist',
+            type: 'new_direct_message',
+            title: `Сообщение от ${senderName || 'пользователя'}`.slice(0, 200),
+            message: preview,
+            link: `/profile?tab=messages&conversation=${conversationId}`,
+            metadata: { conversationId, messageId: msgId, senderId },
+          });
+        } catch (bellErr) {
+          log.warn({ err: bellErr, recipient: otherId, conversationId }, 'recipient_bell_notify_failed');
         }
       }
       if (adminFound) {
         try {
-          const { notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
-          const preview = text.trim().length > 120 ? text.trim().slice(0, 117) + '...' : text.trim();
           await notifyAllAdmins({
             sourceRole: (senderRole as any) || 'artist',
             type: 'new_direct_message',
@@ -632,7 +653,7 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
         }
       }
     } catch (err) {
-      log.warn({ err, conversationId }, 'admin_telegram_forward_failed');
+      log.warn({ err, conversationId }, 'dm_bell_or_telegram_failed');
     }
 
     return c.json({
