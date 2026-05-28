@@ -19,16 +19,23 @@
 import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
 import { callLLM } from './llm-router.tsx';
-import { promoAirDjScriptsStore, promoAirDjSettingsStore, promoAirDjQueueStore } from './db.tsx';
+import {
+  getPromoAirDjSettings,
+  upsertPromoAirDjSettings,
+  insertPromoAirDjScript,
+  listPromoAirDjScripts,
+  enqueuePromoAirDjItem,
+  listPromoAirDjQueuePending,
+  type PromoAirDjSettings,
+} from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 
-// ─── Stores ─────────────────────────────────────────────
-
-const djScriptsStore = promoAirDjScriptsStore;
-const djSettingsStore = promoAirDjSettingsStore;
-const djQueueStore = promoAirDjQueueStore;
+// Migration 071 промочил 3 (pk, data jsonb) stores на native row-per-record
+// tables. Старые алиасы на promoAirDj{Scripts,Settings,Queue}Store удалены —
+// handler'ы переведены на typed functions выше. До 071 promo_air_dj_settings
+// и promo_air_dj_queue были MISSING на проде (feature partially broken).
 
 // ─── Constants ──────────────────────────────────────────
 
@@ -160,13 +167,13 @@ app.post('/generate-script', requireAuth, async (c) => {
       return c.json({ success: false, error: 'venueId is required' }, 400);
     }
 
-    // Загружаем настройки
-    const savedSettings = await djSettingsStore.get(venueId);
-    const settings: DjSettings = {
+    // Загружаем настройки (или используем defaults если row отсутствует)
+    const savedSettings = await getPromoAirDjSettings(venueId);
+    const settings = {
       ...DEFAULT_SETTINGS,
       ...(savedSettings || {}),
       venueId,
-    };
+    } as DjSettings;
 
     const systemPrompt = buildSystemPrompt(settings, venueName);
     const userPrompt = buildUserPrompt(segmentType as SegmentType, { ...context, venueName });
@@ -192,11 +199,9 @@ app.post('/generate-script', requireAuth, async (c) => {
       status: 'text_ready',
     };
 
-    // Сохраняем в историю
-    const existing: any[] = (await djScriptsStore.get(venueId)) || [];
-    existing.unshift(script);
-    if (existing.length > 100) existing.length = 100; // keep last 100
-    await djScriptsStore.set(venueId, existing);
+    // Native INSERT + retention (keep last 100 per venue) — заменяет
+    // jsonbStore get+unshift+cap+set паттерн. Atomic INSERT race-free.
+    await insertPromoAirDjScript(script);
 
     return c.json({ success: true, script });
   } catch (error: any) {
@@ -304,12 +309,12 @@ app.post('/generate-full', requireAuth, async (c) => {
     }
 
     // 1. Генерируем текст
-    const savedSettings = await djSettingsStore.get(venueId);
-    const settings: DjSettings = {
+    const savedSettings = await getPromoAirDjSettings(venueId);
+    const settings = {
       ...DEFAULT_SETTINGS,
       ...(savedSettings || {}),
       venueId,
-    };
+    } as DjSettings;
 
     const systemPrompt = buildSystemPrompt(settings, venueName);
     const userPrompt = buildUserPrompt(segmentType as SegmentType, { ...context, venueName });
@@ -392,23 +397,22 @@ app.post('/generate-full', requireAuth, async (c) => {
       status: audioUrl ? 'ready' : 'text_only',
     };
 
-    const existing: any[] = (await djScriptsStore.get(venueId)) || [];
-    existing.unshift(script);
-    if (existing.length > 100) existing.length = 100;
-    await djScriptsStore.set(venueId, existing);
+    // Native INSERT + retention — заменяет jsonbStore array-mutate паттерн.
+    await insertPromoAirDjScript(script);
 
-    // Добавляем в очередь
-    const queue: any[] = (await djQueueStore.get(venueId)) || [];
-    queue.push({
+    // Enqueue для playback (retention = last 50 per venue). Раньше queue
+    // table вообще не существовала на проде → этот POST падал; теперь
+    // работает с native row-per-item.
+    await enqueuePromoAirDjItem({
+      venueId,
       scriptId: script.id,
       segmentType,
       text: scriptText,
       audioUrl,
       scheduledAt: new Date().toISOString(),
       played: false,
+      playedAt: null,
     });
-    if (queue.length > 50) queue.shift();
-    await djQueueStore.set(venueId, queue);
 
     return c.json({ success: true, script });
   } catch (error: any) {
@@ -423,8 +427,8 @@ app.get('/scripts/:venueId', requireAuth, async (c) => {
   try {
     const venueId = c.req.param('venueId');
     const limit = parseInt(c.req.query('limit') || '20');
-    const scripts: any[] = (await djScriptsStore.get(venueId)) || [];
-    return c.json({ success: true, scripts: scripts.slice(0, limit) });
+    const scripts = await listPromoAirDjScripts(venueId, limit);
+    return c.json({ success: true, scripts });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -435,9 +439,10 @@ app.get('/scripts/:venueId', requireAuth, async (c) => {
 app.get('/queue/:venueId', requireAuth, async (c) => {
   try {
     const venueId = c.req.param('venueId');
-    const queue: any[] = (await djQueueStore.get(venueId)) || [];
-    const pending = queue.filter((q: any) => !q.played);
-    return c.json({ success: true, queue: pending });
+    // Native partial index idx_promo_air_dj_queue_pending делает запрос
+    // O(log n) на venue_id вместо O(N) JS .filter по всему массиву.
+    const queue = await listPromoAirDjQueuePending(venueId);
+    return c.json({ success: true, queue });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -454,11 +459,12 @@ app.post('/settings', requireAuth, async (c) => {
       return c.json({ success: false, error: 'venueId is required' }, 400);
     }
 
-    const existing = (await djSettingsStore.get(venueId)) || {};
-    const updated = { ...DEFAULT_SETTINGS, ...existing, ...settingsUpdate, venueId };
-    await djSettingsStore.set(venueId, updated);
-
-    return c.json({ success: true, settings: updated });
+    // upsertPromoAirDjSettings принимает partial — отсутствующие
+    // поля используют DEFAULT (на INSERT path) или сохраняют существующее
+    // значение (на UPDATE path). До migration 071 этот endpoint падал —
+    // promo_air_dj_settings таблица не существовала.
+    const updated = await upsertPromoAirDjSettings(venueId, settingsUpdate);
+    return c.json({ success: true, settings: { ...DEFAULT_SETTINGS, ...updated } });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -469,7 +475,12 @@ app.post('/settings', requireAuth, async (c) => {
 app.get('/settings/:venueId', requireAuth, async (c) => {
   try {
     const venueId = c.req.param('venueId');
-    const settings = (await djSettingsStore.get(venueId)) || { ...DEFAULT_SETTINGS, venueId };
+    const saved = await getPromoAirDjSettings(venueId);
+    // Если row не существует — возвращаем DEFAULT_SETTINGS (mirror legacy
+    // jsonbStore поведения через client-side default fallback).
+    const settings = saved
+      ? { ...DEFAULT_SETTINGS, ...saved }
+      : { ...DEFAULT_SETTINGS, venueId };
     return c.json({ success: true, settings });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);

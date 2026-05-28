@@ -4058,7 +4058,253 @@ export async function listAllProduction360Orders(): Promise<any[]> {
   return r.rows.map(mapP360OrderRow);
 }
 
-// ── Promo.Air AI DJ stores ──
-export const promoAirDjScriptsStore = makeJsonbKeyStore('promo_air_dj_scripts');
-export const promoAirDjSettingsStore = makeJsonbKeyStore('promo_air_dj_settings');
-export const promoAirDjQueueStore = makeJsonbKeyStore('promo_air_dj_queue');
+// ─── Promo.Air AI DJ (migration 071 — native cols since this PR) ──
+//
+// 3 tables, row-per-record (kills (pk, data jsonb) anti-pattern):
+//   promo_air_dj_settings  — venue-scoped singleton config
+//   promo_air_dj_scripts   — script history (retention: last 100/venue)
+//   promo_air_dj_queue     — playback queue (retention: last 50/venue)
+//
+// 2 of 3 tables были MISSING на проде до этой миграции — feature
+// partially broken (POST /settings и GET /queue падали). Эта миграция
+// + типизированные функции ниже починили feature через native cols.
+
+export interface PromoAirDjSettings {
+  venueId: string;
+  voiceStyle: 'warm' | 'energetic' | 'calm' | 'professional';
+  language: 'ru' | 'en';
+  djName: string;
+  enabledSegments: string[];
+  trackIntroFrequency: number;
+  timeCheckFrequency: number;
+  weatherFrequency: number;
+  customPrompt?: string | null;
+}
+
+export interface PromoAirDjScript {
+  id: string;
+  venueId: string;
+  segmentType: string;
+  text: string;
+  audioUrl: string | null;
+  model: string | null;
+  latencyMs: number | null;
+  status: string;
+  generatedAt: string;
+}
+
+export interface PromoAirDjQueueItem {
+  id: string;
+  venueId: string;
+  scriptId: string | null;
+  segmentType: string;
+  text: string;
+  audioUrl: string | null;
+  scheduledAt: string;
+  played: boolean;
+  playedAt: string | null;
+}
+
+function mapPromoAirDjSettings(r: any): PromoAirDjSettings | null {
+  if (!r) return null;
+  return {
+    venueId: r.venue_id,
+    voiceStyle: r.voice_style,
+    language: r.language,
+    djName: r.dj_name,
+    enabledSegments: r.enabled_segments || [],
+    trackIntroFrequency: r.track_intro_frequency,
+    timeCheckFrequency: r.time_check_frequency,
+    weatherFrequency: r.weather_frequency,
+    customPrompt: r.custom_prompt,
+  };
+}
+
+function mapPromoAirDjScript(r: any): PromoAirDjScript {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  return {
+    id: r.id,
+    venueId: r.venue_id,
+    segmentType: r.segment_type,
+    text: r.text,
+    audioUrl: r.audio_url,
+    model: r.model,
+    latencyMs: r.latency_ms,
+    status: r.status,
+    generatedAt: iso(r.generated_at),
+  };
+}
+
+function mapPromoAirDjQueueItem(r: any): PromoAirDjQueueItem {
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  return {
+    id: String(r.id),
+    venueId: r.venue_id,
+    scriptId: r.script_id,
+    segmentType: r.segment_type,
+    text: r.text,
+    audioUrl: r.audio_url,
+    scheduledAt: iso(r.scheduled_at) || '',
+    played: !!r.played,
+    playedAt: iso(r.played_at),
+  };
+}
+
+const PROMO_AIR_DJ_SETTINGS_COLS = `venue_id, voice_style, language, dj_name,
+  enabled_segments, track_intro_frequency, time_check_frequency,
+  weather_frequency, custom_prompt`;
+
+export async function getPromoAirDjSettings(venueId: string): Promise<PromoAirDjSettings | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${PROMO_AIR_DJ_SETTINGS_COLS} FROM promo_air_dj_settings
+      WHERE venue_id = $1 LIMIT 1`,
+    [venueId],
+  );
+  return mapPromoAirDjSettings(r.rows[0]);
+}
+
+/**
+ * Upsert settings. Принимает partial — отсутствующие поля используют
+ * DEFAULT на INSERT path или сохраняют существующее значение на UPDATE
+ * path. Returns the row after upsert (so handler возвращает client'у
+ * merged-with-defaults версию).
+ */
+export async function upsertPromoAirDjSettings(
+  venueId: string,
+  patch: Partial<Omit<PromoAirDjSettings, 'venueId'>>,
+): Promise<PromoAirDjSettings> {
+  const { pool } = await import('./db-client.tsx');
+  // Build dynamic SET clause — только переданные поля участвуют в UPDATE.
+  // Поля выбраны через field name → column name mapping.
+  const FIELD_MAP: Record<string, string> = {
+    voiceStyle:           'voice_style',
+    language:             'language',
+    djName:               'dj_name',
+    enabledSegments:      'enabled_segments',
+    trackIntroFrequency:  'track_intro_frequency',
+    timeCheckFrequency:   'time_check_frequency',
+    weatherFrequency:     'weather_frequency',
+    customPrompt:         'custom_prompt',
+  };
+  // Список ключей которые callers могут передать; не входящие в map игнорим.
+  const insertCols: string[] = ['venue_id'];
+  const insertVals: any[] = [venueId];
+  const updateSet: string[] = [];
+  let idx = 2;
+  for (const [field, col] of Object.entries(FIELD_MAP)) {
+    if (patch[field as keyof typeof patch] !== undefined) {
+      insertCols.push(col);
+      insertVals.push(patch[field as keyof typeof patch]);
+      updateSet.push(`${col} = EXCLUDED.${col}`);
+      idx++;
+    }
+  }
+  updateSet.push('updated_at = NOW()');
+
+  const placeholders = insertVals.map((_, i) => `$${i + 1}`).join(', ');
+  const r = await pool.query(
+    `INSERT INTO promo_air_dj_settings (${insertCols.join(', ')})
+     VALUES (${placeholders})
+     ON CONFLICT (venue_id) DO UPDATE SET ${updateSet.join(', ')}
+     RETURNING ${PROMO_AIR_DJ_SETTINGS_COLS}`,
+    insertVals,
+  );
+  return mapPromoAirDjSettings(r.rows[0])!;
+}
+
+const PROMO_AIR_DJ_SCRIPT_COLS = `id, venue_id, segment_type, text, audio_url,
+  model, latency_ms, status, generated_at`;
+
+/**
+ * Insert script + retention: автоматически удаляет старше последних 100
+ * для venue. Старая jsonbStore-based handler делал то же самое JS-side
+ * через `existing.length = 100` после unshift'а.
+ */
+export async function insertPromoAirDjScript(script: PromoAirDjScript): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO promo_air_dj_scripts
+       (id, venue_id, segment_type, text, audio_url, model, latency_ms, status, generated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::timestamptz, NOW()))`,
+    [
+      script.id, script.venueId, script.segmentType, script.text,
+      script.audioUrl, script.model, script.latencyMs, script.status,
+      script.generatedAt || null,
+    ],
+  );
+  // Retention — keep last 100 per venue. Window CTE для атомарного delete.
+  await pool.query(
+    `DELETE FROM promo_air_dj_scripts
+      WHERE venue_id = $1
+        AND id NOT IN (
+          SELECT id FROM promo_air_dj_scripts
+           WHERE venue_id = $1
+           ORDER BY generated_at DESC
+           LIMIT 100
+        )`,
+    [script.venueId],
+  );
+}
+
+export async function listPromoAirDjScripts(venueId: string, limit: number = 20): Promise<PromoAirDjScript[]> {
+  const { pool } = await import('./db-client.tsx');
+  const safeLimit = Math.max(1, Math.min(limit, 100));
+  const r = await pool.query(
+    `SELECT ${PROMO_AIR_DJ_SCRIPT_COLS} FROM promo_air_dj_scripts
+      WHERE venue_id = $1
+      ORDER BY generated_at DESC
+      LIMIT ${safeLimit}`,
+    [venueId],
+  );
+  return r.rows.map(mapPromoAirDjScript);
+}
+
+const PROMO_AIR_DJ_QUEUE_COLS = `id, venue_id, script_id, segment_type, text,
+  audio_url, scheduled_at, played, played_at`;
+
+/**
+ * Enqueue item + retention: keep last 50 per venue. На отличие от legacy
+ * jsonbStore поведения (FIFO `queue.shift()` если >50), мы режем по
+ * scheduled_at DESC — пишет последние 50.
+ */
+export async function enqueuePromoAirDjItem(item: Omit<PromoAirDjQueueItem, 'id'>): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO promo_air_dj_queue
+       (venue_id, script_id, segment_type, text, audio_url, scheduled_at, played, played_at)
+     VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, NOW()), $7, $8::timestamptz)`,
+    [
+      item.venueId, item.scriptId, item.segmentType, item.text,
+      item.audioUrl, item.scheduledAt || null, item.played,
+      item.playedAt || null,
+    ],
+  );
+  await pool.query(
+    `DELETE FROM promo_air_dj_queue
+      WHERE venue_id = $1
+        AND id NOT IN (
+          SELECT id FROM promo_air_dj_queue
+           WHERE venue_id = $1
+           ORDER BY scheduled_at DESC
+           LIMIT 50
+        )`,
+    [item.venueId],
+  );
+}
+
+/**
+ * Returns pending (not-played) queue items for venue, ordered by
+ * scheduled_at ASC (FIFO playback). Использует partial index
+ * idx_promo_air_dj_queue_pending для hot-path.
+ */
+export async function listPromoAirDjQueuePending(venueId: string): Promise<PromoAirDjQueueItem[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${PROMO_AIR_DJ_QUEUE_COLS} FROM promo_air_dj_queue
+      WHERE venue_id = $1 AND played = FALSE
+      ORDER BY scheduled_at ASC`,
+    [venueId],
+  );
+  return r.rows.map(mapPromoAirDjQueueItem);
+}
