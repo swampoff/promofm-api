@@ -57,7 +57,9 @@ import {
   // beat_reviews (native cols since migration 060):
   getBeatReview, upsertBeatReview, listBeatReviewsByBeat,
   getBeatReviewsAggregateStats, findBeatReviewByUser,
-  beatFavoritesStore, contractsStore, digitalGoodsStore,
+  // beat_favorites — row-per-favorite (migration 062):
+  listBeatFavorites, toggleBeatFavorite,
+  contractsStore, digitalGoodsStore,
   platformRevenueLogStore, platformStatsStore,
   producerServicesStore, serviceOrdersByClientStore,
   serviceOrdersByProducerStore, serviceOrdersStore,
@@ -274,8 +276,7 @@ app.get('/beats/favorites', requireAuth, async (c) => {
     const userId = c.get('userId'); // IDOR fix: from JWT
     if (!userId) return c.json({ success: false, error: 'userId required' }, 400);
 
-    const raw = await beatFavoritesStore.get(userId);
-    const favIds: string[] = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
+    const favIds = await listBeatFavorites(userId);
     return c.json({ success: true, data: favIds });
   } catch (error) {
     console.log('GET /beats/favorites error:', error);
@@ -564,18 +565,9 @@ app.post('/beats/:id/favorite', requireAuth, async (c) => {
 
     if (!userId) return c.json({ success: false, error: 'Authorization required' }, 401);
 
-    const raw = await beatFavoritesStore.get(userId);
-    const favs: string[] = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
-
-    const idx = favs.indexOf(beatId);
-    const added = idx === -1;
-    if (added) {
-      favs.unshift(beatId);
-    } else {
-      favs.splice(idx, 1);
-    }
-
-    await beatFavoritesStore.set(userId, JSON.stringify(favs));
+    // Atomic toggle (INSERT ON CONFLICT DO NOTHING + проверка rowCount).
+    // Раньше: get array → modify → set (race window для 2 concurrent toggles).
+    const { added } = await toggleBeatFavorite(userId, beatId);
 
     // Обновить likes на бите
     try {
