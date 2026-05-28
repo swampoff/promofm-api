@@ -3717,7 +3717,9 @@ export const systemConfigStore = makeJsonbKeyStore('system_config', 'key');
 //   accounting_counterparties / accounting_calendar. Доступ — напрямую
 //   через pool.query в payments-routes.tsx. accounting_data таблица
 //   оставлена на проде для legacy non-accounting:* keys (если есть).
-export const guideDataStore = makeJsonbKeyStore('promo_guide_data', 'key');
+// guideDataStore — REMOVED (dead store, 0 writers anywhere; only 3 .get reads
+// которые возвращали [] / null since data never populated). promo_guide_data
+// table candidate для manual DROP via OPERATIONS_LOG.md.
 // elevenlabsStore — DROPPED (0 callers AND 0 direct refs к elevenlabs_config
 // таблице. Кандидат на DROP TABLE после ручной проверки laptop'ом).
 export const platformRevenueLogStore = makeJsonbKeyStore('platform_revenue_log');
