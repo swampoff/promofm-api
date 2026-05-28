@@ -3984,7 +3984,9 @@ export const radioNotificationsStore  = makeRadioRequestArrayStore('radio_notifi
 // через pool.query в venue-routes.tsx / venue-api-routes.tsx.
 // venue_ad_campaigns — row-per-campaign, native cols since migration 082.
 // Доступ через typed functions ниже (см. anchor "venue_ad_campaigns native").
-export const venueAnalyticsStore = makeJsonbKeyStore('venue_analytics', 'venue_id');
+// venueAnalyticsStore — REMOVED (dead store, 0 writers anywhere; only 4 .get
+// reads которые возвращали {} / []). venue_analytics table candidate для
+// manual DROP via OPERATIONS_LOG.md.
 export const venueRadioBrandStore = makeJsonbKeyStore('venue_radio_brand', 'venue_id');
 // ticketProvidersStore — DROPPED (0 callers; ticket_providers доступ
 // через `upsertTicketProvider` + `getTicketProvidersByConcert` функции
