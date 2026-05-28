@@ -1819,38 +1819,108 @@ export async function getPaymentTxUserSummaries(): Promise<any[]> {
  *  - нужны JOIN'ы на другие таблицы по часто-фильтруемому полю
  * Пример уже сделанной миграции — таблица `tracks` (db-typed.tsx).
  */
-function jsonbStore(table: string, pk = 'id') {
+// ─── Typed store factories (replace legacy jsonbStore wrapper) ─────────
+//
+// `jsonbStore()` was DELETED in this PR (re-rebased #75). All callers
+// converted to typed factories below. They use pool.query directly
+// (no `db()` supabase wrapper) and preserve the legacy `.get/.set/.del
+// /.getAll/.getByCol` API — handler call sites don't change.
+//
+// Three flavours, picked by table shape:
+//   makeUserSingletonStore('foo')        — 1 row per user_id (per-user
+//                                          singleton config). Pins
+//                                          pkCol='user_id' so callers
+//                                          read like `store.get(userId)`.
+//   makeJsonbKeyStore('foo')             — 1 row per `id` (general
+//                                          id→object mapping). Default
+//                                          for tables whose PK is `id`.
+//   makeJsonbKeyStore('foo', 'foo_id')   — 1 row per custom PK column.
+//   makeJsonbIndexStore('foo', 'foo_id') — alias of makeJsonbKeyStore
+//                                          with explicit pkCol — makes
+//                                          per-X-index intent obvious
+//                                          (X array refs inside data).
+//
+// `paymentBalancesStore` is a SPECIAL CASE: payment_balances has native
+// cols (available, pending, total), NOT `data jsonb`. Restored as a
+// hand-rolled wrapper reading/writing native cols — see below.
+
+function makeUserSingletonStore(table: string) {
+  return makeJsonbKeyStore(table, 'user_id');
+}
+
+function makeJsonbKeyStore(table: string, pkCol: string = 'id') {
   return {
-    async get(id: string) {
-      const { data, error } = await db().from(table).select('*').eq(pk, id).maybeSingle();
-      if (error) console.error(`[db] ${table}.get:`, error);
-      return data ? (data.data ?? data) : null;
+    async get(id: string): Promise<any | null> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT data FROM ${table} WHERE ${pkCol} = $1 LIMIT 1`,
+        [id]
+      );
+      if (!r.rowCount) return null;
+      const d = r.rows[0].data;
+      return typeof d === 'string' ? JSON.parse(d) : (d ?? null);
     },
-    async set(id: string, value: any, extra?: Record<string, any>) {
-      // PG node driver auto-serializes JS object → jsonb. Do NOT JSON.stringify here,
-      // otherwise value is stored as escaped string (jsonb_typeof=string) and consumers
-      // doing JSON.parse on it will fail (object vs string mismatch). Accept value as-is
-      // when caller already passed a string, parse it back to object for proper storage.
-      const normalized = typeof value === 'string' ? (() => { try { return JSON.parse(value); } catch { return value; } })() : value;
-      const row = { [pk]: id, data: normalized, updated_at: new Date().toISOString(), ...extra };
-      const { error } = await db().from(table).upsert(row, { onConflict: pk });
-      if (error) console.error(`[db] ${table}.set:`, error);
+    async set(id: string, value: any, extra?: Record<string, any>): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      const normalized = typeof value === 'string'
+        ? (() => { try { return JSON.parse(value); } catch { return value; } })()
+        : value;
+      if (!extra || Object.keys(extra).length === 0) {
+        await pool.query(
+          `INSERT INTO ${table} (${pkCol}, data, updated_at)
+           VALUES ($1, $2::jsonb, NOW())
+           ON CONFLICT (${pkCol}) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+          [id, JSON.stringify(normalized)]
+        );
+        return;
+      }
+      const extraKeys = Object.keys(extra);
+      const safeKeys = extraKeys.filter(k => /^[a-z_][a-z0-9_]*$/i.test(k));
+      const cols = [pkCol, 'data', 'updated_at', ...safeKeys].join(', ');
+      const vals: any[] = [id, JSON.stringify(normalized), new Date().toISOString(), ...safeKeys.map(k => extra[k])];
+      const placeholders = vals.map((_, i) => i === 1 ? `$${i + 1}::jsonb` : `$${i + 1}`).join(', ');
+      const updateSet = ['data = EXCLUDED.data', 'updated_at = EXCLUDED.updated_at',
+        ...safeKeys.map(k => `${k} = EXCLUDED.${k}`)].join(', ');
+      await pool.query(
+        `INSERT INTO ${table} (${cols}) VALUES (${placeholders})
+         ON CONFLICT (${pkCol}) DO UPDATE SET ${updateSet}`,
+        vals
+      );
     },
-    async del(id: string) {
-      const { error } = await db().from(table).delete().eq(pk, id);
-      if (error) console.error(`[db] ${table}.del:`, error);
+    async del(id: string): Promise<void> {
+      const { pool } = await import('./db-client.tsx');
+      await pool.query(`DELETE FROM ${table} WHERE ${pkCol} = $1`, [id]);
     },
-    async getAll() {
-      const { data, error } = await db().from(table).select('*').order('created_at', { ascending: false });
-      if (error) console.error(`[db] ${table}.getAll:`, error);
-      return (data || []).map((r: any) => r.data ?? r);
+    async getAll(): Promise<any[]> {
+      const { pool } = await import('./db-client.tsx');
+      const r = await pool.query(
+        `SELECT data FROM ${table} ORDER BY created_at DESC`
+      );
+      return r.rows.map((row: any) => {
+        const d = row.data;
+        return typeof d === 'string' ? JSON.parse(d) : d;
+      });
     },
-    async getByCol(column: string, value: string) {
-      const { data, error } = await db().from(table).select('*').eq(column, value).order('created_at', { ascending: false });
-      if (error) console.error(`[db] ${table}.getByCol:`, error);
-      return (data || []).map((r: any) => r.data ?? r);
+    async getByCol(column: string, value: string): Promise<any[]> {
+      const { pool } = await import('./db-client.tsx');
+      if (!/^[a-z_][a-z0-9_]*$/i.test(column)) {
+        console.error(`[db] ${table}.getByCol: unsafe column "${column}"`);
+        return [];
+      }
+      const r = await pool.query(
+        `SELECT data FROM ${table} WHERE ${column} = $1 ORDER BY created_at DESC`,
+        [value]
+      );
+      return r.rows.map((row: any) => {
+        const d = row.data;
+        return typeof d === 'string' ? JSON.parse(d) : d;
+      });
     },
   };
+}
+
+function makeJsonbIndexStore(table: string, pkCol: string) {
+  return makeJsonbKeyStore(table, pkCol);
 }
 
 // ─── track_test_requests native-cols store (migration 051) ───
@@ -2383,11 +2453,11 @@ export async function countBeatFavoriters(beatId: string): Promise<number> {
 // beat_reviews_index DROPPED — derived через idx_beat_reviews_beat_created.
 // 2 store wrappers DELETED. Доступ — getBeatReview / upsertBeatReview /
 // listBeatReviewsByBeat / getBeatReviewsAggregateStats ниже.
-export const contractsStore = jsonbStore('contracts');
-export const digitalGoodsStore = jsonbStore('digital_goods');
-export const producerSettingsStore = jsonbStore('producer_settings', 'user_id');
-export const producerProfileEditStore = jsonbStore('producer_profile_edit', 'user_id');
-export const producerAiLastStore = jsonbStore('producer_ai_last', 'user_id');
+export const contractsStore = makeJsonbKeyStore('contracts');
+export const digitalGoodsStore = makeJsonbKeyStore('digital_goods');
+export const producerSettingsStore = makeUserSingletonStore('producer_settings');
+export const producerProfileEditStore = makeUserSingletonStore('producer_profile_edit');
+export const producerAiLastStore = makeUserSingletonStore('producer_ai_last');
 // producer_convs/messages/sessions переехали на row-per-entity
 // (migration 042). Доступ через pool.query в producer-studio-routes.tsx.
 // producer_custom_services / producer_custom_portfolio переехали на
@@ -2630,10 +2700,58 @@ export async function listServiceOrdersByProducer(producerId: string): Promise<a
   );
   return r.rows.map(mapServiceOrderRow);
 }
-export const bookingCalendarStore = jsonbStore('booking_calendar', 'performer_id');
+export const bookingCalendarStore = makeJsonbKeyStore('booking_calendar', 'performer_id');
 // payment_transactions переехал на row-per-tx (migration 037). Доступ
 // через pool.query из platform-revenue.tsx + track-test-routes.tsx.
-export const paymentBalancesStore = jsonbStore('payment_balances', 'user_id');
+// payment_balances имеет native cols (available, pending, total) — не data
+// jsonb. Handworked wrapper читает/пишет native cols через
+// userId/available/pending/total contract. Не наследует makeUserSingletonStore.
+export const paymentBalancesStore = {
+  async get(userId: string): Promise<any | null> {
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `SELECT user_id, available, pending, total FROM payment_balances WHERE user_id = $1 LIMIT 1`,
+      [userId]
+    );
+    if (!r.rowCount) return null;
+    const row = r.rows[0];
+    return {
+      userId: row.user_id,
+      available: Number(row.available || 0),
+      pending: Number(row.pending || 0),
+      total: Number(row.total || 0),
+    };
+  },
+  async set(userId: string, value: any): Promise<void> {
+    const { pool } = await import('./db-client.tsx');
+    await pool.query(
+      `INSERT INTO payment_balances (user_id, available, pending, total, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET
+         available = EXCLUDED.available,
+         pending   = EXCLUDED.pending,
+         total     = EXCLUDED.total,
+         updated_at = NOW()`,
+      [userId, Number(value.available || 0), Number(value.pending || 0), Number(value.total || 0)]
+    );
+  },
+  async del(userId: string): Promise<void> {
+    const { pool } = await import('./db-client.tsx');
+    await pool.query(`DELETE FROM payment_balances WHERE user_id = $1`, [userId]);
+  },
+  async getAll(): Promise<any[]> {
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `SELECT user_id, available, pending, total FROM payment_balances`
+    );
+    return r.rows.map((row: any) => ({
+      userId: row.user_id,
+      available: Number(row.available || 0),
+      pending: Number(row.pending || 0),
+      total: Number(row.total || 0),
+    }));
+  },
+};
 // dj_marketplace_index, dj_reviews, dj_collaborations, dj_pitches,
 // dj_editor_profiles — store declarations удалены как orphan (2026-05-27):
 // dj_marketplace_index, dj_collaborations, dj_pitches — 0 callers;
@@ -2731,7 +2849,7 @@ function makeDjSubscriptionsStore() {
 export const djSubscriptionsStore = makeDjSubscriptionsStore();
 // dj_withdrawals переехал на row-per-withdrawal (migration 044). Доступ
 // через pool.query из dj-studio-routes.tsx + checkout-routes.tsx webhook.
-export const djTransactionsStore = jsonbStore('dj_transactions', 'dj_id');
+export const djTransactionsStore = makeJsonbKeyStore('dj_transactions', 'dj_id');
 // collab_offers — row-per-offer native cols (migration 064).
 // collab_offers_by_artist + collab_offers_by_producer таблицы DROPPED
 // — derived из collab_offers.artist_id / producer_id с native indexes.
@@ -2892,31 +3010,31 @@ export async function getCollabOfferStatsByUser(userId: string): Promise<any> {
 }
 // collab_messages переехал на row-per-message (migration 038). Доступ
 // через pool.query в collaboration-routes.tsx.
-export const publishOrdersStore = jsonbStore('publish_orders');
+export const publishOrdersStore = makeJsonbKeyStore('publish_orders');
 // publish_chats переехал на row-per-message (migration 038). Доступ
 // через pool.query в chat-routes.tsx.
-export const publishEmailPrefsStore = jsonbStore('publish_email_prefs', 'user_id');
-export const emailHistoryStore = jsonbStore('email_history');
-export const emailTemplatesStore = jsonbStore('email_templates');
-export const chartAggregationStore = jsonbStore('chart_aggregation');
-export const chartSourcesStore = jsonbStore('chart_sources');
+export const publishEmailPrefsStore = makeUserSingletonStore('publish_email_prefs');
+export const emailHistoryStore = makeJsonbKeyStore('email_history');
+export const emailTemplatesStore = makeJsonbKeyStore('email_templates');
+export const chartAggregationStore = makeJsonbKeyStore('chart_aggregation');
+export const chartSourcesStore = makeJsonbKeyStore('chart_sources');
 // radioAdSlotsStore + radioAdSlotIndexStore — заменены на нативные хелперы
 // после migration 050. См. блок «Radio Ad Slots» ниже.
-export const radioAnalyticsStore = jsonbStore('radio_analytics', 'radio_id');
+export const radioAnalyticsStore = makeJsonbKeyStore('radio_analytics', 'radio_id');
 export const radioArtistRequestsStore = makeRadioRequestArrayStore('radio_artist_requests', mapArtistRequestRow, normalizeArtistRequestForInsert);
 export const radioVenueRequestsStore  = makeRadioRequestArrayStore('radio_venue_requests',  mapVenueRequestRow,  normalizeVenueRequestForInsert);
-export const radioFinanceStore = jsonbStore('radio_finance', 'radio_id');
+export const radioFinanceStore = makeJsonbKeyStore('radio_finance', 'radio_id');
 export const radioNotificationsStore  = makeRadioRequestArrayStore('radio_notifications',   mapRadioNotificationRow, normalizeRadioNotificationForInsert);
-export const radioTransactionsStore = jsonbStore('radio_transactions', 'radio_id');
+export const radioTransactionsStore = makeJsonbKeyStore('radio_transactions', 'radio_id');
 // venue_playlists перевели на row-per-playlist (migration 036). Доступ
 // через pool.query в venue-routes.tsx / venue-api-routes.tsx.
-export const venueAdCampaignsStore = jsonbStore('venue_ad_campaigns', 'venue_id');
-export const venueAnalyticsStore = jsonbStore('venue_analytics', 'venue_id');
-export const venueRadioBrandStore = jsonbStore('venue_radio_brand', 'venue_id');
+export const venueAdCampaignsStore = makeJsonbKeyStore('venue_ad_campaigns', 'venue_id');
+export const venueAnalyticsStore = makeJsonbKeyStore('venue_analytics', 'venue_id');
+export const venueRadioBrandStore = makeJsonbKeyStore('venue_radio_brand', 'venue_id');
 // ticketProvidersStore — DROPPED (0 callers; ticket_providers доступ
 // через `upsertTicketProvider` + `getTicketProvidersByConcert` функции
 // в db.tsx + ticketing-routes.tsx).
-export const ticketSalesStore = jsonbStore('ticket_sales');
+export const ticketSalesStore = makeJsonbKeyStore('ticket_sales');
 // track_test_requests — row-per-request, native cols since migration 051.
 // Interface (.get / .set / .del / .getAll) preserved для совместимости
 // с handler'ами; backed by pool.query на native cols.
@@ -2927,12 +3045,12 @@ export const trackTestRequestsStore = makeTrackTestRequestsStore();
 // SELECT id FROM track_test_requests …
 export const trackTestUserRequestsStore = makeTrackTestUserRequestsView();
 export const trackTestAllRequestsStore = makeTrackTestAllRequestsView();
-export const trackTestExpertsStore = jsonbStore('track_test_experts');
-export const trackTestReviewsStore = jsonbStore('track_test_reviews');
-export const trackTestRequestReviewsStore = jsonbStore('track_test_request_reviews', 'request_id');
-export const newsPipelineStore = jsonbStore('news_pipeline', 'key');
-export const agentSessionsStore = jsonbStore('agent_sessions');
-export const agentSessionsIndexStore = jsonbStore('agent_sessions_index');
+export const trackTestExpertsStore = makeJsonbKeyStore('track_test_experts');
+export const trackTestReviewsStore = makeJsonbKeyStore('track_test_reviews');
+export const trackTestRequestReviewsStore = makeJsonbKeyStore('track_test_request_reviews', 'request_id');
+export const newsPipelineStore = makeJsonbKeyStore('news_pipeline', 'key');
+export const agentSessionsStore = makeJsonbKeyStore('agent_sessions');
+export const agentSessionsIndexStore = makeJsonbKeyStore('agent_sessions_index');
 // agent_queue → agent_tasks (row-per-task, migration 036). Доступ через
 // pool.query в agents-routes.tsx.
 // artist_analytics_cache переехал на pool.query с native expires_at TTL
@@ -2946,25 +3064,25 @@ export const agentSessionsIndexStore = jsonbStore('agent_sessions_index');
 // notificationSettingsKvStore — DROPPED (0 callers; notification_settings
 // доступ через `getNotificationSettings` / `upsertNotificationSettings`
 // функции в db.tsx).
-export const systemConfigStore = jsonbStore('system_config', 'key');
+export const systemConfigStore = makeJsonbKeyStore('system_config', 'key');
 // accountingStore — split на 5 native таблиц (migration 055):
 //   accounting_reports / accounting_documents / accounting_ledger /
 //   accounting_counterparties / accounting_calendar. Доступ — напрямую
 //   через pool.query в payments-routes.tsx. accounting_data таблица
 //   оставлена на проде для legacy non-accounting:* keys (если есть).
-export const guideDataStore = jsonbStore('promo_guide_data', 'key');
+export const guideDataStore = makeJsonbKeyStore('promo_guide_data', 'key');
 // elevenlabsStore — DROPPED (0 callers AND 0 direct refs к elevenlabs_config
 // таблице. Кандидат на DROP TABLE после ручной проверки laptop'ом).
-export const platformRevenueLogStore = jsonbStore('platform_revenue_log');
-export const platformStatsStore = jsonbStore('platform_stats', 'id');
-export const trackTestExpertStatsStore = jsonbStore('track_test_expert_stats', 'expert_id');
+export const platformRevenueLogStore = makeJsonbKeyStore('platform_revenue_log');
+export const platformStatsStore = makeJsonbKeyStore('platform_stats', 'id');
+export const trackTestExpertStatsStore = makeJsonbKeyStore('track_test_expert_stats', 'expert_id');
 // trackModerationStore DELETED — 0 callers. track_moderation пишется
 // напрямую через pool.query в src/ai-check.tsx (после migration 052 —
 // все native cols, jsonb остаётся только в ai_check_result).
-export const newsPublicStore = jsonbStore('news_public');
+export const newsPublicStore = makeJsonbKeyStore('news_public');
 // contactFormsStore — DROPPED (0 callers; `contact_forms` table читается
 // напрямую через pool.query в landing-data-routes.tsx).
-export const investorInquiriesStore = jsonbStore('investor_inquiries');
+export const investorInquiriesStore = makeJsonbKeyStore('investor_inquiries');
 // djEditorProfileStore — DROPPED (0 callers; `dj_editor_profiles` доступ
 // напрямую через pool.query). DO NOT re-add (was previously removed by #73
 // dead-stores cleanup).
@@ -3134,8 +3252,8 @@ export async function getConcertAgentStats(): Promise<{
   };
 }
 
-export const curatorReportsStore = jsonbStore('curator_reports');
-export const verificationTokensStore = jsonbStore('verification_tokens');
+export const curatorReportsStore = makeJsonbKeyStore('curator_reports');
+export const verificationTokensStore = makeJsonbKeyStore('verification_tokens');
 
 // ─── Coin Transactions (specific table) ───
 
@@ -3941,6 +4059,6 @@ export async function listAllProduction360Orders(): Promise<any[]> {
 }
 
 // ── Promo.Air AI DJ stores ──
-export const promoAirDjScriptsStore = jsonbStore('promo_air_dj_scripts');
-export const promoAirDjSettingsStore = jsonbStore('promo_air_dj_settings');
-export const promoAirDjQueueStore = jsonbStore('promo_air_dj_queue');
+export const promoAirDjScriptsStore = makeJsonbKeyStore('promo_air_dj_scripts');
+export const promoAirDjSettingsStore = makeJsonbKeyStore('promo_air_dj_settings');
+export const promoAirDjQueueStore = makeJsonbKeyStore('promo_air_dj_queue');

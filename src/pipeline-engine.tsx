@@ -457,21 +457,15 @@ export interface AuditEntry {
 // In-memory audit log + DB persistence
 const auditLog: AuditEntry[] = [];
 
-// Lazy DB store — загружается при первом обращении
-let _auditDbStore: any = null;
+// pipeline_audit persist — inline pool.query (раньше использовали
+// dynamic jsonbStore() call, helper удалён в re-rebased #75).
+// Errors swallowed: in-memory log остаётся source-of-truth для UI,
+// DB write это best-effort persistence для долгосрочной аналитики.
 async function getAuditDbStore() {
-  if (!_auditDbStore) {
-    try {
-      const dbMod = await import('./db.tsx');
-      // Используем общий jsonbStore pattern — таблица pipeline_audit
-      if (typeof (dbMod as any).jsonbStore === 'function') {
-        _auditDbStore = (dbMod as any).jsonbStore('pipeline_audit');
-      }
-    } catch (_) {
-      // DB not available — работаем только in-memory
-    }
-  }
-  return _auditDbStore;
+  // Backwards-compatible stub — actual write path inlined in
+  // persistAuditEntry() below. Kept the function to avoid touching
+  // other call sites that test for null return.
+  return null as any;
 }
 
 /**
@@ -497,9 +491,16 @@ export function logAudit(entry: Omit<AuditEntry, 'id' | 'timestamp'>): AuditEntr
 }
 
 async function persistAuditEntry(entry: AuditEntry) {
-  const store = await getAuditDbStore();
-  if (store) {
-    await store.set(entry.id, entry);
+  try {
+    const { pool } = await import('./db-client.tsx');
+    await pool.query(
+      `INSERT INTO pipeline_audit (id, data, updated_at)
+       VALUES ($1, $2::jsonb, NOW())
+       ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [entry.id, JSON.stringify(entry)]
+    );
+  } catch (_) {
+    // DB unavailable — in-memory log is source-of-truth for UI.
   }
 }
 
