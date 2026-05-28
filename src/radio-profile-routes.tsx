@@ -190,6 +190,54 @@ app.put('/profile/:radioId', requireAuth, async (c) => {
 });
 
 /**
+ * POST /request-verification — radio station submits a verification
+ * request. Mirrors artist's POST /artist-profile/request-verification
+ * (migration 058) and venue's new POST /venue/request-verification.
+ * Admin processes via POST /auth/admin/verify-profile { role:
+ * 'radio_station', isVerified, rejectionReason? }.
+ *
+ * Idempotent: re-clicking refreshes verification_requested_at and
+ * clears rejection_reason. Authenticated user_id is the station —
+ * URL param is not needed (the existing :radioId routes use the URL
+ * param, but for request-verification the JWT identity is sufficient).
+ *
+ * Migration 062 added the underlying columns.
+ */
+app.post('/request-verification', requireAuth, async (c) => {
+  const userId = c.get('userId' as never) as string | undefined;
+  if (!userId) {
+    return c.json({ success: false, error: 'Не авторизован' }, 401);
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT is_verified FROM radio_profiles WHERE user_id = $1 LIMIT 1`,
+      [userId],
+    );
+    if (rows.length === 0) {
+      return c.json({ success: false, error: 'Radio profile not found' }, 404);
+    }
+    if (rows[0].is_verified) {
+      return c.json({ success: false, error: 'Профиль уже верифицирован' }, 400);
+    }
+    await pool.query(
+      `UPDATE radio_profiles
+          SET verification_requested_at     = NOW(),
+              verification_rejection_reason = NULL
+        WHERE user_id = $1`,
+      [userId],
+    );
+    console.log(`[RadioProfile] Verification requested by ${userId}`);
+    return c.json({
+      success: true,
+      message: 'Заявка на верификацию отправлена. Ожидайте рассмотрения администратором.',
+    });
+  } catch (error) {
+    console.error('[RadioProfile] request-verification error:', error);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+/**
  * GET /profile/:radioId/stats
  * Статистика радиостанции
  */

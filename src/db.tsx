@@ -1236,7 +1236,23 @@ export async function getVenueProfile(userId: string) {
     isVerified:     data.is_verified     ?? inner.isVerified     ?? false,
     email:          data.email           ?? inner.email,
     phone:          data.phone           ?? inner.phone,
+    // Migration 062 verification request/approve state. Surface as ISO
+    // strings so the frontend status block (mirrors artist's pattern
+    // in settings-page.tsx:1370) can render Pending/Approved/Rejected.
+    verificationRequestedAt:     isoOrNullVerif(data.verification_requested_at),
+    verificationApprovedAt:      isoOrNullVerif(data.verification_approved_at),
+    verificationRejectionReason: data.verification_rejection_reason ?? null,
   };
+}
+
+// Shared helper for the three role overlays (venue/radio/producer) —
+// converts a Postgres TIMESTAMPTZ value to an ISO string when present.
+// Lives near upsertVenueProfile so the venue / radio / producer
+// projectors can use it. Returns null for both NULL and missing keys.
+function isoOrNullVerif(v: unknown): string | null {
+  if (v == null) return null;
+  if (v instanceof Date) return v.toISOString();
+  return String(v);
 }
 
 export async function upsertVenueProfile(userId: string, profile: Record<string, any>) {
@@ -1319,6 +1335,10 @@ export async function getRadioProfile(userId: string) {
     isVerified:       data.is_verified       ?? inner.isVerified ?? false,
     email:            data.email             ?? inner.email,
     phone:            data.phone             ?? inner.phone,
+    // Migration 062 verification state — see isoOrNullVerif above.
+    verificationRequestedAt:     isoOrNullVerif(data.verification_requested_at),
+    verificationApprovedAt:      isoOrNullVerif(data.verification_approved_at),
+    verificationRejectionReason: data.verification_rejection_reason ?? null,
   };
 }
 
@@ -1389,6 +1409,12 @@ function projectProducerProfileRow(data: any) {
     coverUrl:       data.cover_url       ?? inner.coverUrl,
     email:          data.email           ?? inner.email,
     phone:          data.phone           ?? inner.phone,
+    // Migration 062 — verification state. is_verified column itself
+    // was also added in 062 (producer never had it before).
+    isVerified:                  data.is_verified ?? inner.isVerified ?? false,
+    verificationRequestedAt:     isoOrNullVerif(data.verification_requested_at),
+    verificationApprovedAt:      isoOrNullVerif(data.verification_approved_at),
+    verificationRejectionReason: data.verification_rejection_reason ?? null,
   };
 }
 

@@ -956,6 +956,55 @@ app.put('/profile/update/:producerId', requireAuth, async (c) => {
   } catch (error) { console.log(`Error updating profile: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
+/**
+ * POST /request-verification — producer submits a verification request.
+ *
+ * Mirrors artist's POST /artist-profile/request-verification (migration
+ * 058) + the venue/radio analogues. Admin processes via POST /auth/
+ * admin/verify-profile { role: 'producer', isVerified, rejectionReason? }.
+ *
+ * Idempotent: re-clicking refreshes verification_requested_at and
+ * clears any previous rejection_reason.
+ *
+ * Migration 062 added the underlying is_verified +
+ * verification_requested_at/approved_at/rejection_reason columns
+ * (producer never had is_verified before — migration 011 skipped this
+ * table).
+ */
+app.post('/request-verification', requireAuth, async (c) => {
+  const userId = c.get('userId' as never) as string | undefined;
+  if (!userId) {
+    return c.json({ success: false, error: 'Не авторизован' }, 401);
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT is_verified FROM producer_profiles WHERE user_id = $1 LIMIT 1`,
+      [userId],
+    );
+    if (rows.length === 0) {
+      return c.json({ success: false, error: 'Producer profile not found' }, 404);
+    }
+    if (rows[0].is_verified) {
+      return c.json({ success: false, error: 'Профиль уже верифицирован' }, 400);
+    }
+    await pool.query(
+      `UPDATE producer_profiles
+          SET verification_requested_at     = NOW(),
+              verification_rejection_reason = NULL
+        WHERE user_id = $1`,
+      [userId],
+    );
+    console.log(`[ProducerProfile] Verification requested by ${userId}`);
+    return c.json({
+      success: true,
+      message: 'Заявка на верификацию отправлена. Ожидайте рассмотрения администратором.',
+    });
+  } catch (error) {
+    console.error('[ProducerProfile] request-verification error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 app.get('/profile/edits/:producerId', requireAuth, async (c) => {
   try {
     const producerId = c.req.param('producerId');
