@@ -1012,8 +1012,29 @@ app.get('/profile/edits/:producerId', requireAuth, async (c) => {
   if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
-    const edits = await producerProfileEditStore.get(producerId);
-    return c.json({ success: true, data: edits || null });
+    const edits = (await producerProfileEditStore.get(producerId)) || {};
+    // Fold migration 062 verification state from producer_profiles
+    // (admin-managed, not part of the editor store) so the cabinet
+    // doesn't have to hit the public /landing-data endpoint just to
+    // render its own status badge. Verification state is public
+    // info, so this is a convenience-locality win — not a privacy
+    // change. Errors here are swallowed: the edit-store payload is
+    // the contract; verification fields are best-effort overlay.
+    let verification: Record<string, any> = {};
+    try {
+      const pub = await db.getProducerProfile(producerId);
+      if (pub) {
+        verification = {
+          isVerified:                  !!(pub as any).isVerified,
+          verificationRequestedAt:     (pub as any).verificationRequestedAt     ?? null,
+          verificationApprovedAt:      (pub as any).verificationApprovedAt      ?? null,
+          verificationRejectionReason: (pub as any).verificationRejectionReason ?? null,
+        };
+      }
+    } catch (verifErr) {
+      console.log(`[producer-profile] verification fold failed (non-fatal):`, verifErr);
+    }
+    return c.json({ success: true, data: { ...(edits as any), ...verification } });
   } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
