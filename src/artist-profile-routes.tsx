@@ -226,6 +226,16 @@ app.get('/profile/:artistId', async (c) => {
           if (apRow.total_followers != null) normalized.totalFollowers = Number(apRow.total_followers);
           if (apRow.is_verified) normalized.isVerified = !!apRow.is_verified;
           if (apRow.rating != null) normalized.rating = Number(apRow.rating);
+          // Migration 057 columns — surface them in the cached-profile
+          // response so refresh shows what the user just saved.
+          if (apRow.label         != null) normalized.label        = apRow.label         as string;
+          if (apRow.manager       != null) normalized.manager      = apRow.manager       as string;
+          if (apRow.booking_email != null) normalized.bookingEmail = apRow.booking_email as string;
+          if (apRow.career_start  != null) normalized.careerStart  = apRow.career_start  as string;
+          if (apRow.location      != null) normalized.location     = apRow.location      as string;
+          if (Array.isArray(apRow.languages) && apRow.languages.length > 0) {
+            normalized.languages = apRow.languages as string[];
+          }
 
           try {
             const { pool } = await import('./db-client.tsx');
@@ -354,6 +364,14 @@ app.get('/profile/:artistId', async (c) => {
           isVerified: apRow.is_verified || false,
           website: apRow.website || '',
           socials: apRow.social_links || { ...EMPTY_SOCIALS },
+          label:        apRow.label         || '',
+          manager:      apRow.manager       || '',
+          bookingEmail: apRow.booking_email || '',
+          careerStart:  apRow.career_start  || '',
+          location:     apRow.location      || '',
+          languages: (Array.isArray(apRow.languages) && apRow.languages.length > 0)
+            ? (apRow.languages as string[])
+            : ['Русский'],
         });
         return c.json({ success: true, source: 'sql', data: sqlProfile });
       }

@@ -126,8 +126,12 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
       userId
     );
 
-    // Upsert artist_profiles (required for track upload and public pages)
-    const artistName = (data.fullName as string) || (data.name as string) || null;
+    // Upsert artist_profiles (required for track upload and public pages).
+    // Prefer the explicit stage name from the form; fall back to legal name
+    // only when artistName is absent (e.g., very early signups). Previously
+    // fullName always won, which silently overwrote the stage name with
+    // the Latin passport transliteration for artists like "Надежда Гуськова".
+    const artistName = (data.artistName as string) || (data.fullName as string) || (data.name as string) || null;
     if (artistName) {
       const genre = (data.genre as string) || (Array.isArray(data.genres) && data.genres.length > 0 ? (data.genres as string[])[0] : null);
       const subGenres = Array.isArray(data.genres) ? (data.genres as string[]) : (data.genre ? [data.genre as string] : []);
@@ -140,9 +144,26 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
         if (s.appleMusic) streamingLinks.appleMusic = s.appleMusic;
       }
 
+      // Migration 057 added six native columns (label, manager, booking_email,
+      // career_start, languages, location) that were previously silently
+      // dropped by this mapping. Pass them through explicitly; the
+      // COALESCE/CASE clauses below preserve any existing value on partial
+      // updates (e.g., form submits with only one field changed).
+      const labelVal      = typeof data.label         === 'string' ? data.label         : null;
+      const managerVal    = typeof data.manager       === 'string' ? data.manager       : null;
+      const bookingEmail  = typeof data.bookingEmail  === 'string' ? data.bookingEmail  : null;
+      const careerStart   = typeof data.careerStart   === 'string' ? data.careerStart   : null;
+      const locationVal   = typeof data.location      === 'string' ? data.location      : null;
+      const languagesVal  = Array.isArray(data.languages) ? (data.languages as string[]) : null;
+
       await rlsQuery(
-        `INSERT INTO artist_profiles (user_id, slug, artist_name, genre, sub_genres, city, country, bio, avatar_url, website, social_links, streaming_links, data)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        `INSERT INTO artist_profiles (
+           user_id, slug, artist_name, genre, sub_genres, city, country, bio,
+           avatar_url, website, social_links, streaming_links, data,
+           label, manager, booking_email, career_start, languages, location
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                 $14, $15, $16, $17, COALESCE($18, ARRAY[]::text[]), $19)
          ON CONFLICT (user_id) DO UPDATE SET
            artist_name = COALESCE(EXCLUDED.artist_name, artist_profiles.artist_name),
            genre = COALESCE(EXCLUDED.genre, artist_profiles.genre),
@@ -154,6 +175,14 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
            social_links = COALESCE(EXCLUDED.social_links, artist_profiles.social_links),
            streaming_links = COALESCE(EXCLUDED.streaming_links, artist_profiles.streaming_links),
            data = COALESCE(artist_profiles.data, '{}'::jsonb) || EXCLUDED.data,
+           label         = COALESCE(EXCLUDED.label,         artist_profiles.label),
+           manager       = COALESCE(EXCLUDED.manager,       artist_profiles.manager),
+           booking_email = COALESCE(EXCLUDED.booking_email, artist_profiles.booking_email),
+           career_start  = COALESCE(EXCLUDED.career_start,  artist_profiles.career_start),
+           languages     = CASE WHEN array_length(EXCLUDED.languages, 1) > 0
+                                THEN EXCLUDED.languages
+                                ELSE artist_profiles.languages END,
+           location      = COALESCE(EXCLUDED.location,      artist_profiles.location),
            updated_at = NOW()`,
         [
           userId,
@@ -169,6 +198,12 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
           JSON.stringify(socials),
           JSON.stringify(streamingLinks),
           JSON.stringify(dataBlob),
+          labelVal,
+          managerVal,
+          bookingEmail,
+          careerStart,
+          languagesVal,
+          locationVal,
         ],
         userId
       );

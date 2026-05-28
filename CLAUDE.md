@@ -173,15 +173,20 @@ Order matters: radio_stations row first, FK second.
 ### Don't invent columns
 
 The TypeScript `ArtistProfile` interface shape DOES NOT match the SQL
-schema 1:1. The interface lists `rating`, `careerStart`, `coinsBalance`,
-`bookingEmail`, `languages` — most of these are NOT columns. They live
-in `data jsonb` or just nowhere.
+schema 1:1. After migration 057 (artist profile extended fields,
+2026-05-28), these ARE now columns: `label`, `manager`, `booking_email`,
+`career_start`, `languages` (`text[]`), `location`. Still NOT columns,
+live in `data jsonb` or nowhere: `rating`, `coinsBalance`, `phone` on
+artist_profiles (phone lives on `users.phone`).
 
 Before `SELECT <col>` from any cabinet table — verify the column
 exists. If you need a field that isn't there:
 1. Add `ALTER TABLE … ADD COLUMN IF NOT EXISTS …` migration in the
    same PR
 2. Note `MANUAL DEPLOY STEPS` in the commit body
+3. Extend the matching mapping in `vps-userdata.tsx` / `<role>-routes.tsx`
+   so the field actually flows from API → SQL → API. Adding the column
+   alone won't fix a silent-drop bug; the mapping is what writes.
 
 ### Migrations don't auto-run
 
