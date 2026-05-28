@@ -1208,7 +1208,35 @@ export async function getVenueProfile(userId: string) {
     .eq('user_id', userId)
     .maybeSingle();
   if (error) console.error('[db] getVenueProfile:', error);
-  return data ? (data.data || data) : null;
+  if (!data) return null;
+
+  // Overlay native columns (migration 059) on top of legacy `data` jsonb.
+  // After 059, native columns are source-of-truth for the 12 promoted
+  // fields — but billing-side updaters (checkout-routes, venue-billing-*,
+  // venue-trial) still UPDATE data = $1::jsonb without touching native
+  // columns, so jsonb is the fallback when native is empty (legacy rows
+  // pre-059 backfill, or fields these billing writers don't manage).
+  const inner = (data.data || {}) as Record<string, any>;
+  return {
+    ...inner,
+    venueName:      data.venue_name      ?? inner.venueName      ?? inner.name,
+    description:    data.description     ?? inner.description,
+    venueType:      data.venue_type      ?? inner.venueType      ?? inner.type,
+    address:        data.address         ?? inner.address,
+    city:           data.city            ?? inner.city,
+    country:        data.country         ?? inner.country,
+    capacity:       data.capacity        ?? inner.capacity,
+    logoUrl:        data.logo_url        ?? inner.logoUrl,
+    coverImageUrl:  data.cover_image_url ?? inner.coverImageUrl  ?? inner.coverUrl,
+    genres:         (Array.isArray(data.genres) && data.genres.length > 0)
+                      ? data.genres : (inner.genres || []),
+    socialLinks:    (data.social_links && Object.keys(data.social_links).length > 0)
+                      ? data.social_links : (inner.socialLinks || {}),
+    workingHours:   data.working_hours   ?? inner.workingHours,
+    isVerified:     data.is_verified     ?? inner.isVerified     ?? false,
+    email:          data.email           ?? inner.email,
+    phone:          data.phone           ?? inner.phone,
+  };
 }
 
 export async function upsertVenueProfile(userId: string, profile: Record<string, any>) {
@@ -1217,10 +1245,28 @@ export async function upsertVenueProfile(userId: string, profile: Record<string,
   // existing строка имеет id ≠ userId — UPSERT идёт в INSERT path,
   // UNIQUE на user_id ловит дубль, ошибка тихо логируется.
   // Migration 027 добавляет UNIQUE индекс на user_id.
+  //
+  // Migration 059 promoted 12 fields from `data` jsonb to native
+  // columns — extract them here. Mirrors upsertDjProfile (db.tsx:1134)
+  // shape. `data: profile` is preserved for backward compat with
+  // billing-side updaters that read/write the whole envelope.
   const row = {
-    user_id: userId,
-    data: profile,
-    updated_at: new Date().toISOString(),
+    user_id:         userId,
+    venue_name:      profile.venueName      ?? profile.name      ?? null,
+    description:     profile.description    ?? null,
+    venue_type:      profile.venueType      ?? profile.type      ?? null,
+    address:         profile.address        ?? null,
+    city:            profile.city           ?? null,
+    country:         profile.country        ?? null,
+    capacity:        profile.capacity       ?? null,
+    logo_url:        profile.logoUrl        ?? null,
+    cover_image_url: profile.coverImageUrl  ?? profile.coverUrl  ?? null,
+    genres:          Array.isArray(profile.genres) ? profile.genres : [],
+    social_links:    (profile.socialLinks && typeof profile.socialLinks === 'object')
+                       ? profile.socialLinks : {},
+    working_hours:   profile.workingHours   ?? null,
+    data:            profile,
+    updated_at:      new Date().toISOString(),
   };
   const { error } = await db()
     .from('venue_profiles')
