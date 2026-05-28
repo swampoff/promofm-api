@@ -176,6 +176,23 @@ export async function sendPasswordResetEmail(email: string, name: string, token:
   return sendEmail({ to: email, subject: 'Сброс пароля — ПРОМО.МУЗЫКА', html });
 }
 
+export async function sendActivationEmail(email: string, name: string, token: string): Promise<boolean> {
+  const resetUrl = `${SITE_URL}/reset-password?token=${token}`;
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Ваш кабинет на ПРОМО.МУЗЫКА готов</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(name)}</strong>!</p>
+    <p>Мы перенесли вашу страницу артиста со старой платформы <strong>promo.fm</strong> на новый сервис <strong>promo-music.ru</strong>.</p>
+    <p>Чтобы получить доступ — придумайте пароль по ссылке ниже. Email уже привязан, никакая дополнительная верификация не нужна:</p>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${resetUrl}" style="${buttonStyle}">Активировать кабинет</a>
+    </p>
+    <p style="color: #999; font-size: 14px;">Ссылка действительна в течение 7 дней. Если не активируете — кабинет останется, можно зайти позже через «Забыли пароль?».</p>
+    <p style="color: #999; font-size: 14px; margin-top: 16px;">В кабинете: загрузка треков, публикация на радио ПРОМО.ФМ, статистика, заказы продвижения, продажа концертов и многое другое.</p>
+    <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">Если кнопка не работает: ${resetUrl}</p>
+  `);
+  return sendEmail({ to: email, subject: 'Ваш кабинет на ПРОМО.МУЗЫКА — активируйте', html });
+}
+
 export async function sendVerificationEmail(email: string, name: string, token: string): Promise<boolean> {
   const verifyUrl = `${API_BASE}/auth/verify-email-page?token=${token}`;
   const html = emailWrapper(`
