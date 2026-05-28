@@ -5,7 +5,8 @@
 
 import {
   upsertBeat, upsertProducerService, insertDigitalGood, type DigitalGood,
-  platformStatsStore, systemConfigStore,
+  platformStatsStore,
+  getSystemConfig, upsertSystemConfig, deleteSystemConfig,
 } from './db.tsx';
 
 const SEED_VERSION = 'marketplace_v1';
@@ -104,7 +105,7 @@ function getProducerId(name: string): string {
 export async function seedDemoData(): Promise<{ seeded: boolean; message: string }> {
   try {
     // Idempotency: skip if already seeded this version
-    const existing = await systemConfigStore.get(`seed:${SEED_VERSION}`);
+    const existing = await getSystemConfig(`seed:${SEED_VERSION}`);
     if (existing) {
       return { seeded: false, message: `Already seeded (${SEED_VERSION})` };
     }
@@ -207,7 +208,7 @@ export async function seedDemoData(): Promise<{ seeded: boolean; message: string
     await platformStatsStore.set('platform', stats);
 
     // Mark as seeded
-    await systemConfigStore.set(`seed:${SEED_VERSION}`, { seededAt: new Date().toISOString(), ...stats });
+    await upsertSystemConfig(`seed:${SEED_VERSION}`, { seededAt: new Date().toISOString(), ...stats });
 
     return {
       seeded: true,
@@ -220,7 +221,7 @@ export async function seedDemoData(): Promise<{ seeded: boolean; message: string
 
 export async function reseedDemoData(): Promise<{ seeded: boolean; message: string }> {
   // Force re-seed by clearing the version key
-  try { await systemConfigStore.del(`seed:${SEED_VERSION}`); } catch (_) {}
+  try { await deleteSystemConfig(`seed:${SEED_VERSION}`); } catch (_) {}
   return seedDemoData();
 }
 
