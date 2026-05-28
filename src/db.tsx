@@ -2180,7 +2180,48 @@ function makeRadioRequestArrayStore(
 
 // ─── Store instances for all tables ───
 
-export const beatFavoritesStore = jsonbStore('beat_favorites', 'user_id');
+// beat_favorites — row-per-favorite native cols (migration 062).
+// Store DELETED. Доступ — типизированные функции ниже.
+
+export async function listBeatFavorites(userId: string): Promise<string[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT beat_id FROM beat_favorites
+      WHERE user_id = $1 ORDER BY created_at DESC`,
+    [userId]
+  );
+  return r.rows.map((row: any) => row.beat_id);
+}
+
+export async function toggleBeatFavorite(userId: string, beatId: string): Promise<{ added: boolean }> {
+  // Atomic toggle через INSERT ON CONFLICT DO NOTHING + проверка rowCount.
+  // Если 1 — INSERT прошёл (added). Иначе уже было — DELETE.
+  const { pool } = await import('./db-client.tsx');
+  const ins = await pool.query(
+    `INSERT INTO beat_favorites (user_id, beat_id, created_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (user_id, beat_id) DO NOTHING`,
+    [userId, beatId]
+  );
+  if (ins.rowCount && ins.rowCount > 0) {
+    return { added: true };
+  }
+  // Уже было — DELETE.
+  await pool.query(
+    `DELETE FROM beat_favorites WHERE user_id = $1 AND beat_id = $2`,
+    [userId, beatId]
+  );
+  return { added: false };
+}
+
+export async function countBeatFavoriters(beatId: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM beat_favorites WHERE beat_id = $1`,
+    [beatId]
+  );
+  return Number(r.rows[0]?.n || 0);
+}
 // beat_reviews — native cols + UNIQUE (beat_id, user_id) since migration 060.
 // beat_reviews_index DROPPED — derived через idx_beat_reviews_beat_created.
 // 2 store wrappers DELETED. Доступ — getBeatReview / upsertBeatReview /
