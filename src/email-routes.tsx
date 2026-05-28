@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { publishEmailPrefsStore, emailHistoryStore, emailTemplatesStore } from './db.tsx';
+import { publishEmailPrefsStore, emailHistoryStore, listEmailTemplates, getEmailTemplate, upsertEmailTemplate, type EmailTemplate } from './db.tsx';
 import { requireAuth, requireAdmin, requireOwner } from './auth-middleware.tsx';
 import { smtpSendEmail } from './smtp-sender.tsx';
 
@@ -242,11 +242,12 @@ app.put('/history/:emailId/opened', requireAuth, async (c) => {
  */
 app.get('/templates', requireAuth, async (c) => {
   try {
-    const templateList = await emailTemplatesStore.getAll();
+    const templateList = await listEmailTemplates();
 
-    // Если шаблонов нет, создаём дефолтные
+    // Если шаблонов нет, создаём дефолтные через typed upsert.
     if (templateList.length === 0) {
-      const defaultTemplates = [
+      const now = new Date().toISOString();
+      const defaultTemplates: EmailTemplate[] = [
         {
           id: 'welcome',
           name: 'Приветственное письмо',
@@ -254,7 +255,7 @@ app.get('/templates', requireAuth, async (c) => {
           content: '<h1>Добро пожаловать!</h1><p>Рады видеть вас на платформе.</p>',
           type: 'transactional',
           variables: ['user_name'],
-          created_at: new Date().toISOString(),
+          createdAt: now,
         },
         {
           id: 'new_follower',
@@ -263,7 +264,7 @@ app.get('/templates', requireAuth, async (c) => {
           content: '<h1>Новый фанат!</h1><p>{{follower_name}} подписался на ваши обновления.</p>',
           type: 'notification',
           variables: ['follower_name', 'follower_avatar'],
-          created_at: new Date().toISOString(),
+          createdAt: now,
         },
         {
           id: 'track_approved',
@@ -272,7 +273,7 @@ app.get('/templates', requireAuth, async (c) => {
           content: '<h1>Поздравляем!</h1><p>Трек "{{track_name}}" успешно прошёл модерацию.</p>',
           type: 'notification',
           variables: ['track_name', 'track_url'],
-          created_at: new Date().toISOString(),
+          createdAt: now,
         },
         {
           id: 'weekly_digest',
@@ -281,23 +282,23 @@ app.get('/templates', requireAuth, async (c) => {
           content: '<h1>Ваша статистика</h1><p>Прослушиваний: {{plays}}</p>',
           type: 'newsletter',
           variables: ['plays', 'likes', 'followers_count'],
-          created_at: new Date().toISOString(),
+          createdAt: now,
         },
       ];
-      
+
       for (const template of defaultTemplates) {
-        await emailTemplatesStore.set(template.id, template);
+        await upsertEmailTemplate(template);
       }
-      
+
       return c.json({ success: true, data: defaultTemplates });
     }
-    
+
     return c.json({ success: true, data: templateList });
   } catch (error) {
     console.error('Error loading email templates:', error);
-    return c.json({ 
+    return c.json({
       success: true,
-      data: [] 
+      data: []
     });
   }
 });
@@ -310,12 +311,12 @@ app.get('/templates/:templateId', requireAuth, async (c) => {
   const templateId = c.req.param('templateId');
   
   try {
-    const template = await emailTemplatesStore.get(templateId);
-    
+    const template = await getEmailTemplate(templateId);
+
     if (!template) {
       return c.json({ success: false, error: 'Template not found' }, 404);
     }
-    
+
     return c.json({ success: true, data: template });
   } catch (error) {
     console.error('Error loading email template:', error);

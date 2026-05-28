@@ -6,7 +6,9 @@
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { emailHistoryStore, emailTemplatesStore, publishEmailPrefsStore } from './db.tsx';
+// emailTemplatesStore — removed (migration 073 promoted на native cols);
+// этот файл его никогда не использовал, only emailHistoryStore + publishEmailPrefsStore.
+import { emailHistoryStore, publishEmailPrefsStore } from './db.tsx';
 import { upsertEmailCampaign, getEmailCampaigns } from './db.tsx';
 import { smtpSendEmail, smtpSendBatch } from './smtp-sender.tsx';
 import { vpsListProfiles } from './vps-userdata.tsx';
