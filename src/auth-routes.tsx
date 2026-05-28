@@ -703,7 +703,21 @@ auth.post("/reset-password", async (c) => {
     if (resetData.usedAt) return c.json({ success: false, error: "Ссылка уже использована." }, 400);
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
-    await sql(`UPDATE users SET password_hash = $1, token_version = COALESCE(token_version, 1) + 1 WHERE id = $2`, [passwordHash, resetData.userId]);
+    // Legacy-импорт flow: artist получил активационное письмо, поставил
+    // пароль — это и есть email-подтверждение (мы знаем email из старой
+    // базы). Поэтому is_email_verified=TRUE + email_verified_at=NOW.
+    // Для регулярных reset-password у уже-активированных пользователей
+    // это идемпотентно (TRUE остаётся TRUE).
+    await sql(
+      `UPDATE users SET
+         password_hash    = $1,
+         token_version    = COALESCE(token_version, 1) + 1,
+         is_email_verified = TRUE,
+         email_verified_at = COALESCE(email_verified_at, NOW()),
+         status            = CASE WHEN status::text = 'pending' THEN 'active'::user_status ELSE status END
+       WHERE id = $2`,
+      [passwordHash, resetData.userId]
+    );
     await vpsUseToken(token);
 
     log.info({ userId: resetData.userId }, 'password_reset_completed');

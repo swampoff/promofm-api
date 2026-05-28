@@ -944,8 +944,15 @@ app.get('/search-contacts', requireAuth, async (c) => {
     const orderBy = hasQ ? '' : 'ORDER BY u.created_at DESC';
     params.push(limit);
     const r = await pool.query(
+      // password_hash IS NOT NULL гейт: legacy-импортированные артисты
+      // (2250 строк, 2026-05-28) видны в чате ТОЛЬКО после активации
+      // (когда сами поставят пароль через /reset-password). До этого —
+      // невидимы, как и любой не активированный кабинет.
       `SELECT u.id, u.full_name, u.role::text, u.avatar_url
-       FROM users u WHERE ${where} AND u.status = 'active' ${orderBy} LIMIT $${params.length}`,
+       FROM users u WHERE ${where}
+         AND u.status = 'active'
+         AND u.password_hash IS NOT NULL
+         ${orderBy} LIMIT $${params.length}`,
       params
     );
 
