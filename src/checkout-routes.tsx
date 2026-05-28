@@ -926,16 +926,15 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // ─── Fulfill digital_purchase (Digital Goods Marketplace) ───
   if (session.metadata?.type === 'digital_purchase' && session.metadata?.digitalGoodId) {
     try {
-      const { digitalGoodsStore } = await import('./db.tsx');
+      const { getDigitalGood, incrementDigitalGoodSales } = await import('./db.tsx');
       const { pool: cPool4 } = await import('./db-client.tsx');
       const { recordPlatformCommission } = await import('./platform-revenue.tsx');
       const goodId = session.metadata.digitalGoodId;
       const buyerId = session.userId;
       const buyerName = session.metadata.buyerName || 'Покупатель';
 
-      const raw = await digitalGoodsStore.get(goodId);
-      if (raw) {
-        const good = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const good = await getDigitalGood(goodId);
+      if (good) {
         const price = session.amount;
         const commission = Math.round(price * 0.1);
         const producerPayout = price - commission;
@@ -956,8 +955,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           [purchaseId, goodId, buyerId, price, JSON.stringify(purchase)]
         );
 
-        good.sales = (good.sales || 0) + 1;
-        await digitalGoodsStore.set(goodId, JSON.stringify(good));
+        // Atomic UPDATE sales = sales + 1 (race-free на YooKassa retry).
+        await incrementDigitalGoodSales(goodId);
 
         await recordPlatformCommission('digital_good', good.title, price, commission, producerPayout, {
           producerId: good.producerId, producerName: good.producer, buyerId, buyerName,

@@ -59,7 +59,10 @@ import {
   getBeatReviewsAggregateStats, findBeatReviewByUser,
   // beat_favorites — row-per-favorite (migration 068):
   listBeatFavorites, toggleBeatFavorite,
-  contractsStore, digitalGoodsStore,
+  contractsStore,
+  // digital_goods — native cols since migration 075:
+  listDigitalGoods, getDigitalGood, insertDigitalGood,
+  incrementDigitalGoodViews, type DigitalGood, type ListDigitalGoodsOpts,
   platformRevenueLogStore, platformStatsStore,
   // Native producer_services / service_orders (migration 063):
   getProducerService, listProducerServices, upsertProducerService, incrementProducerServiceOrders,
@@ -1309,72 +1312,34 @@ app.put('/contracts/:id/milestones/:mid', requireAuth, async (c) => {
 });
 
 // ═══════════════════════════════════════════════
-//  D I G I T A L   G O O D S
+//  D I G I T A L   G O O D S  (native cols since migration 075)
 // ═══════════════════════════════════════════════
 
-/** Собрать все цифровые товары из KV */
-async function getAllDigitalGoods(): Promise<any[]> {
-  try {
-    const entries = await digitalGoodsStore.getAll();
-    if (!entries || entries.length === 0) return [];
-    return entries.map((raw: any) => {
-      if (typeof raw === 'string') {
-        try { return JSON.parse(raw); } catch { return null; }
-      }
-      return raw;
-    }).filter(Boolean);
-  } catch (e) {
-    console.log('getAllDigitalGoods error:', e);
-    return [];
-  }
-}
-
 /**
- * GET /digital-goods - Каталог цифровых товаров
- * Query: search, category, price_min, price_max, sort, limit, offset, producerId
+ * GET /digital-goods - Каталог цифровых товаров.
+ * Native SQL filter + sort + pagination через listDigitalGoods().
+ * Hot path = sort='popular' (default) hits idx_digital_goods_active_popular.
  */
 app.get('/digital-goods', async (c) => {
   try {
-    let goods = await getAllDigitalGoods();
-    goods = goods.filter(g => g.status === 'active');
-
-    const search = c.req.query('search')?.toLowerCase();
-    const category = c.req.query('category');
-    const priceMin = c.req.query('price_min') ? Number(c.req.query('price_min')) : null;
-    const priceMax = c.req.query('price_max') ? Number(c.req.query('price_max')) : null;
-    const producerId = c.req.query('producerId');
-    const sort = c.req.query('sort') || 'popular';
     const limit = Math.min(Number(c.req.query('limit') || 50), 100);
     const offset = Number(c.req.query('offset') || 0);
+    const sortRaw = c.req.query('sort') || 'popular';
+    const allowedSort = ['new', 'popular', 'rating', 'price_asc', 'price_desc'];
+    const sort = (allowedSort.includes(sortRaw) ? sortRaw : 'popular') as ListDigitalGoodsOpts['sort'];
 
-    if (search) {
-      goods = goods.filter(g =>
-        g.title?.toLowerCase().includes(search) ||
-        g.description?.toLowerCase().includes(search) ||
-        g.producer?.toLowerCase().includes(search) ||
-        (g.tags || []).some((t: string) => t.toLowerCase().includes(search))
-      );
-    }
-    if (category) goods = goods.filter(g => g.category === category);
-    if (producerId) goods = goods.filter(g => g.producerId === producerId);
-    if (priceMin != null) goods = goods.filter(g => (g.price || 0) >= priceMin);
-    if (priceMax != null) goods = goods.filter(g => (g.price || 0) <= priceMax);
-
-    switch (sort) {
-      case 'new': goods.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()); break;
-      case 'popular': goods.sort((a, b) => (b.sales || 0) - (a.sales || 0)); break;
-      case 'rating': goods.sort((a, b) => (b.rating || 0) - (a.rating || 0)); break;
-      case 'price_asc': goods.sort((a, b) => (a.price || 0) - (b.price || 0)); break;
-      case 'price_desc': goods.sort((a, b) => (b.price || 0) - (a.price || 0)); break;
-      default: goods.sort((a, b) => (b.sales || 0) - (a.sales || 0));
-    }
-
-    const total = goods.length;
-    const paged = goods.slice(offset, offset + limit);
+    const { items, total } = await listDigitalGoods({
+      search:     c.req.query('search') || undefined,
+      category:   c.req.query('category') || undefined,
+      producerId: c.req.query('producerId') || undefined,
+      priceMin:   c.req.query('price_min') ? Number(c.req.query('price_min')) : undefined,
+      priceMax:   c.req.query('price_max') ? Number(c.req.query('price_max')) : undefined,
+      sort, limit, offset,
+    });
 
     return c.json({
       success: true,
-      data: paged,
+      data: items,
       pagination: { total, limit, offset, hasMore: offset + limit < total },
     });
   } catch (error) {
@@ -1384,17 +1349,18 @@ app.get('/digital-goods', async (c) => {
 });
 
 /**
- * GET /digital-goods/:id - Детали товара
+ * GET /digital-goods/:id - Детали товара + atomic view increment.
+ * Killed race condition: legacy get+JSON.stringify+set lost views под
+ * concurrent load. Native UPDATE SET views = views + 1 — atomic.
  */
 app.get('/digital-goods/:id', async (c) => {
   try {
     const id = c.req.param('id');
-    const raw = await digitalGoodsStore.get(id);
-    if (!raw) return c.json({ success: false, error: 'Digital good not found' }, 404);
-    const good = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    good.views = (good.views || 0) + 1;
-    await digitalGoodsStore.set(id, JSON.stringify(good));
-    return c.json({ success: true, data: good });
+    const good = await getDigitalGood(id);
+    if (!good) return c.json({ success: false, error: 'Digital good not found' }, 404);
+    // Atomic increment — fire-and-forget на read path так что не блокируем response.
+    incrementDigitalGoodViews(id).catch(e => console.log('view inc err:', e));
+    return c.json({ success: true, data: { ...good, views: good.views + 1 } });
   } catch (error) {
     console.log('GET /digital-goods/:id error:', error);
     return c.json({ success: false, error: 'Internal server error' }, 500);
@@ -1402,7 +1368,7 @@ app.get('/digital-goods/:id', async (c) => {
 });
 
 /**
- * POST /digital-goods - Создать цифровой товар
+ * POST /digital-goods - Создать цифровой товар (native INSERT).
  */
 app.post('/digital-goods', requireAuth, async (c) => {
   try {
@@ -1413,9 +1379,8 @@ app.post('/digital-goods', requireAuth, async (c) => {
       return c.json({ success: false, error: 'producerId, title, category, price required' }, 400);
     }
 
-    const id = genId('dg');
-    const good = {
-      id,
+    const good: DigitalGood = {
+      id: genId('dg'),
       title,
       producer: producer || 'Unknown',
       producerId,
@@ -1432,7 +1397,7 @@ app.post('/digital-goods', requireAuth, async (c) => {
       createdAt: nowIso(),
     };
 
-    await digitalGoodsStore.set(id, JSON.stringify(good));
+    await insertDigitalGood(good);
     return c.json({ success: true, data: good });
   } catch (error) {
     console.log('POST /digital-goods error:', error);
@@ -1453,9 +1418,8 @@ app.post('/digital-goods/:id/purchase', requireAuth, async (c) => {
 
     if (!buyerId) return c.json({ success: false, error: 'Authorization required' }, 401);
 
-    const raw = await digitalGoodsStore.get(id);
-    if (!raw) return c.json({ success: false, error: 'Digital good not found' }, 404);
-    const good = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const good = await getDigitalGood(id);
+    if (!good) return c.json({ success: false, error: 'Digital good not found' }, 404);
 
     if (good.status !== 'active') {
       return c.json({ success: false, error: 'Item is not available' }, 400);
