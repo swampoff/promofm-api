@@ -1369,6 +1369,29 @@ export async function upsertRadioProfile(userId: string, profile: Record<string,
 
 // ─── Producer Profiles ───
 
+/**
+ * Overlay helper — projects a raw producer_profiles row (post-061) into
+ * the camelCase shape that callers expect. Native columns take priority
+ * when populated; jsonb fallback covers legacy rows pre-061 backfill
+ * and any field not promoted (specializations, averageRating, services,
+ * portfolio, ...).
+ */
+function projectProducerProfileRow(data: any) {
+  if (!data) return null;
+  const inner = (data.data || {}) as Record<string, any>;
+  return {
+    ...inner,
+    name:           data.name            ?? inner.name,
+    city:           data.city            ?? inner.city,
+    bio:            data.bio             ?? inner.bio,
+    workPhilosophy: data.work_philosophy ?? inner.workPhilosophy,
+    avatarUrl:      data.avatar_url      ?? inner.avatarUrl,
+    coverUrl:       data.cover_url       ?? inner.coverUrl,
+    email:          data.email           ?? inner.email,
+    phone:          data.phone           ?? inner.phone,
+  };
+}
+
 export async function getProducerProfile(userId: string) {
   const { data, error } = await db()
     .from('producer_profiles')
@@ -1376,16 +1399,29 @@ export async function getProducerProfile(userId: string) {
     .eq('user_id', userId)
     .maybeSingle();
   if (error) console.error('[db] getProducerProfile:', error);
-  return data ? (data.data || data) : null;
+  return projectProducerProfileRow(data);
 }
 
 export async function upsertProducerProfile(userId: string, profile: Record<string, any>) {
   // Зеркало фикса 8652379 — см. upsertVenueProfile выше.
   // Migration 027 добавляет UNIQUE на user_id.
+  //
+  // Migration 061 promoted 6 fields from `data` jsonb to native
+  // columns. Mirrors upsertVenueProfile (059) / upsertRadioProfile
+  // (060). `data: profile` preserved for backward compat — callers
+  // like persistProducerImage() build up `data` shape with extra
+  // fields (specializations, services links, ...) that aren't yet
+  // promoted to native columns.
   const row = {
-    user_id: userId,
-    data: profile,
-    updated_at: new Date().toISOString(),
+    user_id:         userId,
+    name:            profile.name ?? null,
+    city:            profile.city ?? null,
+    bio:             profile.bio ?? null,
+    work_philosophy: profile.workPhilosophy ?? profile.work_philosophy ?? null,
+    avatar_url:      profile.avatarUrl ?? profile.avatar_url ?? null,
+    cover_url:       profile.coverUrl ?? profile.cover_url ?? null,
+    data:            profile,
+    updated_at:      new Date().toISOString(),
   };
   const { error } = await db()
     .from('producer_profiles')
@@ -1399,7 +1435,9 @@ export async function getAllProducerProfiles() {
     .select('*')
     .order('updated_at', { ascending: false });
   if (error) console.error('[db] getAllProducerProfiles:', error);
-  return (data || []).map((r: any) => r.data || r);
+  // Same projection as getProducerProfile so cross-cabinet listings
+  // (landing-data-routes:1262) see native columns over stale jsonb.
+  return (data || []).map((r: any) => projectProducerProfileRow(r));
 }
 
 // ─── Engineer Profiles ─── (migration 025)
