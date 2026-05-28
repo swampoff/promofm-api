@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { pool } from './db-client.tsx';
-import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, chartSourcesStore, createInvestorInquiry, newsPublicStore, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer, radioAnalyticsStore } from './db.tsx';
+import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, listChartSources, createInvestorInquiry, newsPublicStore, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer, radioAnalyticsStore } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { sanitizeString, sanitizeUrl } from './security.tsx';
@@ -1629,10 +1629,10 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
     results.genres = Object.keys(genreMap).length;
 
     // 4. Weekly Chart TOP-20
-    const chartSources = await chartSourcesStore.getAll();
+    const chartSources = await listChartSources();
     const trackScores: Record<string, { artist: string; title: string; score: number; sources: string[] }> = {};
     for (const src of chartSources) {
-      const tracks = (src as any)?.tracks || [];
+      const tracks = src.tracks || [];
       const sourceMax = tracks.length;
       for (const t of tracks) {
         if (!t.artist || !t.title) continue;
@@ -1641,7 +1641,7 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
           trackScores[key] = { artist: t.artist, title: t.title, score: 0, sources: [] };
         }
         trackScores[key].score += (sourceMax - (t.position || 0) + 1);
-        trackScores[key].sources.push((src as any).sourceId || 'unknown');
+        trackScores[key].sources.push(src.sourceId || src.id || 'unknown');
       }
     }
     const top20 = Object.values(trackScores)

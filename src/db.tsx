@@ -3262,7 +3262,110 @@ export async function upsertEmailTemplate(t: EmailTemplate): Promise<void> {
 }
 
 export const chartAggregationStore = makeJsonbKeyStore('chart_aggregation');
-export const chartSourcesStore = makeJsonbKeyStore('chart_sources');
+
+// ─── chart_sources (native cols since migration 076) ───
+// 1 row per source ID (russkoe, nashe, yandex, shazam, intl:apple:*).
+// tracks остаётся jsonb — per-parser shape варьируется (mistral/fallback/
+// html_parser/json_api), legit polymorphic per CLAUDE.md.
+
+export interface ChartTrackEntry {
+  position?: number;
+  artist: string;
+  title: string;
+  [key: string]: any;
+}
+
+export interface ChartSourceRow {
+  id: string;
+  sourceId: string;       // alias for id (handler API contract)
+  sourceName: string;
+  sourceUrl: string;
+  logo: string;
+  type: string;
+  gradient: string;
+  borderColor: string;
+  tracks: ChartTrackEntry[];
+  fetchedAt: string;
+  parsedBy: string;
+  error?: string;
+}
+
+function mapChartSourceRow(r: any): ChartSourceRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  return {
+    id: r.id,
+    sourceId: r.id,
+    sourceName: r.source_name,
+    sourceUrl: r.source_url,
+    logo: r.logo || '',
+    type: r.type,
+    gradient: r.gradient || '',
+    borderColor: r.border_color || '',
+    tracks: Array.isArray(r.tracks) ? r.tracks : [],
+    fetchedAt: iso(r.fetched_at),
+    parsedBy: r.parsed_by || '',
+    error: r.error || undefined,
+  };
+}
+
+const CHART_SOURCE_COLS = `id, source_name, source_url, logo, type, gradient,
+  border_color, tracks, fetched_at, parsed_by, error`;
+
+export async function getChartSource(id: string): Promise<ChartSourceRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${CHART_SOURCE_COLS} FROM chart_sources WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return mapChartSourceRow(r.rows[0]);
+}
+
+/**
+ * Upsert chart source row. Используется cron'ом re-aggregation на каждый
+ * fetch (полностью замещает кэш). Single statement, no race.
+ */
+export async function upsertChartSource(source: Partial<ChartSourceRow> & { id: string }): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO chart_sources
+       (id, source_name, source_url, logo, type, gradient, border_color,
+        tracks, fetched_at, parsed_by, error)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb,
+             COALESCE($9::timestamptz, NOW()), $10, $11)
+     ON CONFLICT (id) DO UPDATE SET
+       source_name  = EXCLUDED.source_name,
+       source_url   = EXCLUDED.source_url,
+       logo         = EXCLUDED.logo,
+       type         = EXCLUDED.type,
+       gradient     = EXCLUDED.gradient,
+       border_color = EXCLUDED.border_color,
+       tracks       = EXCLUDED.tracks,
+       fetched_at   = EXCLUDED.fetched_at,
+       parsed_by    = EXCLUDED.parsed_by,
+       error        = EXCLUDED.error,
+       updated_at   = NOW()`,
+    [
+      source.id, source.sourceName || source.id, source.sourceUrl || '',
+      source.logo || '', source.type || 'radio',
+      source.gradient || '', source.borderColor || '',
+      JSON.stringify(source.tracks || []),
+      source.fetchedAt || null, source.parsedBy || '', source.error || null,
+    ]
+  );
+}
+
+export async function listChartSources(opts: { type?: string } = {}): Promise<ChartSourceRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  const where = opts.type ? `WHERE type = $1` : '';
+  const params = opts.type ? [opts.type] : [];
+  const r = await pool.query(
+    `SELECT ${CHART_SOURCE_COLS} FROM chart_sources ${where}
+      ORDER BY fetched_at DESC`,
+    params
+  );
+  return r.rows.map(mapChartSourceRow).filter((x): x is ChartSourceRow => x !== null);
+}
 // radioAdSlotsStore + radioAdSlotIndexStore — заменены на нативные хелперы
 // после migration 050. См. блок «Radio Ad Slots» ниже.
 export const radioAnalyticsStore = makeJsonbKeyStore('radio_analytics', 'radio_id');
