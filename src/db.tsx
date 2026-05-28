@@ -2297,8 +2297,164 @@ export const djSubscriptionsStore = makeDjSubscriptionsStore();
 // dj_withdrawals переехал на row-per-withdrawal (migration 044). Доступ
 // через pool.query из dj-studio-routes.tsx + checkout-routes.tsx webhook.
 export const djTransactionsStore = jsonbStore('dj_transactions', 'dj_id');
-export const collabOffersByArtistStore = jsonbStore('collab_offers_by_artist', 'artist_id');
-export const collabOffersByProducerStore = jsonbStore('collab_offers_by_producer', 'producer_id');
+// collab_offers — row-per-offer native cols (migration 058).
+// collab_offers_by_artist + collab_offers_by_producer таблицы DROPPED
+// — derived из collab_offers.artist_id / producer_id с native indexes.
+// Доступ — типизированные функции ниже.
+
+const COLLAB_OFFER_COLS = `id, producer_id, producer_name, producer_avatar,
+  artist_id, artist_name, offer_type, title, description, price, currency,
+  audio_preview_url, bpm, music_key, genre, tags, status, deadline,
+  responded_at, completed_at, artist_comment, extra,
+  created_at, updated_at`;
+
+function mapCollabOfferRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : undefined);
+  return {
+    id: r.id,
+    producerId: r.producer_id,
+    producerName: r.producer_name,
+    producerAvatar: r.producer_avatar || undefined,
+    artistId: r.artist_id,
+    artistName: r.artist_name,
+    type: r.offer_type,
+    title: r.title || '',
+    description: r.description || '',
+    price: r.price !== null && r.price !== undefined ? Number(r.price) : undefined,
+    currency: r.currency || 'RUB',
+    audioPreviewUrl: r.audio_preview_url || undefined,
+    bpm: r.bpm !== null && r.bpm !== undefined ? Number(r.bpm) : undefined,
+    key: r.music_key || undefined,
+    genre: r.genre || undefined,
+    tags: r.tags || [],
+    status: r.status,
+    deadline: iso(r.deadline),
+    respondedAt: iso(r.responded_at),
+    completedAt: iso(r.completed_at),
+    artistComment: r.artist_comment || undefined,
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+    ...(r.extra || {}),
+  };
+}
+
+export async function getCollabOffer(id: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${COLLAB_OFFER_COLS} FROM collab_offers WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return r.rowCount ? mapCollabOfferRow(r.rows[0]) : null;
+}
+
+export async function upsertCollabOffer(id: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const extra = { ...value };
+  ['id','producerId','producerName','producerAvatar','artistId','artistName',
+   'type','title','description','price','currency','audioPreviewUrl','bpm',
+   'key','genre','tags','status','deadline','respondedAt','completedAt',
+   'artistComment','createdAt','updatedAt'].forEach(k => delete extra[k]);
+  const tags = Array.isArray(value.tags) ? value.tags : [];
+  await pool.query(
+    `INSERT INTO collab_offers
+       (id, producer_id, producer_name, producer_avatar,
+        artist_id, artist_name, offer_type, title, description, price, currency,
+        audio_preview_url, bpm, music_key, genre, tags, status, deadline,
+        responded_at, completed_at, artist_comment, extra, updated_at)
+     VALUES ($1, $2, $3, $4,
+             $5, $6, $7, $8, $9, $10, $11,
+             $12, $13, $14, $15, $16::jsonb, $17, $18,
+             $19, $20, $21, $22::jsonb, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       producer_id       = COALESCE(EXCLUDED.producer_id,   collab_offers.producer_id),
+       producer_name     = EXCLUDED.producer_name,
+       producer_avatar   = EXCLUDED.producer_avatar,
+       artist_id         = COALESCE(EXCLUDED.artist_id,     collab_offers.artist_id),
+       artist_name       = EXCLUDED.artist_name,
+       offer_type        = EXCLUDED.offer_type,
+       title             = EXCLUDED.title,
+       description       = EXCLUDED.description,
+       price             = EXCLUDED.price,
+       currency          = EXCLUDED.currency,
+       audio_preview_url = EXCLUDED.audio_preview_url,
+       bpm               = EXCLUDED.bpm,
+       music_key         = EXCLUDED.music_key,
+       genre             = EXCLUDED.genre,
+       tags              = EXCLUDED.tags,
+       status            = EXCLUDED.status,
+       deadline          = EXCLUDED.deadline,
+       responded_at      = EXCLUDED.responded_at,
+       completed_at      = EXCLUDED.completed_at,
+       artist_comment    = EXCLUDED.artist_comment,
+       extra             = EXCLUDED.extra,
+       updated_at        = NOW()`,
+    [
+      id,
+      value.producerId || null, value.producerName || null, value.producerAvatar || null,
+      value.artistId || null, value.artistName || null,
+      value.type || 'beat', value.title || '', value.description || '',
+      value.price !== undefined && value.price !== null ? Number(value.price) : null,
+      value.currency || 'RUB',
+      value.audioPreviewUrl || null,
+      value.bpm !== undefined && value.bpm !== null ? Number(value.bpm) : null,
+      value.key || null,
+      value.genre || null,
+      JSON.stringify(tags),
+      value.status || 'pending',
+      value.deadline || null,
+      value.respondedAt || null, value.completedAt || null,
+      value.artistComment || null,
+      JSON.stringify(extra),
+    ]
+  );
+}
+
+export async function listCollabOffersByArtist(artistId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${COLLAB_OFFER_COLS} FROM collab_offers
+      WHERE artist_id = $1 ORDER BY created_at DESC`,
+    [artistId]
+  );
+  return r.rows.map(mapCollabOfferRow);
+}
+
+export async function listCollabOffersByProducer(producerId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${COLLAB_OFFER_COLS} FROM collab_offers
+      WHERE producer_id = $1 ORDER BY created_at DESC`,
+    [producerId]
+  );
+  return r.rows.map(mapCollabOfferRow);
+}
+
+export async function getCollabOfferStatsByUser(userId: string): Promise<any> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE artist_id = $1)                                     AS total_received,
+       COUNT(*) FILTER (WHERE producer_id = $1)                                   AS total_sent,
+       COUNT(*) FILTER (WHERE (artist_id = $1 OR producer_id = $1) AND status = 'pending')    AS pending,
+       COUNT(*) FILTER (WHERE (artist_id = $1 OR producer_id = $1) AND status = 'accepted')   AS accepted,
+       COUNT(*) FILTER (WHERE (artist_id = $1 OR producer_id = $1) AND status = 'declined')   AS declined,
+       COUNT(*) FILTER (WHERE (artist_id = $1 OR producer_id = $1) AND status = 'discussion') AS in_discussion,
+       COUNT(*) FILTER (WHERE (artist_id = $1 OR producer_id = $1) AND status = 'completed')  AS completed
+     FROM collab_offers`,
+    [userId]
+  );
+  const row = r.rows[0] || {};
+  return {
+    totalReceived: Number(row.total_received || 0),
+    totalSent:     Number(row.total_sent || 0),
+    pending:       Number(row.pending || 0),
+    accepted:      Number(row.accepted || 0),
+    declined:      Number(row.declined || 0),
+    inDiscussion:  Number(row.in_discussion || 0),
+    completed:     Number(row.completed || 0),
+  };
+}
 // collab_messages переехал на row-per-message (migration 038). Доступ
 // через pool.query в collaboration-routes.tsx.
 export const publishOrdersStore = jsonbStore('publish_orders');
