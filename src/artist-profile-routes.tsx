@@ -63,6 +63,11 @@ interface ArtistProfile {
   manager: string;
   bookingEmail: string;
   languages: string[];
+  /** Set when artist clicks «Подать заявку на верификацию». Cleared
+   *  on admin approval/rejection by the timestamps below. */
+  verificationRequestedAt: string | null;
+  verificationApprovedAt: string | null;
+  verificationRejectionReason: string | null;
   createdAt: string;
 }
 
@@ -146,6 +151,9 @@ function makeProfile(overrides: Partial<ArtistProfile> & { id: string; email: st
     manager: '',
     bookingEmail: '',
     languages: ['Русский'],
+    verificationRequestedAt: null,
+    verificationApprovedAt: null,
+    verificationRejectionReason: null,
     createdAt: '',
     ...overrides,
     socials: { ...EMPTY_SOCIALS, ...overrides.socials },
@@ -235,6 +243,22 @@ app.get('/profile/:artistId', async (c) => {
           if (apRow.location      != null) normalized.location     = apRow.location      as string;
           if (Array.isArray(apRow.languages) && apRow.languages.length > 0) {
             normalized.languages = apRow.languages as string[];
+          }
+          // Migration 058 verification state — surface for the
+          // 3-state UI on settings-page.tsx ("not requested" /
+          // "pending" / "verified or rejected").
+          if (apRow.verification_requested_at != null) {
+            normalized.verificationRequestedAt = (apRow.verification_requested_at instanceof Date)
+              ? apRow.verification_requested_at.toISOString()
+              : String(apRow.verification_requested_at);
+          }
+          if (apRow.verification_approved_at != null) {
+            normalized.verificationApprovedAt = (apRow.verification_approved_at instanceof Date)
+              ? apRow.verification_approved_at.toISOString()
+              : String(apRow.verification_approved_at);
+          }
+          if (apRow.verification_rejection_reason != null) {
+            normalized.verificationRejectionReason = apRow.verification_rejection_reason as string;
           }
 
           try {
@@ -372,6 +396,17 @@ app.get('/profile/:artistId', async (c) => {
           languages: (Array.isArray(apRow.languages) && apRow.languages.length > 0)
             ? (apRow.languages as string[])
             : ['Русский'],
+          verificationRequestedAt: apRow.verification_requested_at
+            ? (apRow.verification_requested_at instanceof Date
+                ? apRow.verification_requested_at.toISOString()
+                : String(apRow.verification_requested_at))
+            : null,
+          verificationApprovedAt: apRow.verification_approved_at
+            ? (apRow.verification_approved_at instanceof Date
+                ? apRow.verification_approved_at.toISOString()
+                : String(apRow.verification_approved_at))
+            : null,
+          verificationRejectionReason: apRow.verification_rejection_reason || null,
         });
         return c.json({ success: true, source: 'sql', data: sqlProfile });
       }
@@ -446,6 +481,64 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), async (c) =
   } catch (error) {
     console.error(`[ArtistProfile] PUT error: ${error}`);
     return c.json({ success: false, error: 'Failed to save profile' }, 500);
+  }
+});
+
+/**
+ * POST /request-verification
+ * Artist submits a verification request. Admin processes via
+ * POST /auth/admin/verify-profile { role: 'artist', isVerified }.
+ *
+ * Idempotent: re-clicking the button refreshes `verification_requested_at`
+ * and clears any previous rejection reason, so an artist who was
+ * rejected can submit a corrected request.
+ */
+app.post('/request-verification', requireAuth, async (c) => {
+  const userId = c.get('userId' as never) as string | undefined;
+  if (!userId) {
+    return c.json({ success: false, error: 'Не авторизован' }, 401);
+  }
+
+  try {
+    const { pool } = await import('./db-client.tsx');
+
+    const { rows } = await pool.query(
+      `SELECT is_verified
+         FROM artist_profiles
+        WHERE user_id = $1
+        LIMIT 1`,
+      [userId],
+    );
+
+    if (rows.length === 0) {
+      return c.json({ success: false, error: 'Artist profile not found' }, 404);
+    }
+    if (rows[0].is_verified) {
+      return c.json(
+        { success: false, error: 'Профиль уже верифицирован' },
+        400,
+      );
+    }
+
+    await pool.query(
+      `UPDATE artist_profiles
+          SET verification_requested_at  = NOW(),
+              verification_rejection_reason = NULL
+        WHERE user_id = $1`,
+      [userId],
+    );
+
+    console.log(`[ArtistProfile] Verification requested by ${userId}`);
+    return c.json({
+      success: true,
+      message: 'Заявка на верификацию отправлена. Ожидайте рассмотрения администратором.',
+    });
+  } catch (error) {
+    console.error('[ArtistProfile] request-verification error:', error);
+    return c.json(
+      { success: false, error: 'Failed to submit verification request' },
+      500,
+    );
   }
 });
 

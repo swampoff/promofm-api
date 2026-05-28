@@ -888,24 +888,64 @@ auth.get("/admin/pending-users", requireAuth, requireAdmin, async (c) => {
 
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/admin/verify-profile
-// Toggles radio_profiles.is_verified / venue_profiles.is_verified.
-// This is a SECOND-LEVEL trust gate, separate from approve-user
-// (which only flips users.status='active'). Verified accounts can
-// download tracks via /tracks/:id/download for broadcast / in-venue
-// play. Newly-registered radio/venue start at is_verified=false.
+// Toggles is_verified on radio_profiles / venue_profiles / artist_profiles.
+// SECOND-LEVEL trust gate, separate from approve-user (which only flips
+// users.status='active'). Verified radio/venue accounts can download
+// tracks for broadcast; verified artists get a public badge on their
+// profile page. Newly-registered profiles start at is_verified=false.
 //
-// body: { userId: string, role: 'radio_station'|'venue', isVerified: boolean }
+// Artist verification (migration 058) is REQUEST-DRIVEN — the artist
+// hits POST /artist-profile/request-verification to set
+// verification_requested_at = NOW(); admin then approves/rejects here.
+// On approve we stamp verification_approved_at; on reject we keep
+// the request timestamp visible and store verification_rejection_reason
+// so the frontend can show «Заявка отклонена: <reason>».
+//
+// body: {
+//   userId: string,
+//   role: 'radio_station'|'venue'|'artist',
+//   isVerified: boolean,
+//   rejectionReason?: string   // role='artist' && isVerified=false only
+// }
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/admin/verify-profile", requireAuth, requireAdmin, async (c) => {
   try {
-    const { userId, role, isVerified } = await c.req.json();
+    const { userId, role, isVerified, rejectionReason } = await c.req.json();
     if (!userId) return c.json({ success: false, error: 'userId обязателен' }, 400);
-    if (role !== 'radio_station' && role !== 'venue') {
-      return c.json({ success: false, error: "role должно быть 'radio_station' или 'venue'" }, 400);
+    if (role !== 'radio_station' && role !== 'venue' && role !== 'artist') {
+      return c.json({ success: false, error: "role должно быть 'radio_station', 'venue' или 'artist'" }, 400);
     }
     if (typeof isVerified !== 'boolean') {
       return c.json({ success: false, error: 'isVerified должно быть boolean' }, 400);
     }
+
+    if (role === 'artist') {
+      // Artists carry extended verification state (approved_at + rejection_reason).
+      // On approve: stamp approved_at, clear any previous rejection_reason so
+      //   stale rejection messages don't appear after a re-request.
+      // On reject: keep the existing verification_requested_at so the UI shows
+      //   "your request was reviewed" rather than reverting to "not started";
+      //   stash the optional reason in verification_rejection_reason.
+      const result = await sql(
+        `UPDATE artist_profiles
+            SET is_verified                   = $1,
+                verification_approved_at      = CASE WHEN $1 THEN NOW() ELSE verification_approved_at END,
+                verification_rejection_reason = CASE WHEN $1 THEN NULL ELSE $3 END
+          WHERE user_id = $2
+         RETURNING user_id, is_verified, verification_rejection_reason`,
+        [isVerified, userId, rejectionReason || null]
+      );
+      if (result.rows.length === 0) {
+        return c.json({ success: false, error: 'Профиль не найден' }, 404);
+      }
+      return c.json({
+        success: true,
+        data: result.rows[0],
+        message: isVerified ? 'Профиль верифицирован' : 'Заявка отклонена',
+      });
+    }
+
+    // radio_station / venue — simple boolean toggle (no request flow).
     const table = role === 'radio_station' ? 'radio_profiles' : 'venue_profiles';
     const result = await sql(
       `UPDATE ${table}
