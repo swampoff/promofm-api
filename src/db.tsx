@@ -3001,10 +3001,218 @@ export async function upsertPaymentBalance(userId: string, balance: { available?
 
 // ── Audio Branding stores ──
 
-// ── Production 360 stores ──
-export const production360OrdersStore = jsonbStore('production_360_orders');
-export const production360ByStatusStore = jsonbStore('production_360_by_status');
-export const production360ByArtistStore = jsonbStore('production_360_by_artist');
+// ── Production 360 — row-per-order native cols (migration 059) ──
+// production_360_by_status + production_360_by_artist таблицы DROPPED
+// — derived из native indexes на production_360_orders.status / artist_id.
+// 3 store wrapper'а DELETED. Доступ — типизированные функции ниже.
+
+const P360_ORDER_COLS = `id, artist_id, artist_name, service_type, project_title,
+  project_description, project_goals, target_audience, genre,
+  service_price, addons_total, discount, final_price, estimated_full_price,
+  subscription, status, status_entered_at, current_stage, completed_percentage,
+  estimated_completion, deadline, admin_comment, client_feedback,
+  revision_notes, revision_count, rejection_reason, existing_material,
+  paid_at, approved_date, completed_date,
+  services, addons, "references", stage_progress, assigned_team, files, extra,
+  created_at, updated_at`;
+
+function mapP360OrderRow(r: any): any {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : undefined);
+  return {
+    id: r.id,
+    artistId: r.artist_id,
+    artistName: r.artist_name,
+    serviceType: r.service_type,
+    projectTitle: r.project_title,
+    projectDescription: r.project_description,
+    projectGoals: r.project_goals || undefined,
+    targetAudience: r.target_audience || undefined,
+    genre: r.genre || undefined,
+    services: r.services || {},
+    addons: r.addons || [],
+    references: r["references"] || [],
+    existingMaterial: r.existing_material || undefined,
+    deadline: iso(r.deadline),
+    servicePrice: Number(r.service_price || 0),
+    addonsTotal: Number(r.addons_total || 0),
+    discount: Number(r.discount || 0),
+    finalPrice: Number(r.final_price || 0),
+    subscription: r.subscription,
+    estimatedFullPrice: r.estimated_full_price !== null && r.estimated_full_price !== undefined
+      ? Number(r.estimated_full_price) : undefined,
+    status: r.status,
+    statusEnteredAt: iso(r.status_entered_at),
+    progress: {
+      currentStage: r.current_stage || 'concept',
+      completedPercentage: Number(r.completed_percentage || 0),
+      stageProgress: r.stage_progress || {},
+      estimatedCompletion: iso(r.estimated_completion),
+    },
+    assignedTeam: r.assigned_team || [],
+    files: r.files || [],
+    adminComment: r.admin_comment || undefined,
+    clientFeedback: r.client_feedback || undefined,
+    revisionNotes: r.revision_notes || undefined,
+    revisionCount: Number(r.revision_count || 0),
+    rejectionReason: r.rejection_reason || undefined,
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+    paidAt: iso(r.paid_at),
+    approvedDate: iso(r.approved_date),
+    completedDate: iso(r.completed_date),
+    ...(r.extra || {}),
+  };
+}
+
+export async function getProduction360Order(id: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${P360_ORDER_COLS} FROM production_360_orders WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return r.rowCount ? mapP360OrderRow(r.rows[0]) : null;
+}
+
+export async function upsertProduction360Order(id: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const extra = { ...value };
+  ['id','artistId','artistName','serviceType','projectTitle','projectDescription',
+   'projectGoals','targetAudience','genre','services','addons','references',
+   'existingMaterial','deadline','servicePrice','addonsTotal','discount',
+   'finalPrice','subscription','estimatedFullPrice','status','statusEnteredAt',
+   'progress','assignedTeam','files','adminComment','clientFeedback',
+   'revisionNotes','revisionCount','rejectionReason','createdAt','updatedAt',
+   'paidAt','approvedDate','completedDate'].forEach(k => delete extra[k]);
+  const progress = value.progress || {};
+  await pool.query(
+    `INSERT INTO production_360_orders (
+       id, artist_id, artist_name, service_type, project_title, project_description,
+       project_goals, target_audience, genre,
+       service_price, addons_total, discount, final_price, estimated_full_price,
+       subscription, status, status_entered_at, current_stage,
+       completed_percentage, estimated_completion, deadline,
+       admin_comment, client_feedback, revision_notes, revision_count,
+       rejection_reason, existing_material, paid_at, approved_date, completed_date,
+       services, addons, "references", stage_progress, assigned_team, files, extra,
+       updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6,
+             $7, $8, $9,
+             $10, $11, $12, $13, $14,
+             $15, $16, $17, $18,
+             $19, $20, $21,
+             $22, $23, $24, $25,
+             $26, $27, $28, $29, $30,
+             $31::jsonb, $32::jsonb, $33::jsonb, $34::jsonb, $35::jsonb, $36::jsonb, $37::jsonb,
+             NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       artist_id            = COALESCE(EXCLUDED.artist_id, production_360_orders.artist_id),
+       artist_name          = EXCLUDED.artist_name,
+       service_type         = EXCLUDED.service_type,
+       project_title        = EXCLUDED.project_title,
+       project_description  = EXCLUDED.project_description,
+       project_goals        = EXCLUDED.project_goals,
+       target_audience      = EXCLUDED.target_audience,
+       genre                = EXCLUDED.genre,
+       service_price        = EXCLUDED.service_price,
+       addons_total         = EXCLUDED.addons_total,
+       discount             = EXCLUDED.discount,
+       final_price          = EXCLUDED.final_price,
+       estimated_full_price = EXCLUDED.estimated_full_price,
+       subscription         = EXCLUDED.subscription,
+       status               = EXCLUDED.status,
+       status_entered_at    = EXCLUDED.status_entered_at,
+       current_stage        = EXCLUDED.current_stage,
+       completed_percentage = EXCLUDED.completed_percentage,
+       estimated_completion = EXCLUDED.estimated_completion,
+       deadline             = EXCLUDED.deadline,
+       admin_comment        = EXCLUDED.admin_comment,
+       client_feedback      = EXCLUDED.client_feedback,
+       revision_notes       = EXCLUDED.revision_notes,
+       revision_count       = EXCLUDED.revision_count,
+       rejection_reason     = EXCLUDED.rejection_reason,
+       existing_material    = EXCLUDED.existing_material,
+       paid_at              = EXCLUDED.paid_at,
+       approved_date        = EXCLUDED.approved_date,
+       completed_date       = EXCLUDED.completed_date,
+       services             = EXCLUDED.services,
+       addons               = EXCLUDED.addons,
+       "references"         = EXCLUDED."references",
+       stage_progress       = EXCLUDED.stage_progress,
+       assigned_team        = EXCLUDED.assigned_team,
+       files                = EXCLUDED.files,
+       extra                = EXCLUDED.extra,
+       updated_at           = NOW()`,
+    [
+      id,
+      value.artistId || null, value.artistName || null, value.serviceType || null,
+      value.projectTitle || null, value.projectDescription || null,
+      value.projectGoals || null, value.targetAudience || null, value.genre || null,
+      Number(value.servicePrice || 0), Number(value.addonsTotal || 0),
+      Number(value.discount || 0), Number(value.finalPrice || 0),
+      value.estimatedFullPrice !== undefined && value.estimatedFullPrice !== null
+        ? Number(value.estimatedFullPrice) : null,
+      value.subscription || 'none',
+      value.status || 'draft',
+      value.statusEnteredAt || null,
+      progress.currentStage || null,
+      Number(progress.completedPercentage || 0),
+      progress.estimatedCompletion || null,
+      value.deadline || null,
+      value.adminComment || null,
+      value.clientFeedback || null,
+      value.revisionNotes || null,
+      Number(value.revisionCount || 0),
+      value.rejectionReason || null,
+      value.existingMaterial || null,
+      value.paidAt || null,
+      value.approvedDate || null,
+      value.completedDate || null,
+      JSON.stringify(value.services || {}),
+      JSON.stringify(Array.isArray(value.addons) ? value.addons : []),
+      JSON.stringify(Array.isArray(value.references) ? value.references : []),
+      JSON.stringify(progress.stageProgress || {}),
+      JSON.stringify(Array.isArray(value.assignedTeam) ? value.assignedTeam : []),
+      JSON.stringify(Array.isArray(value.files) ? value.files : []),
+      JSON.stringify(extra),
+    ]
+  );
+}
+
+export async function deleteProduction360Order(id: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(`DELETE FROM production_360_orders WHERE id = $1`, [id]);
+  return r.rowCount || 0;
+}
+
+export async function listProduction360OrdersByArtist(artistId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${P360_ORDER_COLS} FROM production_360_orders
+      WHERE artist_id = $1 ORDER BY created_at DESC`,
+    [artistId]
+  );
+  return r.rows.map(mapP360OrderRow);
+}
+
+export async function listProduction360OrdersByStatus(statuses: string[]): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${P360_ORDER_COLS} FROM production_360_orders
+      WHERE status = ANY($1::text[]) ORDER BY created_at DESC`,
+    [statuses]
+  );
+  return r.rows.map(mapP360OrderRow);
+}
+
+export async function listAllProduction360Orders(): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${P360_ORDER_COLS} FROM production_360_orders ORDER BY created_at DESC`
+  );
+  return r.rows.map(mapP360OrderRow);
+}
 
 // ── Promo.Air AI DJ stores ──
 export const promoAirDjScriptsStore = jsonbStore('promo_air_dj_scripts');
