@@ -905,6 +905,10 @@ app.get('/search-contacts', requireAuth, async (c) => {
   const role = c.req.query('role') || '';
   const authRole = c.get('userRole');
   const authUserId = c.get('userId');
+  // Default 25 для совместимости (mobile inbox), max 200 для desktop browse.
+  // Caller передаёт ?limit=200 чтобы видеть полный list.
+  const requestedLimit = parseInt(c.req.query('limit') || '25', 10);
+  const limit = Math.max(1, Math.min(200, isNaN(requestedLimit) ? 25 : requestedLimit));
 
   const contacts: Participant[] = [];
   try {
@@ -938,9 +942,10 @@ app.get('/search-contacts', requireAuth, async (c) => {
     // С поиском — порядок не критичен (LIMIT 25 хватает). В browse-режиме
     // — свежие регистрации сверху чтобы новички быстро находились.
     const orderBy = hasQ ? '' : 'ORDER BY u.created_at DESC';
+    params.push(limit);
     const r = await pool.query(
       `SELECT u.id, u.full_name, u.role::text, u.avatar_url
-       FROM users u WHERE ${where} AND u.status = 'active' ${orderBy} LIMIT 25`,
+       FROM users u WHERE ${where} AND u.status = 'active' ${orderBy} LIMIT $${params.length}`,
       params
     );
 

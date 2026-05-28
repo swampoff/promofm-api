@@ -10,7 +10,7 @@ import bcrypt from 'bcryptjs';
 import { Pool } from 'pg';
 import { upsertNotification } from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsStoreToken, vpsGetToken, vpsUseToken } from './vps-userdata.tsx';
-import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendVenueRadioWelcomeEmail } from "./email-helper.tsx";
+import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendVenueRadioWelcomeEmail, sendActivationEmail } from "./email-helper.tsx";
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { isValidRole } from './roles.tsx';
 import {
@@ -1093,6 +1093,70 @@ auth.post("/mfa/setup", requireAuth, async (c) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────
+
+// ──────────────────────────────────────────────────────────────────────
+// POST /auth/admin/send-activation-batch — рассылка активационных писем
+// legacy-импортированным артистам. Throttle через batch_size+sleep.
+// ──────────────────────────────────────────────────────────────────────
+auth.post("/admin/send-activation-batch", requireAuth, requireAdmin, async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({} as any));
+    const batchSize = Math.max(1, Math.min(500, parseInt(body.batchSize || '250', 10)));
+    const dryRun = body.dryRun === true;
+
+    const { rows } = await sql(`
+      SELECT id::text AS id, email, full_name, display_name
+        FROM users
+       WHERE role::text = 'artist'
+         AND password_hash IS NULL
+         AND activation_email_sent_at IS NULL
+         AND email IS NOT NULL
+         AND deleted_at IS NULL
+       ORDER BY created_at ASC
+       LIMIT $1
+    `, [batchSize]);
+
+    if (dryRun) {
+      return c.json({
+        success: true,
+        dryRun: true,
+        wouldSend: rows.length,
+        sample: rows.slice(0, 5).map((r: any) => ({ email: r.email, name: r.display_name || r.full_name })),
+      });
+    }
+
+    let sent = 0, failed = 0;
+    for (const u of rows) {
+      try {
+        const token = crypto.randomUUID();
+        await vpsStoreToken(u.id, token, 'password_reset', 24 * 7);  // 7 days
+        const name = (u.display_name || u.full_name || (u.email as string).split('@')[0]) as string;
+        const ok = await sendActivationEmail(u.email, name, token);
+        if (ok) {
+          await sql(`UPDATE users SET activation_email_sent_at = NOW() WHERE id = $1`, [u.id]);
+          sent++;
+        } else {
+          failed++;
+        }
+      } catch (err) {
+        log.warn({ err, userId: u.id }, 'activation_email_failed');
+        failed++;
+      }
+    }
+
+    return c.json({
+      success: true,
+      batchSize,
+      processed: rows.length,
+      sent,
+      failed,
+    });
+  } catch (error) {
+    log.error({ err: error }, 'activation_batch_error');
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
 // POST /auth/mfa/verify — H7: Verify TOTP code and enable MFA
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/mfa/verify", requireAuth, async (c) => {
