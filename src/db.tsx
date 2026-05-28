@@ -3675,7 +3675,8 @@ export const radioNotificationsStore  = makeRadioRequestArrayStore('radio_notifi
 export const radioTransactionsStore = makeJsonbKeyStore('radio_transactions', 'radio_id');
 // venue_playlists перевели на row-per-playlist (migration 036). Доступ
 // через pool.query в venue-routes.tsx / venue-api-routes.tsx.
-export const venueAdCampaignsStore = makeJsonbKeyStore('venue_ad_campaigns', 'venue_id');
+// venue_ad_campaigns — row-per-campaign, native cols since migration 082.
+// Доступ через typed functions ниже (см. anchor "venue_ad_campaigns native").
 export const venueAnalyticsStore = makeJsonbKeyStore('venue_analytics', 'venue_id');
 export const venueRadioBrandStore = makeJsonbKeyStore('venue_radio_brand', 'venue_id');
 // ticketProvidersStore — DROPPED (0 callers; ticket_providers доступ
@@ -5342,4 +5343,144 @@ export async function listPromoAirDjQueuePending(venueId: string): Promise<Promo
     [venueId],
   );
   return r.rows.map(mapPromoAirDjQueueItem);
+}
+
+// ─── venue_ad_campaigns native (migration 082) ───
+// Row-per-campaign (id PK, venue_id FK semantic). Replaces venueAdCampaignsStore
+// per-venue jsonb-array. Race-free creation + atomic status updates.
+
+export interface VenueAdCampaignRow {
+  id: string;
+  venueId: string;
+  stationId?: string | null;
+  stationName?: string | null;
+  advertiserId?: string | null;
+  packageType?: string | null;
+  status: string;
+  audioUrl?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  targetPlays: number;
+  totalPlays: number;
+  budget: number;
+  spent: number;
+  impressions: number;
+  ctr: number;
+  timeSlots: any[];
+  extra: Record<string, any>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function mapVenueAdCampaignRow(r: any): VenueAdCampaignRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  return {
+    id: r.id,
+    venueId: r.venue_id,
+    stationId: r.station_id ?? null,
+    stationName: r.station_name ?? null,
+    advertiserId: r.advertiser_id ?? null,
+    packageType: r.package_type ?? null,
+    status: r.status,
+    audioUrl: r.audio_url ?? null,
+    startDate: r.start_date ?? null,
+    endDate: r.end_date ?? null,
+    targetPlays: Number(r.target_plays || 0),
+    totalPlays: Number(r.total_plays || 0),
+    budget: Number(r.budget || 0),
+    spent: Number(r.spent || 0),
+    impressions: Number(r.impressions || 0),
+    ctr: Number(r.ctr || 0),
+    timeSlots: Array.isArray(r.time_slots) ? r.time_slots : [],
+    extra: r.extra || {},
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
+  };
+}
+
+const VAC_COLS = `id, venue_id, station_id, station_name, advertiser_id,
+  package_type, status, audio_url, start_date, end_date,
+  target_plays, total_plays, budget, spent, impressions, ctr,
+  time_slots, extra, created_at, updated_at`;
+
+export async function getVenueAdCampaign(id: string): Promise<VenueAdCampaignRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${VAC_COLS} FROM venue_ad_campaigns WHERE id = $1 LIMIT 1`, [id]
+  );
+  return mapVenueAdCampaignRow(r.rows[0]);
+}
+
+export async function listVenueAdCampaigns(venueId: string): Promise<VenueAdCampaignRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${VAC_COLS} FROM venue_ad_campaigns
+      WHERE venue_id = $1 ORDER BY created_at DESC`, [venueId]
+  );
+  return r.rows.map(mapVenueAdCampaignRow).filter((x): x is VenueAdCampaignRow => x !== null);
+}
+
+export async function insertVenueAdCampaign(c: VenueAdCampaignRow): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO venue_ad_campaigns
+       (id, venue_id, station_id, station_name, advertiser_id, package_type,
+        status, audio_url, start_date, end_date,
+        target_plays, total_plays, budget, spent, impressions, ctr,
+        time_slots, extra, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+             $11,$12,$13,$14,$15,$16,
+             $17::jsonb,$18::jsonb,
+             COALESCE($19::timestamptz, NOW()),
+             COALESCE($20::timestamptz, NOW()))`,
+    [
+      c.id, c.venueId, c.stationId ?? null, c.stationName ?? null,
+      c.advertiserId ?? null, c.packageType ?? null, c.status || 'pending',
+      c.audioUrl ?? null, c.startDate ?? null, c.endDate ?? null,
+      c.targetPlays || 0, c.totalPlays || 0, c.budget || 0, c.spent || 0,
+      c.impressions || 0, c.ctr || 0,
+      JSON.stringify(c.timeSlots || []),
+      JSON.stringify(c.extra || {}),
+      c.createdAt ?? null, c.updatedAt ?? null,
+    ]
+  );
+}
+
+/**
+ * Atomic partial UPDATE. Принимает камелкейс patch; снэк-кейс через ручной mapping.
+ * Race-free vs legacy get→mutate→set паттерн.
+ */
+export async function updateVenueAdCampaign(
+  id: string,
+  patch: Partial<{
+    status: string; audioUrl: string | null; startDate: string | null;
+    endDate: string | null; targetPlays: number; totalPlays: number;
+    budget: number; spent: number; impressions: number; ctr: number;
+    timeSlots: any[];
+    packageType: string | null;
+  }>
+): Promise<VenueAdCampaignRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const fieldMap: Record<string, string> = {
+    status: 'status', audioUrl: 'audio_url', startDate: 'start_date',
+    endDate: 'end_date', targetPlays: 'target_plays', totalPlays: 'total_plays',
+    budget: 'budget', spent: 'spent', impressions: 'impressions', ctr: 'ctr',
+    timeSlots: 'time_slots', packageType: 'package_type',
+  };
+  const sets: string[] = [];
+  const vals: any[] = [];
+  for (const [k, v] of Object.entries(patch)) {
+    const col = fieldMap[k]; if (!col) continue;
+    vals.push(col === 'time_slots' ? JSON.stringify(v ?? []) : v);
+    sets.push(`${col} = $${vals.length}${col === 'time_slots' ? '::jsonb' : ''}`);
+  }
+  if (sets.length === 0) return getVenueAdCampaign(id);
+  vals.push(id);
+  const r = await pool.query(
+    `UPDATE venue_ad_campaigns SET ${sets.join(', ')}, updated_at = NOW()
+      WHERE id = $${vals.length} RETURNING ${VAC_COLS}`,
+    vals
+  );
+  return mapVenueAdCampaignRow(r.rows[0]);
 }

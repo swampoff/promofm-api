@@ -26,7 +26,7 @@
  */
 
 import { Hono } from 'hono';
-import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, venueAdCampaignsStore, venueAnalyticsStore, venueRadioBrandStore, radioVenueRequestsStore, radioNotificationsStore } from './db.tsx';
+import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, venueAnalyticsStore, venueRadioBrandStore, radioVenueRequestsStore, radioNotificationsStore, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, type VenueAdCampaignRow } from './db.tsx';
 import { pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
@@ -323,13 +323,11 @@ app.get('/analytics/overview', requireAuth, async (c) => {
     const analyticsRaw = await venueAnalyticsStore.get(profile.id);
     const analytics = parse(analyticsRaw) || {};
 
-    // Получить кампании
-    const campaignsRaw = await venueAdCampaignsStore.get(profile.id);
-    const campaigns = parse(campaignsRaw) || [];
+    const campaigns = await listVenueAdCampaigns(profile.id);
 
-    const activeCampaigns = campaigns.filter((c: any) => c.status === 'active').length;
-    const completedCampaigns = campaigns.filter((c: any) => c.status === 'completed').length;
-    const totalSpending = campaigns.reduce((sum: number, c: any) => sum + (c.totalSpent || 0), 0);
+    const activeCampaigns = campaigns.filter(c => c.status === 'active').length;
+    const completedCampaigns = campaigns.filter(c => c.status === 'completed').length;
+    const totalSpending = campaigns.reduce((sum, c) => sum + (c.spent || 0), 0);
 
     return c.json({
       success: true,
@@ -377,8 +375,7 @@ app.get('/analytics/campaigns', requireAuth, async (c) => {
       return c.json(featureBlocked('analytics', profile), 403);
     }
 
-    const campaignsRaw = await venueAdCampaignsStore.get(profile.id);
-    const campaigns = parse(campaignsRaw) || [];
+    const campaigns = await listVenueAdCampaigns(profile.id);
 
     return c.json({ success: true, campaigns });
   } catch (error: any) {
@@ -759,8 +756,7 @@ app.get('/radio-campaigns', requireAuth, async (c) => {
       return c.json({ success: true, campaigns: [] });
     }
 
-    const raw = await venueAdCampaignsStore.get(profile.id);
-    const campaigns = parse(raw) || [];
+    const campaigns = await listVenueAdCampaigns(profile.id);
     return c.json({ success: true, campaigns });
   } catch (error: any) {
     console.error('Error fetching radio campaigns:', error);
@@ -778,10 +774,13 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
     }
 
     const body = await c.req.json();
-    const campaign = {
+    const now = new Date().toISOString();
+    const campaign: VenueAdCampaignRow = {
       id: `camp-${crypto.randomUUID()}`,
+      venueId: profile.id,
       stationId: body.stationId,
       stationName: body.stationName || '',
+      advertiserId: null,
       packageType: body.packageType || 'slot_15sec',
       status: 'pending',
       audioUrl: body.audioUrl || '',
@@ -794,13 +793,13 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
       impressions: 0,
       ctr: 0,
       timeSlots: body.timeSlots || [],
-      createdAt: new Date().toISOString(),
+      extra: {},
+      createdAt: now,
+      updatedAt: now,
     };
 
-    const raw = await venueAdCampaignsStore.get(profile.id);
-    const campaigns = parse(raw) || [];
-    campaigns.push(campaign);
-    await venueAdCampaignsStore.set(profile.id, campaigns);
+    // Atomic INSERT — no race window vs legacy get-push-set.
+    await insertVenueAdCampaign(campaign);
 
     // Push venue request to radio side so radio station sees it in orders
     if (campaign.stationId) {
@@ -877,17 +876,25 @@ app.put('/radio-campaigns/:id', requireAuth, async (c) => {
     const campaignId = c.req.param('id');
     const body = await c.req.json();
 
-    const raw = await venueAdCampaignsStore.get(profile.id);
-    const campaigns: any[] = parse(raw) || [];
-    const idx = campaigns.findIndex((c: any) => c.id === campaignId);
-    if (idx === -1) {
+    // Atomic UPDATE — race-free vs legacy get→find→mutate→set.
+    const updated = await updateVenueAdCampaign(campaignId, {
+      ...(body.status !== undefined ? { status: body.status } : {}),
+      ...(body.audioUrl !== undefined ? { audioUrl: body.audioUrl } : {}),
+      ...(body.startDate !== undefined ? { startDate: body.startDate } : {}),
+      ...(body.endDate !== undefined ? { endDate: body.endDate } : {}),
+      ...(body.targetPlays !== undefined ? { targetPlays: body.targetPlays } : {}),
+      ...(body.totalPlays !== undefined ? { totalPlays: body.totalPlays } : {}),
+      ...(body.budget !== undefined ? { budget: body.budget } : {}),
+      ...(body.spent !== undefined ? { spent: body.spent } : {}),
+      ...(body.impressions !== undefined ? { impressions: body.impressions } : {}),
+      ...(body.timeSlots !== undefined ? { timeSlots: body.timeSlots } : {}),
+      ...(body.packageType !== undefined ? { packageType: body.packageType } : {}),
+    });
+    if (!updated || updated.venueId !== profile.id) {
       return c.json({ error: 'Campaign not found' }, 404);
     }
 
-    campaigns[idx] = { ...campaigns[idx], ...body, updatedAt: new Date().toISOString() };
-    await venueAdCampaignsStore.set(profile.id, campaigns);
-
-    return c.json({ success: true, campaign: campaigns[idx] });
+    return c.json({ success: true, campaign: updated });
   } catch (error: any) {
     console.error('Error updating radio campaign:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -950,10 +957,11 @@ app.get('/radio-campaigns/:id/status', requireAuth, async (c) => {
     const profile = await getVenueProfile(userId);
     if (!profile) return c.json({ success: false, error: 'Venue profile not found' }, 404);
     const campaignId = c.req.param('id');
-    const campaignsRaw = await venueAdCampaignsStore.get(profile.id);
-    const campaigns = Array.isArray(campaignsRaw) ? campaignsRaw : (campaignsRaw?.data || []);
-    const campaign = campaigns.find((cam: any) => cam.id === campaignId);
-    if (!campaign) return c.json({ success: false, error: 'Campaign not found' }, 404);
+    const { getVenueAdCampaign } = await import('./db.tsx');
+    const campaign = await getVenueAdCampaign(campaignId);
+    if (!campaign || campaign.venueId !== profile.id) {
+      return c.json({ success: false, error: 'Campaign not found' }, 404);
+    }
 
     let radioStatus = null;
     let pricing = null;
