@@ -3079,7 +3079,159 @@ export const trackTestExpertStatsStore = makeJsonbKeyStore('track_test_expert_st
 // trackModerationStore DELETED — 0 callers. track_moderation пишется
 // напрямую через pool.query в src/ai-check.tsx (после migration 052 —
 // все native cols, jsonb остаётся только в ai_check_result).
-export const newsPublicStore = makeJsonbKeyStore('news_public');
+// ─── news_public (native cols since migration 077) ───
+// Public news feed. Pipeline writer + admin moderation + sitemap + content-health.
+
+export interface NewsPublicRow {
+  id: string;
+  title: string;
+  excerpt: string;
+  content: string;
+  category: string;
+  tags: string[];
+  source: string;
+  sourceId?: string | null;
+  sourceUrl?: string | null;
+  imageUrl?: string | null;
+  authorName?: string | null;
+  authorAvatar?: string | null;
+  publishedAt: string;
+  processedAt?: string | null;
+  status: string;       // 'pending' | 'published' | 'rejected'
+  createdAt: string;
+  updatedAt?: string | null;
+}
+
+function mapNewsPublicRow(r: any): NewsPublicRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  const isoOrNull = (d: any) => d == null ? null : iso(d);
+  return {
+    id: r.id,
+    title: r.title,
+    excerpt: r.excerpt || '',
+    content: r.content || '',
+    category: r.category,
+    tags: r.tags || [],
+    source: r.source,
+    sourceId: r.source_id,
+    sourceUrl: r.source_url,
+    imageUrl: r.image_url,
+    authorName: r.author_name,
+    authorAvatar: r.author_avatar,
+    publishedAt: iso(r.published_at),
+    processedAt: isoOrNull(r.processed_at),
+    status: r.status,
+    createdAt: iso(r.created_at),
+    updatedAt: isoOrNull(r.updated_at),
+  };
+}
+
+const NEWS_PUBLIC_COLS = `id, title, excerpt, content, category, tags, source,
+  source_id, source_url, image_url, author_name, author_avatar,
+  published_at, processed_at, status, created_at, updated_at`;
+
+export async function getNewsPublic(id: string): Promise<NewsPublicRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${NEWS_PUBLIC_COLS} FROM news_public WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return mapNewsPublicRow(r.rows[0]);
+}
+
+export interface ListNewsPublicOpts {
+  status?: string;       // 'published' default
+  tag?: string;
+  source?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Listing с SQL filter + sort pushdown. Default — published only,
+ * sorted by published_at DESC. Hits idx_news_public_published.
+ */
+export async function listNewsPublic(opts: ListNewsPublicOpts = {}): Promise<NewsPublicRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  const where: string[] = [];
+  const params: any[] = [];
+  let i = 1;
+
+  if (opts.status !== '*') {
+    const status = opts.status || 'published';
+    where.push(`status = $${i++}`); params.push(status);
+  }
+  if (opts.tag)    { where.push(`$${i++} = ANY(tags)`); params.push(opts.tag); }
+  if (opts.source) { where.push(`source = $${i++}`);    params.push(opts.source); }
+
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const limit = Math.max(1, Math.min(opts.limit ?? 50, 200));
+  const offset = Math.max(0, opts.offset ?? 0);
+
+  const r = await pool.query(
+    `SELECT ${NEWS_PUBLIC_COLS} FROM news_public
+      ${whereSql}
+      ORDER BY published_at DESC
+      LIMIT ${limit} OFFSET ${offset}`,
+    params
+  );
+  return r.rows.map(mapNewsPublicRow).filter((x): x is NewsPublicRow => x !== null);
+}
+
+/**
+ * Return ALL news (for pipeline health monitoring + sitemap generation).
+ * No filter — caller filters in-memory. Не hot-path (вызывается раз в
+ * минут от cron'ов мониторинга).
+ */
+export async function listAllNewsPublic(): Promise<NewsPublicRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${NEWS_PUBLIC_COLS} FROM news_public ORDER BY published_at DESC`
+  );
+  return r.rows.map(mapNewsPublicRow).filter((x): x is NewsPublicRow => x !== null);
+}
+
+export async function upsertNewsPublic(news: Partial<NewsPublicRow> & { id: string; title: string }): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO news_public
+       (id, title, excerpt, content, category, tags, source, source_id,
+        source_url, image_url, author_name, author_avatar,
+        published_at, processed_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+             COALESCE($13::timestamptz, NOW()), $14::timestamptz, $15)
+     ON CONFLICT (id) DO UPDATE SET
+       title         = EXCLUDED.title,
+       excerpt       = EXCLUDED.excerpt,
+       content       = EXCLUDED.content,
+       category      = EXCLUDED.category,
+       tags          = EXCLUDED.tags,
+       source        = EXCLUDED.source,
+       source_id     = EXCLUDED.source_id,
+       source_url    = EXCLUDED.source_url,
+       image_url     = EXCLUDED.image_url,
+       author_name   = EXCLUDED.author_name,
+       author_avatar = EXCLUDED.author_avatar,
+       published_at  = EXCLUDED.published_at,
+       processed_at  = EXCLUDED.processed_at,
+       status        = EXCLUDED.status,
+       updated_at    = NOW()`,
+    [
+      news.id, news.title, news.excerpt || '', news.content || '',
+      news.category || 'industry', news.tags || [], news.source || '',
+      news.sourceId || null, news.sourceUrl || null, news.imageUrl || null,
+      news.authorName || null, news.authorAvatar || null,
+      news.publishedAt || null, news.processedAt || null,
+      news.status || 'published',
+    ]
+  );
+}
+
+export async function deleteNewsPublic(id: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(`DELETE FROM news_public WHERE id = $1`, [id]);
+}
 // contactFormsStore — DROPPED (0 callers; `contact_forms` table читается
 // напрямую через pool.query в landing-data-routes.tsx).
 export const investorInquiriesStore = makeJsonbKeyStore('investor_inquiries');

@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
-import { newsPublicStore } from './db.tsx';
+import { listAllNewsPublic } from './db.tsx';
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 
 async function requireAdminOrKey(c: any, next: any) {
@@ -181,7 +181,7 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
 
     // Fetch dynamic content in parallel
     const [newsResult, concertsResult, videosResult, tracksResult] = await Promise.all([
-      newsPublicStore.getAll().catch(() => []),
+      listAllNewsPublic().catch(() => []),
       pool.query(`SELECT id, title, updated_at, created_at FROM concerts WHERE is_hidden = false AND is_cancelled = false ORDER BY event_date DESC`).catch(() => ({ rows: [] })),
       pool.query(`SELECT id, title, updated_at, created_at FROM videos WHERE is_hidden = false ORDER BY created_at DESC`).catch(() => ({ rows: [] })),
       pool.query(`SELECT id, title, artist_name, genre, updated_at, created_at FROM tracks WHERE moderation_status = 'approved' AND is_hidden = false ORDER BY created_at DESC LIMIT 500`).catch(() => ({ rows: [] })),

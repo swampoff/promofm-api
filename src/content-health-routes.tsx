@@ -11,7 +11,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as db from './db.tsx';
-import { chartAggregationStore, chartSourcesStore, newsPipelineStore, newsPublicStore } from './db.tsx';
+import { chartAggregationStore, chartSourcesStore, newsPipelineStore, listAllNewsPublic } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const contentHealth = new Hono();
@@ -112,7 +112,7 @@ async function collectHealthData(): Promise<ContentHealthData> {
 
   // ═══════════════ NEWS HEALTH ═══════════════
 
-  const allNews = await newsPublicStore.getAll();
+  const allNews = await listAllNewsPublic();
   let pending = 0, published = 0, rejected = 0, collectedToday = 0;
 
   for (const item of allNews) {

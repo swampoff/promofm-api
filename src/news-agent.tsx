@@ -4,7 +4,7 @@
  * Каждый автор-персонаж имеет свой стиль и специализацию
  */
 
-import { newsPublicStore } from './db.tsx';
+import { listAllNewsPublic, upsertNewsPublic } from './db.tsx';
 import { isUrlSafe } from './security.tsx';
 
 
@@ -774,7 +774,7 @@ export async function fetchNewsFromSource(source: NewsSource, overridePoster?: t
   }
 
   // Load existing news for deduplication
-  const existing = await newsPublicStore.getAll();
+  const existing = await listAllNewsPublic();
   const existingTitles = existing.map((n: any) => n.title || '');
 
   let added = 0;
@@ -802,7 +802,7 @@ export async function fetchNewsFromSource(source: NewsSource, overridePoster?: t
       createdAt: new Date().toISOString(),
     };
 
-    await newsPublicStore.set(id, newsRecord);
+    await upsertNewsPublic(newsRecord as any);
     pingIndexNow(id).catch(() => {});
     postToTelegram({ id, title: item.title, excerpt: item.excerpt, authorName: poster.name, source: source.name, tags: item.tags, category: item.category, imageUrl: item.imageUrl }).catch(() => {});
 
