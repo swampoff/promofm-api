@@ -4002,7 +4002,9 @@ export const trackTestRequestsStore = makeTrackTestRequestsStore();
 // SELECT id FROM track_test_requests …
 export const trackTestUserRequestsStore = makeTrackTestUserRequestsView();
 export const trackTestAllRequestsStore = makeTrackTestAllRequestsView();
-export const trackTestExpertsStore = makeJsonbKeyStore('track_test_experts');
+// trackTestExpertsStore — REMOVED. track_test_experts table dropped in
+// migration 053 (derived: SELECT DISTINCT expert_id FROM track_test_expert_stats).
+// Доступ через listRegisteredTrackTestExperts() ниже.
 export const trackTestReviewsStore = makeJsonbKeyStore('track_test_reviews');
 export const trackTestRequestReviewsStore = makeJsonbKeyStore('track_test_request_reviews', 'request_id');
 export const newsPipelineStore = makeJsonbKeyStore('news_pipeline', 'key');
@@ -6229,4 +6231,18 @@ export async function updateVenueAdCampaign(
     vals
   );
   return mapVenueAdCampaignRow(r.rows[0]);
+}
+
+// ─── track_test experts (migration 053 dropped track_test_experts) ───
+/**
+ * Список зарегистрированных track-test экспертов (для SSE-рассылок).
+ * Replaces dropped track_test_experts singleton-array. Source of truth —
+ * track_test_expert_stats (1 row per expert).
+ */
+export async function listRegisteredTrackTestExperts(): Promise<string[]> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT DISTINCT expert_id FROM track_test_expert_stats WHERE expert_id IS NOT NULL`
+  );
+  return r.rows.map(row => row.expert_id as string);
 }

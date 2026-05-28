@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { trackTestAllRequestsStore, trackTestExpertsStore, getExpertStats, incrementExpertAssigned, completeExpertReviewAndReward, trackTestRequestReviewsStore, trackTestRequestsStore, trackTestReviewsStore, trackTestUserRequestsStore } from './db.tsx';
+import { trackTestAllRequestsStore, getExpertStats, incrementExpertAssigned, completeExpertReviewAndReward, trackTestRequestReviewsStore, trackTestRequestsStore, trackTestReviewsStore, trackTestUserRequestsStore, listRegisteredTrackTestExperts } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { quickLLM, getLLMStatus } from './llm-router.tsx';
@@ -459,8 +459,9 @@ app.post('/moderate', requireAuth, requireAdmin, async (c) => {
       request.moderation_notes = notes;
       console.log(`Request approved: ${request_id}`);
 
-      // SSE: уведомить всех онлайн-экспертов о новом доступном тесте
-      const expertIds = (await trackTestExpertsStore.get('singleton') || []) as string[];
+      // SSE: уведомить всех онлайн-экспертов о новом доступном тесте.
+      // Native source — DISTINCT expert_id из track_test_expert_stats.
+      const expertIds = await listRegisteredTrackTestExperts();
       for (const eid of expertIds) {
         emitSSE(eid, {
           type: 'track_test_available',
@@ -1287,14 +1288,10 @@ app.post('/claim-review', requireAuth, async (c) => {
     await trackTestRequestsStore.set(request_id, req);
 
     // Atomic +1 total_assigned. Создаёт row если не существует.
+    // Регистрация эксперта в track_test_expert_stats — single source of truth
+    // для listRegisteredTrackTestExperts. Прежний блок с trackTestExpertsStore
+    // singleton-array — REDUNDANT, удалён (migration 053 dropped the table).
     await incrementExpertAssigned(expert_id);
-
-    // Регистрируем эксперта для SSE-рассылок
-    const registeredExperts = (await trackTestExpertsStore.get('singleton') || []) as string[];
-    if (!registeredExperts.includes(expert_id)) {
-      registeredExperts.push(expert_id);
-      await trackTestExpertsStore.set('singleton', registeredExperts);
-    }
 
     // SSE: уведомить артиста-автора о новом эксперте
     if (req.user_id) {
