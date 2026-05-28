@@ -11,7 +11,7 @@
  */
 
 import { Hono } from 'hono';
-import { publishOrdersStore } from './db.tsx';
+import { getPublishOrder, listPublishOrdersByUser } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { getDbClient, pool } from './db-client.tsx';
@@ -115,7 +115,7 @@ app.post('/messages/:orderId', requireAuth, async (c) => {
 
     // Определяем получателя для SSE
     // Ищем заказ чтобы узнать userId артиста
-    const order: any = await publishOrdersStore.get(orderId);
+    const order = await getPublishOrder(orderId);
     if (order) {
       // 'admin' is the shared broadcast channel all admin UIs subscribe to.
       // Previous 'admin-moderator' was a phantom channel — no one listened to
@@ -173,15 +173,11 @@ app.get('/unread/:userId', requireAuth, async (c) => {
     return c.json({ success: false, error: 'Access denied: not resource owner' }, 403);
   }
   try {
-    // Получаем все заказы пользователя
-    const allOrders = await publishOrdersStore.getAll();
-    const userOrderIds: string[] = [];
-    
-    for (const order of allOrders) {
-      if (order && typeof order === 'object' && (order as any).userId === userId) {
-        userOrderIds.push((order as any).id);
-      }
-    }
+    // Native cols since migration 078: индексованный SELECT WHERE user_id = $1
+    // через idx_publish_orders_user_recent. Было: getAll + JS .filter
+    // тащил всю таблицу в JS.
+    const userOrders = await listPublishOrdersByUser(userId);
+    const userOrderIds = userOrders.map(o => o.id);
 
     let totalUnread = 0;
     const unreadByOrder: Record<string, number> = {};
