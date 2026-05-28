@@ -2875,7 +2875,9 @@ export async function listServiceOrdersByProducer(producerId: string): Promise<a
   );
   return r.rows.map(mapServiceOrderRow);
 }
-export const bookingCalendarStore = makeJsonbKeyStore('booking_calendar', 'performer_id');
+// bookingCalendarStore — REMOVED (dead cache, 0 writers; only 2 .del calls).
+// Cache invalidation was no-op после migration that promoted bookings к
+// native cols. Table candidate для manual DROP via OPERATIONS_LOG.
 // payment_transactions переехал на row-per-tx (migration 037). Доступ
 // через pool.query из platform-revenue.tsx + track-test-routes.tsx.
 // payment_balances имеет native cols (available, pending, total) — не data
@@ -3024,7 +3026,9 @@ function makeDjSubscriptionsStore() {
 export const djSubscriptionsStore = makeDjSubscriptionsStore();
 // dj_withdrawals переехал на row-per-withdrawal (migration 044). Доступ
 // через pool.query из dj-studio-routes.tsx + checkout-routes.tsx webhook.
-export const djTransactionsStore = makeJsonbKeyStore('dj_transactions', 'dj_id');
+// djTransactionsStore — REMOVED (dead store, 0 writers anywhere; only 2 .get
+// reads which returned []. Transactions surface'ятся через fetchDjEvents +
+// dj_withdrawals row-per-withdrawal, см. dj-studio-routes.tsx finances).
 // collab_offers — row-per-offer native cols (migration 064).
 // collab_offers_by_artist + collab_offers_by_producer таблицы DROPPED
 // — derived из collab_offers.artist_id / producer_id с native indexes.

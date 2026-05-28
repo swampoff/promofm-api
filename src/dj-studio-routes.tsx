@@ -20,7 +20,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import {
   getDjProfile, upsertDjProfile,
-  djSubscriptionsStore, djTransactionsStore,
+  djSubscriptionsStore,
   getCoinBalance,
 } from './db.tsx';
 import { pool } from './db-client.tsx';
@@ -1072,15 +1072,16 @@ function inCurrentMonth(iso: string | undefined): boolean {
 app.get('/finances/overview', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const [events, withdrawals, txs, planLimits] = await Promise.all([
+    const [events, withdrawals, planLimits] = await Promise.all([
       fetchDjEvents(userId).catch(() => []),
       fetchDjWithdrawals(userId).catch(() => []),
-      djTransactionsStore.get(userId).catch(() => []),
       getDjPlanLimits(String(userId)).catch(() => DJ_PLANS[0].limits),
     ]);
     const eventsArr: any[] = Array.isArray(events) ? events : [];
     const withdrawalsArr: any[] = Array.isArray(withdrawals) ? withdrawals : [];
-    const txsArr: any[] = Array.isArray(txs) ? txs : [];
+    // dj_transactions dead store (0 writers); transactions surface'ятся
+    // через events + withdrawals (см. /finances/transactions endpoint).
+    const txsArr: any[] = [];
 
     const completed = eventsArr.filter((e: any) => e.status === 'completed');
     const pending = eventsArr.filter((e: any) => e.status === 'upcoming' || e.status === 'confirmed');
@@ -1131,13 +1132,13 @@ app.get('/finances/overview', requireAuth, requireDjRole, async (c) => {
 app.get('/finances/transactions', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
-    const [events, txs, planLimits] = await Promise.all([
+    const [events, planLimits] = await Promise.all([
       fetchDjEvents(userId).catch(() => []),
-      djTransactionsStore.get(userId).catch(() => []),
       getDjPlanLimits(String(userId)).catch(() => DJ_PLANS[0].limits),
     ]);
     const eventsArr: any[] = Array.isArray(events) ? events : [];
-    const txsArr: any[] = Array.isArray(txs) ? txs : [];
+    // dj_transactions dead store; transaction history derived from events.
+    const txsArr: any[] = [];
 
     // События-как-транзакции: completed → income, остальные → pending
     const eventTxs = eventsArr

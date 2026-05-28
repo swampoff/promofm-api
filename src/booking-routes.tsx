@@ -25,7 +25,7 @@ import { apiError } from './error-codes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { Hono } from 'hono';
 import { requireAuth, requireRole } from './auth-middleware.tsx';
-import { getArtistProfile, getBooking, getBookingsByUser, getDjProfile, getVenueProfile, upsertBooking, upsertNotification, bookingCalendarStore, getPaymentSession } from './db.tsx';
+import { getArtistProfile, getBooking, getBookingsByUser, getDjProfile, getVenueProfile, upsertBooking, upsertNotification, getPaymentSession } from './db.tsx';
 import { notifyBookingRequest } from './email-helper.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { getDjPlanLimits } from './dj-studio-routes.tsx';
@@ -561,8 +561,7 @@ app.put('/:id/cancel', requireAuth, async (c) => {
 
     await upsertBooking(bookingId, booking);
 
-    // Разблокировать дату
-    await bookingCalendarStore.del(booking.performerId);
+    // bookingCalendarStore.del invalidation removed — dead cache, 0 writers.
 
     // Уведомление другой стороне
     const otherUserId = booking.requesterId === user.id ? booking.performerId : booking.requesterId;
@@ -699,8 +698,7 @@ app.post(
       booking.updatedAt = new Date().toISOString();
       await upsertBooking(bookingId, booking);
 
-      // Free the date in the performer's calendar
-      try { await bookingCalendarStore.del(booking.performerId); } catch {}
+      // bookingCalendarStore.del removed — dead cache, 0 writers.
 
       // Notify both parties
       const partyMessage = `Букинг "${booking.eventTitle}" отменён администратором` +
