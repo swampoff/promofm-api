@@ -96,7 +96,7 @@ INSERT INTO venue_ad_campaigns (
   target_plays, total_plays, budget, spent, impressions, ctr,
   time_slots, extra, created_at, updated_at
 )
-SELECT
+SELECT DISTINCT ON (COALESCE(NULLIF(elem->>'id', ''), 'camp-legacy-' || md5(elem::text || b.venue_id)))
   COALESCE(NULLIF(elem->>'id', ''), 'camp-legacy-' || md5(elem::text || b.venue_id)),
   b.venue_id,
   NULLIF(elem->>'stationId', ''),
@@ -124,7 +124,7 @@ FROM _vac_backup b,
             WHEN jsonb_typeof(b.data) = 'object' THEN jsonb_build_array(b.data)
             ELSE '[]'::jsonb END
      ) elem
-ON CONFLICT (id) DO NOTHING;
+;  -- ON CONFLICT removed: TRUNCATE'd before INSERT, no conflicts; PK not yet added
 
 -- Step 6: Defaults + NOT NULL + PK.
 UPDATE venue_ad_campaigns SET
