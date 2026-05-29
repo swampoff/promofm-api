@@ -30,8 +30,8 @@ import { Hono } from 'hono';
 import {
   getRadioAdSlot, listRadioAdSlotsByStation, countRadioAdSlots,
   upsertRadioAdSlot, deleteRadioAdSlot,
-  getRadioProfile, radioAnalyticsStore, radioArtistRequestsStore,
-  radioFinanceStore, radioNotificationsStore, radioTransactionsStore,
+  getRadioProfile, radioArtistRequestsStore,
+  radioNotificationsStore,
   radioVenueRequestsStore,
 } from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
@@ -662,8 +662,8 @@ app.get('/finance/overview', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
-    const financeData = await radioFinanceStore.get(station.id);
-    const finance = financeData || {
+    // radio_finance dead store — 0 writers anywhere. Returns zeros (как и до cleanup).
+    const finance = {
       totalRevenue: 0,
       monthlyRevenue: 0,
       adRevenue: 0,
@@ -688,8 +688,9 @@ app.get('/finance/transactions', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
-    const txData = await radioTransactionsStore.get(station.id);
-    const transactions = Array.isArray(txData) ? txData : [];
+    // radio_transactions never populated — placeholder. Returns empty list
+    // как и до cleanup (table had no writers anywhere in codebase).
+    const transactions: any[] = [];
 
     return c.json({ success: true, transactions });
   } catch (error: any) {
@@ -734,13 +735,10 @@ async function _getRadioWithdrawals(stationUserId: string): Promise<any[]> {
 }
 
 async function _getRadioBalance(stationUserId: string): Promise<number> {
-  const { pool: rwPool } = await import('./db-client.tsx');
-  let balance = 0;
-  try {
-    const r = await rwPool.query(`SELECT data FROM radio_finance WHERE radio_id = $1`, [stationUserId]);
-    const data: any = r.rows[0]?.data || {};
-    balance = Number(data?.availableBalance ?? data?.balance ?? data?.totalRevenue ?? 0);
-  } catch {}
+  // radio_finance table never populated — 0 writers в codebase. Balance
+  // computed solely from withdrawals (reserved amounts). Previously
+  // _getRadioBalance читал из jsonb-blob, который всегда был empty.
+  const balance = 0;
   const wds = await _getRadioWithdrawals(stationUserId);
   const reserved = wds
     .filter((w: any) => w?.status !== 'rejected' && w?.status !== 'cancelled')
@@ -930,20 +928,19 @@ app.get('/analytics', requireAuth, async (c) => {
 
     // Собираем данные из разных stores. adSlotsCount — native COUNT(*)
     // вместо чтения JSON-массива из index-таблицы (migration 050 убрала её).
-    const [artistReqData, venueReqData, financeData, adSlotsCount, transactionsData, detailedAnalyticsData] = await Promise.all([
+    const [artistReqData, venueReqData, adSlotsCount] = await Promise.all([
       radioArtistRequestsStore.get(station.id),
       radioVenueRequestsStore.get(station.id),
-      radioFinanceStore.get(station.id),
       countRadioAdSlots(station.id),
-      radioTransactionsStore.get(station.id),
-      radioAnalyticsStore.get(station.id),
     ]);
 
     const artistRequests = Array.isArray(artistReqData) ? artistReqData : [];
     const venueRequests = Array.isArray(venueReqData) ? venueReqData : [];
-    const finance = financeData || {};
-    const transactions = Array.isArray(transactionsData) ? transactionsData : [];
-    const detailedAnalytics = detailedAnalyticsData || {};
+    // radio_finance / radio_transactions / radio_analytics: dead stores
+    // (0 writers anywhere in codebase). Empty placeholders preserve API.
+    const finance: any = {};
+    const transactions: any[] = [];
+    const detailedAnalytics: any = {};
 
     // Агрегация заявок артистов
     const artistStats = {
