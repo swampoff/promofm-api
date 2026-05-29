@@ -877,8 +877,8 @@ app.get('/stats', requireAuth, requireAdmin, async (c) => {
 app.get('/newReleases', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '25');
-    const { platformStatsStore } = await import('./db.tsx');
-    const cached: any = await platformStatsStore.get('tracks:new_releases');
+    const { getPlatformStats } = await import('./db.tsx');
+    const cached: any = await getPlatformStats('tracks:new_releases');
     if (cached?.tracks?.length) {
       return c.json({ success: true, releases: cached.tracks.slice(0, limit) });
     }

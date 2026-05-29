@@ -1037,29 +1037,7 @@ export async function upsertBanner(bannerId: string, userId: string, banner: Rec
   if (error) console.error('[db] upsertBanner:', error);
 }
 
-// ─── Platform Stats ───
-
-export async function getPlatformStats() {
-  const { data, error } = await db()
-    .from('platform_stats')
-    .select('*')
-    .eq('id', 1)
-    .maybeSingle();
-  if (error) console.error('[db] getPlatformStats:', error);
-  return data ? (data.stats || data.data || data) : null;
-}
-
-export async function upsertPlatformStats(stats: Record<string, any>) {
-  const row = {
-    id: 1,
-    stats,
-    updated_at: new Date().toISOString(),
-  };
-  const { error } = await db()
-    .from('platform_stats')
-    .upsert(row, { onConflict: 'id' });
-  if (error) console.error('[db] upsertPlatformStats:', error);
-}
+// Platform Stats — see typed functions below (anchor: platform_stats typed).
 
 // Agent Sessions — see native typed functions below (migration 081).
 
@@ -4413,7 +4391,27 @@ export async function getPlatformRevenueStats(): Promise<{
 }
 
 
-export const platformStatsStore = makeJsonbKeyStore('platform_stats', 'id');
+// ─── platform_stats typed (anchor: platform_stats typed) ───
+// platform_stats — legit key/value cache для pre-computed aggregations
+// (platform, artists:popular, genres, chart:weekly:top20, chart:promofm,
+// itunes:preview_cache, videos:new_clips, etc). Schema unchanged:
+// `id TEXT PK, data JSONB`. Typed atomic UPSERT через ON CONFLICT DO UPDATE.
+
+export async function getPlatformStats<T = any>(key: string): Promise<T | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(`SELECT data FROM platform_stats WHERE id = $1`, [key]);
+  return r.rows[0]?.data ?? null;
+}
+
+export async function setPlatformStats(key: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO platform_stats (id, data, updated_at)
+     VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+    [key, JSON.stringify(value)],
+  );
+}
 // track_test_expert_stats — native cols since migration 053 (data column DROPPED).
 // trackTestExpertStatsStore wrapper REMOVED — был broken на проде. Доступ через
 // typed atomic helpers (см. ниже): getExpertStats, incrementExpertAssigned,

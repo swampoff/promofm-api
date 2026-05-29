@@ -5,7 +5,7 @@
 
 import {
   upsertBeat, upsertProducerService, insertDigitalGood, type DigitalGood,
-  platformStatsStore,
+  getPlatformStats, setPlatformStats, 
   getSystemConfig, upsertSystemConfig, deleteSystemConfig,
 } from './db.tsx';
 
@@ -205,7 +205,7 @@ export async function seedDemoData(): Promise<{ seeded: boolean; message: string
       totalRevenue: 0,
       activeProducers: Object.keys(PRODUCER_IDS).length,
     };
-    await platformStatsStore.set('platform', stats);
+    await setPlatformStats('platform', stats);
 
     // Mark as seeded
     await upsertSystemConfig(`seed:${SEED_VERSION}`, { seededAt: new Date().toISOString(), ...stats });

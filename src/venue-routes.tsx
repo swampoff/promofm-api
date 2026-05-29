@@ -26,7 +26,7 @@
  */
 
 import { Hono } from 'hono';
-import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, getVenueRadioBrand, patchVenueRadioBrand, radioVenueRequestsStore, radioNotificationsStore, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, insertRadioVenueRequest, insertRadioNotification, type VenueAdCampaignRow } from './db.tsx';
+import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, getPlatformStats, setPlatformStats, getVenueRadioBrand, patchVenueRadioBrand, radioVenueRequestsStore, radioNotificationsStore, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, insertRadioVenueRequest, insertRadioNotification, type VenueAdCampaignRow } from './db.tsx';
 import { pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
@@ -439,7 +439,7 @@ app.get('/analytics/radio-compare', requireAuth, async (c) => {
       return c.json(featureBlocked('analytics', profile), 403);
     }
 
-    const compareRaw = await platformStatsStore.get(`venue_radio_compare:${profile.id}`);
+    const compareRaw = await getPlatformStats(`venue_radio_compare:${profile.id}`);
     const comparison = parse(compareRaw) || [];
 
     return c.json({ success: true, data: comparison });
@@ -735,7 +735,7 @@ app.delete('/playlists/:id', requireAuth, async (c) => {
 // GET /radio-catalog - Каталог радиостанций для рекламы
 app.get('/radio-catalog', requireAuth, async (c) => {
   try {
-    const raw = await platformStatsStore.get('venue_radio_catalog');
+    const raw = await getPlatformStats('venue_radio_catalog');
     const stations = parse(raw) || [];
     return c.json({ success: true, stations });
   } catch (error: any) {

@@ -3,7 +3,7 @@ import * as db from './db.tsx';
 import { pool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
-import { platformStatsStore } from './db.tsx';
+import { getPlatformStats, setPlatformStats } from './db.tsx';
 import { notifyVideoUpload } from './email-helper.tsx';
 
 const videosRoutes = new Hono();
@@ -174,7 +174,7 @@ function parseMuzTVChart(md: string): Array<{
 videosRoutes.get('/newClips', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '20');
-    const cached: any = await platformStatsStore.get('videos:new_clips');
+    const cached: any = await getPlatformStats('videos:new_clips');
     if (cached?.clips?.length) {
       // Normalize field names and proxy YouTube thumbnails (YouTube CDN blocked in Russia)
       const normalized = cached.clips
@@ -306,7 +306,7 @@ videosRoutes.post('/build-clips', async (c) => {
   // Filter out entries without valid videoId or thumbnail
   const finalClips = clips.filter(c => c.videoId && c.thumbnail).slice(0, 20);
 
-  await platformStatsStore.set('videos:new_clips', {
+  await setPlatformStats('videos:new_clips', {
     clips: finalClips,
     updatedAt: new Date().toISOString(),
     sourceCounts: results.sources,

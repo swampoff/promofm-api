@@ -6,7 +6,7 @@
 
 import { Hono } from 'hono';
 import * as db from './db.tsx';
-import { getChartAggregationStatus, upsertChartAggregationStatus, getChartSource, upsertChartSource, listChartSources, platformStatsStore, getTracksByUser } from './db.tsx';
+import { getChartAggregationStatus, upsertChartAggregationStatus, getChartSource, upsertChartSource, listChartSources, getPlatformStats, setPlatformStats, getTracksByUser } from './db.tsx';
 import { getPublishedTracks } from './db-typed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { isUrlSafe } from './security.tsx';
@@ -965,11 +965,11 @@ charts.get('/all', async (c) => {
     // ── Enrich tracks with iTunes preview URLs (with KV cache) ──
     try {
       // 1. Load cached iTunes preview map from KV
-      const cachedMap: any = await platformStatsStore.get('itunes:preview_cache') || {};
+      const cachedMap: any = await getPlatformStats('itunes:preview_cache') || {};
       const itunesMap = new Map<string, string>(Object.entries(cachedMap.urls || {}));
 
       // 2. Add entries from chart:promofm
-      const chartData: any = await platformStatsStore.get('chart:promofm');
+      const chartData: any = await getPlatformStats('chart:promofm');
       if (chartData?.entries?.length) {
         for (const e of chartData.entries) {
           if (e.previewUrl && e.previewUrl.includes('itunes.apple.com')) {
@@ -1020,7 +1020,7 @@ charts.get('/all', async (c) => {
       if (newFound > 0) {
         const urlsObj: Record<string, string> = {};
         for (const [k, v] of itunesMap) urlsObj[k] = v;
-        await platformStatsStore.set('itunes:preview_cache', { urls: urlsObj, updatedAt: new Date().toISOString(), count: itunesMap.size });
+        await setPlatformStats('itunes:preview_cache', { urls: urlsObj, updatedAt: new Date().toISOString(), count: itunesMap.size });
       }
     } catch (enrichErr) {
       // Non-critical, continue without enrichment
@@ -1276,7 +1276,7 @@ async function buildPromoFMChart(): Promise<PromoFMChartEntry[]> {
   }
 
   // 3. Загружаем предыдущий чарт для трендов
-  const prevChart: any = await platformStatsStore.get('chart:promofm');
+  const prevChart: any = await getPlatformStats('chart:promofm');
   const prevEntries: PromoFMChartEntry[] = prevChart?.entries || [];
   const prevPosMap = new Map<string, number>();
   prevEntries.forEach(e => {
@@ -1359,7 +1359,7 @@ charts.post('/aggregate-promofm', requireAdminOrKey, async (c) => {
     const entries = await buildPromoFMChart();
 
     // Preserve existing covers from previous chart
-    const prevChart: any = await platformStatsStore.get('chart:promofm');
+    const prevChart: any = await getPlatformStats('chart:promofm');
     const prevCoverMap = new Map<string, { coverUrl: string; coverSmall: string; previewUrl: string }>();
     if (prevChart?.entries) {
       for (const pe of prevChart.entries) {
@@ -1403,10 +1403,10 @@ charts.post('/aggregate-promofm', requireAdminOrKey, async (c) => {
     };
 
     // Сохраняем сводный чарт
-    await platformStatsStore.set('chart:promofm', chartData);
+    await setPlatformStats('chart:promofm', chartData);
 
     // Также обновляем chart:weekly:top20 для лендинга
-    await platformStatsStore.set('chart:weekly:top20', {
+    await setPlatformStats('chart:weekly:top20', {
       entries: entries.slice(0, 20),
       updatedAt: new Date().toISOString(),
     });
@@ -1427,7 +1427,7 @@ charts.post('/aggregate-promofm', requireAdminOrKey, async (c) => {
 charts.get('/promofm', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '50');
-    const chart: any = await platformStatsStore.get('chart:promofm');
+    const chart: any = await getPlatformStats('chart:promofm');
 
     if (!chart?.entries?.length) {
       return c.json({ success: true, data: { entries: [], updatedAt: null } });
@@ -1593,7 +1593,7 @@ charts.post('/build-new-releases', requireAdminOrKey, async (c) => {
       totalExternal: tracks.filter((t: any) => !t.isOurArtist).length,
     };
 
-    await platformStatsStore.set('weekly:new_releases', data);
+    await setPlatformStats('weekly:new_releases', data);
 
     console.log(`[charts] New releases: ${tracks.length} tracks (${data.totalPlatform} platform, ${data.totalExternal} external, ${withPreview} with audio)`);
 
@@ -1690,8 +1690,8 @@ charts.post('/full-update', requireAdminOrKey, async (c) => {
       onPlatformCount: entries.filter(e => e.onPlatform).length,
     };
 
-    await platformStatsStore.set('chart:promofm', chartData);
-    await platformStatsStore.set('chart:weekly:top20', {
+    await setPlatformStats('chart:promofm', chartData);
+    await setPlatformStats('chart:weekly:top20', {
       entries: entries.slice(0, 20),
       updatedAt: new Date().toISOString(),
     });
@@ -1720,7 +1720,7 @@ charts.post('/full-update', requireAdminOrKey, async (c) => {
 // ─── Public: Weekly Chart for landing page ─────────────
 charts.get('/weekly', async (c) => {
   try {
-    const cached: any = await platformStatsStore.get('chart:weekly:top20');
+    const cached: any = await getPlatformStats('chart:weekly:top20');
     if (cached?.entries?.length) {
       return c.json({ success: true, data: cached });
     }
@@ -1735,7 +1735,7 @@ charts.get('/weekly', async (c) => {
 // ─── Cron: Refresh preview URLs (iTunes → Deezer fallback) ─────────
 charts.post('/refresh-previews', async (c) => {
   try {
-    const cached: any = await platformStatsStore.get('chart:weekly:top20');
+    const cached: any = await getPlatformStats('chart:weekly:top20');
     if (!cached?.entries?.length) {
       return c.json({ success: false, error: 'No chart data' }, 404);
     }
@@ -1772,17 +1772,17 @@ charts.post('/refresh-previews', async (c) => {
 
     // Save updated data back
     cached.updatedAt = new Date().toISOString();
-    await platformStatsStore.set('chart:weekly:top20', cached);
+    await setPlatformStats('chart:weekly:top20', cached);
 
     // Also update full chart
-    const full: any = await platformStatsStore.get('chart:promofm');
+    const full: any = await getPlatformStats('chart:promofm');
     if (full?.entries?.length) {
       for (const fe of full.entries) {
         const match = entries.find((e: any) => e.artist === fe.artist && e.title === fe.title);
         if (match?.previewUrl) fe.previewUrl = match.previewUrl;
       }
       full.updatedAt = new Date().toISOString();
-      await platformStatsStore.set('chart:promofm', full);
+      await setPlatformStats('chart:promofm', full);
     }
 
     console.log();
@@ -1955,7 +1955,7 @@ async function getIntlChart(platform: string, countryCode: string) {
 // Same approach as enrichWithPreviews but for IntlChartEntry[]
 async function enrichIntlWithPreviews(entries: IntlChartEntry[], countryCode: string = "us"): Promise<void> {
   // 1. Load cached preview map
-  const cachedMap: any = await platformStatsStore.get('itunes:intl_preview_cache') || {};
+  const cachedMap: any = await getPlatformStats('itunes:intl_preview_cache') || {};
   const previewMap = new Map<string, { preview: string; cover: string }>(
     Object.entries(cachedMap.urls || {}).map(([k, v]: [string, any]) => [k, v])
   );
@@ -2009,7 +2009,7 @@ async function enrichIntlWithPreviews(entries: IntlChartEntry[], countryCode: st
   if (newFound > 0) {
     const urlsObj: Record<string, { preview: string; cover: string }> = {};
     for (const [k, v] of previewMap) urlsObj[k] = v;
-    await platformStatsStore.set('itunes:intl_preview_cache', {
+    await setPlatformStats('itunes:intl_preview_cache', {
       urls: urlsObj, updatedAt: new Date().toISOString(), count: previewMap.size,
     });
   }
@@ -2042,7 +2042,7 @@ charts.get('/country/:code', async (c) => {
 
     // Russia → return PromoFM unified chart
     if (code === 'ru' && !c.req.query('platform')) {
-      const promofm: any = await platformStatsStore.get('chart:promofm');
+      const promofm: any = await getPlatformStats('chart:promofm');
       if (promofm?.entries?.length) {
         return c.json({ success: true, data: {
           platform: 'promofm', countryCode: 'ru',
