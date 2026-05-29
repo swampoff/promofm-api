@@ -50,16 +50,29 @@ function jsonErr(error: string) {
   return { success: false as const, error };
 }
 
+// Separate storage since migration 087 — agent_sessions native cols (migration
+// 081) reserves table для AI dept discussions ('s-*' prefix, title/task shape).
 async function saveSession(
   sessionId: string,
   sessionData: Record<string, unknown>
 ): Promise<void> {
   try {
     await pool.query(
-      `INSERT INTO agent_sessions (id, data, created_at, updated_at)
-       VALUES ($1, $2, NOW(), NOW())
-       ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
-      [sessionId, JSON.stringify(sessionData)]
+      `INSERT INTO ecosystem_sessions (id, mode, type, status, data, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, NOW(), NOW())
+       ON CONFLICT (id) DO UPDATE SET
+         mode = EXCLUDED.mode,
+         type = EXCLUDED.type,
+         status = EXCLUDED.status,
+         data = EXCLUDED.data,
+         updated_at = NOW()`,
+      [
+        sessionId,
+        (sessionData?.mode as string) ?? null,
+        (sessionData?.type as string) ?? null,
+        (sessionData?.status as string) ?? null,
+        JSON.stringify(sessionData),
+      ]
     );
   } catch (err) {
     console.error("[ecosystem] Failed to save session:", err);
@@ -71,7 +84,7 @@ async function getSession(
 ): Promise<Record<string, unknown> | null> {
   try {
     const res = await pool.query(
-      "SELECT data FROM agent_sessions WHERE id = $1",
+      "SELECT data FROM ecosystem_sessions WHERE id = $1",
       [sessionId]
     );
     if (res.rows.length === 0) return null;
@@ -198,9 +211,10 @@ app.get("/mode/:mode/status", requireAdminOrKey, async (c) => {
   }
 
   try {
+    // Native indexed lookup via idx_ecosystem_sessions_mode_created.
     const res = await pool.query(
-      `SELECT id, data, created_at FROM agent_sessions
-       WHERE data->>'mode' = $1
+      `SELECT id, data, created_at FROM ecosystem_sessions
+       WHERE mode = $1
        ORDER BY created_at DESC
        LIMIT 1`,
       [modeName]
@@ -379,19 +393,20 @@ app.get("/reports", requireAdminOrKey, async (c) => {
   const type = c.req.query("type");
 
   try {
-    let sql =
-      "SELECT id, data, created_at FROM agent_sessions WHERE id LIKE 'eco_%'";
+    // ecosystem_sessions (own table since migration 087) — индексированный
+    // filter по mode/type через native cols заменил data->>'mode' jsonb extract.
+    let sql = "SELECT id, data, created_at FROM ecosystem_sessions WHERE 1=1";
     const params: unknown[] = [];
     let paramIdx = 1;
 
     if (mode) {
-      sql += ` AND data->>'mode' = $${paramIdx}`;
+      sql += ` AND mode = $${paramIdx}`;
       params.push(mode);
       paramIdx++;
     }
 
     if (type) {
-      sql += ` AND data->>'type' = $${paramIdx}`;
+      sql += ` AND type = $${paramIdx}`;
       params.push(type);
       paramIdx++;
     }
