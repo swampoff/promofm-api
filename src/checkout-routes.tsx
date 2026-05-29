@@ -395,22 +395,33 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       }
       
       if (itemType === 'radio_campaign' && session.metadata.stationId) {
-        // Create radio campaign after payment
-        const { venueAdCampaignsStore } = await import('./db.tsx');
+        // Create radio campaign after payment. Native row-per-campaign since
+        // migration 082. Fixes legacy bug — set(campaign.id) wrote to wrong PK
+        // на per-venue таблице, кампания была невидима в venue cabinet.
+        const { insertVenueAdCampaign } = await import('./db.tsx');
         const campaign = {
           id: `bp-${crypto.randomUUID()}`,
+          venueId: session.userId,
           stationId: session.metadata.stationId,
           stationName: session.metadata.stationName || '',
           advertiserId: session.userId,
           packageType: session.metadata.packageType || 'standard',
-          budget: session.amount,
           status: 'paid',
+          audioUrl: null,
           startDate: session.metadata.startDate || new Date().toISOString().split('T')[0],
           endDate: session.metadata.endDate || '',
           targetPlays: parseInt(session.metadata.targetPlays || '0'),
+          totalPlays: 0,
+          budget: session.amount,
+          spent: 0,
+          impressions: 0,
+          ctr: 0,
+          timeSlots: [],
+          extra: {},
           createdAt: now,
+          updatedAt: now,
         };
-        await venueAdCampaignsStore.set(campaign.id, campaign);
+        await insertVenueAdCampaign(campaign);
         log.info({ campaignId: campaign.id }, 'radio_campaign_created');
         
         // Notify station owner
