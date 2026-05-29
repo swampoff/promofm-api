@@ -16,9 +16,9 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import {
-  producerAiLastStore,
-  producerProfileEditStore,
-  producerSettingsStore,
+  getProducerAiLast, setProducerAiLast,
+  getProducerProfileEdit, setProducerProfileEdit, patchProducerProfileEdit,
+  getProducerSettings, setProducerSettings,
   upsertProducerService, deleteProducerService,
 } from './db.tsx';
 import { getPaymentBalance, upsertPaymentBalance } from './db.tsx';
@@ -461,7 +461,7 @@ app.get('/settings/:producerId', requireAuth, async (c) => {
   if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
-    const settings = await producerSettingsStore.get(producerId);
+    const settings = await getProducerSettings(producerId);
     return c.json({ success: true, data: settings || null });
   } catch (error) {
     console.log(`Error fetching settings: ${error}`);
@@ -482,7 +482,7 @@ app.post('/settings/:producerId', requireAuth, async (c) => {
       ...body,
       updatedAt: new Date().toISOString(),
     };
-    await producerSettingsStore.set(producerId, settings);
+    await setProducerSettings(producerId, settings);
     return c.json({ success: true, data: settings });
   } catch (error) {
     console.log(`Error saving settings: ${error}`);
@@ -930,9 +930,8 @@ app.put('/profile/update/:producerId', requireAuth, async (c) => {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
     const body = await c.req.json();
-    const existing = await producerProfileEditStore.get(producerId) || {};
-    const updated = { ...(existing as any), ...body, updatedAt: nowIso() };
-    await producerProfileEditStore.set(producerId, updated);
+    // Atomic jsonb || merge — race-free vs legacy get+merge+set.
+    const updated = await patchProducerProfileEdit(producerId, { ...body, updatedAt: nowIso() });
 
     // Migration 061: mirror editor writes to the public `producer_profiles`
     // table so cross-cabinet listings (landing-data-routes /landing/
@@ -1008,7 +1007,7 @@ app.get('/profile/edits/:producerId', requireAuth, async (c) => {
   if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
-    const edits = (await producerProfileEditStore.get(producerId)) || {};
+    const edits = (await getProducerProfileEdit(producerId)) || {};
     // Fold migration 062 verification state from producer_profiles
     // (admin-managed, not part of the editor store) so the cabinet
     // doesn't have to hit the public /landing-data endpoint just to
@@ -1129,7 +1128,7 @@ app.post('/ai/analyze', requireAuth, async (c) => {
         `SELECT ${SESSION_COLS} FROM producer_sessions WHERE producer_id = $1`,
         [producerId]
       ).then((r: any) => r.rows.map(mapSessionRow)),
-      producerSettingsStore.get(producerId),
+      getProducerSettings(producerId),
       // row-per-withdrawal (migration 043): возвращаем массив строк.
       pool.query(
         `SELECT app_id, amount, payment_method, status
@@ -1177,7 +1176,7 @@ app.post('/ai/analyze', requireAuth, async (c) => {
 
     const data = await resp.json();
     const aiResp = data.choices[0].message.content;
-    await producerAiLastStore.set(producerId, { question, response: aiResp, timestamp: nowIso() });
+    await setProducerAiLast(producerId, { question, response: aiResp, timestamp: nowIso() });
     return c.json({ success: true, data: { response: aiResp, model: 'mistral-large' } });
   } catch (error) { console.log(`AI error: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -1189,7 +1188,7 @@ app.get('/ai/history/:producerId', requireAuth, async (c) => {
   if (producerId !== c.get('userId') && c.get('userRole') !== 'admin') {
     return c.json({ success: false, error: 'Access denied' }, 403);
   }
-    const last = await producerAiLastStore.get(producerId);
+    const last = await getProducerAiLast(producerId);
     return c.json({ success: true, data: last || null });
   } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -1414,13 +1413,8 @@ app.delete('/calendar/delete/:sessionId', requireAuth, async (c) => {
 // AND any public/cross-cabinet card that hits getProducerProfile.
 
 async function persistProducerImage(producerId: string, field: 'avatarUrl' | 'coverUrl', url: string) {
-  // Edit store (what the producer sees in their cabinet)
-  const editExisting = (await producerProfileEditStore.get(producerId)) || {};
-  await producerProfileEditStore.set(producerId, {
-    ...(editExisting as any),
-    [field]: url,
-    updatedAt: nowIso(),
-  });
+  // Edit store (what the producer sees in their cabinet). Atomic jsonb || merge.
+  await patchProducerProfileEdit(producerId, { [field]: url, updatedAt: nowIso() });
   // Public producer_profiles row (what other cabinets read)
   const pubExisting = (await db.getProducerProfile(producerId)) || {};
   await db.upsertProducerProfile(producerId, {

@@ -2724,9 +2724,53 @@ export async function setDigitalGoodStatus(id: string, status: string): Promise<
     [status, id]
   );
 }
-export const producerSettingsStore = makeUserSingletonStore('producer_settings');
-export const producerProfileEditStore = makeUserSingletonStore('producer_profile_edit');
-export const producerAiLastStore = makeUserSingletonStore('producer_ai_last');
+// Producer per-user singletons — typed access since this PR. 3 tables share
+// identical (user_id PK, data jsonb) shape — generic helpers ниже used by all 3.
+
+async function _userSingletonGet(table: string, userId: string): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT data FROM ${table} WHERE user_id = $1 LIMIT 1`, [userId]
+  );
+  if (r.rows.length === 0) return null;
+  const raw = r.rows[0].data;
+  return typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : (raw || null);
+}
+async function _userSingletonSet(table: string, userId: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO ${table} (user_id, data, created_at, updated_at)
+     VALUES ($1, $2::jsonb, NOW(), NOW())
+     ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+    [userId, JSON.stringify(value ?? {})]
+  );
+}
+async function _userSingletonPatch(table: string, userId: string, patch: Record<string, any>): Promise<Record<string, any>> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `INSERT INTO ${table} (user_id, data, created_at, updated_at)
+     VALUES ($1, $2::jsonb, NOW(), NOW())
+     ON CONFLICT (user_id) DO UPDATE SET
+       data = COALESCE(${table}.data, '{}'::jsonb) || EXCLUDED.data,
+       updated_at = NOW()
+     RETURNING data`,
+    [userId, JSON.stringify(patch)]
+  );
+  return r.rows[0]?.data || patch;
+}
+
+// producer_settings (preferences, notifications, etc.)
+export const getProducerSettings = (userId: string) => _userSingletonGet('producer_settings', userId);
+export const setProducerSettings = (userId: string, v: any) => _userSingletonSet('producer_settings', userId, v);
+
+// producer_profile_edit (in-flight profile edits / drafts).
+export const getProducerProfileEdit = (userId: string) => _userSingletonGet('producer_profile_edit', userId);
+export const setProducerProfileEdit = (userId: string, v: any) => _userSingletonSet('producer_profile_edit', userId, v);
+export const patchProducerProfileEdit = (userId: string, p: Record<string, any>) => _userSingletonPatch('producer_profile_edit', userId, p);
+
+// producer_ai_last (last AI question/response для studio chat).
+export const getProducerAiLast = (userId: string) => _userSingletonGet('producer_ai_last', userId);
+export const setProducerAiLast = (userId: string, v: any) => _userSingletonSet('producer_ai_last', userId, v);
 // producer_convs/messages/sessions переехали на row-per-entity
 // (migration 042). Доступ через pool.query в producer-studio-routes.tsx.
 // producer_custom_services / producer_custom_portfolio переехали на
