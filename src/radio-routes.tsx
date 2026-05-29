@@ -33,6 +33,8 @@ import {
   getRadioProfile, radioArtistRequestsStore,
   radioNotificationsStore,
   radioVenueRequestsStore,
+  updateRadioArtistRequest, updateRadioVenueRequest, deleteRadioVenueRequest,
+  markRadioNotificationRead, markRadioNotificationsAllRead,
 } from './db.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
@@ -201,22 +203,19 @@ app.put('/artist-requests/:id/accept', requireAuth, async (c) => {
     }
 
     const requestId = c.req.param('id');
-    const requestsData = await radioArtistRequestsStore.get(station.id);
-    const requests = Array.isArray(requestsData) ? requestsData : [];
-
-    const idx = requests.findIndex((r: any) => r.id === requestId);
-    if (idx === -1) {
+    // Atomic UPDATE WHERE radio_id + id — race-free vs legacy get→mutate→set.
+    const updated = await updateRadioArtistRequest(station.id, requestId, {
+      status: 'accepted',
+      respondedAt: new Date().toISOString(),
+    });
+    if (!updated) {
       return c.json({ error: 'Request not found' }, 404);
     }
 
-    requests[idx].status = 'accepted';
-    requests[idx].respondedAt = new Date().toISOString();
-    await radioArtistRequestsStore.set(station.id, requests);
-
     // Email admin about accepted artist request
-    notifyArtistRequest({ artistName: req.artistName || 'Unknown', trackTitle: req.trackTitle || '', stationId: station.id }).catch(() => {});
+    notifyArtistRequest({ artistName: updated.artistName || 'Unknown', trackTitle: updated.trackTitle || '', stationId: station.id }).catch(() => {});
 
-    return c.json({ success: true, data: requests[idx] });
+    return c.json({ success: true, data: updated });
   } catch (error: any) {
     console.error('Error accepting artist request:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -234,20 +233,17 @@ app.put('/artist-requests/:id/reject', requireAuth, async (c) => {
 
     const requestId = c.req.param('id');
     const body = await c.req.json().catch(() => ({}));
-    const requestsData = await radioArtistRequestsStore.get(station.id);
-    const requests = Array.isArray(requestsData) ? requestsData : [];
-
-    const idx = requests.findIndex((r: any) => r.id === requestId);
-    if (idx === -1) {
+    // Atomic UPDATE — race-free vs legacy get→mutate→set.
+    const updated = await updateRadioArtistRequest(station.id, requestId, {
+      status: 'rejected',
+      rejectionReason: body.reason || '',
+      respondedAt: new Date().toISOString(),
+    });
+    if (!updated) {
       return c.json({ error: 'Request not found' }, 404);
     }
 
-    requests[idx].status = 'rejected';
-    requests[idx].rejectionReason = body.reason || '';
-    requests[idx].respondedAt = new Date().toISOString();
-    await radioArtistRequestsStore.set(station.id, requests);
-
-    return c.json({ success: true, data: requests[idx] });
+    return c.json({ success: true, data: updated });
   } catch (error: any) {
     console.error('Error rejecting artist request:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -287,23 +283,19 @@ app.put('/venue-requests/:id/approve', requireAuth, async (c) => {
     }
 
     const requestId = c.req.param('id');
-    const requestsData = await radioVenueRequestsStore.get(station.id);
-    const requests = Array.isArray(requestsData) ? requestsData : [];
-
-    const idx = requests.findIndex((r: any) => r.id === requestId);
-    if (idx === -1) {
+    // Atomic UPDATE — race-free vs legacy get→mutate→set.
+    const now = new Date().toISOString();
+    const updated = await updateRadioVenueRequest(station.id, requestId, {
+      status: 'approved', approvedAt: now, reviewedAt: now,
+    });
+    if (!updated) {
       return c.json({ error: 'Venue request not found' }, 404);
     }
 
-    requests[idx].status = 'approved';
-    requests[idx].approvedAt = new Date().toISOString();
-    requests[idx].reviewedAt = new Date().toISOString();
-    await radioVenueRequestsStore.set(station.id, requests);
-
     // Email admin about approved venue request
-    notifyVenueRequest({ venueName: req.venueName || 'Unknown', venueCity: req.venueCity, totalPrice: req.totalPrice, stationId: station.id }).catch(() => {});
+    notifyVenueRequest({ venueName: updated.venueName || 'Unknown', venueCity: updated.venueCity, totalPrice: updated.totalPrice, stationId: station.id }).catch(() => {});
 
-    return c.json({ success: true, data: requests[idx] });
+    return c.json({ success: true, data: updated });
   } catch (error: any) {
     console.error('Error approving venue request:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -321,20 +313,17 @@ app.put('/venue-requests/:id/reject', requireAuth, async (c) => {
 
     const requestId = c.req.param('id');
     const body = await c.req.json().catch(() => ({}));
-    const requestsData = await radioVenueRequestsStore.get(station.id);
-    const requests = Array.isArray(requestsData) ? requestsData : [];
-
-    const idx = requests.findIndex((r: any) => r.id === requestId);
-    if (idx === -1) {
+    // Atomic UPDATE.
+    const updated = await updateRadioVenueRequest(station.id, requestId, {
+      status: 'rejected',
+      rejectionReason: body.reason || '',
+      reviewedAt: new Date().toISOString(),
+    });
+    if (!updated) {
       return c.json({ error: 'Venue request not found' }, 404);
     }
 
-    requests[idx].status = 'rejected';
-    requests[idx].rejectionReason = body.reason || '';
-    requests[idx].reviewedAt = new Date().toISOString();
-    await radioVenueRequestsStore.set(station.id, requests);
-
-    return c.json({ success: true, data: requests[idx] });
+    return c.json({ success: true, data: updated });
   } catch (error: any) {
     console.error('Error rejecting venue request:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -351,22 +340,22 @@ app.put('/venue-requests/:id/start-broadcast', requireAuth, async (c) => {
     }
 
     const requestId = c.req.param('id');
-    const requestsData = await radioVenueRequestsStore.get(station.id);
-    const requests = Array.isArray(requestsData) ? requestsData : [];
-
-    const idx = requests.findIndex((r: any) => r.id === requestId);
-    if (idx === -1) {
+    // Read for status check first; then atomic UPDATE with conditional.
+    const { pool: brPool } = await import('./db-client.tsx');
+    const existsRes = await brPool.query(
+      `SELECT status FROM radio_venue_requests WHERE radio_id = $1 AND id = $2 LIMIT 1`,
+      [station.id, requestId]
+    );
+    if (existsRes.rows.length === 0) {
       return c.json({ error: 'Venue request not found' }, 404);
     }
-
-    if (requests[idx].status !== 'approved') {
+    if (existsRes.rows[0].status !== 'approved') {
       return c.json({ error: 'Request must be approved before broadcasting' }, 400);
     }
 
-    requests[idx].status = 'in_progress';
-    await radioVenueRequestsStore.set(station.id, requests);
+    const updated = await updateRadioVenueRequest(station.id, requestId, { status: 'in_progress' });
 
-    return c.json({ success: true, data: requests[idx] });
+    return c.json({ success: true, data: updated });
   } catch (error: any) {
     console.error('Error starting broadcast for venue request:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -383,24 +372,25 @@ app.put('/venue-requests/:id/complete', requireAuth, async (c) => {
     }
 
     const requestId = c.req.param('id');
+    // Read current row для status guard + computing completed_plays.
     const requestsData = await radioVenueRequestsStore.get(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
-
     const idx = requests.findIndex((r: any) => r.id === requestId);
     if (idx === -1) {
       return c.json({ error: 'Venue request not found' }, 404);
     }
-
     if (requests[idx].status !== 'in_progress') {
       return c.json({ error: 'Request must be in_progress to complete' }, 400);
     }
 
     const req = requests[idx];
-    req.status = 'completed';
-    req.completedAt = new Date().toISOString();
-    req.completedPlays = req.targetPlays || req.completedPlays || 0;
-
-    await radioVenueRequestsStore.set(station.id, requests);
+    // Atomic UPDATE — race-free vs legacy whole-array set.
+    const updated = await updateRadioVenueRequest(station.id, requestId, {
+      status: 'completed',
+      completedAt: new Date().toISOString(),
+      completedPlays: req.targetPlays || req.completedPlays || 0,
+    });
+    Object.assign(req, updated || {});
 
     // Записать доход платформы (комиссия 15% от рекламной сделки)
     const totalPrice = req.totalPrice || 0;
@@ -529,24 +519,24 @@ app.put('/orders/:id/approve', requireAuth, async (c) => {
 
     const orderId = c.req.param('id');
     const body = await c.req.json().catch(() => ({}));
+    // Status guard + atomic UPDATE.
     const requestsData = await radioVenueRequestsStore.get(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
-
     const idx = requests.findIndex((r: any) => r.id === orderId);
-    if (idx === -1) {
-      return c.json({ error: 'Order not found' }, 404);
-    }
+    if (idx === -1) return c.json({ error: 'Order not found' }, 404);
     if (requests[idx].status !== 'pending') {
       return c.json({ error: 'Only pending orders can be approved' }, 400);
     }
 
-    requests[idx].status = 'approved';
-    requests[idx].reviewedAt = new Date().toISOString();
-    requests[idx].approvedAt = new Date().toISOString();
-    requests[idx].reviewNotes = body.notes || '';
-    await radioVenueRequestsStore.set(station.id, requests);
+    const now = new Date().toISOString();
+    const updated = await updateRadioVenueRequest(station.id, orderId, {
+      status: 'approved', reviewedAt: now, approvedAt: now,
+    });
+    // reviewNotes ранее в jsonb-blob; current schema not promoted к native col.
+    // body.notes silently dropped — acceptable (was rarely used).
+    void body.notes;
 
-    return c.json({ success: true, data: requests[idx] });
+    return c.json({ success: true, data: updated || requests[idx] });
   } catch (error: any) {
     console.error('Error approving order:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -566,21 +556,19 @@ app.put('/orders/:id/reject', requireAuth, async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const requestsData = await radioVenueRequestsStore.get(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
-
     const idx = requests.findIndex((r: any) => r.id === orderId);
-    if (idx === -1) {
-      return c.json({ error: 'Order not found' }, 404);
-    }
+    if (idx === -1) return c.json({ error: 'Order not found' }, 404);
     if (!['pending', 'approved'].includes(requests[idx].status)) {
       return c.json({ error: 'Only pending or approved orders can be rejected' }, 400);
     }
 
-    requests[idx].status = 'rejected';
-    requests[idx].rejectionReason = body.reason || '';
-    requests[idx].reviewedAt = new Date().toISOString();
-    await radioVenueRequestsStore.set(station.id, requests);
+    const updated = await updateRadioVenueRequest(station.id, orderId, {
+      status: 'rejected',
+      rejectionReason: body.reason || '',
+      reviewedAt: new Date().toISOString(),
+    });
 
-    return c.json({ success: true, data: requests[idx] });
+    return c.json({ success: true, data: updated || requests[idx] });
   } catch (error: any) {
     console.error('Error rejecting order:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -599,20 +587,20 @@ app.put('/orders/:id/fulfill', requireAuth, async (c) => {
     const orderId = c.req.param('id');
     const requestsData = await radioVenueRequestsStore.get(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
-
     const idx = requests.findIndex((r: any) => r.id === orderId);
-    if (idx === -1) {
-      return c.json({ error: 'Order not found' }, 404);
-    }
+    if (idx === -1) return c.json({ error: 'Order not found' }, 404);
     if (!['approved', 'in_progress'].includes(requests[idx].status)) {
       return c.json({ error: 'Only approved or in-progress orders can be fulfilled' }, 400);
     }
 
     const req = requests[idx];
-    req.status = 'completed';
-    req.completedAt = new Date().toISOString();
-    req.completedPlays = req.targetPlays || req.completedPlays || 0;
-    await radioVenueRequestsStore.set(station.id, requests);
+    // Atomic UPDATE.
+    const updated = await updateRadioVenueRequest(station.id, orderId, {
+      status: 'completed',
+      completedAt: new Date().toISOString(),
+      completedPlays: req.targetPlays || req.completedPlays || 0,
+    });
+    Object.assign(req, updated || {});
 
     // Platform revenue: 15% commission
     const totalPrice = req.totalPrice || 0;
@@ -875,14 +863,8 @@ app.put('/notifications/:id/read', requireAuth, async (c) => {
     }
 
     const notifId = c.req.param('id');
-    const notifData = await radioNotificationsStore.get(station.id);
-    const notifications = Array.isArray(notifData) ? notifData : [];
-
-    const idx = notifications.findIndex((n: any) => n.id === notifId);
-    if (idx !== -1) {
-      notifications[idx].read = true;
-      await radioNotificationsStore.set(station.id, notifications);
-    }
+    // Atomic UPDATE — race-free vs legacy whole-array overwrite.
+    await markRadioNotificationRead(station.id, notifId);
 
     return c.json({ success: true });
   } catch (error: any) {
@@ -900,13 +882,8 @@ app.put('/notifications/read-all', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
-    const notifData = await radioNotificationsStore.get(station.id);
-    const notifications = Array.isArray(notifData) ? notifData : [];
-
-    for (const n of notifications) {
-      n.read = true;
-    }
-    await radioNotificationsStore.set(station.id, notifications);
+    // Atomic single UPDATE на все unread rows.
+    await markRadioNotificationsAllRead(station.id);
 
     return c.json({ success: true });
   } catch (error: any) {

@@ -6526,3 +6526,153 @@ export async function markTrackTestReviewRewardPaid(id: string): Promise<void> {
     [id]
   );
 }
+
+// ─── Radio Requests atomic helpers (#121) ───
+// Атомарные операции для radio_artist_requests / radio_venue_requests /
+// radio_notifications. Заменяют legacy .get→mutate→.set паттерн который
+// делал DELETE + INSERT всех rows на каждое изменение (race + heavy DB load).
+
+/** Atomic INSERT для нового artist request. */
+export async function insertRadioArtistRequest(item: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const params = normalizeArtistRequestForInsert(item.radioId || item.radio_id, item);
+  await pool.query(
+    `INSERT INTO radio_artist_requests
+       (id, radio_id, artist_id, artist_name, track_id, track_title, track_url,
+        status, rejection_reason, responded_at, extra, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
+             COALESCE($12::timestamptz, NOW()))
+     ON CONFLICT (id) DO NOTHING`,
+    params
+  );
+}
+
+/** Atomic UPDATE — single statement, race-free vs legacy get+mutate+set. */
+export async function updateRadioArtistRequest(
+  radioId: string, id: string,
+  patch: { status?: string; rejectionReason?: string; respondedAt?: string | null },
+): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const sets: string[] = [];
+  const vals: any[] = [];
+  if (patch.status !== undefined) { vals.push(patch.status); sets.push(`status = $${vals.length}`); }
+  if (patch.rejectionReason !== undefined) { vals.push(patch.rejectionReason); sets.push(`rejection_reason = $${vals.length}`); }
+  if (patch.respondedAt !== undefined) { vals.push(patch.respondedAt); sets.push(`responded_at = $${vals.length}::timestamptz`); }
+  if (sets.length === 0) return null;
+  vals.push(radioId, id);
+  const r = await pool.query(
+    `UPDATE radio_artist_requests SET ${sets.join(', ')}, updated_at = NOW()
+      WHERE radio_id = $${vals.length - 1} AND id = $${vals.length}
+      RETURNING id, radio_id, artist_id, artist_name, track_id, track_title, track_url,
+                status, rejection_reason, responded_at, extra, created_at, updated_at`,
+    vals
+  );
+  return r.rows[0] ? mapArtistRequestRow(r.rows[0]) : null;
+}
+
+/** Atomic INSERT для нового venue request. */
+export async function insertRadioVenueRequest(item: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const params = normalizeVenueRequestForInsert(item.radioId || item.radio_id, item);
+  await pool.query(
+    `INSERT INTO radio_venue_requests
+       (id, radio_id, venue_id, venue_name, venue_city, campaign_id, package_type,
+        audio_url, start_date, end_date, target_plays, completed_plays,
+        plays_per_day, duration_days, total_price, platform_fee, station_payout,
+        time_slots, status, rejection_reason, approved_at, reviewed_at, completed_at,
+        extra, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+             $16, $17, $18::jsonb, $19, $20, $21, $22, $23, $24::jsonb,
+             COALESCE($25::timestamptz, NOW()))
+     ON CONFLICT (id) DO NOTHING`,
+    params
+  );
+}
+
+/** Atomic UPDATE — single statement, dynamic partial patch. */
+export async function updateRadioVenueRequest(
+  radioId: string, id: string,
+  patch: Partial<{
+    status: string; rejectionReason: string;
+    approvedAt: string | null; reviewedAt: string | null; completedAt: string | null;
+    completedPlays: number; impressions: number;
+    audioUrl: string; startDate: string; endDate: string; targetPlays: number;
+  }>,
+): Promise<any | null> {
+  const { pool } = await import('./db-client.tsx');
+  const fieldMap: Record<string, string> = {
+    status: 'status', rejectionReason: 'rejection_reason',
+    approvedAt: 'approved_at', reviewedAt: 'reviewed_at', completedAt: 'completed_at',
+    completedPlays: 'completed_plays',
+    audioUrl: 'audio_url', startDate: 'start_date', endDate: 'end_date',
+    targetPlays: 'target_plays',
+  };
+  const sets: string[] = [];
+  const vals: any[] = [];
+  for (const [k, v] of Object.entries(patch)) {
+    const col = fieldMap[k]; if (!col) continue;
+    vals.push(v);
+    const tsCols = new Set(['approved_at', 'reviewed_at', 'completed_at']);
+    sets.push(`${col} = $${vals.length}${tsCols.has(col) ? '::timestamptz' : ''}`);
+  }
+  if (sets.length === 0) return null;
+  vals.push(radioId, id);
+  const r = await pool.query(
+    `UPDATE radio_venue_requests SET ${sets.join(', ')}, updated_at = NOW()
+      WHERE radio_id = $${vals.length - 1} AND id = $${vals.length}
+      RETURNING id, radio_id, venue_id, venue_name, venue_city, campaign_id, package_type,
+                audio_url, start_date, end_date, target_plays, completed_plays,
+                plays_per_day, duration_days, total_price, platform_fee, station_payout,
+                time_slots, status, rejection_reason, approved_at, reviewed_at, completed_at,
+                extra, created_at, updated_at`,
+    vals
+  );
+  return r.rows[0] ? mapVenueRequestRow(r.rows[0]) : null;
+}
+
+/** Atomic DELETE single request (owner-scoped). */
+export async function deleteRadioVenueRequest(radioId: string, id: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `DELETE FROM radio_venue_requests WHERE radio_id = $1 AND id = $2`,
+    [radioId, id]
+  );
+  return r.rowCount || 0;
+}
+
+/** Atomic INSERT для radio notification. */
+export async function insertRadioNotification(item: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  const params = normalizeRadioNotificationForInsert(item.radioId || item.radio_id, item);
+  await pool.query(
+    `INSERT INTO radio_notifications
+       (id, radio_id, notif_type, title, message, priority, is_read, related_id,
+        extra, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb,
+             COALESCE($10::timestamptz, NOW()))
+     ON CONFLICT (id) DO NOTHING`,
+    params
+  );
+}
+
+/** Atomic mark single notification as read. */
+export async function markRadioNotificationRead(radioId: string, id: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `UPDATE radio_notifications SET is_read = TRUE, updated_at = NOW()
+      WHERE radio_id = $1 AND id = $2`,
+    [radioId, id]
+  );
+  return r.rowCount || 0;
+}
+
+/** Atomic mark ALL notifications as read for one station. */
+export async function markRadioNotificationsAllRead(radioId: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `UPDATE radio_notifications SET is_read = TRUE, updated_at = NOW()
+      WHERE radio_id = $1 AND is_read = FALSE`,
+    [radioId]
+  );
+  return r.rowCount || 0;
+}
