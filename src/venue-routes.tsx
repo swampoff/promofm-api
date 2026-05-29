@@ -26,7 +26,7 @@
  */
 
 import { Hono } from 'hono';
-import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, venueAnalyticsStore, venueRadioBrandStore, radioVenueRequestsStore, radioNotificationsStore, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, type VenueAdCampaignRow } from './db.tsx';
+import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, venueRadioBrandStore, radioVenueRequestsStore, radioNotificationsStore, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, type VenueAdCampaignRow } from './db.tsx';
 import { pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
@@ -252,9 +252,8 @@ app.get('/stats', requireAuth, async (c) => {
       });
     }
 
-    // Получить ан��литику из KV
-    const analyticsRaw = await venueAnalyticsStore.get(profile.id);
-    const analytics = parse(analyticsRaw);
+    // venue_analytics — dead store, 0 writers. Return null-equivalent (всегда было null).
+    const analytics: any = null;
 
     // Получить букинги для подсчёта
     const bookingIdsRaw = await getBookingsByUser(userId);
@@ -319,9 +318,8 @@ app.get('/analytics/overview', requireAuth, async (c) => {
       return c.json(featureBlocked('analytics', profile), 403);
     }
 
-    // Получить аналитику из KV
-    const analyticsRaw = await venueAnalyticsStore.get(profile.id);
-    const analytics = parse(analyticsRaw) || {};
+    // venue_analytics — dead store, 0 writers. Empty placeholder.
+    const analytics: any = {};
 
     const campaigns = await listVenueAdCampaigns(profile.id);
 
@@ -397,9 +395,8 @@ app.get('/analytics/spending', requireAuth, async (c) => {
       return c.json(featureBlocked('analytics', profile), 403);
     }
 
-    // Получить историю расходов из KV
-    const spendingRaw = await venueAnalyticsStore.get(profile.id);
-    const spending = parse(spendingRaw) || [];
+    // venue_analytics — dead store, 0 writers. Empty placeholder.
+    const spending: any[] = [];
 
     return c.json({ success: true, period, data: spending });
   } catch (error: any) {
@@ -420,8 +417,8 @@ app.get('/analytics/roi', requireAuth, async (c) => {
       return c.json(featureBlocked('analytics', profile), 403);
     }
 
-    const roiRaw = await venueAnalyticsStore.get(profile.id);
-    const roi = parse(roiRaw) || [];
+    // venue_analytics — dead store, 0 writers. Empty placeholder.
+    const roi: any[] = [];
 
     return c.json({ success: true, data: roi });
   } catch (error: any) {
