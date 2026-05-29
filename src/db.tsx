@@ -3778,7 +3778,46 @@ export async function upsertEmailTemplate(t: EmailTemplate): Promise<void> {
   );
 }
 
-export const chartAggregationStore = makeJsonbKeyStore('chart_aggregation');
+// chart_aggregation — native cols since migration 085. Доступ через
+// getChartAggregationStatus / upsertChartAggregationStatus (см. ниже).
+export interface ChartAggregationStatus {
+  timestamp: string | null;
+  sourcesProcessed: number;
+  totalTracks: number;
+  results: any[];
+}
+export async function getChartAggregationStatus(): Promise<ChartAggregationStatus | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT timestamp, sources_processed, total_tracks, results
+       FROM chart_aggregation WHERE key = 'last' LIMIT 1`
+  );
+  if (r.rows.length === 0) return null;
+  const row = r.rows[0];
+  return {
+    timestamp: row.timestamp instanceof Date ? row.timestamp.toISOString() : (row.timestamp || null),
+    sourcesProcessed: Number(row.sources_processed || 0),
+    totalTracks: Number(row.total_tracks || 0),
+    results: Array.isArray(row.results) ? row.results : [],
+  };
+}
+export async function upsertChartAggregationStatus(s: {
+  timestamp: string; sourcesProcessed: number; totalTracks: number; results: any[];
+}): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO chart_aggregation
+       (key, timestamp, sources_processed, total_tracks, results, updated_at)
+     VALUES ('last', $1::timestamptz, $2, $3, $4::jsonb, NOW())
+     ON CONFLICT (key) DO UPDATE SET
+       timestamp         = EXCLUDED.timestamp,
+       sources_processed = EXCLUDED.sources_processed,
+       total_tracks      = EXCLUDED.total_tracks,
+       results           = EXCLUDED.results,
+       updated_at        = NOW()`,
+    [s.timestamp, s.sourcesProcessed || 0, s.totalTracks || 0, JSON.stringify(s.results || [])]
+  );
+}
 
 // ─── chart_sources (native cols since migration 076) ───
 // 1 row per source ID (russkoe, nashe, yandex, shazam, intl:apple:*).

@@ -6,7 +6,7 @@
 
 import { Hono } from 'hono';
 import * as db from './db.tsx';
-import { chartAggregationStore, getChartSource, upsertChartSource, listChartSources, platformStatsStore, getTracksByUser } from './db.tsx';
+import { getChartAggregationStatus, upsertChartAggregationStatus, getChartSource, upsertChartSource, listChartSources, platformStatsStore, getTracksByUser } from './db.tsx';
 import { getPublishedTracks } from './db-typed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { isUrlSafe } from './security.tsx';
@@ -1129,8 +1129,8 @@ charts.post('/aggregate', async (c) => {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
 
-    // Save aggregation timestamp
-    await chartAggregationStore.set('last', {
+    // Save aggregation timestamp (atomic UPSERT через native cols).
+    await upsertChartAggregationStatus({
       timestamp: new Date().toISOString(),
       sourcesProcessed: results.length,
       totalTracks: results.reduce((sum, r) => sum + r.tracksFound, 0),
@@ -1152,7 +1152,7 @@ charts.post('/aggregate', async (c) => {
  */
 charts.get('/aggregation-status', async (c) => {
   try {
-    const status: any = await chartAggregationStore.get('last');
+    const status = await getChartAggregationStatus();
     return c.json({ success: true, data: status || null });
   } catch (error) {
     console.log(`Error fetching aggregation status: ${error}`);
@@ -1658,8 +1658,8 @@ charts.post('/full-update', requireAdminOrKey, async (c) => {
       results.push({ sourceId: 'shazam', tracksFound: 0, error: String(err) });
     }
 
-    // Save aggregation log
-    await chartAggregationStore.set('last', {
+    // Save aggregation log (atomic UPSERT через native cols).
+    await upsertChartAggregationStatus({
       timestamp: new Date().toISOString(),
       sourcesProcessed: results.length,
       totalTracks: results.reduce((sum: any, r: any) => sum + r.tracksFound, 0),

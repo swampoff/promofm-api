@@ -11,7 +11,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as db from './db.tsx';
-import { chartAggregationStore, getChartSource, newsPipelineStore, listAllNewsPublic } from './db.tsx';
+import { getChartAggregationStatus, getChartSource, newsPipelineStore, listAllNewsPublic } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const contentHealth = new Hono();
@@ -203,7 +203,7 @@ async function collectHealthData(): Promise<ContentHealthData> {
 
   // ═══════════════ CHARTS HEALTH ═══════════════
 
-  const aggStatus = await chartAggregationStore.get('last') as any;
+  const aggStatus = await getChartAggregationStatus();
   const lastAggregation = aggStatus?.timestamp || null;
   const aggHoursAgo = hoursAgo(lastAggregation);
   const aggregationStale = aggHoursAgo === null || aggHoursAgo > (7 * 24);
