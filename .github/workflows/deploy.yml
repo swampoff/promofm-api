@@ -15,9 +15,18 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            set -e
             cd /opt/promofm-api
             git pull origin main
             npm ci --omit=dev
             sudo systemctl restart promofm-api
-            sleep 2
-            curl -sf http://localhost:3000/server/health || echo "HEALTH CHECK FAILED"
+            ok=0
+            for i in $(seq 1 10); do
+              if curl -fsS http://127.0.0.1:3000/server/health > /dev/null; then
+                echo "Health OK after attempt ${i}"; ok=1; break
+              fi
+              sleep 3
+            done
+            if [ "$ok" != "1" ]; then
+              echo "Health check FAILED after 30s"; exit 1
+            fi
