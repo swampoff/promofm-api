@@ -11,7 +11,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import * as db from './db.tsx';
-import { getChartAggregationStatus, getChartSource, newsPipelineStore, listAllNewsPublic } from './db.tsx';
+import { getChartAggregationStatus, getChartSource, getNewsPipelineKey, listAllNewsPublic } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const contentHealth = new Hono();
@@ -126,7 +126,7 @@ async function collectHealthData(): Promise<ContentHealthData> {
     }
   }
 
-  const pipelineStats = await newsPipelineStore.get('news:pipeline:stats') as any;
+  const pipelineStats = await getNewsPipelineKey('news:pipeline:stats') as any;
   const lastPipelineRun = pipelineStats?.lastRunAt || null;
   const pipelineHoursAgo = hoursAgo(lastPipelineRun);
   const pipelineStale = pipelineHoursAgo === null || pipelineHoursAgo > 24;
@@ -163,7 +163,7 @@ async function collectHealthData(): Promise<ContentHealthData> {
   const sourcesNeverFetched: string[] = [];
 
   for (const sourceId of NEWS_SOURCE_IDS) {
-    const status = await newsPipelineStore.get(`news:pipeline:source:${sourceId}`) as any;
+    const status = await getNewsPipelineKey(`news:pipeline:source:${sourceId}`) as any;
     if (!status) {
       sourcesNeverFetched.push(sourceId);
       continue;
