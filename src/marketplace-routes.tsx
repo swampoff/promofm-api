@@ -64,7 +64,9 @@ import {
   // digital_goods — native cols since migration 075:
   listDigitalGoods, getDigitalGood, insertDigitalGood,
   incrementDigitalGoodViews, type DigitalGood, type ListDigitalGoodsOpts,
-  platformRevenueLogStore, platformStatsStore,
+  // platform_revenue_log promoted to native (migration 084) — using listPlatformRevenue
+  listPlatformRevenue,
+  platformStatsStore,
   // Native producer_services / service_orders (migration 063):
   getProducerService, listProducerServices, upsertProducerService, incrementProducerServiceOrders,
   getServiceOrder, upsertServiceOrder, listServiceOrdersByClient, listServiceOrdersByProducer,
@@ -1504,18 +1506,16 @@ app.post('/digital-goods/:id/purchase', requireAuth, async (c) => {
  */
 app.get('/admin/transactions', requireAuth, requireAdmin, async (c) => {
   try {
-    const raw = await platformRevenueLogStore.get('singleton');
-    let txs: any[] = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
-
     const channelFilter = c.req.query('type') || c.req.query('channel');
-    if (channelFilter) txs = txs.filter(t => t.channel === channelFilter);
-
-    txs.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-
     const limit = Math.min(Number(c.req.query('limit') || 100), 500);
     const offset = Number(c.req.query('offset') || 0);
-    const total = txs.length;
-    const paged = txs.slice(offset, offset + limit);
+    // Native cols since migration 084 — SQL filter+pagination вместо JS filter+slice
+    const { items, total } = await listPlatformRevenue({
+      channel: channelFilter || undefined,
+      limit,
+      offset,
+    });
+    const paged = items;
 
     // Маппинг в формат, совместимый с фронтом
     const mapped = paged.map((t: any) => ({
