@@ -2453,7 +2453,132 @@ export async function countBeatFavoriters(beatId: string): Promise<number> {
 // beat_reviews_index DROPPED — derived через idx_beat_reviews_beat_created.
 // 2 store wrappers DELETED. Доступ — getBeatReview / upsertBeatReview /
 // listBeatReviewsByBeat / getBeatReviewsAggregateStats ниже.
-export const contractsStore = makeJsonbKeyStore('contracts');
+// ─── contracts (native cols since migration 080) ───
+// Milestone-based contracts for marketplace service orders. 1:1 с
+// service_orders через UNIQUE(order_id). 6 callers в marketplace-routes.
+// milestones остаётся jsonb (per-stage shape varies — legit nested).
+
+export interface ContractMilestone {
+  id: string;
+  index: number;
+  title: string;
+  description?: string;
+  amount: number;
+  dueDate?: string | null;
+  status: string;       // pending | in_progress | submitted | approved | revision
+  paidAt?: string | null;
+  completedAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ContractRow {
+  id: string;
+  orderId: string;
+  serviceTitle?: string | null;
+  producerId?: string | null;
+  producerName?: string | null;
+  clientId?: string | null;
+  clientName?: string | null;
+  totalAmount: number;
+  paidAmount: number;
+  status: string;
+  milestones: ContractMilestone[];
+  createdAt: string;
+  completedAt?: string | null;
+  updatedAt?: string | null;
+}
+
+function mapContractRow(r: any): ContractRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  const isoOrNull = (d: any) => d == null ? null : iso(d);
+  return {
+    id: r.id,
+    orderId: r.order_id,
+    serviceTitle: r.service_title,
+    producerId: r.producer_id,
+    producerName: r.producer_name,
+    clientId: r.client_id,
+    clientName: r.client_name,
+    totalAmount: Number(r.total_amount || 0),
+    paidAmount: Number(r.paid_amount || 0),
+    status: r.status,
+    milestones: Array.isArray(r.milestones) ? r.milestones : [],
+    createdAt: iso(r.created_at),
+    completedAt: isoOrNull(r.completed_at),
+    updatedAt: isoOrNull(r.updated_at),
+  };
+}
+
+const CONTRACT_COLS = `id, order_id, service_title, producer_id, producer_name,
+  client_id, client_name, total_amount, paid_amount, status, milestones,
+  created_at, completed_at, updated_at`;
+
+export async function getContractByOrderId(orderId: string): Promise<ContractRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${CONTRACT_COLS} FROM contracts WHERE order_id = $1 LIMIT 1`,
+    [orderId]
+  );
+  return mapContractRow(r.rows[0]);
+}
+
+export async function insertContract(c: ContractRow): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO contracts
+       (id, order_id, service_title, producer_id, producer_name, client_id,
+        client_name, total_amount, paid_amount, status, milestones,
+        created_at, completed_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
+             COALESCE($12::timestamptz, NOW()), $13::timestamptz)`,
+    [
+      c.id, c.orderId, c.serviceTitle ?? null,
+      c.producerId ?? null, c.producerName ?? null,
+      c.clientId ?? null, c.clientName ?? null,
+      c.totalAmount ?? 0, c.paidAmount ?? 0,
+      c.status || 'active',
+      JSON.stringify(c.milestones || []),
+      c.createdAt ?? null, c.completedAt ?? null,
+    ]
+  );
+}
+
+/**
+ * Update milestone(s) + paid_amount + status atomically by order_id.
+ * Caller передаёт полный milestones array после mutation (т.к. milestones
+ * остаются jsonb — row-per-milestone refactor scope больше этого PR'а).
+ * Single UPDATE statement без read-modify-set race window.
+ */
+export async function updateContractByOrderId(
+  orderId: string,
+  patch: { milestones?: ContractMilestone[]; paidAmount?: number; status?: string; completedAt?: string | null },
+): Promise<void> {
+  const sets: string[] = [];
+  const vals: any[] = [];
+  let i = 1;
+  if (patch.milestones !== undefined) {
+    sets.push(`milestones = $${i++}::jsonb`); vals.push(JSON.stringify(patch.milestones));
+  }
+  if (patch.paidAmount !== undefined) {
+    sets.push(`paid_amount = $${i++}`); vals.push(patch.paidAmount);
+  }
+  if (patch.status !== undefined) {
+    sets.push(`status = $${i++}`); vals.push(patch.status);
+  }
+  if (patch.completedAt !== undefined) {
+    sets.push(`completed_at = $${i++}::timestamptz`); vals.push(patch.completedAt);
+  }
+  if (sets.length === 0) return;
+  sets.push('updated_at = NOW()');
+  vals.push(orderId);
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE contracts SET ${sets.join(', ')} WHERE order_id = $${i}`,
+    vals
+  );
+}
 // digital_goods — native cols since migration 075. Store removed,
 // typed functions ниже (SQL filter + sort pushdown + atomic counters).
 // 8 callers across marketplace-routes / checkout-routes / demo-seed.

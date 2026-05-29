@@ -59,7 +59,8 @@ import {
   getBeatReviewsAggregateStats, findBeatReviewByUser,
   // beat_favorites — row-per-favorite (migration 068):
   listBeatFavorites, toggleBeatFavorite,
-  contractsStore,
+  // contracts — native cols since migration 080:
+  getContractByOrderId, insertContract, updateContractByOrderId, type ContractRow,
   // digital_goods — native cols since migration 075:
   listDigitalGoods, getDigitalGood, insertDigitalGood,
   incrementDigitalGoodViews, type DigitalGood, type ListDigitalGoodsOpts,
@@ -1023,7 +1024,7 @@ app.put('/orders/:id/status', requireAuth, async (c) => {
       } catch {}
 
       // Записать комиссию платформы при прямом завершении (без контракта)
-      const existingContract = await contractsStore.get(orderId);
+      const existingContract = await getContractByOrderId(orderId);
       if (!existingContract) {
         await recordPlatformCommission(
           'service',
@@ -1095,8 +1096,10 @@ app.post('/orders/:id/contract', requireAuth, async (c) => {
     }
 
     // Проверить, нет ли уже контракта
-    const existingRaw = await contractsStore.get(orderId);
-    if (existingRaw) {
+    // UNIQUE index uq_contracts_order_id обеспечивает атомарность —
+    // INSERT с дубликатом orderId упадёт даже если 2 concurrent POST'а.
+    const existingContract = await getContractByOrderId(orderId);
+    if (existingContract) {
       return c.json({ success: false, error: 'Contract already exists for this order' }, 409);
     }
 
@@ -1129,7 +1132,8 @@ app.post('/orders/:id/contract', requireAuth, async (c) => {
       createdAt: nowIso(),
     };
 
-    await contractsStore.set(orderId, JSON.stringify(contract));
+    // Native INSERT (migration 080). UNIQUE order_id index defends races.
+    await insertContract(contract as ContractRow);
 
     // SSE уведомление клиенту
     await sendSSE(order.clientId, 'service_order_update', {
@@ -1152,9 +1156,8 @@ app.post('/orders/:id/contract', requireAuth, async (c) => {
 app.get('/contracts/:id', requireAuth, async (c) => {
   try {
     const orderId = c.req.param('id');
-    const raw = await contractsStore.get(orderId);
-    if (!raw) return c.json({ success: false, error: 'Contract not found' }, 404);
-    const contract = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const contract = await getContractByOrderId(orderId);
+    if (!contract) return c.json({ success: false, error: 'Contract not found' }, 404);
     return c.json({ success: true, data: contract });
   } catch (error) {
     console.log('GET /contracts/:id error:', error);
@@ -1185,9 +1188,8 @@ app.put('/contracts/:id/milestones/:mid', requireAuth, async (c) => {
       return c.json({ success: false, error: 'action required' }, 400);
     }
 
-    const raw = await contractsStore.get(orderId);
-    if (!raw) return c.json({ success: false, error: 'Contract not found' }, 404);
-    const contract = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const contract = await getContractByOrderId(orderId);
+    if (!contract) return c.json({ success: false, error: 'Contract not found' }, 404);
 
     if (contract.status !== 'active') {
       return c.json({ success: false, error: 'Contract is not active' }, 400);
@@ -1302,7 +1304,14 @@ app.put('/contracts/:id/milestones/:mid', requireAuth, async (c) => {
       await upsertServiceOrder(orderId, order);
     }
 
-    await contractsStore.set(orderId, JSON.stringify(contract));
+    // Atomic UPDATE (migration 080) — patch только реально изменённое.
+    // Single UPDATE без read-modify-set race window.
+    await updateContractByOrderId(orderId, {
+      milestones: contract.milestones,
+      paidAmount: contract.paidAmount,
+      status: contract.status,
+      completedAt: (contract as any).completedAt ?? null,
+    });
 
     return c.json({ success: true, data: contract });
   } catch (error) {
