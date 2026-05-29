@@ -26,7 +26,7 @@
  */
 
 import { Hono } from 'hono';
-import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, getVenueRadioBrand, patchVenueRadioBrand, radioVenueRequestsStore, radioNotificationsStore, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, type VenueAdCampaignRow } from './db.tsx';
+import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, getVenueRadioBrand, patchVenueRadioBrand, radioVenueRequestsStore, radioNotificationsStore, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, insertRadioVenueRequest, insertRadioNotification, type VenueAdCampaignRow } from './db.tsx';
 import { pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
@@ -821,15 +821,13 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
       };
 
       try {
-        const existingRaw = await radioVenueRequestsStore.get(campaign.stationId);
-        const existing = Array.isArray(existingRaw) ? existingRaw : [];
-        existing.push(venueRequest);
-        await radioVenueRequestsStore.set(campaign.stationId, existing);
+        // Atomic INSERTs — race-free vs legacy get+push+set (которое могло
+        // потерять concurrent venue request от другого канала).
+        await insertRadioVenueRequest({ ...venueRequest, radioId: campaign.stationId });
 
-        // Push notification to radio station
-        const notifRaw = await radioNotificationsStore.get(campaign.stationId);
-        const notifs = Array.isArray(notifRaw) ? notifRaw : [];
-        notifs.unshift({
+        // Push notification to radio station.
+        await insertRadioNotification({
+          radioId: campaign.stationId,
           id: `notif-${Date.now()}`,
           type: 'venue_request',
           title: 'New ad campaign request',
@@ -839,7 +837,6 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
           relatedId: campaign.id,
           createdAt: new Date().toISOString(),
         });
-        await radioNotificationsStore.set(campaign.stationId, notifs);
       } catch (e) {
         console.error('Error pushing venue request to radio:', e);
       }
