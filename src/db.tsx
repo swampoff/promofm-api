@@ -4072,7 +4072,34 @@ export const trackTestAllRequestsStore = makeTrackTestAllRequestsView();
 // Доступ через listRegisteredTrackTestExperts() ниже.
 export const trackTestReviewsStore = makeJsonbKeyStore('track_test_reviews');
 export const trackTestRequestReviewsStore = makeJsonbKeyStore('track_test_request_reviews', 'request_id');
-export const newsPipelineStore = makeJsonbKeyStore('news_pipeline', 'key');
+// ─── news_pipeline (typed KV access since #120) ───
+// News CMS pipeline state (sources config, articles:pending/published/rejected
+// buckets, last_run, per-source status). Schema unchanged (key TEXT PK, data
+// jsonb). Killed makeJsonbKeyStore wrapper; reads/writes теперь through typed
+// functions. Future work: split articles buckets to row-per-article (separate PR).
+export async function getNewsPipelineKey<T = any>(key: string): Promise<T | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT data FROM news_pipeline WHERE key = $1 LIMIT 1`, [key]
+  );
+  if (r.rows.length === 0) return null;
+  const raw = r.rows[0].data;
+  return (typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return raw; } })() : raw) as T;
+}
+export async function setNewsPipelineKey(key: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO news_pipeline (key, data, created_at, updated_at)
+     VALUES ($1, $2::jsonb, NOW(), NOW())
+     ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+    [key, JSON.stringify(value ?? null)]
+  );
+}
+export async function delNewsPipelineKey(key: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(`DELETE FROM news_pipeline WHERE key = $1`, [key]);
+}
+
 // ─── agent_sessions (native cols since migration 081) ───
 // AI department discussions (ARCH/DEV/SEC/OPS/QA simulated agents).
 // agent_sessions_index DROPPED — replaced by indexed SELECT.

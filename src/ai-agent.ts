@@ -15,7 +15,7 @@
  */
 
 import { Hono } from 'hono';
-import { newsPipelineStore } from './db.tsx';
+import { getNewsPipelineKey, setNewsPipelineKey, delNewsPipelineKey } from './db.tsx';
 import { quickLLM } from './llm-router.tsx';
 import { safeErrorMessage } from './security.tsx';
 
@@ -55,7 +55,7 @@ const DEFAULT_SOURCES = [
 ];
 
 async function ensureSources() {
-  const existing = await newsPipelineStore.get('news:sources');
+  const existing = await getNewsPipelineKey('news:sources');
   if (!existing) {
     const sources = DEFAULT_SOURCES.map(s => ({
       ...s,
@@ -67,18 +67,18 @@ async function ensureSources() {
         articlesCollected: 0,
       },
     }));
-    await newsPipelineStore.set('news:sources', sources);
+    await setNewsPipelineKey('news:sources', sources);
     return sources;
   }
   return existing as any[];
 }
 
 async function getStats() {
-  const pending = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
-  const published = (await newsPipelineStore.get('news:articles:published') || []) as any[];
-  const rejected = (await newsPipelineStore.get('news:articles:rejected') || []) as any[];
+  const pending = (await getNewsPipelineKey('news:articles:pending') || []) as any[];
+  const published = (await getNewsPipelineKey('news:articles:published') || []) as any[];
+  const rejected = (await getNewsPipelineKey('news:articles:rejected') || []) as any[];
   const sources = await ensureSources();
-  const lastRun = await newsPipelineStore.get('news:last_run') as string | null;
+  const lastRun = await getNewsPipelineKey('news:last_run') as string | null;
 
   return {
     totalCollected: pending.length + published.length + rejected.length,
@@ -110,12 +110,12 @@ async function collectNews(sourceId?: string) {
     src.status.lastFetchStatus = 'success';
     src.status.articlesCollected += newArticles.filter((a: any) => a.source === src.name).length;
   }
-  await newsPipelineStore.set('news:sources', sources);
+  await setNewsPipelineKey('news:sources', sources);
 
   // Add to pending
   const updated = [...newArticles, ...pending];
-  await newsPipelineStore.set('news:articles:pending', updated);
-  await newsPipelineStore.set('news:last_run', new Date().toISOString());
+  await setNewsPipelineKey('news:articles:pending', updated);
+  await setNewsPipelineKey('news:last_run', new Date().toISOString());
 
   return { collected: newArticles.length, articles: newArticles };
 }
@@ -149,7 +149,7 @@ app.get('/stats', requireAdminOrKey, async (c) => {
 // GET /pending
 app.get('/pending', requireAdminOrKey, async (c) => {
   try {
-    const articles = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
+    const articles = (await getNewsPipelineKey('news:articles:pending') || []) as any[];
     return c.json({ success: true, data: articles });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -160,7 +160,7 @@ app.get('/pending', requireAdminOrKey, async (c) => {
 app.get('/published', requireAdminOrKey, async (c) => {
   try {
     const limit = Number(c.req.query('limit') || 50);
-    const articles = (await newsPipelineStore.get('news:articles:published') || []) as any[];
+    const articles = (await getNewsPipelineKey('news:articles:published') || []) as any[];
     return c.json({ success: true, data: articles.slice(0, limit) });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -170,7 +170,7 @@ app.get('/published', requireAdminOrKey, async (c) => {
 // GET /rejected
 app.get('/rejected', requireAdminOrKey, async (c) => {
   try {
-    const articles = (await newsPipelineStore.get('news:articles:rejected') || []) as any[];
+    const articles = (await getNewsPipelineKey('news:articles:rejected') || []) as any[];
     return c.json({ success: true, data: articles });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -193,7 +193,7 @@ app.post('/collect', requireAdminOrKey, async (c) => {
 app.post('/:id/approve', requireAdminOrKey, async (c) => {
   try {
     const id = c.req.param('id');
-    const pending = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
+    const pending = (await getNewsPipelineKey('news:articles:pending') || []) as any[];
     const article = pending.find((a: any) => a.id === id);
     if (!article) {
       return c.json({ success: false, error: 'Статья не найдена' }, 404);
@@ -202,9 +202,9 @@ app.post('/:id/approve', requireAdminOrKey, async (c) => {
     // Move to published
     article.status = 'published';
     article.publishedAt = new Date().toISOString();
-    const published = (await newsPipelineStore.get('news:articles:published') || []) as any[];
-    await newsPipelineStore.set('news:articles:published', [article, ...published]);
-    await newsPipelineStore.set('news:articles:pending', pending.filter((a: any) => a.id !== id));
+    const published = (await getNewsPipelineKey('news:articles:published') || []) as any[];
+    await setNewsPipelineKey('news:articles:published', [article, ...published]);
+    await setNewsPipelineKey('news:articles:pending', pending.filter((a: any) => a.id !== id));
 
     return c.json({ success: true, data: article });
   } catch (error) {
@@ -216,7 +216,7 @@ app.post('/:id/approve', requireAdminOrKey, async (c) => {
 app.post('/:id/reject', requireAdminOrKey, async (c) => {
   try {
     const id = c.req.param('id');
-    const pending = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
+    const pending = (await getNewsPipelineKey('news:articles:pending') || []) as any[];
     const article = pending.find((a: any) => a.id === id);
     if (!article) {
       return c.json({ success: false, error: 'Статья не найдена' }, 404);
@@ -225,9 +225,9 @@ app.post('/:id/reject', requireAdminOrKey, async (c) => {
     // Move to rejected
     article.status = 'rejected';
     article.rejectedAt = new Date().toISOString();
-    const rejected = (await newsPipelineStore.get('news:articles:rejected') || []) as any[];
-    await newsPipelineStore.set('news:articles:rejected', [article, ...rejected]);
-    await newsPipelineStore.set('news:articles:pending', pending.filter((a: any) => a.id !== id));
+    const rejected = (await getNewsPipelineKey('news:articles:rejected') || []) as any[];
+    await setNewsPipelineKey('news:articles:rejected', [article, ...rejected]);
+    await setNewsPipelineKey('news:articles:pending', pending.filter((a: any) => a.id !== id));
 
     return c.json({ success: true });
   } catch (error) {
@@ -242,10 +242,10 @@ app.delete('/:id', requireAdminOrKey, async (c) => {
 
     // Try removing from all lists
     for (const listKey of ['news:articles:pending', 'news:articles:published', 'news:articles:rejected']) {
-      const list = (await newsPipelineStore.get(listKey) || []) as any[];
+      const list = (await getNewsPipelineKey(listKey) || []) as any[];
       const filtered = list.filter((a: any) => a.id !== id);
       if (filtered.length !== list.length) {
-        await newsPipelineStore.set(listKey, filtered);
+        await setNewsPipelineKey(listKey, filtered);
         return c.json({ success: true });
       }
     }
@@ -259,7 +259,7 @@ app.delete('/:id', requireAdminOrKey, async (c) => {
 // POST /approve-all
 app.post('/approve-all', requireAdminOrKey, async (c) => {
   try {
-    const pending = (await newsPipelineStore.get('news:articles:pending') || []) as any[];
+    const pending = (await getNewsPipelineKey('news:articles:pending') || []) as any[];
     if (pending.length === 0) {
       return c.json({ success: true, data: { approved: 0 } });
     }
@@ -271,9 +271,9 @@ app.post('/approve-all', requireAdminOrKey, async (c) => {
       publishedAt: now,
     }));
 
-    const published = (await newsPipelineStore.get('news:articles:published') || []) as any[];
-    await newsPipelineStore.set('news:articles:published', [...approved, ...published]);
-    await newsPipelineStore.set('news:articles:pending', []);
+    const published = (await getNewsPipelineKey('news:articles:published') || []) as any[];
+    await setNewsPipelineKey('news:articles:published', [...approved, ...published]);
+    await setNewsPipelineKey('news:articles:pending', []);
 
     return c.json({ success: true, data: { approved: approved.length } });
   } catch (error) {
