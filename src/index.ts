@@ -21,7 +21,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger as honoLogger } from 'hono/logger';
 import * as db from './db.tsx';
-import { platformStatsStore, systemConfigStore } from './db.tsx';
+import { platformStatsStore } from './db.tsx';
 
 import { initializeStorage } from './storage-setup.tsx';
 

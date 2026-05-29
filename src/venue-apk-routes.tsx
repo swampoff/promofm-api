@@ -24,7 +24,7 @@ import crypto from 'crypto';
 import { existsSync, mkdirSync, writeFileSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { systemConfigStore } from './db.tsx';
+import { getSystemConfig, upsertSystemConfig } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
@@ -61,10 +61,9 @@ const DEFAULT_META: ApkReleaseMeta = {
 
 async function readMeta(): Promise<ApkReleaseMeta> {
   try {
-    const stored = await systemConfigStore.get(APK_CONFIG_KEY) as any;
+    const stored = await getSystemConfig<any>(APK_CONFIG_KEY);
     if (!stored) return { ...DEFAULT_META };
-    const data = stored.data || stored;
-    return { ...DEFAULT_META, ...data };
+    return { ...DEFAULT_META, ...stored };
   } catch (err) {
     console.error('[venue-apk] readMeta failed:', err);
     return { ...DEFAULT_META };
@@ -72,7 +71,7 @@ async function readMeta(): Promise<ApkReleaseMeta> {
 }
 
 async function writeMeta(meta: ApkReleaseMeta): Promise<void> {
-  await systemConfigStore.set(APK_CONFIG_KEY, meta);
+  await upsertSystemConfig(APK_CONFIG_KEY, meta);
 }
 
 // ──────────────────────────────────────────────────────────────────

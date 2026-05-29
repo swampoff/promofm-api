@@ -4074,7 +4074,31 @@ export async function deleteAgentSession(id: string): Promise<void> {
 // notificationSettingsKvStore — DROPPED (0 callers; notification_settings
 // доступ через `getNotificationSettings` / `upsertNotificationSettings`
 // функции в db.tsx).
-export const systemConfigStore = makeJsonbKeyStore('system_config', 'key');
+// system_config — typed access since this PR. Legit key/value semantics
+// (boot status flags, APK release metadata, etc). Killed KV store wrapper
+// pattern через atomic UPSERT.
+export async function getSystemConfig<T = any>(key: string): Promise<T | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT data FROM system_config WHERE key = $1 LIMIT 1`, [key]
+  );
+  if (r.rows.length === 0) return null;
+  const raw = r.rows[0].data;
+  return (typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return raw; } })() : raw) as T;
+}
+export async function upsertSystemConfig(key: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO system_config (key, data, created_at, updated_at)
+     VALUES ($1, $2::jsonb, NOW(), NOW())
+     ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+    [key, JSON.stringify(value ?? null)]
+  );
+}
+export async function deleteSystemConfig(key: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(`DELETE FROM system_config WHERE key = $1`, [key]);
+}
 // accountingStore — split на 5 native таблиц (migration 055):
 //   accounting_reports / accounting_documents / accounting_ledger /
 //   accounting_counterparties / accounting_calendar. Доступ — напрямую
