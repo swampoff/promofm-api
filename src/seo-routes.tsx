@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
+import { getChartSource } from './db.tsx';
 import { PILLAR_PAGES, type PillarMeta } from './seo-content.tsx';
 import { ALL_ALIASES, type SeoAlias } from './seo-aliases.tsx';
 
@@ -408,11 +409,18 @@ seoRoutes.get('/prerender/*', async (c) => {
       // Aggregate chart data from chart_sources KV store
       const sourceIds = ['russkoe', 'nashe', 'dfm', 'europa', 'hitfm', 'retro'];
       const allTracks: { title: string; artist: string; source: string; pos: number }[] = [];
+      // Native getChartSource — chart_sources data column was DROPPED in
+      // migration 076 (это endpoint молча return'ил empty список с тех пор).
       for (const sid of sourceIds) {
-        const { rows } = await pool.query(`SELECT data FROM chart_sources WHERE id = $1`, [sid]);
-        if (rows[0]?.data?.tracks) {
-          for (const t of rows[0].data.tracks.slice(0, 10)) {
-            allTracks.push({ title: t.title || '', artist: t.artist || '', source: rows[0].data.sourceName || sid, pos: t.position || 0 });
+        const src = await getChartSource(sid);
+        if (src?.tracks?.length) {
+          for (const t of src.tracks.slice(0, 10)) {
+            allTracks.push({
+              title: t.title || '',
+              artist: t.artist || '',
+              source: src.sourceName || sid,
+              pos: t.position || 0,
+            });
           }
         }
       }

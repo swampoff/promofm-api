@@ -50,16 +50,111 @@ function jsonErr(error: string) {
   return { success: false as const, error };
 }
 
+// ─── ecosystem_sessions inline bootstrap ─────────────────────────────────────
+//
+// migration-runner.tsx — stub; migrations/087_ecosystem_sessions_extract.sql
+// НЕ запускается на `systemctl restart promofm-api`. Inline-bootstrap здесь
+// гарантирует self-applying schema независимо от того, прогнали ли миграцию
+// 087 руками.
+//
+// Idempotent. Handles все 3 порядка применения:
+//   1. Code restart до 081 → backfill из agent_sessions.data + DELETE eco_*.
+//   2. Code restart после 081 → backfill skip (нет data col); таблица создаётся
+//      для будущих saveSession (legacy eco_* потеряны, но 087 файл-миграция
+//      должна была отработать до 081 deploy — см. PR body).
+//   3. Code restart после уже-применённой 087 → no-op (CONFLICT DO NOTHING).
+//
+// Memoized promise — выполняется один раз per process; на ошибке reset
+// чтобы следующий handler retried bootstrap.
+let ecosystemBootstrapPromise: Promise<void> | null = null;
+
+async function bootstrapEcosystemTable(): Promise<void> {
+  if (ecosystemBootstrapPromise) return ecosystemBootstrapPromise;
+  ecosystemBootstrapPromise = (async () => {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ecosystem_sessions (
+          id          TEXT PRIMARY KEY,
+          mode        TEXT,
+          type        TEXT,
+          status      TEXT,
+          data        JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_ecosystem_sessions_mode_created
+          ON ecosystem_sessions(mode, created_at DESC) WHERE mode IS NOT NULL
+      `);
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_ecosystem_sessions_type
+          ON ecosystem_sessions(type) WHERE type IS NOT NULL
+      `);
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_ecosystem_sessions_created
+          ON ecosystem_sessions(created_at DESC)
+      `);
+
+      // Backfill из legacy agent_sessions, только если data col ещё present.
+      // После migration 081 этот блок no-op (column dropped, IF check false).
+      const hasData = await pool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'agent_sessions' AND column_name = 'data'
+          LIMIT 1`
+      );
+      if (hasData.rows.length > 0) {
+        await pool.query(`
+          INSERT INTO ecosystem_sessions
+            (id, mode, type, status, data, created_at, updated_at)
+          SELECT id,
+                 data->>'mode',
+                 data->>'type',
+                 data->>'status',
+                 data,
+                 created_at,
+                 COALESCE(updated_at, created_at)
+            FROM agent_sessions
+           WHERE id LIKE 'eco_%' AND data IS NOT NULL
+           ON CONFLICT (id) DO NOTHING
+        `);
+        // Удалить eco_ rows из agent_sessions чтобы будущая migration 081
+        // backfill (title/task NOT NULL) не падала.
+        await pool.query(`DELETE FROM agent_sessions WHERE id LIKE 'eco_%'`);
+      }
+    } catch (err) {
+      console.error('[ecosystem] bootstrap failed:', err);
+      ecosystemBootstrapPromise = null; // retry на следующем handler call
+      throw err;
+    }
+  })();
+  return ecosystemBootstrapPromise;
+}
+
+// Separate storage since migration 087 — agent_sessions native cols (migration
+// 081) reserves table для AI dept discussions ('s-*' prefix, title/task shape).
 async function saveSession(
   sessionId: string,
   sessionData: Record<string, unknown>
 ): Promise<void> {
   try {
+    await bootstrapEcosystemTable();
     await pool.query(
-      `INSERT INTO agent_sessions (id, data, created_at, updated_at)
-       VALUES ($1, $2, NOW(), NOW())
-       ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
-      [sessionId, JSON.stringify(sessionData)]
+      `INSERT INTO ecosystem_sessions (id, mode, type, status, data, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, NOW(), NOW())
+       ON CONFLICT (id) DO UPDATE SET
+         mode = EXCLUDED.mode,
+         type = EXCLUDED.type,
+         status = EXCLUDED.status,
+         data = EXCLUDED.data,
+         updated_at = NOW()`,
+      [
+        sessionId,
+        (sessionData?.mode as string) ?? null,
+        (sessionData?.type as string) ?? null,
+        (sessionData?.status as string) ?? null,
+        JSON.stringify(sessionData),
+      ]
     );
   } catch (err) {
     console.error("[ecosystem] Failed to save session:", err);
@@ -70,8 +165,9 @@ async function getSession(
   sessionId: string
 ): Promise<Record<string, unknown> | null> {
   try {
+    await bootstrapEcosystemTable();
     const res = await pool.query(
-      "SELECT data FROM agent_sessions WHERE id = $1",
+      "SELECT data FROM ecosystem_sessions WHERE id = $1",
       [sessionId]
     );
     if (res.rows.length === 0) return null;
@@ -198,9 +294,11 @@ app.get("/mode/:mode/status", requireAdminOrKey, async (c) => {
   }
 
   try {
+    await bootstrapEcosystemTable();
+    // Native indexed lookup via idx_ecosystem_sessions_mode_created.
     const res = await pool.query(
-      `SELECT id, data, created_at FROM agent_sessions
-       WHERE data->>'mode' = $1
+      `SELECT id, data, created_at FROM ecosystem_sessions
+       WHERE mode = $1
        ORDER BY created_at DESC
        LIMIT 1`,
       [modeName]
@@ -379,19 +477,21 @@ app.get("/reports", requireAdminOrKey, async (c) => {
   const type = c.req.query("type");
 
   try {
-    let sql =
-      "SELECT id, data, created_at FROM agent_sessions WHERE id LIKE 'eco_%'";
+    await bootstrapEcosystemTable();
+    // ecosystem_sessions (own table since migration 087) — индексированный
+    // filter по mode/type через native cols заменил data->>'mode' jsonb extract.
+    let sql = "SELECT id, data, created_at FROM ecosystem_sessions WHERE 1=1";
     const params: unknown[] = [];
     let paramIdx = 1;
 
     if (mode) {
-      sql += ` AND data->>'mode' = $${paramIdx}`;
+      sql += ` AND mode = $${paramIdx}`;
       params.push(mode);
       paramIdx++;
     }
 
     if (type) {
-      sql += ` AND data->>'type' = $${paramIdx}`;
+      sql += ` AND type = $${paramIdx}`;
       params.push(type);
       paramIdx++;
     }

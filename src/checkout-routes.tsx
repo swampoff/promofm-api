@@ -835,28 +835,23 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     && session.metadata?.orderId
   ) {
     try {
-      const { pool: pubPool } = await import('./db-client.tsx');
+      // publish_orders data column DROPPED в migration 078 — typed getPublishOrder
+      // / updatePublishOrder читают/пишут native cols. Раньше этот flow silently
+      // failed payment fulfillment — order оставался в pending_payment forever.
+      const { getPublishOrder, updatePublishOrder } = await import('./db.tsx');
       const orderId = String(session.metadata.orderId);
-      const row = await pubPool.query(`SELECT data FROM publish_orders WHERE id = $1`, [orderId]);
-      if (row.rows.length === 0) {
+      const ord = await getPublishOrder(orderId);
+      if (!ord) {
         log.warn({ orderId }, 'publish_order_not_found_for_fulfillment');
       } else {
-        const ord = typeof row.rows[0].data === 'string' ? JSON.parse(row.rows[0].data) : row.rows[0].data;
-        ord.status = 'paid';
-        ord.paidAt = now;
-        ord.paymentMethod = session.gateway;
-        ord.paymentSessionId = session.gatewayPaymentId;
-        ord.updatedAt = now;
-        await pubPool.query(
-          `UPDATE publish_orders SET data = $1::jsonb, updated_at = NOW() WHERE id = $2`,
-          [JSON.stringify(ord), orderId]
-        );
+        await updatePublishOrder(orderId, {
+          status: 'paid',
+          paidAt: now,
+          paymentMethod: session.gateway,
+        });
         log.info({ orderId, type: session.metadata.type, amount: session.amount }, 'publish_order_payment_fulfilled');
 
         // Notify artist payment received + admin that an order awaits publication.
-        // createArtistNotification persists to the `notifications` table (drives the
-        // unread bell badge) and emits the SSE push. Without this call the artist's
-        // UI only shows the new 'paid' status after a manual refresh.
         try {
           const { createArtistNotification } = await import('./publish-routes.tsx');
           await createArtistNotification(session.userId, orderId, ord.title || '', 'paid');
