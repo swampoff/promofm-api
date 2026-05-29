@@ -26,7 +26,7 @@
  */
 
 import { Hono } from 'hono';
-import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, venueRadioBrandStore, radioVenueRequestsStore, radioNotificationsStore, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, type VenueAdCampaignRow } from './db.tsx';
+import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, platformStatsStore, getVenueRadioBrand, patchVenueRadioBrand, radioVenueRequestsStore, radioNotificationsStore, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, type VenueAdCampaignRow } from './db.tsx';
 import { pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
@@ -911,8 +911,7 @@ app.get('/radio-brand', requireAuth, async (c) => {
       return c.json({ success: true, data: null });
     }
 
-    const raw = await venueRadioBrandStore.get(profile.id);
-    const data = parse(raw);
+    const data = await getVenueRadioBrand(profile.id);
     return c.json({ success: true, data });
   } catch (error: any) {
     console.error('Error fetching radio brand:', error);
@@ -930,10 +929,8 @@ app.put('/radio-brand', requireAuth, async (c) => {
     }
 
     const body = await c.req.json();
-    const raw = await venueRadioBrandStore.get(profile.id);
-    const current = parse(raw) || {};
-    const updated = { ...current, ...body, updatedAt: new Date().toISOString() };
-    await venueRadioBrandStore.set(profile.id, updated);
+    // Atomic jsonb || merge — race-free vs legacy get+merge+set паттерн.
+    const updated = await patchVenueRadioBrand(profile.id, body);
 
     return c.json({ success: true, data: updated });
   } catch (error: any) {
