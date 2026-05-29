@@ -11,12 +11,12 @@
 
 import { Hono } from 'hono';
 import * as db from './db.tsx';
-import { platformStatsStore } from './db.tsx';
+import { getPlatformStats } from './db.tsx';
 
 const app = new Hono();
 
 /** Получение актуальной статистики платформы из KV */
-async function getPlatformStats(): Promise<{
+async function getOgPlatformStats(): Promise<{
   totalArtists: number;
   totalTracks: number;
   totalPlays: number;
@@ -24,7 +24,7 @@ async function getPlatformStats(): Promise<{
   totalBeats: number;
 }> {
   try {
-    const stats = await platformStatsStore.get('platform');
+    const stats = await getPlatformStats('platform');
     if (stats && typeof stats === 'object') {
       return {
         totalArtists: (stats as any).totalArtists || 0,
@@ -97,7 +97,7 @@ app.get("/", async (c) => {
   const mode = (c.req.query("mode") as OgMode) || "dark";
   const showStats = c.req.query("stats") !== "false"; // По умолчанию показываем
 
-  const stats = showStats ? await getPlatformStats() : null;
+  const stats = showStats ? await getOgPlatformStats() : null;
 
   const svg = generateOgSvg({
     title,
@@ -181,7 +181,7 @@ app.get("/:cabinet", async (c) => {
     glowColor: "#FF577F",
   };
 
-  const rawStats = await getPlatformStats();
+  const rawStats = await getOgPlatformStats();
   const cabinetStats = config.statsFilter
     ? config.statsFilter(rawStats)
     : [

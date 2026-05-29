@@ -66,7 +66,7 @@ import {
   incrementDigitalGoodViews, type DigitalGood, type ListDigitalGoodsOpts,
   // platform_revenue_log promoted to native (migration 084) — using listPlatformRevenue
   listPlatformRevenue,
-  platformStatsStore,
+  getPlatformStats, setPlatformStats, 
   // Native producer_services / service_orders (migration 063):
   getProducerService, listProducerServices, upsertProducerService, incrementProducerServiceOrders,
   getServiceOrder, upsertServiceOrder, listServiceOrdersByClient, listServiceOrdersByProducer,
@@ -380,12 +380,12 @@ app.post('/beats', requireAuth, async (c) => {
 
     // Обновить статистику
     try {
-      const statsRaw = await platformStatsStore.get('platform');
+      const statsRaw = await getPlatformStats('platform');
       if (statsRaw) {
         const stats = typeof statsRaw === 'string' ? JSON.parse(statsRaw) : statsRaw;
         stats.totalBeats = (stats.totalBeats || 0) + 1;
         stats.updatedAt = nowIso();
-        await platformStatsStore.set('platform', JSON.stringify(stats));
+        await setPlatformStats('platform', stats);
       }
     } catch {}
 
@@ -450,12 +450,12 @@ app.delete('/beats/:id', requireAuth, async (c) => {
 
     // Обновить статистику
     try {
-      const statsRaw = await platformStatsStore.get('platform');
+      const statsRaw = await getPlatformStats('platform');
       if (statsRaw) {
         const stats = typeof statsRaw === 'string' ? JSON.parse(statsRaw) : statsRaw;
         stats.totalBeats = Math.max(0, (stats.totalBeats || 1) - 1);
         stats.updatedAt = nowIso();
-        await platformStatsStore.set('platform', JSON.stringify(stats));
+        await setPlatformStats('platform', stats);
       }
     } catch {}
 

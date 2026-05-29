@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { pool } from './db-client.tsx';
-import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, listChartSources, createInvestorInquiry, listNewsPublic, listAllNewsPublic, getNewsPublic, upsertNewsPublic, deleteNewsPublic, paymentBalancesStore, platformStatsStore, listProducerServices, listServiceOrdersByProducer } from './db.tsx';
+import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, listChartSources, createInvestorInquiry, listNewsPublic, listAllNewsPublic, getNewsPublic, upsertNewsPublic, deleteNewsPublic, paymentBalancesStore, getPlatformStats, setPlatformStats, listProducerServices, listServiceOrdersByProducer } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { sanitizeString, sanitizeUrl } from './security.tsx';
@@ -77,7 +77,7 @@ const landing = new Hono();
 
 landing.get('/popular-artists', async (c) => {
   try {
-    const raw = await platformStatsStore.get('artists:popular');
+    const raw = await getPlatformStats('artists:popular');
     return c.json({ success: true, data: raw || [] });
   } catch (error) {
     console.error('Error fetching popular artists:', error);
@@ -281,7 +281,7 @@ landing.get('/artists', async (c) => {
 landing.get('/charts/weekly', async (c) => {
   try {
     // Read from canonical chart:promofm (has covers from Deezer enrichment)
-    const raw: any = await platformStatsStore.get('chart:promofm');
+    const raw: any = await getPlatformStats('chart:promofm');
     if (raw?.entries) {
       // Lazy-create profiles for chart artists (fire & forget)
       Promise.allSettled(raw.entries.slice(0, 20).map((e: any) => 
@@ -290,7 +290,7 @@ landing.get('/charts/weekly', async (c) => {
       return c.json({ success: true, data: { entries: raw.entries.slice(0, 20), updatedAt: raw.updatedAt } });
     }
     // Fallback to chart:weekly:top20
-    const fallback = await platformStatsStore.get('chart:weekly:top20');
+    const fallback = await getPlatformStats('chart:weekly:top20');
     return c.json({ success: true, data: fallback || { entries: [] } });
   } catch (error) {
     console.error('Error fetching weekly chart:', error);
@@ -526,7 +526,7 @@ landing.get('/tracks/new', async (c) => {
 
     // If no real tracks, fallback to chart data with covers
     if (mapped.length === 0) {
-      const chartData: any = await platformStatsStore.get('chart:promofm');
+      const chartData: any = await getPlatformStats('chart:promofm');
       if (chartData?.entries?.length) {
         const chartTracks = chartData.entries.slice(0, limit).map((e: any, i: number) => ({
           id: 'chart-' + (i + 1),
@@ -1112,7 +1112,7 @@ landing.get('/radio-partners', async (c) => {
 landing.get('/stats', async (c) => {
   try {
     // Mix KV stats with real SQL counts
-    const raw = await platformStatsStore.get('platform');
+    const raw = await getPlatformStats('platform');
     const baseStats = raw || {};
 
     // Track counts from SQL
@@ -1150,7 +1150,7 @@ landing.get('/stats', async (c) => {
 
 landing.get('/genres', async (c) => {
   try {
-    const raw = await platformStatsStore.get('genres');
+    const raw = await getPlatformStats('genres');
     return c.json({ success: true, data: raw || {} });
   } catch (error) {
     return c.json({ success: true, data: {} });
@@ -1256,7 +1256,7 @@ landing.get('/producer-services', async (c) => {
 
 landing.get('/portfolio', async (c) => {
   try {
-    const raw = await platformStatsStore.get('portfolio:public:all');
+    const raw = await getPlatformStats('portfolio:public:all');
     return c.json({ success: true, data: raw || [] });
   } catch (error) {
     return c.json({ success: true, data: [] });
@@ -1607,7 +1607,7 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
         monthlyListeners: a.monthlyListeners || 0, plays: a.plays || 0,
         verified: a.verified || false,
       }));
-    await platformStatsStore.set('artists:popular', validArtists);
+    await setPlatformStats('artists:popular', validArtists);
     results.popularArtists = validArtists.length;
 
     // 2. Platform Stats — use real SQL counts
@@ -1625,7 +1625,7 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
       totalRadioStations: radioStationsCount,
       updatedAt: new Date().toISOString(),
     };
-    await platformStatsStore.set('platform', stats);
+    await setPlatformStats('platform', stats);
     results.platformStats = stats;
 
     // 3. Genres
@@ -1636,7 +1636,7 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
     for (const t of publishedTracks) {
       if ((t as any)?.genre) { const g = (t as any).genre; genreMap[g] = (genreMap[g] || 0) + 1; }
     }
-    await platformStatsStore.set('genres', genreMap);
+    await setPlatformStats('genres', genreMap);
     results.genres = Object.keys(genreMap).length;
 
     // 4. Weekly Chart TOP-20
@@ -1662,7 +1662,7 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
         position: idx + 1, artist: t.artist, title: t.title,
         score: t.score, sources: [...new Set(t.sources)],
       }));
-    await platformStatsStore.set('chart:weekly:top20', { entries: top20, updatedAt: new Date().toISOString() });
+    await setPlatformStats('chart:weekly:top20', { entries: top20, updatedAt: new Date().toISOString() });
     results.weeklyChart = top20.length;
 
     // Auto-create profiles for chart artists
@@ -1829,7 +1829,7 @@ landing.post('/admin/tracks/publish', requireAdminOrKey, async (c) => {
 /** GET /albums/weekly — публичный endpoint */
 landing.get('/albums/weekly', async (c) => {
   try {
-    const cached: any = await platformStatsStore.get('albums:weekly');
+    const cached: any = await getPlatformStats('albums:weekly');
     if (cached?.albums?.length) {
       return c.json({ success: true, data: cached });
     }
@@ -1861,7 +1861,7 @@ landing.post('/admin/albums/weekly', requireAdminOrKey, async (c) => {
       position: a.position ?? i + 1,
     }));
 
-    await platformStatsStore.set('albums:weekly', {
+    await setPlatformStats('albums:weekly', {
       albums: normalized,
       updatedAt: new Date().toISOString(),
       totalAlbums: normalized.length,
@@ -2213,7 +2213,7 @@ landing.post('/build-albums', async (c) => {
   ];
 
   if (finalAlbums.length > 0) {
-    await platformStatsStore.set('albums:weekly', {
+    await setPlatformStats('albums:weekly', {
       albums: finalAlbums,
       updatedAt: new Date().toISOString(),
       totalAlbums: finalAlbums.length,
