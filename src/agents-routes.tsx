@@ -5,7 +5,13 @@
 
 import { Hono } from 'hono';
 import * as db from './db.tsx';
-import { agentSessionsIndexStore, agentSessionsStore } from './db.tsx';
+// agent_sessions — native cols since migration 081. agent_sessions_index
+// DROPPED — derived list через indexed SELECT (см. listAgentSessionSummaries).
+import {
+  getAgentSession, listAgentSessionSummaries, insertAgentSession,
+  appendAgentSessionFollowUp, deleteAgentSession,
+  type AgentSessionRow,
+} from './db.tsx';
 import { pool } from './db-client.tsx';
 import { callLLM, getLLMStatus } from './llm-router.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -119,13 +125,8 @@ async function callAI(messages: { role: 'user' | 'assistant'; content: string }[
   };
 }
 
-async function updateSessionIndex(id: string, title: string, createdAt: string) {
-  const idx: { id: string; title: string; createdAt: string }[] = (await agentSessionsIndexStore.get('singleton') as any) || [];
-  const existing = idx.findIndex(s => s.id === id);
-  if (existing !== -1) idx[existing] = { id, title, createdAt };
-  else idx.unshift({ id, title, createdAt });
-  await agentSessionsIndexStore.set('singleton', idx.slice(0, 100)); // keep last 100
-}
+// updateSessionIndex — REMOVED. Migration 081 DROP'нула agent_sessions_index.
+// List теперь derived через listAgentSessionSummaries() (ORDER BY created_at DESC).
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
@@ -158,8 +159,16 @@ agentsRoutes.post('/discuss', requireAuth, async (c) => {
       followUps: [],
     };
 
-    await agentSessionsStore.set(id, session);
-    await updateSessionIndex(id, title, now);
+    // Native INSERT — derived index list builds itself через next SELECT.
+    await insertAgentSession({
+      id, title, task,
+      status: session.status,
+      messages: session.messages,
+      decisions: session.decisions,
+      followUps: session.followUps || [],
+      createdAt: now,
+      updatedAt: now,
+    } as AgentSessionRow);
 
     return c.json({ success: true, session });
   } catch (error) {
@@ -177,8 +186,9 @@ agentsRoutes.post('/sessions/:id/continue', requireAuth, async (c) => {
 
     if (!followUp) return c.json({ success: false, error: 'Message required' }, 400);
 
-    const session = await agentSessionsStore.get(id) as Session | null;
-    if (!session) return c.json({ success: false, error: 'Session not found' }, 404);
+    const sessionRow = await getAgentSession(id);
+    if (!sessionRow) return c.json({ success: false, error: 'Session not found' }, 404);
+    const session = sessionRow as unknown as Session;
 
     // Build conversation history
     const history: { role: 'user' | 'assistant'; content: string }[] = [
@@ -192,14 +202,9 @@ agentsRoutes.post('/sessions/:id/continue', requireAuth, async (c) => {
 
     const result = await callAI(history);
 
-    const updated: Session = {
-      ...session,
-      followUps: [...(session.followUps || []), result.messages],
-      decisions: [...session.decisions, ...result.decisions],
-      updatedAt: new Date().toISOString(),
-    };
-
-    await agentSessionsStore.set(id, updated);
+    // Atomic append через jsonb || concatenation. Race-free vs legacy
+    // get→mutate→set паттерн — 2 concurrent /continue calls oba сохранятся.
+    await appendAgentSessionFollowUp(id, result.messages, result.decisions);
 
     return c.json({ success: true, messages: result.messages, decisions: result.decisions });
   } catch (error) {
@@ -208,11 +213,11 @@ agentsRoutes.post('/sessions/:id/continue', requireAuth, async (c) => {
   }
 });
 
-// GET /sessions - список сессий
+// GET /sessions - список сессий (derived через ORDER BY created_at DESC LIMIT)
 agentsRoutes.get('/sessions', requireAuth, async (c) => {
   try {
-    const idx = (await agentSessionsIndexStore.get('singleton') as any) || [];
-    return c.json({ success: true, sessions: idx });
+    const sessions = await listAgentSessionSummaries(100);
+    return c.json({ success: true, sessions });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -222,7 +227,7 @@ agentsRoutes.get('/sessions', requireAuth, async (c) => {
 agentsRoutes.get('/sessions/:id', requireAuth, async (c) => {
   try {
     const { id } = c.req.param();
-    const session = await agentSessionsStore.get(id);
+    const session = await getAgentSession(id);
     if (!session) return c.json({ success: false, error: 'Not found' }, 404);
     return c.json({ success: true, session });
   } catch (error) {
@@ -230,13 +235,11 @@ agentsRoutes.get('/sessions/:id', requireAuth, async (c) => {
   }
 });
 
-// DELETE /sessions/:id - удалить сессию
+// DELETE /sessions/:id - удалить сессию (single statement, no index sync).
 agentsRoutes.delete('/sessions/:id', requireAuth, async (c) => {
   try {
     const { id } = c.req.param();
-    await agentSessionsStore.del(id);
-    const idx: any[] = (await agentSessionsIndexStore.get('singleton') as any) || [];
-    await agentSessionsIndexStore.set('singleton', idx.filter((s: any) => s.id !== id));
+    await deleteAgentSession(id);
     return c.json({ success: true });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -329,8 +332,15 @@ agentsRoutes.post('/queue/process', requireAuth, requireAdmin, async (c) => {
           status: 'completed', createdAt: now, updatedAt: now, followUps: [],
         };
 
-        await agentSessionsStore.set(id, session);
-        await updateSessionIndex(id, session.title, now);
+        await insertAgentSession({
+          id, title: session.title, task: session.task,
+          status: session.status,
+          messages: session.messages,
+          decisions: session.decisions,
+          followUps: session.followUps || [],
+          createdAt: now,
+          updatedAt: now,
+        } as AgentSessionRow);
 
         await pool.query(
           `UPDATE agent_tasks

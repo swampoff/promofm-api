@@ -1061,38 +1061,7 @@ export async function upsertPlatformStats(stats: Record<string, any>) {
   if (error) console.error('[db] upsertPlatformStats:', error);
 }
 
-// ─── Agent Sessions ───
-
-export async function getAgentSessions() {
-  const { data, error } = await db()
-    .from('agent_sessions')
-    .select('*')
-    .order('created_at', { ascending: false });
-  if (error) console.error('[db] getAgentSessions:', error);
-  return (data || []).map((r: any) => r.data || r);
-}
-
-export async function getAgentSession(sessionId: string) {
-  const { data, error } = await db()
-    .from('agent_sessions')
-    .select('*')
-    .eq('id', sessionId)
-    .maybeSingle();
-  if (error) console.error('[db] getAgentSession:', error);
-  return data ? (data.data || data) : null;
-}
-
-export async function upsertAgentSession(sessionId: string, session: Record<string, any>) {
-  const row = {
-    id: sessionId,
-    data: session,
-    updated_at: new Date().toISOString(),
-  };
-  const { error } = await db()
-    .from('agent_sessions')
-    .upsert(row, { onConflict: 'id' });
-  if (error) console.error('[db] upsertAgentSession:', error);
-}
+// Agent Sessions — see native typed functions below (migration 081).
 
 // ─── Charts ───
 
@@ -3945,8 +3914,113 @@ export const trackTestExpertsStore = makeJsonbKeyStore('track_test_experts');
 export const trackTestReviewsStore = makeJsonbKeyStore('track_test_reviews');
 export const trackTestRequestReviewsStore = makeJsonbKeyStore('track_test_request_reviews', 'request_id');
 export const newsPipelineStore = makeJsonbKeyStore('news_pipeline', 'key');
-export const agentSessionsStore = makeJsonbKeyStore('agent_sessions');
-export const agentSessionsIndexStore = makeJsonbKeyStore('agent_sessions_index');
+// ─── agent_sessions (native cols since migration 081) ───
+// AI department discussions (ARCH/DEV/SEC/OPS/QA simulated agents).
+// agent_sessions_index DROPPED — replaced by indexed SELECT.
+
+export interface AgentSessionRow {
+  id: string;
+  title: string;
+  task: string;
+  status: string;
+  messages: any[];      // AgentMsg[] — legit nested polymorphic (agent/type/ts varies)
+  decisions: any[];
+  followUps: any[][];   // array of message arrays
+  createdAt: string;
+  updatedAt?: string | null;
+}
+
+function mapAgentSessionRow(r: any): AgentSessionRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  const isoOrNull = (d: any) => d == null ? null : iso(d);
+  return {
+    id: r.id,
+    title: r.title,
+    task: r.task,
+    status: r.status,
+    messages: Array.isArray(r.messages) ? r.messages : [],
+    decisions: Array.isArray(r.decisions) ? r.decisions : [],
+    followUps: Array.isArray(r.follow_ups) ? r.follow_ups : [],
+    createdAt: iso(r.created_at),
+    updatedAt: isoOrNull(r.updated_at),
+  };
+}
+
+const AGENT_SESSION_COLS = `id, title, task, status, messages, decisions,
+  follow_ups, created_at, updated_at`;
+
+export async function getAgentSession(id: string): Promise<AgentSessionRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT ${AGENT_SESSION_COLS} FROM agent_sessions WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return mapAgentSessionRow(r.rows[0]);
+}
+
+/**
+ * Replaces legacy agent_sessions_index store — denormalized list of last N
+ * sessions. Native SELECT через idx_agent_sessions_recent — race-free и
+ * always consistent с актуальной таблицей.
+ */
+export async function listAgentSessionSummaries(limit: number = 100): Promise<Array<{
+  id: string; title: string; createdAt: string;
+}>> {
+  const { pool } = await import('./db-client.tsx');
+  const safeLimit = Math.max(1, Math.min(limit, 500));
+  const r = await pool.query(
+    `SELECT id, title, created_at FROM agent_sessions
+      ORDER BY created_at DESC LIMIT ${safeLimit}`
+  );
+  return r.rows.map(row => ({
+    id: row.id, title: row.title,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+  }));
+}
+
+export async function insertAgentSession(session: AgentSessionRow): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO agent_sessions
+       (id, title, task, status, messages, decisions, follow_ups, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
+             COALESCE($8::timestamptz, NOW()),
+             COALESCE($9::timestamptz, NOW()))`,
+    [
+      session.id, session.title, session.task, session.status || 'completed',
+      JSON.stringify(session.messages || []),
+      JSON.stringify(session.decisions || []),
+      JSON.stringify(session.followUps || []),
+      session.createdAt ?? null,
+      session.updatedAt ?? null,
+    ]
+  );
+}
+
+/**
+ * Atomic append к follow_ups + decisions через UPDATE ... = jsonb || ...
+ * Race-free vs legacy get→mutate→set паттерн в POST /sessions/:id/continue.
+ * 2 concurrent follow-up calls обе сохранят свои messages без потери.
+ */
+export async function appendAgentSessionFollowUp(
+  id: string, messages: any[], newDecisions: any[],
+): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE agent_sessions
+        SET follow_ups = follow_ups || $2::jsonb,
+            decisions  = decisions  || $3::jsonb,
+            updated_at = NOW()
+      WHERE id = $1`,
+    [id, JSON.stringify([messages]), JSON.stringify(newDecisions)]
+  );
+}
+
+export async function deleteAgentSession(id: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(`DELETE FROM agent_sessions WHERE id = $1`, [id]);
+}
 // agent_queue → agent_tasks (row-per-task, migration 036). Доступ через
 // pool.query в agents-routes.tsx.
 // artist_analytics_cache переехал на pool.query с native expires_at TTL
