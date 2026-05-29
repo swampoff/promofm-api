@@ -8,7 +8,8 @@ import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 // email_history — native cols since migration 079. Compound keys '<campaignId>_<kind>_<email>'
 // decomposed на (campaign_id, kind, to_email) tuple — см. findCampaignEmailEvent.
-import { findCampaignEmailEvent, upsertEmailHistory, publishEmailPrefsStore } from './db.tsx';
+// publish_email_prefs — typed access since this PR (см. db.tsx anchor "publish_email_prefs").
+import { findCampaignEmailEvent, upsertEmailHistory, getPublishEmailPrefs, setPublishEmailPrefs } from './db.tsx';
 import { upsertEmailCampaign, getEmailCampaigns } from './db.tsx';
 import { smtpSendEmail, smtpSendBatch } from './smtp-sender.tsx';
 import { vpsListProfiles } from './vps-userdata.tsx';
@@ -71,7 +72,7 @@ async function saveCampaign(campaign: Campaign): Promise<void> {
  */
 async function isUnsubscribed(email: string): Promise<boolean> {
   try {
-    const data = await publishEmailPrefsStore.get(`${UNSUB_PREFIX}${email.toLowerCase()}`);
+    const data = await getPublishEmailPrefs(`${UNSUB_PREFIX}${email.toLowerCase()}`);
     return !!data;
   } catch {
     return false;
@@ -205,7 +206,7 @@ app.post('/unsubscribe', async (c) => {
     }
 
     // Store unsubscribe
-    await publishEmailPrefsStore.set(`${UNSUB_PREFIX}${email}`, {
+    await setPublishEmailPrefs(`${UNSUB_PREFIX}${email}`, {
       email,
       unsubscribed_at: new Date().toISOString(),
       campaign_id: campaignId,

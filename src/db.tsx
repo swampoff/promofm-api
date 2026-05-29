@@ -3629,7 +3629,43 @@ export async function getPublishOrderStats(): Promise<{
 }
 // publish_chats переехал на row-per-message (migration 038). Доступ
 // через pool.query в chat-routes.tsx.
-export const publishEmailPrefsStore = makeUserSingletonStore('publish_email_prefs');
+// ─── publish_email_prefs (typed access since #117) ───
+// Per-user singleton (1 row per user_id с email preferences). Killed wrapper +
+// get→merge→set race через atomic UPSERT с jsonb || merge.
+export async function getPublishEmailPrefs(userId: string): Promise<Record<string, any> | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT data FROM publish_email_prefs WHERE user_id = $1 LIMIT 1`, [userId]
+  );
+  if (r.rows.length === 0) return null;
+  const raw = r.rows[0].data;
+  return typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : (raw || null);
+}
+/** Replaces store.set (full overwrite). */
+export async function setPublishEmailPrefs(userId: string, value: any): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `INSERT INTO publish_email_prefs (user_id, data, created_at, updated_at)
+     VALUES ($1, $2::jsonb, NOW(), NOW())
+     ON CONFLICT (user_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+    [userId, JSON.stringify(value ?? {})]
+  );
+}
+/** Atomic partial merge — race-free vs legacy get+merge+set. */
+export async function patchPublishEmailPrefs(userId: string, patch: Record<string, any>): Promise<Record<string, any>> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `INSERT INTO publish_email_prefs (user_id, data, created_at, updated_at)
+     VALUES ($1, $2::jsonb, NOW(), NOW())
+     ON CONFLICT (user_id) DO UPDATE SET
+       data = COALESCE(publish_email_prefs.data, '{}'::jsonb) || EXCLUDED.data,
+       updated_at = NOW()
+     RETURNING data`,
+    [userId, JSON.stringify(patch)]
+  );
+  return r.rows[0]?.data || patch;
+}
+
 // ─── email_history (native cols since migration 079) ───
 // Transactional emails + campaign send/open/click tracking. Replaces
 // compound-key patterns в email-campaigns-routes.tsx через native

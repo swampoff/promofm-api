@@ -5,7 +5,7 @@
 
 import { Hono } from 'hono';
 import {
-  publishEmailPrefsStore,
+  getPublishEmailPrefs, setPublishEmailPrefs, patchPublishEmailPrefs,
   getEmailHistory, listEmailHistoryByUser, upsertEmailHistory, type EmailHistoryRow,
   listEmailTemplates, getEmailTemplate, upsertEmailTemplate, type EmailTemplate,
 } from './db.tsx';
@@ -28,7 +28,7 @@ app.get('/subscriptions/:userId', requireAuth, requireOwner('userId'), async (c)
   const userId = c.req.param('userId');
   
   try {
-    const subscriptions = await publishEmailPrefsStore.get(userId);
+    const subscriptions = await getPublishEmailPrefs(userId);
 
     // Если настроек нет, возвращаем дефолтные
     if (!subscriptions) {
@@ -58,7 +58,7 @@ app.get('/subscriptions/:userId', requireAuth, requireOwner('userId'), async (c)
         updated_at: new Date().toISOString(),
       };
 
-      await publishEmailPrefsStore.set(userId, defaultSubscriptions);
+      await setPublishEmailPrefs(userId, defaultSubscriptions);
       return c.json({ success: true, data: defaultSubscriptions });
     }
 
@@ -81,17 +81,11 @@ app.put('/subscriptions/:userId', requireAuth, requireOwner('userId'), async (c)
   
   try {
     const body = await c.req.json();
-    const existingSubscriptions = await publishEmailPrefsStore.get(userId);
+    // Atomic jsonb merge — race-free vs legacy get+merge+set.
+    const updatedSubscriptions = await patchPublishEmailPrefs(userId, {
+      ...body, user_id: userId, updated_at: new Date().toISOString(),
+    });
 
-    const updatedSubscriptions = {
-      ...existingSubscriptions,
-      ...body,
-      user_id: userId,
-      updated_at: new Date().toISOString(),
-    };
-
-    await publishEmailPrefsStore.set(userId, updatedSubscriptions);
-    
     return c.json({ success: true, data: updatedSubscriptions });
   } catch (error) {
     console.error('Error updating email subscriptions:', error);
