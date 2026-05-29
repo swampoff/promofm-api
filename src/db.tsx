@@ -4070,8 +4070,12 @@ export const trackTestAllRequestsStore = makeTrackTestAllRequestsView();
 // trackTestExpertsStore — REMOVED. track_test_experts table dropped in
 // migration 053 (derived: SELECT DISTINCT expert_id FROM track_test_expert_stats).
 // Доступ через listRegisteredTrackTestExperts() ниже.
-export const trackTestReviewsStore = makeJsonbKeyStore('track_test_reviews');
-export const trackTestRequestReviewsStore = makeJsonbKeyStore('track_test_request_reviews', 'request_id');
+// trackTestReviewsStore wrapper REMOVED (#116). track_test_reviews — native cols
+// since migration 053; data column DROPPED. Доступ через typed functions ниже
+// (см. anchor "track_test_reviews native cols since migration 053").
+// trackTestRequestReviewsStore wrapper REMOVED (#116). track_test_request_reviews
+// table DROPPED migration 053. Derived через listTrackTestReviewsByRequest
+// (SELECT FROM track_test_reviews WHERE request_id = $1).
 // ─── news_pipeline (typed KV access since #120) ───
 // News CMS pipeline state (sources config, articles:pending/published/rejected
 // buckets, last_run, per-source status). Schema unchanged (key TEXT PK, data
@@ -6337,4 +6341,188 @@ export async function listRegisteredTrackTestExperts(): Promise<string[]> {
     `SELECT DISTINCT expert_id FROM track_test_expert_stats WHERE expert_id IS NOT NULL`
   );
   return r.rows.map(row => row.expert_id as string);
+}
+
+// ─── track_test_reviews native cols since migration 053 (typed access since #116) ───
+//
+// Inline-bootstrap (migration 086) — pure additive CREATE INDEX IF NOT EXISTS,
+// memoized → выполняется один раз per process; на ошибке reset для retry.
+// Если 086 .sql прогнан руками — block no-op (CREATE INDEX IF NOT EXISTS).
+// Pattern matches PR #122 ecosystem_sessions inline bootstrap.
+
+let trackTestReviewIndexBootstrapPromise: Promise<void> | null = null;
+async function ensureTrackTestReviewIndexes(): Promise<void> {
+  if (trackTestReviewIndexBootstrapPromise) return trackTestReviewIndexBootstrapPromise;
+  trackTestReviewIndexBootstrapPromise = (async () => {
+    const { pool } = await import('./db-client.tsx');
+    try {
+      await pool.query(
+        `CREATE INDEX IF NOT EXISTS idx_track_test_reviews_request
+           ON track_test_reviews(request_id, created_at)`
+      );
+      await pool.query(
+        `CREATE INDEX IF NOT EXISTS idx_track_test_reviews_expert
+           ON track_test_reviews(expert_email, created_at DESC)
+           WHERE expert_email IS NOT NULL`
+      );
+    } catch (err) {
+      console.error('[track_test_reviews] index bootstrap failed:', err);
+      trackTestReviewIndexBootstrapPromise = null; // retry on next access
+      throw err;
+    }
+  })();
+  return trackTestReviewIndexBootstrapPromise;
+}
+
+export interface TrackTestReviewRow {
+  id: string;
+  request_id: string;
+  expert_email: string;
+  expert_name: string;
+  expert_role: string | null;
+  status: string;
+  mixing_mastering_score: number;
+  arrangement_score: number;
+  originality_score: number;
+  commercial_potential_score: number;
+  overall_score: number;
+  mixing_mastering_feedback: string;
+  arrangement_feedback: string;
+  originality_feedback: string;
+  commercial_potential_feedback: string;
+  general_feedback: string;
+  recommendations: string;
+  audio_notes: any[];
+  reward_points: number;
+  reward_paid: boolean;
+  created_at: string;
+  completed_at?: string | null;
+}
+
+function mapTrackTestReviewRow(r: any): TrackTestReviewRow | null {
+  if (!r) return null;
+  const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : '');
+  return {
+    id: r.id,
+    request_id: r.request_id,
+    expert_email: r.expert_email,
+    expert_name: r.expert_name,
+    expert_role: r.expert_role ?? null,
+    status: r.status,
+    mixing_mastering_score: Number(r.mixing_mastering_score || 0),
+    arrangement_score: Number(r.arrangement_score || 0),
+    originality_score: Number(r.originality_score || 0),
+    commercial_potential_score: Number(r.commercial_potential_score || 0),
+    overall_score: Number(r.overall_score || 0),
+    mixing_mastering_feedback: r.mixing_mastering_feedback || '',
+    arrangement_feedback: r.arrangement_feedback || '',
+    originality_feedback: r.originality_feedback || '',
+    commercial_potential_feedback: r.commercial_potential_feedback || '',
+    general_feedback: r.general_feedback || '',
+    recommendations: r.recommendations || '',
+    audio_notes: Array.isArray(r.audio_notes) ? r.audio_notes : [],
+    reward_points: Number(r.reward_points || 50),
+    reward_paid: Boolean(r.reward_paid),
+    created_at: iso(r.created_at),
+    completed_at: r.completed_at instanceof Date ? r.completed_at.toISOString() : (r.completed_at || null),
+  };
+}
+
+const TTR_COLS = `id, request_id, expert_email, expert_name, expert_role,
+  status, mixing_mastering_score, arrangement_score, originality_score,
+  commercial_potential_score, overall_score, mixing_mastering_feedback,
+  arrangement_feedback, originality_feedback, commercial_potential_feedback,
+  general_feedback, recommendations, audio_notes, reward_points,
+  reward_paid, created_at, completed_at`;
+
+export async function getTrackTestReview(id: string): Promise<TrackTestReviewRow | null> {
+  const { pool } = await import('./db-client.tsx');
+  await ensureTrackTestReviewIndexes();
+  const r = await pool.query(
+    `SELECT ${TTR_COLS} FROM track_test_reviews WHERE id = $1 LIMIT 1`, [id]
+  );
+  return mapTrackTestReviewRow(r.rows[0]);
+}
+
+/**
+ * Replaces dropped track_test_request_reviews — SELECT по request_id через
+ * idx_track_test_reviews_request (inline-bootstrapped).
+ */
+export async function listTrackTestReviewsByRequest(requestId: string): Promise<TrackTestReviewRow[]> {
+  const { pool } = await import('./db-client.tsx');
+  await ensureTrackTestReviewIndexes();
+  const r = await pool.query(
+    `SELECT ${TTR_COLS} FROM track_test_reviews WHERE request_id = $1
+      ORDER BY created_at ASC`, [requestId]
+  );
+  return r.rows.map(mapTrackTestReviewRow).filter((x): x is TrackTestReviewRow => x !== null);
+}
+
+export async function upsertTrackTestReview(review: TrackTestReviewRow): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await ensureTrackTestReviewIndexes();
+  await pool.query(
+    `INSERT INTO track_test_reviews
+       (id, request_id, expert_email, expert_name, expert_role, status,
+        mixing_mastering_score, arrangement_score, originality_score,
+        commercial_potential_score, overall_score,
+        mixing_mastering_feedback, arrangement_feedback, originality_feedback,
+        commercial_potential_feedback, general_feedback, recommendations,
+        audio_notes, reward_points, reward_paid,
+        created_at, completed_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+             $18::jsonb,$19,$20,
+             COALESCE($21::timestamptz, NOW()), $22::timestamptz, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       request_id                    = EXCLUDED.request_id,
+       expert_email                  = EXCLUDED.expert_email,
+       expert_name                   = EXCLUDED.expert_name,
+       expert_role                   = EXCLUDED.expert_role,
+       status                        = EXCLUDED.status,
+       mixing_mastering_score        = EXCLUDED.mixing_mastering_score,
+       arrangement_score             = EXCLUDED.arrangement_score,
+       originality_score             = EXCLUDED.originality_score,
+       commercial_potential_score    = EXCLUDED.commercial_potential_score,
+       overall_score                 = EXCLUDED.overall_score,
+       mixing_mastering_feedback     = EXCLUDED.mixing_mastering_feedback,
+       arrangement_feedback          = EXCLUDED.arrangement_feedback,
+       originality_feedback          = EXCLUDED.originality_feedback,
+       commercial_potential_feedback = EXCLUDED.commercial_potential_feedback,
+       general_feedback              = EXCLUDED.general_feedback,
+       recommendations               = EXCLUDED.recommendations,
+       audio_notes                   = EXCLUDED.audio_notes,
+       reward_points                 = EXCLUDED.reward_points,
+       reward_paid                   = EXCLUDED.reward_paid,
+       completed_at                  = EXCLUDED.completed_at,
+       updated_at                    = NOW()`,
+    [
+      review.id, review.request_id, review.expert_email, review.expert_name,
+      review.expert_role ?? null, review.status || 'assigned',
+      review.mixing_mastering_score || 0, review.arrangement_score || 0,
+      review.originality_score || 0, review.commercial_potential_score || 0,
+      review.overall_score || 0,
+      review.mixing_mastering_feedback || '',
+      review.arrangement_feedback || '',
+      review.originality_feedback || '',
+      review.commercial_potential_feedback || '',
+      review.general_feedback || '',
+      review.recommendations || '',
+      JSON.stringify(review.audio_notes || []),
+      review.reward_points || 50,
+      Boolean(review.reward_paid),
+      review.created_at ?? null,
+      review.completed_at ?? null,
+    ]
+  );
+}
+
+/**
+ * Atomic mark-reward-paid. Race-free vs legacy get+mutate+set паттерн.
+ */
+export async function markTrackTestReviewRewardPaid(id: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE track_test_reviews SET reward_paid = TRUE, updated_at = NOW() WHERE id = $1`,
+    [id]
+  );
 }

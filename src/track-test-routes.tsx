@@ -1,6 +1,13 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { trackTestAllRequestsStore, getExpertStats, incrementExpertAssigned, completeExpertReviewAndReward, trackTestRequestReviewsStore, trackTestRequestsStore, trackTestReviewsStore, trackTestUserRequestsStore, listRegisteredTrackTestExperts } from './db.tsx';
+import {
+  trackTestAllRequestsStore, trackTestRequestsStore, trackTestUserRequestsStore,
+  getExpertStats, incrementExpertAssigned, completeExpertReviewAndReward,
+  listRegisteredTrackTestExperts,
+  getTrackTestReview, listTrackTestReviewsByRequest,
+  upsertTrackTestReview, markTrackTestReviewRewardPaid,
+  type TrackTestReviewRow,
+} from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { quickLLM, getLLMStatus } from './llm-router.tsx';
@@ -566,21 +573,29 @@ app.post('/assign-experts', requireAuth, requireAdmin, async (c) => {
         created_at: now
       };
 
-      await trackTestReviewsStore.set(reviewId, expertReview);
+      await upsertTrackTestReview({
+        ...(expertReview as unknown as TrackTestReviewRow),
+        created_at: now,
+        completed_at: null,
+        expert_role: null,
+        audio_notes: [],
+        reward_points: 50,
+        reward_paid: false,
+      });
       expertReviews.push(reviewId);
 
       // Отправить уведомление эксперту
       console.log(`Notification sent to expert: ${expertEmail}`);
     }
 
-    // Обновить заявку
+    // Обновить заявку. track_test_request_reviews DROPPED migration 053 —
+    // derived через listTrackTestReviewsByRequest, no separate index write.
     request.assigned_experts = expert_emails;
     request.required_expert_count = required_count || expert_emails.length;
     request.status = 'experts_assigned';
     request.updated_at = now;
 
     await trackTestRequestsStore.set(request_id, request);
-    await trackTestRequestReviewsStore.set(request_id, expertReviews);
 
     console.log(`Assigned ${expert_emails.length} experts to request: ${request_id}`);
 
@@ -635,12 +650,12 @@ app.post('/submit-review', requireAuth, async (c) => {
       }
     }
 
-    const review = await trackTestReviewsStore.get(review_id);
+    const review = await getTrackTestReview(review_id);
     if (!review) {
       return c.json({ error: 'Review not found' }, 404);
     }
 
-    // Обновить оценку
+    // Обновить оценку + reward в одном typed UPSERT.
     review.status = 'completed';
     review.mixing_mastering_score = mixing_mastering_score;
     review.arrangement_score = arrangement_score;
@@ -655,10 +670,8 @@ app.post('/submit-review', requireAuth, async (c) => {
     review.recommendations = recommendations;
     review.audio_notes = audio_notes || [];
     review.completed_at = new Date().toISOString();
-
-    // Выплатить награду эксперту (50 коинов)
     review.reward_paid = true;
-    await trackTestReviewsStore.set(review_id, review);
+    await upsertTrackTestReview(review);
 
     // Atomic completion: +1 completed, +reward_points coins, recompute rating.
     // Race-free vs legacy get→mutate→set паттерн (concurrent review completions
@@ -720,15 +733,10 @@ app.post('/submit-review', requireAuth, async (c) => {
 
 async function consolidateReviews(request: TrackTestRequest) {
   try {
-    const reviewIds = await trackTestRequestReviewsStore.get(request.id) || [];
-    const reviews: ExpertReview[] = [];
-
-    for (const reviewId of reviewIds) {
-      const review = await trackTestReviewsStore.get(reviewId);
-      if (review && review.status === 'completed') {
-        reviews.push(review);
-      }
-    }
+    // Single indexed SELECT (idx_track_test_reviews_request) — заменяет
+    // dropped track_test_request_reviews + N+1 .get fetches.
+    const allReviews = await listTrackTestReviewsByRequest(request.id);
+    const reviews: ExpertReview[] = allReviews.filter(r => r.status === 'completed') as unknown as ExpertReview[];
 
     if (reviews.length === 0) return;
 
@@ -1093,16 +1101,8 @@ app.get('/requests/:id', requireAuth, async (c) => {
       return c.json({ error: 'Request not found' }, 404);
     }
 
-    // Получить все оценки экспертов
-    const reviewIds = await trackTestRequestReviewsStore.get(requestId) || [];
-    const reviews = [];
-
-    for (const reviewId of reviewIds) {
-      const review = await trackTestReviewsStore.get(reviewId);
-      if (review) {
-        reviews.push(review);
-      }
-    }
+    // Single indexed SELECT — заменяет dropped track_test_request_reviews + N+1.
+    const reviews = await listTrackTestReviewsByRequest(requestId);
 
     return c.json({
       success: true,
@@ -1154,23 +1154,18 @@ app.get('/expert/reviews', requireAuth, async (c) => {
       return c.json({ error: 'Expert email required' }, 400);
     }
 
-    // Поиск всех оценок для эксперта
-    const allRequestIds = await trackTestAllRequestsStore.get('singleton') || [];
-    const expertReviews = [];
-
-    for (const requestId of allRequestIds) {
-      const reviewIds = await trackTestRequestReviewsStore.get(requestId) || [];
-      
-      for (const reviewId of reviewIds) {
-        const review = await trackTestReviewsStore.get(reviewId);
-        if (review && review.expert_email === expertEmail) {
-          const request = await trackTestRequestsStore.get(requestId);
-          expertReviews.push({
-            review,
-            request
-          });
-        }
-      }
+    // Native indexed SELECT через idx_track_test_reviews_expert.
+    // Single query вместо O(N*M) iteration through index tables.
+    const { pool: ttPool } = await import('./db-client.tsx');
+    const r = await ttPool.query(
+      `SELECT * FROM track_test_reviews
+        WHERE expert_email = $1 ORDER BY created_at DESC`,
+      [expertEmail]
+    );
+    const expertReviews: any[] = [];
+    for (const row of r.rows) {
+      const request = await trackTestRequestsStore.get(row.request_id);
+      expertReviews.push({ review: row, request });
     }
 
     return c.json({
@@ -1272,12 +1267,13 @@ app.post('/claim-review', requireAuth, async (c) => {
       created_at: now,
     };
 
-    await trackTestReviewsStore.set(reviewId, expertReview);
-
-    // Обновляем список ревью для заявки
-    const existingReviewIds = (await trackTestRequestReviewsStore.get(request_id) || []) as string[];
-    existingReviewIds.push(reviewId);
-    await trackTestRequestReviewsStore.set(request_id, existingReviewIds);
+    await upsertTrackTestReview({
+      ...expertReview,
+      audio_notes: [],
+      completed_at: null,
+    } as unknown as TrackTestReviewRow);
+    // track_test_request_reviews — DROPPED migration 053. List теперь
+    // derived через listTrackTestReviewsByRequest, no separate index write.
 
     // Обновляем заявку
     req.assigned_experts = [...(req.assigned_experts || []), expert_id];
@@ -1342,25 +1338,20 @@ app.get('/expert/stats', requireAuth, async (c) => {
       rating_bonus: 0,
     };
 
-    // Подсчёт реальных данных из ревью
-    const allIds = (await trackTestAllRequestsStore.get('singleton') || []) as string[];
-    let assigned = 0;
-    let completed = 0;
-    let totalCoins = 0;
-
-    for (const id of allIds) {
-      const reviewIds = (await trackTestRequestReviewsStore.get(id) || []) as string[];
-      for (const rid of reviewIds) {
-        const review: any = await trackTestReviewsStore.get(rid);
-        if (review && review.expert_email === expertId) {
-          assigned++;
-          if (review.status === 'completed') {
-            completed++;
-            totalCoins += review.reward_points || 50;
-          }
-        }
-      }
-    }
+    // SQL aggregation через idx_track_test_reviews_expert — заменяет O(N*M)
+    // iteration through dropped index tables.
+    const { pool: ttSPool } = await import('./db-client.tsx');
+    const aggRes = await ttSPool.query(
+      `SELECT
+         COUNT(*)::int AS assigned,
+         COUNT(*) FILTER (WHERE status = 'completed')::int AS completed,
+         COALESCE(SUM(reward_points) FILTER (WHERE status = 'completed'), 0)::int AS total_coins
+         FROM track_test_reviews WHERE expert_email = $1`,
+      [expertId]
+    );
+    const assigned: number = aggRes.rows[0]?.assigned || 0;
+    const completed: number = aggRes.rows[0]?.completed || 0;
+    const totalCoins: number = aggRes.rows[0]?.total_coins || 0;
 
     const ratingBonus = completed * 0.05; // +0.05 к рейтингу за каждый завершённый тест
 
@@ -1389,18 +1380,16 @@ app.get('/expert/my-reviews', requireAuth, async (c) => {
     const expertId = c.req.query('expert_id');
     if (!expertId) return c.json({ error: 'expert_id required' }, 400);
 
-    const allIds = (await trackTestAllRequestsStore.get('singleton') || []) as string[];
+    // Indexed SELECT через idx_track_test_reviews_expert — single query.
+    const { pool: ttMyPool } = await import('./db-client.tsx');
+    const r = await ttMyPool.query(
+      `SELECT * FROM track_test_reviews WHERE expert_email = $1 ORDER BY created_at DESC`,
+      [expertId]
+    );
     const myReviews: any[] = [];
-
-    for (const id of allIds) {
-      const reviewIds = (await trackTestRequestReviewsStore.get(id) || []) as string[];
-      for (const rid of reviewIds) {
-        const review: any = await trackTestReviewsStore.get(rid);
-        if (review && review.expert_email === expertId) {
-          const request: any = await trackTestRequestsStore.get(id);
-          myReviews.push({ review, request });
-        }
-      }
+    for (const review of r.rows) {
+      const request = await trackTestRequestsStore.get(review.request_id);
+      myReviews.push({ review, request });
     }
 
     return c.json({ success: true, reviews: myReviews, total: myReviews.length });
