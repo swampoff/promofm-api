@@ -431,6 +431,34 @@ export async function deleteBanner(bannerId: string) {
   if (error) console.error('[db-typed] deleteBanner:', error);
 }
 
+// Atomic click counter — race-free vs legacy getBannerById+(+1)+updateBanner
+// (которое теряло конкурентные клики). Возвращает новое значение clicks.
+export async function incrementBannerClicks(bannerId: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `UPDATE banner_ads
+        SET clicks = COALESCE(clicks, 0) + 1, updated_at = NOW()
+      WHERE id = $1
+      RETURNING clicks`,
+    [bannerId],
+  );
+  return r.rows[0]?.clicks ?? 0;
+}
+
+// Atomic impressions bump — same race story как и clicks. На каждом GET
+// /active для каждого баннера делался get+1+set. Под нагрузкой (hot страницы
+// landing) impressions терялись массово.
+export async function incrementBannerImpressions(bannerIds: string[]): Promise<void> {
+  if (bannerIds.length === 0) return;
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE banner_ads
+        SET impressions = COALESCE(impressions, 0) + 1, updated_at = NOW()
+      WHERE id = ANY($1::text[])`,
+    [bannerIds],
+  );
+}
+
 // ═══════════════════════════════════════
 // ═══════════════════════════════════════
 // UPCOMING RELEASES (typed `upcoming_releases` table)

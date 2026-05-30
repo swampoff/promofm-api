@@ -60,12 +60,9 @@ app.get('/active', async (c) => {
     const placement = c.req.query('placement') || undefined;
     const banners = await typed.getActiveBanners(placement);
 
-    // Record impressions (fire and forget)
-    for (const b of banners) {
-      typed.updateBanner(b.id, {
-        impressions: (b.impressions || 0) + 1,
-      }).catch(() => {});
-    }
+    // Record impressions atomically — race-free, single UPDATE WHERE id = ANY
+    // вместо N×(get+1+set), которое теряло impressions под нагрузкой.
+    typed.incrementBannerImpressions(banners.map((b: any) => b.id)).catch(() => {});
 
     return c.json({ success: true, data: banners });
   } catch (error) {
@@ -74,16 +71,14 @@ app.get('/active', async (c) => {
   }
 });
 
-// POST /click/:id — Record banner click
+// POST /click/:id — Record banner click. Anonymous endpoint by design
+// (publicly visible banners; click attribution не требует JWT).
+// Atomic UPDATE counter — раньше get+(+1)+set терял конкурентные клики
+// под нагрузкой, особенно на hot-баннерах (hero_main).
 app.post('/click/:id', async (c) => {
   try {
     const bannerId = c.req.param('id');
-    const banner = await typed.getBannerById(bannerId);
-    if (banner) {
-      await typed.updateBanner(bannerId, {
-        clicks: (banner.clicks || 0) + 1,
-      });
-    }
+    await typed.incrementBannerClicks(bannerId);
     return c.json({ success: true });
   } catch (error) {
     return c.json({ success: true }); // Don't fail on click tracking

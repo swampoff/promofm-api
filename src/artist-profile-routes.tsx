@@ -8,6 +8,7 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsListProfiles } from './vps-userdata.tsx';
 import { requireAuth, requireOwner } from './auth-middleware.tsx';
+import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 
@@ -624,17 +625,22 @@ app.get('/popular', async (c) => {
     //   - блочит pg-pool слот пока пишет JSON
     //   - сериализует/десериализует jsonb 2323 раза в pg-node
     //   - и иногда timeout'ит / OOM.
-    // Делаем сортировку и лимит на стороне SQL — ORDER BY
-    // (data->>'track_count')::int DESC NULLS LAST + LIMIT 12.
-    // pg-node binding на jsonb path не требует доп. cast'а.
+    // Делаем сортировку и лимит на стороне SQL — LEFT JOIN tracks с
+    // COUNT FILTER (moderation_status='published'). Заменили dead
+    // legacy ORDER BY data->>'track_count' (key не существует после
+    // KV→native sweep, всегда 0 → реально сортировалось только по
+    // total_followers).
     const { pool } = await import('./db-client.tsx');
     const { rows } = await pool.query(
-      `SELECT user_id, slug, artist_name, genre, sub_genres, city,
-              avatar_url, total_plays, total_followers, is_verified, data
-         FROM artist_profiles
-        WHERE artist_name IS NOT NULL AND artist_name <> ''
-        ORDER BY COALESCE(NULLIF(data->>'track_count', '')::int, 0) DESC NULLS LAST,
-                 total_followers DESC NULLS LAST
+      `SELECT ap.user_id, ap.slug, ap.artist_name, ap.genre, ap.sub_genres, ap.city,
+              ap.avatar_url, ap.total_plays, ap.total_followers, ap.is_verified,
+              COUNT(t.id) FILTER (WHERE t.moderation_status = 'published') AS published_count
+         FROM artist_profiles ap
+         LEFT JOIN tracks t ON t.artist_id = ap.id
+        WHERE ap.artist_name IS NOT NULL AND ap.artist_name <> ''
+        GROUP BY ap.id
+        ORDER BY published_count DESC NULLS LAST,
+                 ap.total_followers DESC NULLS LAST
         LIMIT 12`
     );
 
@@ -647,7 +653,7 @@ app.get('/popular', async (c) => {
       city: p.city || '',
       listeners: p.total_followers || 0,
       plays: p.total_plays || 0,
-      tracks: Number(p.data?.track_count) || 0,
+      tracks: Number(p.published_count) || 0,
       rating: 0,
       avatarUrl: p.avatar_url || '',
       isVerified: p.is_verified || false,
@@ -725,9 +731,13 @@ app.get('/profile/:artistId/tracks', async (c) => {
       }));
       return c.json({ success: true, data: formatted });
     } catch (trackErr) {
-      // Fallback to old method
-      const tracks = await db.getTracksByUser(artistId);
-      return c.json({ success: true, data: tracks || [] });
+      // Был fallback на db.getTracksByUser(artistId), но он lookup'ит
+      // по tracks.user_id, а artistId — это artist_profiles.id (UUID),
+      // не user_id (TEXT). Несовместимые типы + неверный column → 0 rows
+      // у всех артистов. Грубее уронить здесь чем silently выдать пустой
+      // список с success:true (фронт думает что у артиста нет треков).
+      console.error('[ArtistProfile/tracks] dbClient query failed:', trackErr);
+      return c.json({ success: false, error: safeErrorMessage(trackErr) }, 500);
     }
   } catch (error) {
     console.error(`[ArtistProfile] Tracks error: ${error}`);
