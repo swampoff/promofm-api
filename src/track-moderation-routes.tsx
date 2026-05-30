@@ -468,23 +468,34 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         : await resolveTrackPublicationPrice(userIdStr, String(pendingTrackId));
       const isFirstFree = publicationPrice === 0;
 
+      // Free-tracks land in 'upcoming' с UPCOMING_DAYS дней до промоушена в
+      // 'published' (мерируется кроном /promote-upcoming).
+      const UPCOMING_DAYS = 3;
+      const upcomingUntil = isFirstFree
+        ? new Date(Date.now() + UPCOMING_DAYS * 24 * 60 * 60 * 1000).toISOString()
+        : null;
+
+      // Native cols — единственный источник правды (см. KV-mandate,
+      // CLAUDE.md). Никаких data-копий для промоутнутых 062 полей.
+      // is_ai_track (frontend boolean) маппится на native is_ai_generated
+      // (migration 062 backfill). overall_score → ai_score (тоже backfill
+      // в 062). ai_flagged + ai_category — native с 062.
       await typed.updateTrack(pendingTrackId, {
         moderation_status: isFirstFree ? 'upcoming' : 'approved',
         moderation_comment: moderator_notes || (isFirstFree ? 'Трек одобрен (первый трек — бесплатно)' : 'Трек одобрен'),
         moderated_at: now,
         is_hidden: !isFirstFree,
-        is_ai_track: is_ai_track === true || false,
-        data: {
-          ...(track.data || {}),
-          overall_score: overall_score || null,
-          requires_payment: !isFirstFree,
-          payment_amount: publicationPrice,
-          first_track_free_applied: isFirstFree,
-          paid_at: isFirstFree ? now : (track.data?.paid_at || null),
-          ai_flagged: is_ai_track === true || (track.ai_score && track.ai_score > 60) || false,
-          is_ai_track: is_ai_track === true || false,
-          ai_category: is_ai_track ? 'ai_music' : 'original',
-        },
+        is_ai_generated: is_ai_track === true || false,
+        ai_score: overall_score || null,
+        ai_flagged: is_ai_track === true || (track.ai_score && track.ai_score > 60) || false,
+        ai_category: is_ai_track ? 'ai_music' : 'original',
+        requires_payment: !isFirstFree,
+        payment_amount: publicationPrice,
+        first_track_free_applied: isFirstFree,
+        payment_completed: isFirstFree,
+        paid_at: isFirstFree ? now : null,
+        upcoming_until: upcomingUntil,
+        approved_for_release_at: isFirstFree ? now : null,
       });
 
       if (isFirstFree) {
@@ -806,17 +817,24 @@ app.post('/batchModeration', requireAuth, requireAdmin, async (c) => {
         const batchPrice = await resolveTrackPublicationPrice(batchUserId, String(trackId));
         const batchIsFirstFree = batchPrice === 0;
 
+        const UPCOMING_DAYS = 3;
+        const batchUpcomingUntil = batchIsFirstFree
+          ? new Date(Date.now() + UPCOMING_DAYS * 24 * 60 * 60 * 1000).toISOString()
+          : null;
+
+        // Same schema-drift fix as single approve — native cols only,
+        // no dual-write to data jsonb (см. подробный комментарий выше).
         await typed.updateTrack(trackId, {
           moderation_status: batchIsFirstFree ? 'upcoming' : 'approved',
           moderated_at: now,
           is_hidden: !batchIsFirstFree,
-          data: {
-            ...(track.data || {}),
-            requires_payment: !batchIsFirstFree,
-            payment_amount: batchPrice,
-            first_track_free_applied: batchIsFirstFree,
-            paid_at: batchIsFirstFree ? now : (track.data?.paid_at || null),
-          },
+          requires_payment: !batchIsFirstFree,
+          payment_amount: batchPrice,
+          first_track_free_applied: batchIsFirstFree,
+          payment_completed: batchIsFirstFree,
+          paid_at: batchIsFirstFree ? now : null,
+          upcoming_until: batchUpcomingUntil,
+          approved_for_release_at: batchIsFirstFree ? now : null,
         });
       } else {
         await typed.updateTrack(trackId, {
@@ -1072,24 +1090,28 @@ app.post('/promote-upcoming', async (c) => {
   }
 
   try {
+    const now = new Date();
+    // SQL-side filter по native upcoming_until (миграция 062). Раньше
+    // JS-side filter по track.data?.upcoming_until — это был KV reader
+    // на jsonb path, тащил все 'upcoming' rows в JS только чтобы
+    // отфильтровать по date. После 062 — native col + partial index
+    // idx_tracks_upcoming_until покрывает WHERE clause.
     const { rows } = await (await import('./db-client.tsx')).pool.query(
-      `SELECT id, title, artist_name, user_id, data FROM tracks WHERE moderation_status = 'upcoming'`
+      `SELECT id, title, artist_name, user_id, audio_url
+         FROM tracks
+        WHERE moderation_status = 'upcoming'
+          AND upcoming_until IS NOT NULL
+          AND upcoming_until <= $1::timestamptz`,
+      [now.toISOString()]
     );
 
-    const now = new Date();
     let promoted = 0;
 
     for (const track of rows) {
-      const upcomingUntil = track.data?.upcoming_until;
-      if (!upcomingUntil || new Date(upcomingUntil) > now) continue;
-
       await typed.updateTrack(track.id, {
         moderation_status: 'published',
         is_hidden: false,
-        data: {
-          ...(track.data || {}),
-          published_at: now.toISOString(),
-        },
+        published_at: now.toISOString(),
       });
 
       // Stage аудио для air (AutoDJ читает из /mnt/data/promofm-music/tracks/).
