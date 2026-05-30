@@ -53,39 +53,9 @@ export async function getTracksByUser(userId: string) {
   return (data || []).map((r: any) => r.data || r);
 }
 
-export async function getTrack(userId: string, trackId: string) {
-  const { data, error } = await db()
-    .from('tracks')
-    .select('*')
-    .eq('id', `${userId}:${trackId}`)
-    .maybeSingle();
-  if (error) console.error('[db] getTrack:', error);
-  return data ? (data.data || data) : null;
-}
-
-export async function upsertTrack(userId: string, trackId: string, track: Record<string, any>) {
-  const row = {
-    id: `${userId}:${trackId}`,
-    user_id: userId,
-    data: track,
-    updated_at: new Date().toISOString(),
-  };
-  const { data, error } = await db()
-    .from('tracks')
-    .upsert(row, { onConflict: 'id' })
-    .select()
-    .single();
-  if (error) console.error('[db] upsertTrack:', error);
-  return data?.data || data;
-}
-
-export async function deleteTrack(userId: string, trackId: string) {
-  const { error } = await db()
-    .from('tracks')
-    .delete()
-    .eq('id', `${userId}:${trackId}`);
-  if (error) console.error('[db] deleteTrack:', error);
-}
+// Legacy getTrack/upsertTrack/deleteTrack (composite text key `${userId}:${trackId}`
+// против UUID-колонки tracks.id) удалены — никогда не работали на проде.
+// Use db-typed.tsx { getTrackById, insertTrack, updateTrack, deleteTrack }.
 
 // ─── Videos ───
 
@@ -558,29 +528,10 @@ export async function upsertUserSettings(userId: string, settings: Record<string
   if (error) console.error('[db] upsertUserSettings:', error);
 }
 
-// ─── Analytics ───
-
-export async function getTrackAnalytics(trackId: string) {
-  const { data, error } = await db()
-    .from('track_analytics')
-    .select('*')
-    .eq('id', trackId)
-    .maybeSingle();
-  if (error) console.error('[db] getTrackAnalytics:', error);
-  return data ? (data.data || data) : null;
-}
-
-export async function upsertTrackAnalytics(trackId: string, analytics: Record<string, any>) {
-  const row = {
-    id: trackId,
-    data: analytics,
-    updated_at: new Date().toISOString(),
-  };
-  const { error } = await db()
-    .from('track_analytics')
-    .upsert(row, { onConflict: 'id' });
-  if (error) console.error('[db] upsertTrackAnalytics:', error);
-}
+// Legacy getTrackAnalytics/upsertTrackAnalytics удалены — таблица track_analytics
+// не существует ни в одной migration, эти helpers crashed бы при первом
+// вызове. Единственный caller (analytics-routes.tsx) тоже удалён.
+// Если потребуется per-track analytics — отдельным PR'ом с native schema.
 
 // ─── Artist Profiles ───
 
