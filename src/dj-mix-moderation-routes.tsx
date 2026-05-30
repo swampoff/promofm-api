@@ -38,6 +38,11 @@ const MIX_PUBLICATION_PRICE = 5000; // зеркало tracks PUBLICATION_PRICE
 async function resolveDjMixPublicationPrice(djId: string, currentMixId: string): Promise<number> {
   if (!djId) return MIX_PUBLICATION_PRICE;
   try {
+    // Native cols since migration 046 — data jsonb column на dj_mixes DROP'нут.
+    // Раньше код читал data->>'payment_amount' / data->>'first_mix_free_applied',
+    // что crash'ило query (column "data" does not exist) → catch swallowed →
+    // всегда возвращал MIX_PUBLICATION_PRICE → first-mix-free квота никогда
+    // не работала, каждый DJ платил 5000 RUB.
     const r = await pool.query(
       `SELECT EXISTS (
          SELECT 1 FROM dj_mixes
@@ -45,8 +50,8 @@ async function resolveDjMixPublicationPrice(djId: string, currentMixId: string):
             AND id <> $2
             AND (
               (moderation_status IN ('upcoming', 'published')
-                AND COALESCE(NULLIF(data->>'payment_amount', '')::numeric, 0) > 0)
-              OR (data->>'first_mix_free_applied' = 'true')
+                AND COALESCE(payment_amount, 0) > 0)
+              OR first_mix_free_applied = TRUE
             )
        )::int AS used_quota`,
       [djId, currentMixId]
@@ -85,8 +90,14 @@ app.get('/pending-dj-mixes', requireAuth, requireAdmin, async (c) => {
     // LEFT JOIN dj_profiles чтобы выдать имя DJ в админ-таблицу.
     // Если у DJ нет профиля — fallback на user_id.
     const { rows } = await pool.query(
+      // Native cols since migration 046 (data column DROP'нут):
+      // is_premium / price / requires_payment / payment_amount /
+      // first_mix_free_applied. Раньше SELECT m.data crash'ил query.
       `SELECT m.id, m.dj_id, m.title, m.genre, m.duration, m.audio_url, m.cover_url,
-              m.description, m.bpm_range, m.data, m.moderation_status, m.moderated_at,
+              m.description, m.bpm_range,
+              m.is_premium, m.price, m.requires_payment, m.payment_amount,
+              m.first_mix_free_applied,
+              m.moderation_status, m.moderated_at,
               m.moderation_comment, m.rejection_reason, m.is_hidden,
               m.created_at, m.updated_at,
               dp.dj_name AS dj_name, u.email AS dj_email
@@ -111,16 +122,16 @@ app.get('/pending-dj-mixes', requireAuth, requireAdmin, async (c) => {
       coverUrl: r.cover_url || '',
       description: r.description || '',
       bpmRange: r.bpm_range || '',
-      isPremium: !!r.data?.isPremium,
-      price: r.data?.price || 0,
+      isPremium: !!r.is_premium,
+      price: Number(r.price || 0),
       moderationStatus: r.moderation_status,
       moderatedAt: r.moderated_at,
       moderationComment: r.moderation_comment || '',
       rejectionReason: r.rejection_reason || '',
       isHidden: !!r.is_hidden,
-      requiresPayment: !!r.data?.requires_payment,
-      paymentAmount: Number(r.data?.payment_amount || 0),
-      firstMixFreeApplied: !!r.data?.first_mix_free_applied,
+      requiresPayment: !!r.requires_payment,
+      paymentAmount: Number(r.payment_amount || 0),
+      firstMixFreeApplied: !!r.first_mix_free_applied,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     }));
