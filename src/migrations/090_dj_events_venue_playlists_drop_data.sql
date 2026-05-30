@@ -1,0 +1,57 @@
+-- 090_dj_events_venue_playlists_drop_data.sql
+--
+-- Финал KV-mandate sweep: убираем dead `data jsonb` колонки на двух
+-- hybrid таблицах. Обе таблицы используются кодом как row-per-entity
+-- с native cols, `data` остался от legacy KV-схемы (migration 034)
+-- и НИКОГДА не читается/пишется текущим кодом.
+--
+-- Pre-audit verified:
+--
+-- dj_events
+--   Native cols (current schema): app_id TEXT, dj_id TEXT, title, venue,
+--     city, event_date, fee NUMERIC, capacity INT, status TEXT,
+--     event_type TEXT, notes TEXT, extra JSONB, completed_at,
+--     cancelled_at, created_at, updated_at.
+--   Code path: dj-studio-routes.tsx → INSERT/UPDATE/SELECT — все на native.
+--   Legacy: data jsonb NOT NULL DEFAULT '[]'::jsonb (migration 034)
+--     — никаких ALTER TABLE для recreate native columns не было; native
+--     добавлены через inline-bootstrap или отдельную миграцию которая
+--     не попала в репо. Текущие INSERTs не передают data → default '[]'
+--     подставляется → колонка набита пустыми массивами для всех rows.
+--
+-- venue_playlists
+--   Native cols (current schema): app_id, venue_id, owner_id, title,
+--     description, cover_image_url, content_items JSONB, track_count INT,
+--     total_duration INT, is_public BOOL, status TEXT, created_at,
+--     updated_at.
+--   Code path: venue-routes.tsx / venue-api-routes.tsx → INSERT/UPDATE/
+--     SELECT — все на native + content_items (полиморфные элементы playlist).
+--   Legacy: data jsonb NOT NULL DEFAULT '[]'::jsonb (migration 034) —
+--     те же условия что у dj_events.
+--
+-- Verification queries (laptop pre-flight):
+--
+--   -- Sanity: data column всё ещё пустая на проде?
+--   SELECT
+--     (SELECT COUNT(*) FROM dj_events WHERE data IS NULL
+--                                       OR data = '[]'::jsonb
+--                                       OR data = '{}'::jsonb) AS empty_dj,
+--     (SELECT COUNT(*) FROM dj_events)                          AS total_dj,
+--     (SELECT COUNT(*) FROM venue_playlists WHERE data IS NULL
+--                                              OR data = '[]'::jsonb
+--                                              OR data = '{}'::jsonb) AS empty_vp,
+--     (SELECT COUNT(*) FROM venue_playlists)                   AS total_vp;
+--
+--   -- Если empty_X = total_X → все rows имеют empty data → safe DROP.
+--   -- Если есть НЕпустые data — сначала аудит keys:
+--   SELECT jsonb_object_keys(data) AS k, COUNT(*) FROM dj_events
+--     WHERE jsonb_typeof(data) = 'object' GROUP BY k;
+--   SELECT jsonb_array_elements(data)->>'kind' AS k, COUNT(*) FROM dj_events
+--     WHERE jsonb_typeof(data) = 'array' AND jsonb_array_length(data) > 0
+--     GROUP BY k;
+--   -- (same for venue_playlists)
+--
+-- ⚠️ КОНВЕНЦИЯ: НЕТ BEGIN/COMMIT — runner оборачивает.
+
+ALTER TABLE dj_events       DROP COLUMN IF EXISTS data;
+ALTER TABLE venue_playlists DROP COLUMN IF EXISTS data;
