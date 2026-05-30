@@ -999,14 +999,16 @@ app.get('/releases', requireAuth, async (c) => {
     // catches both the "uploaded via /api/tracks" and the
     // "/api/track-moderation/submitTrack" branches.
     const tr = await pool.query(
+      // Migration 089 промоутнула data->>'labelId' в native t.label_id.
+      // Используем native cols + индекс idx_tracks_label_id.
       `SELECT t.id, t.title, t.artist_name, t.moderation_status,
               t.cover_url, t.audio_url, t.genre, t.created_at, t.updated_at,
-              t.artist_id, t.data,
+              t.artist_id, t.label_id,
               ap.artist_name AS resolved_artist_name
        FROM tracks t
        LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
        WHERE t.user_id = $1
-          OR (t.data ->> 'labelId') = $2
+          OR t.label_id = $2
        ORDER BY t.created_at DESC
        LIMIT 200`,
       [gate.userId, gate.labelId]
@@ -1025,12 +1027,9 @@ app.get('/releases', requireAuth, async (c) => {
       rejected: 'rejected',
     };
     for (const row of tr.rows) {
-      let payload: any = row.data;
-      try { if (typeof payload === 'string') payload = JSON.parse(payload); } catch { payload = {}; }
-      const trackLabelId = payload?.labelId;
       // Guard: skip rows owned by this user but explicitly labeled for a
-      // different label (legacy migration safety).
-      if (trackLabelId && trackLabelId !== gate.labelId) continue;
+      // different label (legacy migration safety). Native label_id since 089.
+      if (row.label_id && row.label_id !== gate.labelId) continue;
       releases.push({
         id: row.id,
         type: 'track',

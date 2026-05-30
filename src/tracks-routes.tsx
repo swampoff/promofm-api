@@ -100,17 +100,11 @@ tracksRoutes.post('/', requireAuth, async (c) => {
       audio_url: body.audioUrl || body.audio_url || body.audio_file_url || body.audioFile || body.audio || '',
       cover_url: body.coverUrl || body.cover_url || body.cover_image_url || body.cover || '',
       moderation_status: body.status || 'draft',
-      // Persist label-on-behalf context inside `tracks.data` so the checkout
-      // webhook can dual-notify both the label and the linked artist when the
-      // track is published. Existing `data` keys are preserved.
-      data: {
-        ...(body.data || {}),
-        ...(actingForArtistId ? {
-          actingForArtistId,
-          actingForArtistUserId,
-          labelId,
-        } : {}),
-      },
+      // Label-on-behalf context — native cols (migration 089). actingForArtistId
+      // = artist_id (выше) — redundant, не сохраняем. Если actingForArtistId
+      // не пришёл (обычный artist upload) — поля остаются NULL.
+      label_id:           actingForArtistId ? labelId                : null,
+      acting_for_user_id: actingForArtistId ? actingForArtistUserId  : null,
     });
 
     if (!track) {

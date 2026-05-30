@@ -115,14 +115,16 @@ const AI_CHART_SOURCES: AiChartSource[] = [
   },
 ];
 
-// ── Internal AI source: pull from tracks where data.is_ai = true OR data.aiTool exists ──
+// ── Internal AI source: native cols (migration 062 + 089) ──
+// Migration 062 промоутнула is_ai_generated; 089 промоутнула ai_tool +
+// backfill'нула is_ai_generated для legacy is_ai/isAi/aiTool/aiSource rows.
 async function refreshInternalAiSource(): Promise<number> {
   const r = await pool.query(
     `SELECT id, title, artist_name, cover_url, audio_url, plays_count, likes_count,
-            data->>'aiTool' AS ai_tool, created_at
+            ai_tool, created_at
      FROM tracks
      WHERE moderation_status = 'published'
-       AND (data->>'is_ai' = 'true' OR data->>'isAi' = 'true' OR data->>'aiTool' IS NOT NULL OR data->>'aiSource' IS NOT NULL)
+       AND is_ai_generated = TRUE
        AND audio_url IS NOT NULL AND audio_url <> ''
      ORDER BY (COALESCE(plays_count,0) * 0.1 + COALESCE(likes_count,0)) DESC
      LIMIT 30`

@@ -10,7 +10,9 @@
  *   - ai_check_finished_at   — timestamptz
  *   - ai_check_error         — text (only on error)
  *   - ai_check_result        — jsonb (legit nested analyzer breakdown)
- * Also mirrored into tracks.data->aiCheck (jsonb, for cabinet UI).
+ *
+ * Migration 089 удалила legacy mirror в tracks.data->aiCheck (0 readers,
+ * tracks.data column DROP'нут). Авторитативный источник — track_moderation.
  *
  * Detector contract (POST 127.0.0.1:8085/analyze):
  *   body: { file_path: string, track_id?: string }
@@ -148,14 +150,9 @@ export async function runAiCheck(trackId: string, filePath: string): Promise<Ana
         WHERE id = $1`,
       [`ai_${trackId}`, verdict, JSON.stringify(result)],
     );
-    await pool.query(
-      `UPDATE tracks
-          SET data = COALESCE(data, '{}'::jsonb)
-                     || jsonb_build_object('aiCheck', $2::jsonb),
-              updated_at = now()
-        WHERE id = $1`,
-      [trackId, JSON.stringify(result)],
-    );
+    // Dead mirror dropped (migration 089 — DROP COLUMN tracks.data). Был
+    // комментарий "for cabinet UI" но 0 readers tracks.data->aiCheck в коде.
+    // Авторитативный источник — track_moderation.ai_check_result jsonb выше.
   } catch (e: any) {
     console.error(`[ai-check] persist failed for ${trackId}: ${e?.message || e}`);
   }
