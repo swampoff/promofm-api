@@ -191,7 +191,7 @@ profileRoutes.delete('/account', requireAuth, async (c) => {
     // Log the deletion event (anonymized)
     await pool.query(
       `INSERT INTO audit_logs (user_id, action, details, created_at)
-       VALUES ('DELETED', 'account_deleted', $1, NOW())`,
+       VALUES (NULL, 'account_deleted', $1, NOW())`,
       [JSON.stringify({ tables_affected: Object.keys(deletedCounts).length, timestamp: new Date().toISOString() })]
     ).catch(() => {});
 
@@ -208,6 +208,11 @@ profileRoutes.delete('/account', requireAuth, async (c) => {
         }).catch(() => {});
       }
     } catch {}
+
+    if (deletedCounts.users !== 1) {
+      console.error('[account-delete] incomplete — users row not removed', { userId, deletedCounts });
+      return c.json({ success: false, error: 'Не удалось полностью удалить аккаунт. Обратитесь в поддержку.' }, 500);
+    }
 
     return c.json({
       success: true,
