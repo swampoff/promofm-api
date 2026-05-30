@@ -306,22 +306,16 @@ app.post('/submitTrack', requireAuth, async (c) => {
       uploaded_by_email: c.get('userEmail') || body.uploaded_by_email || body.contact_email || body.email || '',
       user_id: userId,  // owner / payer (label for on-behalf, artist otherwise)
       moderation_status: 'pending',
-      // Opt-in metadata stored in the JSONB `data` blob — no column
-      // migration needed for each new optional field. Server-side
-      // trim/slice as a safety net: the frontend caps these, but
-      // curl / label admin tooling / future on-behalf flows might not.
-      data: {
-        ...(body.shoutout_url ? { shoutout_url: String(body.shoutout_url) } : {}),
-        ...(body.description && String(body.description).trim()
-          ? { description: String(body.description).trim().slice(0, 1000) }
-          : {}),
-        ...(body.music_composer && String(body.music_composer).trim()
-          ? { music_composer: String(body.music_composer).trim().slice(0, 200) }
-          : {}),
-        ...(body.lyricist && String(body.lyricist).trim()
-          ? { lyricist: String(body.lyricist).trim().slice(0, 200) }
-          : {}),
-      },
+      // Opt-in metadata — native cols (migration 089). Server-side trim/slice
+      // как safety net: фронт каппирует, но curl / label admin tooling /
+      // on-behalf flows могут не.
+      shoutout_url:    body.shoutout_url ? String(body.shoutout_url) : null,
+      description:     body.description && String(body.description).trim()
+                         ? String(body.description).trim().slice(0, 1000) : null,
+      music_composer:  body.music_composer && String(body.music_composer).trim()
+                         ? String(body.music_composer).trim().slice(0, 200) : null,
+      lyricist:        body.lyricist && String(body.lyricist).trim()
+                         ? String(body.lyricist).trim().slice(0, 200) : null,
     });
 
     if (!track) {
@@ -398,7 +392,7 @@ app.get('/pendingTracks', requireAuth, requireAdmin, async (c) => {
       uploaded_by_email: t.uploaded_by_email || '',
       uploaded_by_user_id: t.user_id || '',
       moderation_status: t.moderation_status,
-      overall_score: t.data?.overall_score || null,
+      overall_score: t.ai_score ?? null,
       moderator_notes: t.moderation_comment || null,
       rejection_reason: t.rejection_reason || null,
       created_at: t.created_at,
@@ -1288,7 +1282,7 @@ app.post('/send-payment-reminders', async (c) => {
     // Find approved tracks older than minAgeDays whose last_reminder_at (in data) is either null or older than reminderInterval
     const r = await pool.query(`
       SELECT t.id, t.title, t.artist_name, t.uploaded_by_email, t.user_id,
-             u.email as user_email, t.data, t.created_at
+             u.email as user_email, t.created_at
       FROM tracks t LEFT JOIN users u ON u.id::text = t.user_id::text
       WHERE t.moderation_status = 'approved'
         AND t.created_at < NOW() - ($1::int || ' days')::interval

@@ -132,7 +132,7 @@ export async function insertTrack(track: Record<string, any>) {
       duration: track.duration || 0,
       audio_url: track.audio_url || track.audio_file_url || track.audioFile || track.audioUrl || '',
       cover_url: track.cover_url || track.cover_image_url || track.cover || track.coverUrl || '',
-      description: track.description || '',
+      description: track.description || null,
       lyrics: track.lyrics || '',
       user_id: track.user_id || null,
       artist_id: track.artist_id || null,
@@ -146,7 +146,12 @@ export async function insertTrack(track: Record<string, any>) {
       credits: track.credits || {},
       rights: track.rights || {},
       is_paid: track.is_paid || false,
-      data: track.data || {},
+      // Promoted native cols (migration 089 — finalized KV kill on tracks).
+      shoutout_url:       track.shoutout_url       ?? null,
+      music_composer:     track.music_composer     ?? null,
+      lyricist:           track.lyricist           ?? null,
+      label_id:           track.label_id           ?? null,
+      acting_for_user_id: track.acting_for_user_id ?? null,
     })
     .select()
     .single();

@@ -76,13 +76,15 @@ app.get('/current', async (c) => {
       return c.json({ success: true, data: { ...release, tracks: [] } });
     }
 
-    // Get full track data with artist profiles
+    // Get full track data with artist profiles.
+    // Native cols only — migration 089 DROP'нет tracks.data. Frontend
+    // weekly-releases-section читает только plain поля (title/artist_name/
+    // cover_url/...), не track.data.* — grep подтверждён.
     const tracksResult = await pool.query(`
       SELECT
         t.id, t.title, t.artist_name, t.genre, t.duration,
         t.audio_url, t.cover_url, t.release_date,
         t.likes_count, t.plays_count, t.city,
-        t.data,
         ap.id as artist_profile_id,
         ap.slug as artist_slug,
         ap.avatar_url as artist_avatar,
@@ -156,12 +158,12 @@ app.get('/:id', async (c) => {
     const release = releaseResult.rows[0];
     const trackIds = release.track_ids;
 
+    // Native cols only — см. /current выше (migration 089).
     const tracksResult = await pool.query(`
       SELECT
         t.id, t.title, t.artist_name, t.genre, t.duration,
         t.audio_url, t.cover_url, t.release_date,
         t.likes_count, t.plays_count,
-        t.data,
         ap.id as artist_profile_id,
         ap.slug as artist_slug,
         ap.avatar_url as artist_avatar,
