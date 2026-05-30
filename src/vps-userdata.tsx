@@ -235,7 +235,7 @@ export async function vpsListProfiles(role?: string): Promise<Record<string, unk
                         u.is_email_verified as "isEmailVerified",
                         u.created_at as "createdAt",
                         p.genre, p.city,
-                        (SELECT COUNT(*)::int FROM tracks t WHERE t.artist_id = u.id::text) as "tracksCount"
+                        (SELECT COUNT(*)::int FROM tracks t WHERE t.artist_id = u.id) as "tracksCount"
                  FROM users u
                  LEFT JOIN profiles p ON p.user_id = u.id::text`;
     const values: any[] = [];
