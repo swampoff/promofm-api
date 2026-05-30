@@ -1774,8 +1774,15 @@ app.get('/mixes', requireAuth, requireDjRole, async (c) => {
     const userId = await getUserId(c);
     await ensureDjMixesSchema();
     const { rows } = await pool.query(
-      `SELECT id, dj_id, title, genre, duration, plays_count, audio_url, cover_url,
-              description, bpm_range, status, data, created_at, updated_at,
+      // Native cols since migration 046 (data column DROP'нут):
+      // likes_count / downloads_count / comments_count / is_premium / price /
+      // requires_payment / payment_amount / first_mix_free_applied.
+      `SELECT id, dj_id, title, genre, duration, plays_count, likes_count,
+              downloads_count, comments_count, audio_url, cover_url,
+              description, bpm_range, status,
+              is_premium, price, requires_payment, payment_amount,
+              first_mix_free_applied,
+              created_at, updated_at,
               moderation_status, moderated_at, moderation_comment, rejection_reason, is_hidden
          FROM dj_mixes
         WHERE dj_id = $1
@@ -1789,15 +1796,15 @@ app.get('/mixes', requireAuth, requireDjRole, async (c) => {
       duration: r.duration ? `${Math.floor(r.duration / 60)}:${String(r.duration % 60).padStart(2, '0')}` : '',
       durationSec: r.duration || 0,
       plays: r.plays_count || 0,
-      likes: r.data?.likes || 0,
-      downloads: r.data?.downloads || 0,
-      comments: r.data?.comments || 0,
+      likes: r.likes_count || 0,
+      downloads: r.downloads_count || 0,
+      comments: r.comments_count || 0,
       audioUrl: r.audio_url || '',
       coverUrl: r.cover_url || '',
       description: r.description || '',
       bpmRange: r.bpm_range || '',
-      isPremium: !!r.data?.isPremium,
-      price: r.data?.price || 0,
+      isPremium: !!r.is_premium,
+      price: Number(r.price || 0),
       status: r.status || 'published',
       // Зеркало пайплайна tracks: pending/approved/upcoming/published/rejected.
       // Кабинет рисует badge + CTA по этому полю.
@@ -1806,9 +1813,9 @@ app.get('/mixes', requireAuth, requireDjRole, async (c) => {
       moderationComment: r.moderation_comment || '',
       rejectionReason: r.rejection_reason || '',
       isHidden: !!r.is_hidden,
-      requiresPayment: !!r.data?.requires_payment,
-      paymentAmount: Number(r.data?.payment_amount || 0),
-      firstMixFreeApplied: !!r.data?.first_mix_free_applied,
+      requiresPayment: !!r.requires_payment,
+      paymentAmount: Number(r.payment_amount || 0),
+      firstMixFreeApplied: !!r.first_mix_free_applied,
       createdAt: r.created_at,
     }));
     return c.json({ success: true, data: mixes });
