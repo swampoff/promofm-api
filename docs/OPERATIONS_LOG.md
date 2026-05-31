@@ -34,7 +34,93 @@ record of what got executed.
 
 ---
 
-## 2026-05-31 — freemium «первый трек бесплатно» отключён + 2 трека grandfathered
+## 2026-05-31 — Security audit batch (Phase A+B+C) + INC-1 key rotation + INC-3 migration 094
+
+**Контекст:** двухагентный аудит admin-кабинета (frontend + backend, security+privacy). Найдено 3 INCIDENT + 11 КРИТ + 21 ВАЖНО/ЗАМЕТКИ. Отчёт — `docs/AUDIT_admin_security_2026_05_31.md` (PR #135). 18/24 пунктов закрыты, в проде. **Эта запись нужна чтобы следующая сессия знала про прод-ротацию и migration 094, иначе можно случайно «починить» правильный код или повторно применить миграцию.**
+
+### Smerged & deployed (порядок merge'а)
+
+| Batch | PR | Что закрыло |
+|---|---|---|
+| Backend 1 | #136 | INC-1 (cron-скрипты читают `VPS_INTERNAL_KEY` из `.env`, не hardcoded), INC-2 (`/send-payment-reminders` sentinel против `c.json()`-без-throw bypass), B-1 (rate-limit skip ужесточён `isAdminToken` → `isSuperadminToken` — narrow на `SUPERADMIN_EMAIL`+role) |
+| Backend 2 | #137 | INC-3 (migration 094 + route gate на `_errors`), B-2 (`password_hash`/`mfa_secret` strip на источнике в обоих export-loops, не post-step), B-5 (UUID-валидация `orderId` + audio-ext allowlist в content-orders/upload), B-6 (`X-Internal-Key` убран из CORS `allowHeaders`), B-9 (`escapeHtml` экспортирован, обёрнуты HTML email-контексты track/dj-mix moderation), B-10 (verify-profile match users.role) |
+| Backend 3 | #139 | B-8 (новый `src/audit-helper.tsx` + `logAdminAction` подключён к 8 admin actions: track-moderation approve/reject, dj-mix approve/reject, user_approve/reject, profile_verify/unverify, publish_order_status_change + batch, email_campaign_send) |
+| Frontend 1 | #76 | F-1 (убран `userEmail !== ADMIN_EMAIL` в AdminApp.tsx — role-only gate), F-2 (XSS в EmailCampaigns preview, `sanitizeHtml` уже был импортирован но не вызывался на L766), F-4 (Bearer header в apiCall), F-5 (window.confirm перед block user / delete partner) |
+| Frontend 2 | #77 | F-6 (email-campaign draft localStorage→sessionStorage — customEmails не выживает между сессиями), F-9 (AdminDmReports на `config.functionsUrl`), F-10 (`toast.success` в catch блоках Support.tsx → `toast.error`), F-11 (`promptBounded` для DM-report resolution: trim + max 500) |
+| Docs | #135, #138, #140 | аудит-отчёт + threat-detector callout (см. ниже) |
+
+### INC-1 — VPS_INTERNAL_KEY rotation (laptop, ssh prod, выполнено)
+
+- **Что было опасно:** key `b5f5cced4f4297465726e7069e35c1d113319187853b765af0e8b4df80d7acc3` лежал plaintext в 4 cron-скриптах в git репо. Открывал `requireAdminOrKey`-endpoints: `charts/full-update`, `landing/admin/news` CRUD, `landing/admin/tracks` CRUD, `ecosystem/mode/evolve/run`, `concert-agent/*`, `news-agent/*`, `release-agent/*`, `curator/*`, `landing/seed-live`, `landing/releases/archive-past`. Любой с read-доступом к репо → full backend admin.
+- **Сделано laptop'ом:**
+  1. Новый ключ через `openssl rand -hex 32`, записан в `/opt/promofm-api/.env` (gitignored)
+  2. Cron-скрипты после PR #136 читают `${VPS_INTERNAL_KEY}` через `set -a; source /opt/promofm-api/.env; set +a`. Если var отсутствует — `${VAR:?...}` fails loudly (НЕ silent fallback на старый).
+  3. Restart `systemctl restart promofm-api`
+- **Verify (выполнено и подтверждено):**
+  - `curl -H "X-Internal-Key: b5f5cce..."` (старый ключ) → **401** ✅
+  - `curl -H "X-Internal-Key: $NEW_KEY"` → 200/работает ✅
+  - `bash /opt/promofm-api/promote-upcoming-cron.sh` → проходит ✅
+- **Git history scrub:** статус по словам user'а «scrub done», но **не задокументирован способ** (filter-repo / BFG / force-push). Verify-команда на следующей сессии если нужно:
+  ```bash
+  git log --all -p | grep -c 'b5f5cced4f4297465726e7069e35c1d113319187853b765af0e8b4df80d7acc3'
+  # 0 = scrub успешен; >0 = ключ ещё в каком-то ref'е
+  ```
+
+### INC-3 — migration 094 applied to prod (laptop, выполнено)
+
+- **Файл:** `src/migrations/094_delete_user_account_surface_errors.sql` (PR #137)
+- **Что меняет:** `CREATE OR REPLACE FUNCTION public.delete_user_account(p_user_id text)`. Старая функция (092) обёрнута `EXCEPTION WHEN OTHERS THEN NULL` на КАЖДОМ per-table delete — FK violation / RLS denial silently swallowed → orphan PII при `users` delete success. GDPR/152-ФЗ regression vector. 094 различает **expected skip** (`undefined_table`/`undefined_column` — таблица дропнута в mig 091) от **real failure** (FK, RLS) — real failures собираются в `_errors` jsonb. Route gate'ит success на `_errors` пустой (PR #137 hardening profile-routes.tsx).
+- **Apply (выполнено):**
+  ```bash
+  sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+  BEGIN;
+  \i /opt/promofm-api/src/migrations/094_delete_user_account_surface_errors.sql
+  COMMIT;
+  EOF
+  ```
+- **Verify:** round-trip PASS (по словам user'а) — тестовый delete проходит, `_errors` пусто на здоровом пользователе. **Идемпотентно** — `CREATE OR REPLACE` не трогает данные, можно reapply'ить без эффекта.
+
+### threat-detector.tsx:615 callout (INC-2 sentinel — wrong status code, НЕ дыра)
+
+**Симптом:** при verify INC-2 — `POST /server/api/track-moderation/send-payment-reminders` без `X-Internal-Key` И без admin-куки (полностью неавторизованно) → **500 RangeError: init["status"] must be in the range of 200 to 599**. Sentry стек всплывает на `threat-detector.tsx:615 (await next)` — но это middleware на пути, не источник.
+
+**Источник:** sentinel-паттерн в `src/track-moderation-routes.tsx` `/send-payment-reminders` (PR #136). `requireAuth`/`requireAdmin` пишут 401/403 через `c.json()`, **не throw'ят**. Sentinel `let authorized = false; ...; if (!authorized) return;` корректно прерывает, **но в no-auth ветке c.res получает status вне 200-599** (вероятно undefined/0/>599) → RangeError при serialize.
+
+**Важно — bypass всё равно закрыт:** работа не выполняется (fail-closed), просто Hono отвечает 500 вместо чистого 401/403. Это **wrong status code**, не уязвимость. Sentry-нойз + плохая клиентская диагностика.
+
+**Fix TODO** (моя зона как автор sentinel, отдельный PR):
+- Найти где в no-auth ветке выставляется out-of-range status. Скорее всего `c.json(..., <undefined>)` или sentinel return оставляет `c.res` с битым статусом из downstream-write.
+- Заменить sentinel на явный `return c.json({ success: false, error: 'Unauthorized' }, 401)` если `!authorized` (вместо bare `return`).
+- Применить тот же паттерн ко **всем** будущим dual-auth (cron-key ИЛИ admin) endpoints — это generalisable bug.
+
+User записал короткую версию в #140 («threat-detector.tsx:615»). Полная природа — этот entry.
+
+### Что ОСТАЛОСЬ из аудита (Phase D — не сделано)
+
+| # | Что | Почему отложено |
+|---|---|---|
+| **B-3** | `/auth/admin/pending-users` PII pagination | Self-contained, маленький PR — могу сделать в любой сессии |
+| **B-4** | RBAC vs superadmin-gate consistency | Архитектурное решение user'а: одна `requireAdmin` (фактически superadmin) vs полноценный RBAC по permissions. `rate-limiter` trusts role alone; `requireAdmin` требует ещё `SUPERADMIN_EMAIL`. Inconsistency осталась. |
+| **B-7** | `/email-campaigns/unsubscribe` signed token | Self-contained, новый HMAC flow — могу сделать |
+| **F-3** | JWT в localStorage → HttpOnly cookie | Большой backend+frontend coordinated refactor — отдельная сессия с design pass |
+| **F-7** | Secrets рендерятся в admin UI (`Settings.tsx` tbank/yukassa/smtp keys через `GET /api/settings`) | Масштабный write-only refactor — отдельная сессия |
+| **F-8** | CSRF UI toggle misleading (`Settings.tsx:790`) | Зависит от F-3 решения (cookie-auth → нужен реальный CSRF) |
+| **B-8 follow-up** | Audit logging на content-orders delete, landing/admin/tracks delete, banner moderation | Lower-priority — основные trust/money/mass actions покрыты |
+
+### Не сделано (намеренно)
+
+- **`charts-routes.tsx /full-update` запуск** — user попросил «обнови все чарты» в этой сессии, **но я не запускал из cloud** (нет ssh + internal key). Команда отдана laptop'у; запускалась ли — неизвестно cloud-сессии. Если будут вопросы «почему чарты старые» — проверить запуск.
+- **F-8 (CSRF UI toggle)** в #77 — toggle оставлен. Не угадывал backend settings-shape, риск был сломать persistence.
+
+### Follow-ups
+
+- При следующем коде-тач'е track-moderation-routes / любого dual-auth endpoint — починить sentinel status-code (см. threat-detector callout выше).
+- Periodic audit `audit_logs` — теперь B-8 пишет на 8 admin actions, можно построить admin-monitoring дэш / алерты на necesseity-of-resolution decisions (mass-reject, mass-email).
+- Если будет ещё security audit — F-3/F-7 это следующие большие куски.
+
+---
+
+
 
 **Инцидент:** промо «первая публикация бесплатно» раздавало бесплатные публикации (должно быть 5000 ₽ за трек). Отключено по всему стеку:
 - **Backend (PR #132):** isFirstFree=false в track-moderation (single + batch) и dj-mix-moderation. Новый одобренный трек теперь: moderation_status='approved', is_hidden=true, requires_payment=true, payment_amount=5000. Smoke по коду пройден.
