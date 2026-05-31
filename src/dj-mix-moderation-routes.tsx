@@ -185,8 +185,10 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
     const djId = String(mix.dj_id || '');
 
     if (action === 'approve') {
-      const publicationPrice = await resolveDjMixPublicationPrice(djId, String(pendingMixId));
-      const isFirstFree = publicationPrice === 0;
+      // Акция «Первый микс бесплатно» отключена 2026-05-31 (зеркально треки).
+      // resolveDjMixPublicationPrice оставлен для будущих скидок/промокодов.
+      const publicationPrice = MIX_PUBLICATION_PRICE;
+      const isFirstFree = false;
 
       // Для first-mix-free выставляем upcoming_until = now + 3 дня
       // (UPCOMING_DAYS) — без этого cron /promote-upcoming не поднимет
