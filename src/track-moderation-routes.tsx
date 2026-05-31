@@ -454,13 +454,12 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         : '';
 
       const userIdStr = String(track.user_id || '');
-      // AI-tracks go through the separate AI-catalog flow with its own pricing
-      // (see AI email branch below) — they don't draw from the first-track-free
-      // quota. The next non-AI track from this artist still gets the free slot.
-      const publicationPrice = (is_ai_track === true)
-        ? PUBLICATION_PRICE
-        : await resolveTrackPublicationPrice(userIdStr, String(pendingTrackId));
-      const isFirstFree = publicationPrice === 0;
+      // Акция «Первый трек бесплатно» отключена 2026-05-31 (бизнес-решение).
+      // Все треки публикуются за полную цену, никакой бесплатной квоты.
+      // resolveTrackPublicationPrice оставлен для будущей вариативной цены
+      // (промокоды/скидки), но сейчас всегда PUBLICATION_PRICE.
+      const publicationPrice = PUBLICATION_PRICE;
+      const isFirstFree = false;
 
       // Free-tracks land in 'upcoming' с UPCOMING_DAYS дней до промоушена в
       // 'published' (мерируется кроном /promote-upcoming).
@@ -804,12 +803,9 @@ app.post('/batchModeration', requireAuth, requireAdmin, async (c) => {
       }
 
       if (action === 'approve') {
-        // Same first-track-free quota check as the single-approve handler.
-        // Batch ops don't carry an is_ai_track flag, so AI gating only
-        // applies via /manageTrackModeration — batch always honours the quota.
-        const batchUserId = String(track.user_id || '');
-        const batchPrice = await resolveTrackPublicationPrice(batchUserId, String(trackId));
-        const batchIsFirstFree = batchPrice === 0;
+        // Акция «Первый трек бесплатно» отключена 2026-05-31. Всё через paid.
+        const batchPrice = PUBLICATION_PRICE;
+        const batchIsFirstFree = false;
 
         const UPCOMING_DAYS = 3;
         const batchUpcomingUntil = batchIsFirstFree
