@@ -14,6 +14,7 @@
  */
 
 import nodemailer from 'nodemailer';
+import { generateUnsubToken } from './unsub-token.tsx';
 
 const DEFAULT_SMTP_HOST = process.env.SMTP_HOST || 'localhost';
 const DEFAULT_SMTP_PORT = Number(process.env.SMTP_PORT || '25');
@@ -118,9 +119,14 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
 
     if (opts.listUnsubscribe !== false) {
       const email = recipients[0];
-      const unsubUrl = opts.campaignId
-        ? `${UNSUBSCRIBE_URL}?email=${encodeURIComponent(email)}&campaign=${opts.campaignId}`
-        : `${UNSUBSCRIBE_URL}?email=${encodeURIComponent(email)}`;
+      // Audit B-7 (2026-05-31): подписываем unsub-URL HMAC-токеном чтобы
+      // /unsubscribe endpoint мог отвергнуть mass-guess attack (POST с
+      // чужим email без токена). Старые письма без token продолжают
+      // работать в soft-режиме (см. STRICT_UNSUB_TOKEN ENV в endpoint).
+      const { t, sig } = generateUnsubToken(email);
+      const params = new URLSearchParams({ email, t: String(t), sig });
+      if (opts.campaignId) params.set('campaign', opts.campaignId);
+      const unsubUrl = `${UNSUBSCRIBE_URL}?${params.toString()}`;
       headers['List-Unsubscribe'] = `<${unsubUrl}>`;
       headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
     }
