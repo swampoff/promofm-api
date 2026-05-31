@@ -159,8 +159,8 @@ async function scanAndCreate(trackDir) {
     // Upsert artist profile
     const artistId = randomUUID();
     const artistResult = await pool.query(`
-      INSERT INTO artist_profiles (id, user_id, slug, artist_name, genre, data)
-      VALUES ($1, $2, $3, $4, $5, '{"source": "friday_release"}'::jsonb)
+      INSERT INTO artist_profiles (id, user_id, slug, artist_name, genre)
+      VALUES ($1, $2, $3, $4, $5)
       ON CONFLICT (slug) DO UPDATE SET genre = COALESCE(NULLIF(artist_profiles.genre, ''), $5)
       RETURNING id
     `, [artistId, `system-friday-${Date.now()}`, slug, primaryArtist, genre]);
@@ -289,8 +289,8 @@ async function showStatus() {
     console.log(`  ${status} ${r.title} — ${r.actual_tracks} tracks`);
   }
 
-  const trackCount = await pool.query(`SELECT count(*) FROM tracks WHERE data->>'source' = 'friday_release'`);
-  const artistCount = await pool.query(`SELECT count(*) FROM artist_profiles WHERE data->>'source' = 'friday_release'`);
+  const trackCount = await pool.query(`SELECT COUNT(DISTINCT tid)::int AS count FROM weekly_releases wr, unnest(wr.track_ids) AS tid`);
+  const artistCount = await pool.query(`SELECT COUNT(DISTINCT t.artist_id)::int AS count FROM weekly_releases wr, unnest(wr.track_ids) AS tid JOIN tracks t ON t.id = tid WHERE t.artist_id IS NOT NULL`);
 
   console.log(`\n  Total: ${trackCount.rows[0].count} tracks, ${artistCount.rows[0].count} artists\n`);
 }
