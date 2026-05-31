@@ -1815,7 +1815,6 @@ app.get('/mixes', requireAuth, requireDjRole, async (c) => {
       isHidden: !!r.is_hidden,
       requiresPayment: !!r.requires_payment,
       paymentAmount: Number(r.payment_amount || 0),
-      firstMixFreeApplied: !!r.first_mix_free_applied,
       createdAt: r.created_at,
     }));
     return c.json({ success: true, data: mixes });

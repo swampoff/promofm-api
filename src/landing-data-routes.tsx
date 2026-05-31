@@ -441,10 +441,8 @@ landing.get('/tracks/new', async (c) => {
       // прошедшие модерацию И оплату. Опт-ин flow от миграции 031
       // (laptop) делает любой загруженный микс status='published' без
       // модерации — таких в публичную ленту НЕ пускаем. В Новинки
-      // попадают только:
-      //   (a) data.payment_completed=true — checkout webhook прошёл, или
-      //   (b) data.first_mix_free_applied=true — первый микс DJ бесплатно
-      //       (manageDjMixModeration approve выставляет этот флаг).
+      // попадают только треки/миксы с payment_completed=true
+      // (checkout webhook прошёл).
       // Это симметрично tracks: paid без admin-publish не виден тут.
       // Native cols (migration 046): payment_completed/first_mix_free_applied
       // — boolean колонки, partial index idx_dj_mixes_public_catalog
