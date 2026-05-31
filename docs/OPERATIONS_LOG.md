@@ -34,6 +34,23 @@ record of what got executed.
 
 ---
 
+## 2026-05-31 — Admin security audit remediation (Phase A+B+B-8) + KEY ROTATION
+
+Аудит админ-кабинета (`docs/AUDIT_admin_security_2026_05_31.md`, PR #135). Деплой laptop-ом.
+
+**🔑 INC-1 — VPS_INTERNAL_KEY РОТИРОВАН (КРИТИЧНО).** Старый ключ `b5f5cced4f42…` (был хардкожен в 4 cron-скриптах + 9 inline crontab + .env) **МЁРТВ** (curl со старым → 401). Новый ключ в: `/opt/promofm-api/.env`, `/opt/promofm-autodj/.env` (AutoDJ тоже его юзает!), crontab (9 inline заменены). Бэкапы: `/root/api.env.bak-*`, `/root/autodj.env.bak-*`, `/root/crontab.bak-*`. PR #136 убрал хардкод из исходников (cron-скрипты теперь `source .env`).
+  - **⚠️ TODO git-history-scrub:** старый ключ всё ещё в git history (но МЁРТВ → не эксплуатируется). Scrub отложен (переписывание истории = всем re-clone, ломает стэкнутые ветки). Сделать координированно. **НЕ использовать старый ключ — он отключён.**
+
+**INC-2** (#136) — `/send-payment-reminders` auth bypass закрыт. Verified: без ключа не выполняется, с новым ключом → 200.
+**INC-3** (#137, migration 094) — `delete_user_account` теперь собирает реальные ошибки в `_errors` (вместо тихого `WHEN OTHERS THEN NULL`); route 500'ит при partial → нет orphan-PII с false-success. Round-trip pre-flight PASS (uuid+text+users удаляются, _errors чист).
+**B-1** (#136) rate-limit narrow (isAdminToken→isSuperadminToken). **B-8** (#139) audit logging на admin-действиях (`src/audit-helper.tsx` + auth/moderation/publish/email). **B-2/5/6/9** (#137). **Frontend** F-1/2/4/5 (#76) + F-6/9/10/11 (#77).
+
+**🐞 KNOWN DEFECT (follow-up, не дыра):** `threat-detector.tsx:615` — block-ответы строят Response с невалидным status → **RangeError → 500** вместо чистого 401/403/429. Fail-closed (work не идёт), но кривой код. Затрагивает все threat-detector блокировки.
+
+**Phase D (в работе):** B-3 pagination `/auth/admin/pending-users`, B-7 signed unsub `/email-campaigns/unsubscribe`. **Отложено:** F-3/F-7 (большой refactor, нужно scoping), RBAC/cookie-migration (Phase C/D arch-решения).
+
+---
+
 ## 2026-05-31 — freemium «первый трек бесплатно» отключён + 2 трека grandfathered
 
 **Инцидент:** промо «первая публикация бесплатно» раздавало бесплатные публикации (должно быть 5000 ₽ за трек). Отключено по всему стеку:
