@@ -1,21 +1,29 @@
 #!/bin/bash
 # NEWS CRON — сбор новостей каждые 2 часа
-# Ротация: каждый запуск берёт 5 случайных источников из 15
+# Регио-сбалансированная выборка: 2 RU + 1 Africa + 1 Europe + 1 World = 5 за прогон.
+# Гарантирует охват российской индустрии, африканских и европейских новинок КАЖДЫЙ прогон
+# (раньше было 5 случайных из 15 — Африка/Европа выпадали редко).
 INTERNAL_KEY="b5f5cced4f4297465726e7069e35c1d113319187853b765af0e8b4df80d7acc3"
 LOG=/var/log/promofm-news.log
 
-SOURCES=(intermedia theflow rollingstone-ru lenta-music afisha-daily pitchfork nme rollingstone-us consequence guardian-music djmag stereogum remezcla ok-africa cnews-ai)
+# Region buckets
+RU=(intermedia theflow rollingstone-ru lenta-music afisha-daily zvuki-ru cnews-ai)
+AFRICA=(ok-africa music-in-africa notjustok)
+EUROPE=(nme guardian-music djmag les-inrocks factmag)
+WORLD=(pitchfork rollingstone-us consequence stereogum remezcla)
 
 # One host per cycle — like real radio, one DJ per shift
 HOSTS=("DJ Den" "Сандра" "Лиана" "Макс" "Марк" "Пабло" "Нико" "РадКат" "Стелла")
 HOST=${HOSTS[$RANDOM % ${#HOSTS[@]}]}
 
-# Shuffle and pick 5 sources
-SHUFFLED=($(printf '%s\n' "${SOURCES[@]}" | shuf | head -5))
+# pickn N <list...> — N distinct random elements
+pickn() { local n=$1; shift; printf '%s\n' "$@" | shuf | head -n "$n"; }
 
-echo "[$(date -Iseconds)] News cron: host=$HOST, fetching ${SHUFFLED[*]}" >> $LOG
+SELECTED=( $(pickn 2 "${RU[@]}") $(pickn 1 "${AFRICA[@]}") $(pickn 1 "${EUROPE[@]}") $(pickn 1 "${WORLD[@]}") )
 
-for src in "${SHUFFLED[@]}"; do
+echo "[$(date -Iseconds)] News cron: host=$HOST, fetching ${SELECTED[*]}" >> $LOG
+
+for src in "${SELECTED[@]}"; do
   RESULT=$(curl -s -X POST "http://127.0.0.1:3000/server/api/news-agent/fetch/$src" \
     -H 'Content-Type: application/json' \
     -H "X-Internal-Key: $INTERNAL_KEY" \
