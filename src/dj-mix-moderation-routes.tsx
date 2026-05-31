@@ -18,7 +18,7 @@ import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { upsertNotification } from './db.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
-import { sendEmail } from './email-helper.tsx';
+import { sendEmail, escapeHtml } from './email-helper.tsx';
 import crypto from 'crypto';
 
 const app = new Hono();
@@ -189,9 +189,9 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
           + '</div>'
           + '<div style="padding:32px;">'
           + '<p>Добрый день!</p>'
-          + `<p>Ваш микс <strong>«${mix.title}»</strong> прошёл модерацию и одобрен к публикации.</p>`
+          + `<p>Ваш микс <strong>«${escapeHtml(mix.title)}»</strong> прошёл модерацию и одобрен к публикации.</p>`
           + statusBlock
-          + (moderator_notes ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ${moderator_notes}</p>` : '')
+          + (moderator_notes ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ${escapeHtml(moderator_notes)}</p>` : '')
           + ctaButton
           + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
           + '</div>'
@@ -273,9 +273,9 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
         + '</div>'
         + '<div style="padding:32px;">'
         + '<p>Добрый день!</p>'
-        + `<p>Благодарим за отправку микса <strong>«${mix.title}»</strong> на платформу.</p>`
+        + `<p>Благодарим за отправку микса <strong>«${escapeHtml(mix.title)}»</strong> на платформу.</p>`
         + `<p>${bodyText}</p>`
-        + (moderator_notes ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ${moderator_notes}</p>` : '')
+        + (moderator_notes ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ${escapeHtml(moderator_notes)}</p>` : '')
         + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
         + '</div>'
         + '</div>';

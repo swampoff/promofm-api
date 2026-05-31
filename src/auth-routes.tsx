@@ -937,6 +937,25 @@ auth.post("/admin/verify-profile", requireAuth, requireAdmin, async (c) => {
       return c.json({ success: false, error: 'isVerified должно быть boolean' }, 400);
     }
 
+    // Audit B-10 (2026-05-31): verify userId actually HAS the role being
+    // verified. Раньше caller выбирал table по `role` без проверки —
+    // admin/fuzz мог flip is_verified на wrong profile row (например
+    // verified-badge на producer-строке юзера который artist). Fail-open
+    // если users.role отсутствует/unknown — не ломаем edge cases, но
+    // блокируем явный mismatch.
+    {
+      const roleRow = await sql(`SELECT role FROM users WHERE id = $1 LIMIT 1`, [userId]);
+      const actualRole = roleRow.rows[0]?.role as string | undefined;
+      // radio/radio_station alias tolerance
+      const norm = (r?: string) => (r === 'radio' ? 'radio_station' : r);
+      if (actualRole && norm(actualRole) !== norm(role)) {
+        return c.json({
+          success: false,
+          error: `Роль пользователя (${actualRole}) не совпадает с запрошенной (${role})`,
+        }, 400);
+      }
+    }
+
     // All four roles now use the same extended state shape:
     //   On approve: stamp approved_at, clear any previous rejection_reason
     //     so stale rejection messages don't appear after a re-request.
