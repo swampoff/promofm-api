@@ -95,7 +95,7 @@ app.get('/current', async (c) => {
       FROM tracks t
       LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
       WHERE t.id = ANY($1)
-      ORDER BY t.likes_count DESC
+      ORDER BY array_position($1::uuid[], t.id)
     `, [trackIds]);
 
     // Get radio pickups for all tracks
@@ -171,7 +171,7 @@ app.get('/:id', async (c) => {
       FROM tracks t
       LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
       WHERE t.id = ANY($1)
-      ORDER BY t.likes_count DESC
+      ORDER BY array_position($1::uuid[], t.id)
     `, [trackIds]);
 
     const pickupsResult = await pool.query(`
