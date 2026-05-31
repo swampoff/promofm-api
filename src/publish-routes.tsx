@@ -33,6 +33,7 @@ import {
 } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { logAdminAction } from './audit-helper.tsx';
 import { notifyModerationSubmitted } from './email-helper.tsx';
 
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
@@ -816,6 +817,14 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
       ...(order.publishedAt           ? { publishedAt: order.publishedAt } : {}),
     });
 
+    // Audit B-8: forensic trail кто менял статус publish-заявки.
+    logAdminAction(c, {
+      action: 'publish_order_status_change',
+      resourceType: 'publish_order',
+      targetId: String(id),
+      details: { newStatus: status, type: order.type, price: order.price, reason: reason || comment || null },
+    });
+
     // Create notification for the artist
     // If the approve handler bumped the video price (subscriber's monthly free
     // quota was consumed by another order between creation and approval), surface
@@ -1080,6 +1089,14 @@ app.put('/admin/batch-status', requireAuth, requireAdmin, async (c) => {
     const failCount = results.filter((r) => !r.success).length;
 
     console.log(`Batch status update: ${successCount} succeeded, ${failCount} failed`);
+
+    // Audit B-8: forensic trail batch-операции (массовое approve/reject).
+    logAdminAction(c, {
+      action: 'publish_order_batch_status_change',
+      resourceType: 'publish_order',
+      targetId: null,
+      details: { newStatus: status, orderIds, succeeded: successCount, failed: failCount, reason: reason || comment || null },
+    });
 
     return c.json({
       success: true,

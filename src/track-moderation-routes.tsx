@@ -5,6 +5,7 @@
  */
 
 import { notifyTrackUpload, sendEmail, escapeHtml } from './email-helper.tsx';
+import { logAdminAction } from './audit-helper.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { upsertNotification } from './db.tsx';
 import { Hono } from 'hono';
@@ -427,6 +428,14 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
 
       console.log(`[moderation] Track ${pendingTrackId} approved. Awaiting payment ${PUBLICATION_PRICE} RUB.` + aiWarning);
 
+      // Audit B-8: forensic trail кто одобрил.
+      logAdminAction(c, {
+        action: 'track_moderation_approve',
+        resourceType: 'track',
+        targetId: String(pendingTrackId),
+        details: { title: track.title, artist: track.artist_name, price: PUBLICATION_PRICE, isAi: is_ai_track === true },
+      });
+
       // Notify artist: email + in-app
       // Fallback chain: uploaded_by_email → users.email lookup (may be empty for VK/SSO users without email contact)
       let artistEmail = track.uploaded_by_email;
@@ -571,6 +580,14 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         rejection_reason: rejection_reason || '',
         moderation_comment: moderator_notes || null,
         moderated_at: now,
+      });
+
+      // Audit B-8: forensic trail кто отклонил + причина.
+      logAdminAction(c, {
+        action: 'track_moderation_reject',
+        resourceType: 'track',
+        targetId: String(pendingTrackId),
+        details: { title: track.title, artist: track.artist_name, rejectionType: rejection_type || null, reason: rejection_reason || moderator_notes || null },
       });
 
       // Notify artist: email + in-app

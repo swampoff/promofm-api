@@ -9,6 +9,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { Pool } from 'pg';
 import { upsertNotification } from './db.tsx';
+import { logAdminAction } from './audit-helper.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsStoreToken, vpsGetToken, vpsUseToken } from './vps-userdata.tsx';
 import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendVenueRadioWelcomeEmail, sendActivationEmail, sendProfileVerifiedEmail, sendProfileVerificationRejectedEmail } from "./email-helper.tsx";
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
@@ -982,6 +983,14 @@ auth.post("/admin/verify-profile", requireAuth, requireAdmin, async (c) => {
       return c.json({ success: false, error: 'Профиль не найден' }, 404);
     }
 
+    // Audit B-8: forensic trail кто verified/unverified профиль.
+    logAdminAction(c, {
+      action: isVerified ? 'profile_verify' : 'profile_unverify',
+      resourceType: 'profile',
+      targetId: String(userId),
+      details: { role, table, rejectionReason: rejectionReason || null },
+    });
+
     // Fire-and-forget notification email. Distinct from
     // sendAccount{Approved,Rejected}Email which fire on USER-level
     // account approval (users.status='active'). These fire on
@@ -1029,6 +1038,7 @@ auth.post("/admin/approve-user", requireAuth, requireAdmin, async (c) => {
     if (result.rows.length === 0) return c.json({ success: false, error: "Не найден" }, 404);
     const user = result.rows[0];
     sendAccountApprovedEmail(user.email, user.full_name || '').catch(() => {});
+    logAdminAction(c, { action: 'user_approve', resourceType: 'user', targetId: String(userId), details: { email: user.email } });
     const notifId = `notif_approved_${Date.now()}`;
     await upsertNotification(userId, notifId, { id: notifId, userId, type: "info", title: "Аккаунт одобрен!", message: "Ваша заявка одобрена.", read: false, createdAt: new Date().toISOString() });
     return c.json({ success: true, message: "Одобрен" });
@@ -1048,6 +1058,7 @@ auth.post("/admin/reject-user", requireAuth, requireAdmin, async (c) => {
     if (result.rows.length === 0) return c.json({ success: false, error: "Не найден" }, 404);
     const user = result.rows[0];
     sendAccountRejectedEmail(user.email, user.full_name || '', reason || '').catch(() => {});
+    logAdminAction(c, { action: 'user_reject', resourceType: 'user', targetId: String(userId), details: { email: user.email, reason: reason || null } });
     const notifId = `notif_rejected_${Date.now()}`;
     await upsertNotification(userId, notifId, { id: notifId, userId, type: "info", title: "Заявка отклонена", message: reason ? `Причина: ${reason}` : "Заявка отклонена.", read: false, createdAt: new Date().toISOString() });
     return c.json({ success: true, message: "Отклонено" });
