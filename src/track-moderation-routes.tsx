@@ -4,7 +4,7 @@
  * One table, one row per track. No separate moderation store.
  */
 
-import { notifyTrackUpload, sendEmail } from './email-helper.tsx';
+import { notifyTrackUpload, sendEmail, escapeHtml } from './email-helper.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { upsertNotification } from './db.tsx';
 import { Hono } from 'hono';
@@ -458,11 +458,11 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<div style="padding:32px;">'
             + '<p>Добрый день!</p>'
             + '<p>Благодарим вас за доверие и за то, что отправили свой трек на платформу Промо.Музыка. Нам действительно ценно, что вы делитесь своим творчеством с нами.</p>'
-            + '<p>В процессе модерации наша система анализа <strong>Promo.Check</strong> определила, что композиция <strong>«' + track.title + '»</strong> с высокой вероятностью (около ' + aiPercent + '%) была создана с использованием технологий искусственного интеллекта.</p>'
+            + '<p>В процессе модерации наша система анализа <strong>Promo.Check</strong> определила, что композиция <strong>«' + escapeHtml(track.title) + '»</strong> с высокой вероятностью (около ' + aiPercent + '%) была создана с использованием технологий искусственного интеллекта.</p>'
             + '<p>Готовы предложить вам размещение трека в нашем специальном разделе, посвященном AI-контенту.</p>'
             + '<p style="padding:16px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:4px;"><strong>Стоимость размещения составляет ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' рублей.</strong></p>'
             + '<p>Если вам откликается это предложение, мы будем рады продолжить сотрудничество.</p>'
-            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий модератора: ' + moderator_notes + '</p>' : '')
+            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий модератора: ' + escapeHtml(moderator_notes) + '</p>' : '')
             + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#F59E0B,#D97706);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Разместить в AI-каталоге</a></p>'
             + '<p>Спасибо за ваш интерес к новым музыкальным формам.</p>'
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
@@ -487,10 +487,10 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<div style="padding:32px;">'
             + '<p>Добрый день!</p>'
             + '<p>Благодарим вас за отправку трека на платформу Промо.Музыка. Мы внимательно прослушали вашу работу и с радостью сообщаем, что она прошла модерацию.</p>'
-            + '<p>Ваш трек <strong>«' + track.title + '»</strong> одобрен к размещению, и мы будем рады представить его нашей аудитории.</p>'
+            + '<p>Ваш трек <strong>«' + escapeHtml(track.title) + '»</strong> одобрен к размещению, и мы будем рады представить его нашей аудитории.</p>'
             + statusBlock
             + '<p>Спасибо за ваше творчество и доверие к нашей платформе — это действительно ценно для нас.</p>'
-            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + moderator_notes + '</p>' : '')
+            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + escapeHtml(moderator_notes) + '</p>' : '')
             + ctaButton
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
             + '</div>'
@@ -602,7 +602,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<p>Благодарим вас за отправку трека на платформу Промо.Музыка и за доверие к нашему отбору.</p>'
             + '<p>Мы внимательно ознакомились с вашей работой. К сожалению, на данный момент мы не можем принять её к размещению в связи с использованием ненормативной лексики, что не соответствует редакционной политике платформы.</p>'
             + '<p>При этом хотим отметить, что у трека есть своя энергия и характер, и мы будем рады рассмотреть его повторно, если появится версия без соответствующего контента (clean version).</p>'
-            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + moderator_notes + '</p>' : '')
+            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + escapeHtml(moderator_notes) + '</p>' : '')
             + '<p>Спасибо за ваше творчество и понимание.</p>'
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
             + '</div>'
@@ -626,7 +626,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<p>Мы внимательно ознакомились с вашей работой, однако на данный момент не готовы включить её в публикацию. Это решение связано с внутренними критериями отбора и текущей редакционной концепцией платформы.</p>'
             + '<p>Важно отметить, что это не оценка вашего потенциала, скорее вопрос соответствия формату и звучанию, которое мы формируем в данный момент.</p>'
             + '<p>Будем рады, если вы продолжите делиться с нами своими новыми релизами в будущем, возможно, следующая работа идеально совпадёт с нашим направлением.</p>'
-            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + moderator_notes + '</p>' : '')
+            + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + escapeHtml(moderator_notes) + '</p>' : '')
             + '<p>Спасибо за ваше творчество и за то, что выбрали нас.</p>'
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
             + '</div>'
@@ -1211,7 +1211,7 @@ app.post('/send-payment-reminders', async (c) => {
         + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
         + '</div><div style="padding:32px;">'
         + '<p>Добрый день!</p>'
-        + '<p>Ваш трек <strong>«' + t.title + '»</strong> одобрен модерацией и ждёт оплаты для публикации.</p>'
+        + '<p>Ваш трек <strong>«' + escapeHtml(t.title) + '»</strong> одобрен модерацией и ждёт оплаты для публикации.</p>'
         + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Стоимость публикации: <strong>5 000 ₽</strong></p>'
         + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/artist/tracks" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
         + '<p style="color:#888;">Если у вас вопросы — ответьте на это письмо.</p>'

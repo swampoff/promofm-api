@@ -221,6 +221,13 @@ app.get('/stats', requireAuth, requireAdmin, async (c) => {
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
+// Audit B-5 (2026-05-31): allowlist расширений + UUID-валидация orderId.
+// Раньше orderId конкатенировался в filename без sanitization (path
+// traversal: orderId=../../../etc/foo), а ext бралась из user-supplied
+// filename без allowlist (мог быть .php/.html).
+const ALLOWED_CONTENT_EXT = new Set(['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg', 'opus']);
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 app.post('/upload', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.parseBody();
@@ -228,8 +235,17 @@ app.post('/upload', requireAuth, requireAdmin, async (c) => {
     const orderId = body.orderId as string;
     if (!file || !orderId) return c.json({ success: false, error: 'file + orderId required' }, 400);
 
+    // Validate orderId is a real UUID — no path traversal via filename.
+    if (!UUID_RE.test(orderId)) {
+      return c.json({ success: false, error: 'invalid orderId' }, 400);
+    }
+
     const buf = Buffer.from(await file.arrayBuffer());
     const ext = (file.name.split('.').pop() || 'mp3').toLowerCase();
+    // Reject non-audio extensions (no .php/.html/.svg stored under web root).
+    if (!ALLOWED_CONTENT_EXT.has(ext)) {
+      return c.json({ success: false, error: `extension .${ext} not allowed` }, 400);
+    }
     const filename = `content_${orderId}_${Date.now()}.${ext}`;
     const dir = '/opt/promofm-api/uploads/content-orders';
     await fs.mkdir(dir, { recursive: true });
