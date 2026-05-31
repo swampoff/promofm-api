@@ -34,6 +34,20 @@ record of what got executed.
 
 ---
 
+## 2026-05-31 — freemium «первый трек бесплатно» отключён + 2 трека grandfathered
+
+**Инцидент:** промо «первая публикация бесплатно» раздавало бесплатные публикации (должно быть 5000 ₽ за трек). Отключено по всему стеку:
+- **Backend (PR #132):** isFirstFree=false в track-moderation (single + batch) и dj-mix-moderation. Новый одобренный трек теперь: moderation_status='approved', is_hidden=true, requires_payment=true, payment_amount=5000. Smoke по коду пройден.
+- **Frontend (PR #70 + дочистка #72, #73):** убраны ВСЕ freemium-формулировки в разных видах («бесплатно», «без оплаты», «первая публикация», «первого трека») из PricingPage, seo-pages.ts (5 мест), SunoMainContent, FloatingCtaBar, DjMixModeration. Build verified грепом = 0 first-free заявлений. NB: #70 (моб) убрал не все варианты — фразы «без оплаты» / «первого трека» ловятся другим грепом, дочищено #72/#73.
+
+**2 трека успели опубликоваться бесплатно. РЕШЕНИЕ (бизнес): GRANDFATHER — оставить бесплатно, НЕ выставлять счёт, НЕ скрывать. Будущим сессиям: НЕ «чинить» их платность, это намеренно (акция была активна на момент публикации):**
+- Deafness (c313bd82, ANGLDR) — first_track_free_applied=true, upcoming, 0₽
+- Инсульт (97bcb090, Сергей Гребеньков) — first_track_free_applied=true, upcoming, 0₽
+
+**Не сделано (намеренно):** DB-флаги first_track_free_applied / first_mix_free_applied оставлены (впредь всегда false, dead) — cleanup опционален отдельным PR. IndexNow re-ping /pricing — опционально для SEO (Yandex/Google могут держать snippet «первый бесплатно» в кеше).
+
+---
+
 ## 2026-05-31 — news pipeline 089-drift fix (093 + #127) + frontend deploy.sh --delete trap
 
 **Prod-интервенции (laptop, ssh):**
