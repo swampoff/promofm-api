@@ -34,6 +34,20 @@ record of what got executed.
 
 ---
 
+## 2026-05-31 — Новинки недели #22 + friday.js post-089 fix + позиционный порядок
+
+**Что сделано (laptop, ssh prod):**
+- **Релиз #22** «Новинки недели #22 (29 мая 2026)» создан через `friday.js scan` — 10 треков из `~/Desktop/SOULFM_music/PROMOFM` (EMIN/JONY, Tasso, Santana/Becky G, Ariana Grande, Merab Amzoevi, Ruki Vverh!, Irakli, Filatov & Karas, Yolka, McCartney) + Гуськова «Это и есть любовь» (`e77b1053`) добавлена вручную в **позицию 6 (середина)** из 11. is_published=true.
+- **friday.js был СЛОМАН миграцией 089** (DROP tracks.data): INSERT в tracks.data (L190) + showStatus (L292) падали. Пропатчен на VPS, закоммичен в ветку `claude/friday-week22-positional-order` (**PR #126**) — НЕ оставлен dirty-tree. Также убрана KV-запись в `artist_profiles.data` (L162, mandate) + showStatus переписан на native (через weekly_releases). `friday.js status` проверен — работает.
+- **Позиционный порядок новинок** (PR #126): `/landing-data/new-releases` и `/weekly-releases/*` теперь `ORDER BY array_position(track_ids, id)` вместо created_at / likes_count.
+- **Гуськова `e77b1053` — радио**: 4 строки в `track_radio_pickups` (radio_station_id=`9583aacd` Soul FM, города Benidorm/Calpe/Altea/Alicante) → карточка показывает «1 радио, 4 города». is_paid=true.
+- **Soul FM radio_profile `9583aacd`**: `broadcast_cities` = {Benidorm, Calpe, Altea, Alicante} (убраны Denia, Valencia), city=Benidorm.
+
+**Состояние:** #22 опубликован, виден на главной (проверено: API + cover HTTP 200 + audio 206). PR #126 ждёт merge (прод уже применён laptop-ом).
+**TODO:** авто-правило «оплаченные при пятничном обновлении опускаются на 2 позиции, не в низ» в friday.js — НЕ реализовано (в этот раз Гуськова поставлена в середину вручную). Позиционный фундамент готов.
+
+---
+
 ## 2026-05-27 — wipe 69 orphan messages в producer_messages (Wave 1.5)
 
 - **What:** migration 042 wipe'ает 15 строк × 69 сообщений в
