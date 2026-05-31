@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { logAdminAction } from './audit-helper.tsx';
 import { pool } from './db-client.tsx';
 
 const app = new Hono();
@@ -188,6 +189,12 @@ app.delete('/orders/:id', requireAuth, requireAdmin, async (c) => {
     const orderId = c.req.param('id');
     const r = await pool.query(`DELETE FROM content_orders WHERE id = $1 RETURNING id`, [orderId]);
     if (r.rows.length === 0) return c.json({ success: false, error: 'Order not found' }, 404);
+    // Audit B-8 follow-up: forensic trail кто удалил content-order.
+    logAdminAction(c, {
+      action: 'content_order_delete',
+      resourceType: 'content_order',
+      targetId: String(orderId),
+    });
     return c.json({ success: true });
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
