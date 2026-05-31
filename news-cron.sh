@@ -3,7 +3,11 @@
 # Регио-сбалансированная выборка: 2 RU + 1 Africa + 1 Europe + 1 World = 5 за прогон.
 # Гарантирует охват российской индустрии, африканских и европейских новинок КАЖДЫЙ прогон
 # (раньше было 5 случайных из 15 — Африка/Европа выпадали редко).
-INTERNAL_KEY="b5f5cced4f4297465726e7069e35c1d113319187853b765af0e8b4df80d7acc3"
+# Read internal key from .env (gitignored). Hardcoded key removed 2026-05-31 — audit INC-1.
+if [ -f /opt/promofm-api/.env ]; then
+  set -a; source /opt/promofm-api/.env; set +a
+fi
+INTERNAL_KEY="${VPS_INTERNAL_KEY:?VPS_INTERNAL_KEY required — set in /opt/promofm-api/.env}"
 LOG=/var/log/promofm-news.log
 
 # Region buckets

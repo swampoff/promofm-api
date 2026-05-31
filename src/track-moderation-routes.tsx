@@ -1168,12 +1168,15 @@ app.post('/send-payment-reminders', async (c) => {
   const internalKey = c.req.header('X-Internal-Key');
   const isCron = internalKey && internalKey === _expectedRemKey;
   if (!isCron) {
-    // Admin path
-    try {
-      await requireAuth(c, async () => { await requireAdmin(c, async () => {}); });
-    } catch {
-      return c.json({ success: false, error: 'Unauthorized' }, 401);
-    }
+    // Admin path. requireAuth/requireAdmin write 401/403 via c.json() but
+    // DON'T throw — so wrap in a sentinel and verify next() was actually
+    // reached. Without this check unauthenticated POST falls through to
+    // success:true (audit INC-2, 2026-05-31).
+    let authorized = false;
+    await requireAuth(c, async () => {
+      await requireAdmin(c, async () => { authorized = true; });
+    });
+    if (!authorized) return; // middleware already wrote the 401/403 response
   }
 
   try {

@@ -18,15 +18,20 @@ interface RateLimiterOptions {
   skip?: (c: Context) => boolean;  // Optional bypass predicate
 }
 
-// admin/superadmin bypass — System Test fires ~64 batched calls and
-// would otherwise blow through apiLimiter (200/min)
-function isAdminToken(c: Context): boolean {
+// Superadmin-only bypass — System Test fires ~64 batched calls and would
+// otherwise blow through apiLimiter (200/min). Narrowed 2026-05-31 from
+// "any admin role" to "the one superadmin email" — see audit B-1. Any
+// compromised admin-role JWT was previously bypassing rate limits on ALL
+// /server/api/* endpoints (LLM-spend abuse, email-campaign spam, etc.).
+function isSuperadminToken(c: Context): boolean {
   const auth = c.req.header('Authorization');
   const token = auth?.replace('Bearer ', '');
   if (!token || !process.env.JWT_SECRET) return false;
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] }) as any;
-    return decoded?.role === 'admin' || decoded?.role === 'superadmin';
+    const SUPERADMIN_EMAIL = process.env.SUPERADMIN_EMAIL || 'n.moiseev@gmx.de';
+    return (decoded?.role === 'admin' || decoded?.role === 'superadmin')
+        && decoded?.email === SUPERADMIN_EMAIL;
   } catch {
     return false;
   }
@@ -110,5 +115,5 @@ export const apiLimiter = createRateLimiter('api', {
   windowMs: 60000,
   max: 200,          // 200 requests per minute per IP
   message: 'Rate limit exceeded, please slow down',
-  skip: isAdminToken,
+  skip: isSuperadminToken,
 });
