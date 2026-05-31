@@ -332,7 +332,7 @@ landing.get('/new-releases', async (c) => {
          WHERE t.id = ANY($1)
          ORDER BY t.id, COALESCE(ap2.is_verified, ap.is_verified) DESC NULLS LAST
        ) deduped
-       ORDER BY created_at DESC NULLS LAST`,
+       ORDER BY array_position($1::uuid[], id)`,
       [tids]
     );
 

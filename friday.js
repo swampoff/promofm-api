@@ -187,14 +187,13 @@ async function scanAndCreate(trackDir) {
     const audioUrl = `/server/uploads/tracks/${encodeURIComponent(file)}`;
 
     await pool.query(`
-      INSERT INTO tracks (id, artist_id, user_id, title, artist_name, genre, duration, audio_url, release_date, moderation_status, data)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'published', $10)
+      INSERT INTO tracks (id, artist_id, user_id, title, artist_name, genre, duration, audio_url, release_date, moderation_status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'published')
       ON CONFLICT (id) DO NOTHING
     `, [
       trackId, finalArtistId, `system-friday-${Date.now()}`,
       title, artistName, genre, duration, audioUrl,
       now.toISOString(),
-      JSON.stringify({ album: meta.album, source: 'friday_release', week: weekNum, year }),
     ]);
 
     // Extract cover art from MP3
