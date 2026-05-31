@@ -36,7 +36,7 @@ export async function notifyAdminTelegram(text: string): Promise<void> {
 
 
 // HTML entity escaping for safe email template interpolation
-function escapeHtml(str: string): string {
+export function escapeHtml(str: string): string {
   if (!str) return '';
   return String(str)
     .replace(/&/g, '&amp;')

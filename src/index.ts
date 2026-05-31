@@ -183,7 +183,11 @@ app.use('*', rlsMiddleware());
 // CORS
 app.use('/*', cors({
   origin: ['https://promo-music.ru', 'https://www.promo-music.ru', 'https://admin.promo-music.ru', 'https://promofm.org', 'https://www.promofm.org'],
-  allowHeaders: ['Content-Type', 'Authorization', 'X-User-Id', 'X-Internal-Key', 'Cache-Control', 'Accept'],
+  // Audit B-6 (2026-05-31): X-Internal-Key убран из allowHeaders. Cron
+  // вызывает endpoints server-side (localhost), browser CORS preflight
+  // никогда не должен пропускать этот header — иначе XSS на allowed origin
+  // мог бы trigger'ить admin-protected endpoints если получил key.
+  allowHeaders: ['Content-Type', 'Authorization', 'X-User-Id', 'Cache-Control', 'Accept'],
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   exposeHeaders: ['Content-Length'],
   maxAge: 600,

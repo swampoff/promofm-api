@@ -95,11 +95,23 @@ profileRoutes.get('/data-export', requireAuth, async (c) => {
       format_version: '1.0',
     };
 
+    // Audit B-2 (2026-05-31): strip password_hash (+ другие secrets) ВНУТРИ
+    // каждого присвоения, не одним post-step на text-path. Раньше UUID-fallback
+    // loop мог заполнить exportData.users ПОСЛЕ единственного strip-step,
+    // пропуская hash в экспорт. Теперь sanitize на источнике.
+    const stripSecrets = (rows: any[], tableName: string): any[] => {
+      if (tableName !== 'users') return rows;
+      return rows.map((u: any) => {
+        const { password_hash, mfa_secret, ...safe } = u;
+        return safe;
+      });
+    };
+
     for (const table of tables) {
       try {
         const result = await pool.query(table.query, [userId]);
         if (result.rows.length > 0) {
-          exportData[table.name] = result.rows;
+          exportData[table.name] = stripSecrets(result.rows, table.name);
         }
       } catch {
         // Table might not exist or have different schema
@@ -113,18 +125,10 @@ profileRoutes.get('/data-export', requireAuth, async (c) => {
           const uuidQuery = table.query.replace('= $1', '= $1::uuid');
           const result = await pool.query(uuidQuery, [userId]);
           if (result.rows.length > 0) {
-            exportData[table.name] = result.rows;
+            exportData[table.name] = stripSecrets(result.rows, table.name);
           }
         } catch {}
       }
-    }
-
-    // Remove password_hash from export
-    if (exportData.users) {
-      exportData.users = exportData.users.map((u: any) => {
-        const { password_hash, ...safe } = u;
-        return safe;
-      });
     }
 
     // Log the export
@@ -208,6 +212,14 @@ profileRoutes.delete('/account', requireAuth, async (c) => {
         }).catch(() => {});
       }
     } catch {}
+
+    // Audit INC-3 (2026-05-31): gate на _errors. Migration 094 теперь
+    // собирает РЕАЛЬНЫЕ per-table failures (FK violation, RLS) в _errors —
+    // раньше они silently swallowed → orphan PII при success:true.
+    if (deletedCounts._errors && Object.keys(deletedCounts._errors).length > 0) {
+      console.error('[account-delete] partial failure — PII may remain', { userId, errors: deletedCounts._errors });
+      return c.json({ success: false, error: 'Аккаунт удалён частично — часть данных не удалось стереть. Обратитесь в поддержку, мы завершим удаление вручную.' }, 500);
+    }
 
     if (deletedCounts.users !== 1) {
       console.error('[account-delete] incomplete — users row not removed', { userId, deletedCounts });
