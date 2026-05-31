@@ -312,32 +312,23 @@ tracksRoutes.get('/radio-stats/all', async (c) => {
     const userId = await resolveUserId(c);
     if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
     const { pool } = await import('./db-client.tsx');
-    
-    // Get radio stats — try by user_id first, fallback to all tracks with pickups
-    let result = await pool.query(`
-      SELECT 
+
+    // Audit INC-A1 (2026-05-31): раньше при пустом результате был fallback
+    // на ВСЕ треки всех артистов (competitor analytics leak). Удалён —
+    // пустой результат значит "у этого юзера нет треков с pickups",
+    // возвращаем пустой объект (не leak'аем чужие данные).
+    const result = await pool.query(`
+      SELECT
         t.id as track_id,
         COUNT(DISTINCT trp.station_name) as radio_count,
         COUNT(DISTINCT trp.city) as city_count
       FROM tracks t
       LEFT JOIN track_radio_pickups trp ON trp.track_id = t.id
-      WHERE t.user_id = \$1
+      WHERE t.user_id = $1
       GROUP BY t.id
       HAVING COUNT(DISTINCT trp.station_name) > 0
     `, [userId]);
-    
-    // Fallback: if no results by user_id, return all tracks with radio pickups
-    if (result.rows.length === 0) {
-      result = await pool.query(`
-        SELECT 
-          trp.track_id,
-          COUNT(DISTINCT trp.station_name) as radio_count,
-          COUNT(DISTINCT trp.city) as city_count
-        FROM track_radio_pickups trp
-        GROUP BY trp.track_id
-      `);
-    }
-    
+
     // Convert to map: { trackId: { radioCount, cityCount } }
     const stats: Record<string, { radioCount: number; cityCount: number }> = {};
     for (const row of result.rows) {
@@ -346,10 +337,12 @@ tracksRoutes.get('/radio-stats/all', async (c) => {
         cityCount: parseInt(row.city_count) || 0,
       };
     }
-    
+
     return c.json({ success: true, data: stats });
   } catch (error) {
     console.error('Error in GET /tracks/radio-stats/all:', error);
-    return c.json({ success: true, data: {} });
+    // Audit INC-A1: раньше catch отвечал success:true {} → клиент думал
+    // "stats нет", не различая "не доступно сейчас" от "реально пусто".
+    return c.json({ success: false, error: 'Failed to load radio stats' }, 500);
   }
 });
