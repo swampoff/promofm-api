@@ -34,6 +34,19 @@ record of what got executed.
 
 ---
 
+## 2026-05-31 — news pipeline 089-drift fix (093 + #127) + frontend deploy.sh --delete trap
+
+**Prod-интервенции (laptop, ssh):**
+- **trg_sync_news_public ДРОПНУТ** (миграция 093, PR #129). Триггер на news_public делал `IF NEW.data IS NOT NULL ...`, но колонку `news_public.data` снёс KV-kill -> КАЖДЫЙ insert новости падал 500 ("record new has no field data") -> news-agent постил 0 новостей с ~29.03 (2 мес). После дропа: +7 русских новостей за прогон. DDL применён на проде + файл миграции в main.
+- **PR #127** (news-agent prompt). Translation-инструкция была жёстко привязана к английскому ("ИСТОЧНИК НА АНГЛИЙСКОМ") -> remezcla (исп. источник) шёл СЫРЫМ испанским и в /news лендинг, и в TG (один pipeline: news-agent -> upsertNewsPublic -> news_public -> обе поверхности). Обобщён на любой иностранный -> русский. Verified: remezcla теперь по-русски (имена артистов/альбомов оставляет на оригинале). Merged + backend redeploy (git pull main + restart). Старые испанские строки остаются в БД (backfill SQL в описании PR #127).
+
+**DEPLOY TRAP (frontend Promomusicfigma deploy.sh):**
+- deploy.sh делал: rsync -a --delete dist/ -> /var/www/promofm/html/. Папка dist/ НЕ содержит server/ -> флаг --delete СНОСИЛ /var/www/promofm/html/server/uploads/{covers,tracks} (symlinks на /opt/promofm-api/uploads/*) -> отваливались ВСЕ обложки и аудио треков (включая новинки #22). avatars/ безопасен (он есть в dist/).
+- Фикс (PR #67): в deploy.sh добавлен --exclude='/server'. Теперь rsync --delete не трогает uploads-symlinks.
+- ПРАВИЛО: после КАЖДОГО фронт-деплоя проверять `ls /var/www/promofm/html/server/uploads/` (covers + tracks на месте) + cover/audio HTTP 200/206.
+
+---
+
 ## 2026-05-31 — Новинки недели #22 + friday.js post-089 fix + позиционный порядок
 
 **Что сделано (laptop, ssh prod):**
