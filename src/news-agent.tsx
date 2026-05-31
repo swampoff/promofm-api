@@ -320,6 +320,41 @@ export const NEWS_SOURCES: NewsSource[] = [
     category: 'industry',
     parsingHint: 'CNews — технологические новости России. Извлеки ТОЛЬКО новости связанные с AI и музыкой, стримингом, музыкальными технологиями. Игнорируй всё остальное.',
   },
+  {
+    id: 'zvuki-ru',
+    name: 'Звуки.Ру',
+    url: 'https://zvuki.ru/',
+    category: 'releases',
+    parsingHint: 'Звуки.Ру — одно из старейших музыкальных изданий России. Новинки, релизы, интервью, новости российской музыкальной индустрии.',
+  },
+  {
+    id: 'music-in-africa',
+    name: 'Music In Africa',
+    url: 'https://www.musicinafrica.net/magazine/news',
+    category: 'industry',
+    parsingHint: 'Music In Africa — панафриканский музыкальный портал. Новости индустрии, артисты и релизы со всей Африки (afrobeats, amapiano, highlife, gqom). ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+  {
+    id: 'notjustok',
+    name: 'Notjustok',
+    url: 'https://notjustok.com/',
+    category: 'releases',
+    parsingHint: 'Notjustok — ведущее нигерийское издание об афробитс и африканской поп-музыке. Новые релизы, чарты, артисты, премьеры. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+  {
+    id: 'les-inrocks',
+    name: 'Les Inrockuptibles',
+    url: 'https://www.lesinrocks.com/musique/',
+    category: 'releases',
+    parsingHint: 'Les Inrockuptibles — культовое французское музыкальное издание. Новинки, премьеры, европейская инди, шансон, электроника. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
+  {
+    id: 'factmag',
+    name: 'FACT Magazine',
+    url: 'https://www.factmag.com/',
+    category: 'releases',
+    parsingHint: 'FACT Magazine — британско-европейское издание об электронной и андеграунд-музыке. Новинки, премьеры, миксы, европейская клубная сцена. ПЕРЕВЕДИ НА РУССКИЙ.',
+  },
 ];
 
 // ─── HTML Fetching ──────────────────────────────────────
@@ -449,7 +484,7 @@ async function extractNewsWithLLM(
     return [];
   }
 
-  const isInternational = ['pitchfork', 'nme', 'rollingstone-us', 'consequence', 'guardian-music', 'clash-magazine', 'stereogum', 'remezcla', 'ok-africa'].includes(source.id);
+  const isInternational = ['pitchfork', 'nme', 'rollingstone-us', 'consequence', 'guardian-music', 'stereogum', 'remezcla', 'ok-africa', 'music-in-africa', 'notjustok', 'les-inrocks', 'factmag'].includes(source.id);
 
   const systemPrompt = `Ты — ${poster.name}, автор-журналист на музыкальной платформе ПРОМО.МУЗЫКА (promo-music.ru).
 Твой стиль: ${poster.style}.
