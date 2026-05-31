@@ -1185,15 +1185,26 @@ app.post('/send-payment-reminders', async (c) => {
   const internalKey = c.req.header('X-Internal-Key');
   const isCron = internalKey && internalKey === _expectedRemKey;
   if (!isCron) {
-    // Admin path. requireAuth/requireAdmin write 401/403 via c.json() but
-    // DON'T throw — so wrap in a sentinel and verify next() was actually
-    // reached. Without this check unauthenticated POST falls through to
-    // success:true (audit INC-2, 2026-05-31).
+    // Admin path. requireAuth/requireAdmin RETURN c.json(...) on failure
+    // but the returned Response is dropped on the floor here — so wrap in
+    // a sentinel and check it (audit INC-2, 2026-05-31).
+    //
+    // Follow-up 2026-05-31: bare `return;` on !authorized left c.res
+    // unset → Hono built a default Response with status outside 200-599
+    // → RangeError → 500 instead of clean 401 (visible in Sentry on
+    // threat-detector.tsx:615 which is just the next middleware in the
+    // chain). Bypass was always closed (work not executed), but the
+    // status code was junk. Return an explicit 401 to fix the wire
+    // response — semantically we know the request was unauthenticated/
+    // unauthorized, the exact 401-vs-403 distinction doesn't matter for
+    // a client that has no business hitting this endpoint anyway.
     let authorized = false;
     await requireAuth(c, async () => {
       await requireAdmin(c, async () => { authorized = true; });
     });
-    if (!authorized) return; // middleware already wrote the 401/403 response
+    if (!authorized) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
   }
 
   try {
