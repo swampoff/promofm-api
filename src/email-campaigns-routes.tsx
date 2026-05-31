@@ -198,12 +198,35 @@ async function filterUnsubscribed(recipients: { email: string; name: string; rol
 // ============================================
 app.post('/unsubscribe', async (c) => {
   try {
-    const body = await c.req.json();
-    const email = body.email?.trim().toLowerCase();
-    const campaignId = body.campaign_id || null;
+    // Audit B-7 (2026-05-31): accept token из query или body (List-Unsubscribe
+    // ссылки кликают как GET-форму; некоторые клиенты конвертируют в POST с
+    // empty body). Принимаем оба источника.
+    const body = await c.req.json().catch(() => ({}));
+    const q = c.req.query();
+    const email = (body.email || q.email || '').trim().toLowerCase();
+    const campaignId = body.campaign_id || q.campaign || null;
+    const t = body.t ?? q.t;
+    const sig = body.sig ?? q.sig;
 
     if (!email || !email.includes('@')) {
       return c.json({ success: false, error: 'Valid email required' }, 400);
+    }
+
+    // Verify HMAC token.
+    const { verifyUnsubToken } = await import('./unsub-token.tsx');
+    const result = verifyUnsubToken(email, t, sig);
+    const STRICT = process.env.STRICT_UNSUB_TOKEN === 'true';
+
+    if (result.ok === false) {
+      if (result.reason === 'missing' && !STRICT) {
+        // Legacy email (отправленный до 2026-05-31) или ручной запрос —
+        // soft-accept с warning, до закрытия migration window.
+        console.warn(`[Campaigns] Unsub WITHOUT token (legacy/soft): ${email} ip=${c.req.header('x-forwarded-for') || ''}`);
+      } else {
+        // expired / invalid / strict-missing — отклоняем.
+        console.warn(`[Campaigns] Unsub REJECTED (${result.reason}): ${email}`);
+        return c.json({ success: false, error: 'Invalid or expired unsubscribe link' }, 403);
+      }
     }
 
     // Store unsubscribe
@@ -213,7 +236,7 @@ app.post('/unsubscribe', async (c) => {
       campaign_id: campaignId,
     });
 
-    console.log(`[Campaigns] Unsubscribed: ${email} (campaign: ${campaignId || 'all'})`);
+    console.log(`[Campaigns] Unsubscribed: ${email} (campaign: ${campaignId || 'all'}, verified: ${result.ok})`);
     return c.json({ success: true, message: 'Successfully unsubscribed' });
   } catch (error) {
     console.error('[Campaigns] Unsubscribe error:', error);
