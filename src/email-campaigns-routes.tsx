@@ -6,6 +6,7 @@
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { logAdminAction } from './audit-helper.tsx';
 // email_history — native cols since migration 079. Compound keys '<campaignId>_<kind>_<email>'
 // decomposed на (campaign_id, kind, to_email) tuple — см. findCampaignEmailEvent.
 // publish_email_prefs — typed access since this PR (см. db.tsx anchor "publish_email_prefs").
@@ -710,6 +711,14 @@ app.post('/campaigns/:id/send', requireAuth, requireAdmin, async (c) => {
     if (recipients.length === 0) {
       return c.json({ success: false, error: 'No recipients match the segment (or all unsubscribed)' }, 400);
     }
+
+    // Audit B-8: forensic trail кто запустил mass email-кампанию.
+    logAdminAction(c, {
+      action: 'email_campaign_send',
+      resourceType: 'email_campaign',
+      targetId: String(id),
+      details: { name: campaign.name, subject: campaign.subject, recipientCount: recipients.length, segment: campaign.segment },
+    });
 
     // Mark as sending
     campaign.status = 'sending';

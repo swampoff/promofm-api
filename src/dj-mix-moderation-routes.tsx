@@ -19,6 +19,7 @@ import { pool } from './db-client.tsx';
 import { upsertNotification } from './db.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { sendEmail, escapeHtml } from './email-helper.tsx';
+import { logAdminAction } from './audit-helper.tsx';
 import crypto from 'crypto';
 
 const app = new Hono();
@@ -169,6 +170,14 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
 
       console.log(`[dj-mix-moderation] Mix ${pendingMixId} approved. Awaiting payment ${MIX_PUBLICATION_PRICE} RUB.`);
 
+      // Audit B-8: forensic trail кто одобрил микс.
+      logAdminAction(c, {
+        action: 'dj_mix_moderation_approve',
+        resourceType: 'dj_mix',
+        targetId: String(pendingMixId),
+        details: { title: mix.title, djId, price: MIX_PUBLICATION_PRICE },
+      });
+
       // Email DJ (fallback chain: users.email → cabinet-stored email)
       let djEmail = '';
       try {
@@ -252,6 +261,14 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
         WHERE id = $4`,
       [rejection_reason || '', moderator_notes || null, now, pendingMixId]
     );
+
+    // Audit B-8: forensic trail кто отклонил микс + причина.
+    logAdminAction(c, {
+      action: 'dj_mix_moderation_reject',
+      resourceType: 'dj_mix',
+      targetId: String(pendingMixId),
+      details: { title: mix.title, djId, reason },
+    });
 
     let djEmail = '';
     try {
