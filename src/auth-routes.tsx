@@ -894,8 +894,33 @@ auth.post("/change-password", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 auth.get("/admin/pending-users", requireAuth, requireAdmin, async (c) => {
   try {
-    const result = await sql(`SELECT id, email, full_name, role::text, created_at, is_email_verified FROM users WHERE status = 'pending' ORDER BY created_at DESC`);
-    return c.json({ success: true, data: result.rows.map((u: any) => ({ userId: u.id, email: u.email, name: u.full_name, role: u.role, createdAt: u.created_at, isEmailVerified: !!u.is_email_verified })) });
+    // Audit B-3 (2026-05-31): pagination. Раньше отдавался полный dump
+    // pending-users со всеми email + full_name. Surface маленький пока
+    // requireAdmin фактически = superadmin, но defense-in-depth: если
+    // когда-то requireAdmin ослабнет до role='admin' alone, full dump
+    // = PII leak. Cap'аем limit на 200 чтобы не сделать /pending-users
+    // = de-facto export endpoint.
+    const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '50', 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(c.req.query('offset') || '0', 10) || 0, 0);
+
+    const [rows, totalRow] = await Promise.all([
+      sql(`SELECT id, email, full_name, role::text, created_at, is_email_verified
+             FROM users
+            WHERE status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT $1 OFFSET $2`, [limit, offset]),
+      sql(`SELECT COUNT(*)::int AS total FROM users WHERE status = 'pending'`),
+    ]);
+    const total = totalRow.rows[0]?.total ?? 0;
+
+    return c.json({
+      success: true,
+      data: rows.rows.map((u: any) => ({
+        userId: u.id, email: u.email, name: u.full_name, role: u.role,
+        createdAt: u.created_at, isEmailVerified: !!u.is_email_verified,
+      })),
+      pagination: { total, limit, offset, hasMore: offset + rows.rows.length < total },
+    });
   } catch (error) {
     return c.json({ success: false, error: "Internal server error" }, 500);
   }
