@@ -8,6 +8,7 @@
 import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { pool } from './db-client.tsx';
+import { logAdminAction } from './audit-helper.tsx';
 import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, listChartSources, createInvestorInquiry, listNewsPublic, listAllNewsPublic, getNewsPublic, upsertNewsPublic, deleteNewsPublic, paymentBalancesStore, getPlatformStats, setPlatformStats, listProducerServices, listServiceOrdersByProducer } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
@@ -1723,6 +1724,14 @@ landing.delete('/admin/news/:id', requireAdminOrKey, async (c) => {
   try {
     const id = c.req.param('id');
     await deleteNewsPublic(id);
+    // Audit B-8 follow-up: forensic trail. NB: requireAdminOrKey пропускает
+    // и admin JWT и cron X-Internal-Key — actor_id будет null если cron.
+    logAdminAction(c, {
+      action: 'landing_news_delete',
+      resourceType: 'news',
+      targetId: String(id),
+      details: { viaInternalKey: !!c.req.header('X-Internal-Key') },
+    });
     return c.json({ success: true });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -1792,6 +1801,13 @@ landing.delete('/admin/tracks/:id', requireAdminOrKey, async (c) => {
   try {
     const trackId = c.req.param('id');
     await typed.deleteTrack(trackId);
+    // Audit B-8 follow-up: forensic trail.
+    logAdminAction(c, {
+      action: 'landing_track_delete',
+      resourceType: 'track',
+      targetId: String(trackId),
+      details: { viaInternalKey: !!c.req.header('X-Internal-Key') },
+    });
     return c.json({ success: true });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
