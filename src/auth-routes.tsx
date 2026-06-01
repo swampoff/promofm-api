@@ -21,7 +21,7 @@ import {
   createRefreshToken, validateRefreshToken, rotateRefreshToken, revokeAllRefreshTokens, revokeRefreshToken,
   sendSecurityAlert,
 } from './auth-security.tsx';
-import { setSessionCookie, clearSessionCookie } from './cookie-helper.tsx';
+import { setSessionCookie, clearSessionCookie, getSessionCookie, setRefreshCookie, getRefreshCookie, clearRefreshCookie } from './cookie-helper.tsx';
 
 import { createLogger } from "./logger.tsx";
 
@@ -331,6 +331,7 @@ auth.post("/signin", async (c) => {
     const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
     setSessionCookie(c, accessToken);
     const refreshTokenData = await createRefreshToken(user.id, ip, ua);
+    setRefreshCookie(c, refreshTokenData.token);
     await sql(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id]);
     logAuthEvent('signin_success', {
       userId: user.id, description: `Вход: ${email}, роль: ${user.role}`, ip, userAgent: ua,
@@ -448,6 +449,7 @@ auth.post("/vk-callback", async (c) => {
       const ip = c.req.header("x-forwarded-for") || c.req.header("x-real-ip") || "unknown";
       const ua = c.req.header("user-agent") || "unknown";
       const refreshData = await createRefreshToken(eu.id, ip, ua);
+      setRefreshCookie(c, refreshData.token);
       return c.json({
         success: true, newUser: false,
         data: { user: { id: eu.id, email: eu.email, name: profile?.name || eu.full_name || vkName, role }, accessToken, refreshToken: refreshData.token, refreshExpiresAt: Math.floor(refreshData.expiresAt.getTime() / 1000) },
@@ -500,6 +502,7 @@ auth.post("/vk-callback", async (c) => {
     const ip2 = c.req.header("x-forwarded-for") || c.req.header("x-real-ip") || "unknown";
     const ua2 = c.req.header("user-agent") || "unknown";
     const refreshData2 = await createRefreshToken(userId, ip2, ua2);
+    setRefreshCookie(c, refreshData2.token);
     log.info({ email: userEmail, userId }, 'vk_user_created');
 
     return c.json({
@@ -625,12 +628,15 @@ auth.get("/me", requireAuth, async (c) => {
 // POST /auth/signout
 // ──────────────────────────────────────────────────────────────────────
 // Phase D etap A (2026-06-01): дополнительно clear'им session cookie и
-// читаем token из cookie если Bearer header отсутствует. После cookie-only
-// этапа C — Bearer-fallback можно убрать.
+// читаем token из cookie если Bearer header отсутствует.
+// Phase D pf_refresh (2026-06-01): дополнительно clear'им pf_refresh
+// cookie в обоих путях (success + catch). revokeAllRefreshTokens уже
+// инвалидирует все DB-токены пользователя — в т.ч. тот что лежит в
+// pf_refresh — так что специально revokeRefreshToken на cookie-токен
+// дублировать не нужно.
 auth.post("/signout", async (c) => {
   try {
     const bearer = c.req.header("Authorization")?.split(" ")[1];
-    const { getSessionCookie } = await import('./cookie-helper.tsx');
     const cookieTok = getSessionCookie(c);
     const token = bearer || cookieTok;
     if (token) {
@@ -642,9 +648,11 @@ auth.post("/signout", async (c) => {
       }
     }
     clearSessionCookie(c);
+    clearRefreshCookie(c);
     return c.json({ success: true, message: "Signed out successfully" });
   } catch {
     clearSessionCookie(c);
+    clearRefreshCookie(c);
     return c.json({ success: true, message: "Signed out" });
   }
 });
@@ -1150,7 +1158,16 @@ auth.post("/exchange-auto-login", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/refresh", async (c) => {
   try {
-    const { refreshToken } = await c.req.json();
+    // Phase D pf_refresh (2026-06-01): принимаем refresh-токен либо из
+    // body (legacy), либо из pf_refresh cookie (B2-ready). Body имеет
+    // приоритет — если frontend в transitional state шлёт оба, body
+    // — свежий после предыдущего ответа /refresh, cookie может быть
+    // тот же или старее.
+    //
+    // Empty-body case: cookie-only клиент шлёт POST без body. c.req.json()
+    // тогда throw — оборачиваем в catch, продолжаем с cookie.
+    const body = await c.req.json().catch(() => ({} as any));
+    const refreshToken: string | undefined = body?.refreshToken || getRefreshCookie(c);
     if (!refreshToken) return c.json({ success: false, error: "Refresh token required" }, 400);
 
     const validation = await validateRefreshToken(refreshToken);
@@ -1168,12 +1185,19 @@ auth.post("/refresh", async (c) => {
     const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || c.req.header('x-real-ip') || '';
     const ua = c.req.header('user-agent') || '';
 
-    // Rotate refresh token (old one revoked, new one issued)
+    // Rotate refresh token (old one revoked, new one issued).
+    // Reuse-detection: после rotateRefreshToken старый токен в БД помечен
+    // revoked_at — повторный /refresh с тем же refreshToken (cookie ещё
+    // не успел обновиться у клиента) даст valid=false на validateRefresh
+    // выше. Это намеренно: refresh-токен — одноразовый.
     const newRefresh = await rotateRefreshToken(refreshToken, user.id, ip, ua);
     if (!newRefresh) return c.json({ success: false, error: "Token rotation failed" }, 401);
 
     const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
     setSessionCookie(c, accessToken);
+    // Ротация: cookie должна получить НОВЫЙ refresh-токен, иначе при
+    // следующем /refresh клиент пришлёт уже revoke'нутый старый.
+    setRefreshCookie(c, newRefresh.token);
 
     return c.json({
       success: true,
