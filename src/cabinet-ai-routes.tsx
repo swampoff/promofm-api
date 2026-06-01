@@ -15,6 +15,18 @@ const app = new Hono();
 
 const aiHistoryMap = new Map<string, { question: string; response: string; timestamp: string }>();
 
+/**
+ * Clear the in-memory cabinet-AI per-user history map. Used by admin
+ * ops endpoint `/admin/ops/clear-cache`. Возвращает кол-во очищенных
+ * ключей. После очистки следующий /cabinet-ai-routes/last → null до
+ * первого нового ответа.
+ */
+export function clearAiHistoryCache(): number {
+  const n = aiHistoryMap.size;
+  aiHistoryMap.clear();
+  return n;
+}
+
 function historyKey(userId: string, cabinet: string) {
   return `${userId}:${cabinet}`;
 }

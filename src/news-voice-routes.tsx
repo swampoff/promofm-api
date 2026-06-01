@@ -26,6 +26,17 @@ const SAMPLE_RATE = 24000;
 const scriptCache = new Map<string, { script: string; author: string; ts: number }>();
 const SCRIPT_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
+/**
+ * Clear the in-memory news-voice LLM script cache. Used by admin ops
+ * endpoint `/admin/ops/clear-cache`. Возвращает кол-во очищенных записей
+ * чтобы admin UI показал «очищено N записей».
+ */
+export function clearScriptCache(): number {
+  const n = scriptCache.size;
+  scriptCache.clear();
+  return n;
+}
+
 const AUTHOR_STYLES: Record<string, string> = {
   'DJ Den': 'Энергичный ведущий клубной культуры. Говорит бодро.',
   'Сандра': 'Яркая ведущая поп-музыки. Говорит эмоционально.',
