@@ -40,16 +40,25 @@ import { resolveUserId } from './resolve-user-id.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { requireAuth, requireRole } from './auth-middleware.tsx';
 import { notifyArtistRequest, notifyVenueRequest } from './email-helper.tsx';
+import { logUserAction } from './audit-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
 
-// Fallback radio user ID (не должен использоваться для записи)
-const FALLBACK_RADIO_USER_ID = 'anonymous';
-
-// Helper: получить userId через единый хелпер авторизации
+// Helper: получить userId через единый хелпер авторизации.
+// Audit B-R2 (2026-05-31): раньше при отсутствии userId возвращался хак
+// FALLBACK_RADIO_USER_ID = 'anonymous' → ВСЕ writes падали в KV под
+// одним ключом 'anonymous' (cross-station contamination — заявки/
+// уведомления radioA смешивались с radioB). Все callers идут под
+// requireAuth, так что null-userId это middleware-bug; fail-safe: throw
+// 401-friendly Error который handler catch'нет (вместо silent write
+// в чужой scope).
 async function getRadioUserId(c: any): Promise<string> {
-  return c.get('userId') || FALLBACK_RADIO_USER_ID;
+  const userId = c.get('userId');
+  if (!userId) {
+    throw new Error('UNAUTHORIZED_NO_USER_ID');
+  }
+  return userId;
 }
 
 // Helper: Get radio station for current user
@@ -163,6 +172,13 @@ app.delete('/ad-slots/:id', requireAuth, async (c) => {
     if (rowCount === 0) {
       return c.json({ error: 'Ad slot not found' }, 404);
     }
+    // Audit B-R3 (2026-05-31): forensic trail — кто удалил рекламный слот.
+    logUserAction(c, {
+      action: 'radio_ad_slot_delete',
+      resourceType: 'radio_ad_slot',
+      targetId: String(slotId),
+      details: { stationId: station.id },
+    });
     return c.json({ success: true, message: 'Ad slot deleted' });
   } catch (error: any) {
     console.error('Error deleting ad slot:', error);
@@ -528,13 +544,18 @@ app.put('/orders/:id/approve', requireAuth, async (c) => {
       return c.json({ error: 'Only pending orders can be approved' }, 400);
     }
 
+    // Audit B-R1 (2026-05-31): body.notes раньше silently dropped (`void
+    // body.notes`). Migration 096 добавила колонку review_notes; теперь
+    // сохраняется при наличии. Cap 2000 chars — frontend длинее не шлёт,
+    // CHECK constraint в БД защищает от мусора.
+    const reviewNotes = typeof body.notes === 'string'
+      ? body.notes.slice(0, 2000)
+      : undefined;
     const now = new Date().toISOString();
     const updated = await updateRadioVenueRequest(station.id, orderId, {
       status: 'approved', reviewedAt: now, approvedAt: now,
+      ...(reviewNotes ? { reviewNotes } : {}),
     });
-    // reviewNotes ранее в jsonb-blob; current schema not promoted к native col.
-    // body.notes silently dropped — acceptable (was rarely used).
-    void body.notes;
 
     return c.json({ success: true, data: updated || requests[idx] });
   } catch (error: any) {

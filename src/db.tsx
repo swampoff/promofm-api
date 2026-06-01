@@ -6546,6 +6546,7 @@ export async function updateRadioVenueRequest(
     approvedAt: string | null; reviewedAt: string | null; completedAt: string | null;
     completedPlays: number; impressions: number;
     audioUrl: string; startDate: string; endDate: string; targetPlays: number;
+    reviewNotes: string;
   }>,
 ): Promise<any | null> {
   const { pool } = await import('./db-client.tsx');
@@ -6555,6 +6556,7 @@ export async function updateRadioVenueRequest(
     completedPlays: 'completed_plays',
     audioUrl: 'audio_url', startDate: 'start_date', endDate: 'end_date',
     targetPlays: 'target_plays',
+    reviewNotes: 'review_notes',
   };
   const sets: string[] = [];
   const vals: any[] = [];
