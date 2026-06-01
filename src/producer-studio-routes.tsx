@@ -24,7 +24,7 @@ import {
 import { getPaymentBalance, upsertPaymentBalance } from './db.tsx';
 import { getDbClient, pool } from "./db-client.tsx";
 import { requireAuth } from './auth-middleware.tsx';
-import { profileLimiter } from './rate-limiter.tsx';
+import { profileLimiter, apiLimiter } from './rate-limiter.tsx';
 import { logUserAction } from './audit-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { saveUpload, IMAGE_EXTS, MAX_IMAGE_BYTES } from './cabinet-uploads.tsx';
@@ -904,7 +904,10 @@ app.delete('/portfolio/v2/:id', requireAuth, profileLimiter, async (c) => {
 });
 
 // GET /portfolio/v2/public/:userId — публичный листинг (без auth).
-app.get('/portfolio/v2/public/:userId', async (c) => {
+// Audit B-P2 (2026-05-31): apiLimiter (200/min/IP) — public endpoint без
+// auth, раньше без rate-limit. Enumeration attack (перебор userId-ов в
+// поиске публичных портфолио) или DOS scrape всего каталога.
+app.get('/portfolio/v2/public/:userId', apiLimiter, async (c) => {
   const targetUserId = c.req.param('userId');
   try {
     const r = await pool.query(

@@ -46,6 +46,40 @@ export interface SavedUpload {
   ext: string;
 }
 
+/**
+ * Magic-byte check для загруженных файлов. Audit B-P1 (2026-05-31):
+ * раньше saveUpload валидировал только расширение через sanitizeExt.
+ * Файл с расширением .mp3 мог содержать .exe / shell-script / архив
+ * → backend хранил как audio, nginx отдавал с audio/* Content-Type
+ * → MIME confusion attack (например: SVG-with-script под .png).
+ *
+ * Проверяем первые 16 байт против ext'а. Если ext в allowed но magic
+ * bytes не совпадают — reject. Расширения вне списка (custom) пропускаем
+ * (не наш job — отвечать за неизвестные форматы).
+ */
+const MAGIC_SIGNATURES: Record<string, RegExp[]> = {
+  // Audio
+  mp3:  [/^ID3/, /^\xFF[\xFB\xF3\xF2]/], // ID3v2 или MPEG frame sync
+  wav:  [/^RIFF.{4}WAVE/s],
+  flac: [/^fLaC/],
+  ogg:  [/^OggS/],
+  m4a:  [/^.{4}ftyp(M4A |mp42|isom|dash)/s],
+  aac:  [/^\xFF[\xF1\xF9]/],
+  // Images
+  jpg:  [/^\xFF\xD8\xFF/],
+  jpeg: [/^\xFF\xD8\xFF/],
+  png:  [/^\x89PNG\r\n\x1A\n/],
+  webp: [/^RIFF.{4}WEBP/s],
+  gif:  [/^GIF8[79]a/],
+};
+
+function verifyMagicBytes(buf: Buffer, ext: string): boolean {
+  const sigs = MAGIC_SIGNATURES[ext.toLowerCase()];
+  if (!sigs) return true; // unknown ext — не наш scope
+  const head = buf.subarray(0, 16).toString('binary');
+  return sigs.some((re) => re.test(head));
+}
+
 export async function saveUpload(
   file: File,
   subdir: string,
@@ -62,6 +96,9 @@ export async function saveUpload(
   await fs.mkdir(dir, { recursive: true });
   const filename = `${prefix}-${crypto.randomUUID()}.${ext}`;
   const buf = Buffer.from(await file.arrayBuffer());
+  if (!verifyMagicBytes(buf, ext)) {
+    throw new Error(`Содержимое файла не соответствует расширению .${ext}`);
+  }
   await fs.writeFile(path.join(dir, filename), buf);
   return {
     filename,
