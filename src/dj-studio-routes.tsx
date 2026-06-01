@@ -26,6 +26,8 @@ import {
 import { pool } from './db-client.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { requireAuth, requireRole } from './auth-middleware.tsx';
+import { profileLimiter } from './rate-limiter.tsx';
+import { logUserAction } from './audit-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
@@ -1217,7 +1219,11 @@ app.get('/finances/withdrawals', requireAuth, requireDjRole, async (c) => {
 });
 
 // POST /finances/withdrawals — запрос вывода (создаёт YooKassa Payout)
-app.post('/finances/withdrawals', requireAuth, requireDjRole, async (c) => {
+// Audit B-D1 (2026-05-31): profileLimiter + logUserAction — финансовая
+// операция требует rate-limit (5/min против abuse через XSS-token) +
+// forensic trail (расследование спора «я не выводил» нужен actor +
+// amount + method без ассерции что payout-провайдер логирует).
+app.post('/finances/withdrawals', requireAuth, requireDjRole, profileLimiter, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json();
@@ -1328,6 +1334,12 @@ app.post('/finances/withdrawals', requireAuth, requireDjRole, async (c) => {
     );
     const withdrawal = ins.rowCount ? mapDjWithdrawalRow(ins.rows[0]) : null;
 
+    logUserAction(c, {
+      action: 'dj_withdrawal_request',
+      resourceType: 'dj_withdrawal',
+      targetId: String(id),
+      details: { amount, method, payoutStatus, yooPayoutId: payoutId },
+    });
     return c.json({ success: true, data: withdrawal }, 201);
   } catch (error) {
     console.error('Error creating DJ withdrawal:', error);
