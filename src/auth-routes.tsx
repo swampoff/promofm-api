@@ -21,6 +21,7 @@ import {
   createRefreshToken, validateRefreshToken, rotateRefreshToken, revokeAllRefreshTokens, revokeRefreshToken,
   sendSecurityAlert,
 } from './auth-security.tsx';
+import { setSessionCookie, clearSessionCookie } from './cookie-helper.tsx';
 
 import { createLogger } from "./logger.tsx";
 
@@ -328,6 +329,7 @@ auth.post("/signin", async (c) => {
     // Success: record + generate tokens
     await recordLoginAttempt(email, ip, ua, true);
     const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
+    setSessionCookie(c, accessToken);
     const refreshTokenData = await createRefreshToken(user.id, ip, ua);
     await sql(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id]);
     logAuthEvent('signin_success', {
@@ -442,6 +444,7 @@ auth.post("/vk-callback", async (c) => {
       if (profile) { profile.lastLoginAt = new Date().toISOString(); await vpsSaveProfile(eu.id, profile); }
 
       const accessToken = signToken({ id: eu.id, email: eu.email, role });
+      setSessionCookie(c, accessToken);
       const ip = c.req.header("x-forwarded-for") || c.req.header("x-real-ip") || "unknown";
       const ua = c.req.header("user-agent") || "unknown";
       const refreshData = await createRefreshToken(eu.id, ip, ua);
@@ -473,6 +476,7 @@ auth.post("/vk-callback", async (c) => {
           const eu = byEmail.rows[0];
           await sql(`UPDATE users SET vk_id = $1, avatar_url = COALESCE($2, avatar_url) WHERE id = $3`, [String(vkUserId), vkAvatar, eu.id]);
           const accessToken = signToken({ id: eu.id, email: userEmail, role: eu.role || "artist" });
+          setSessionCookie(c, accessToken);
           const profile = await vpsGetProfile(eu.id);
           return c.json({
             success: true, newUser: false,
@@ -492,6 +496,7 @@ auth.post("/vk-callback", async (c) => {
     notifyNewUser({ email: userEmail, name: vkName, role: vkRole, via: "vk_oauth" }).catch(() => {});
 
     const accessToken = signToken({ id: userId, email: userEmail, role: vkRole });
+    setSessionCookie(c, accessToken);
     const ip2 = c.req.header("x-forwarded-for") || c.req.header("x-real-ip") || "unknown";
     const ua2 = c.req.header("user-agent") || "unknown";
     const refreshData2 = await createRefreshToken(userId, ip2, ua2);
@@ -619,9 +624,15 @@ auth.get("/me", requireAuth, async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/signout
 // ──────────────────────────────────────────────────────────────────────
+// Phase D etap A (2026-06-01): дополнительно clear'им session cookie и
+// читаем token из cookie если Bearer header отсутствует. После cookie-only
+// этапа C — Bearer-fallback можно убрать.
 auth.post("/signout", async (c) => {
   try {
-    const token = c.req.header("Authorization")?.split(" ")[1];
+    const bearer = c.req.header("Authorization")?.split(" ")[1];
+    const { getSessionCookie } = await import('./cookie-helper.tsx');
+    const cookieTok = getSessionCookie(c);
+    const token = bearer || cookieTok;
     if (token) {
       const decoded = verifyToken(token);
       if (decoded) {
@@ -630,8 +641,10 @@ auth.post("/signout", async (c) => {
         log.info({ email: decoded.email, userId: decoded.sub }, 'user_signed_out');
       }
     }
+    clearSessionCookie(c);
     return c.json({ success: true, message: "Signed out successfully" });
   } catch {
+    clearSessionCookie(c);
     return c.json({ success: true, message: "Signed out" });
   }
 });
@@ -1116,6 +1129,7 @@ auth.post("/exchange-auto-login", async (c) => {
 
     const user = result.rows[0];
     const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
+    setSessionCookie(c, accessToken);
     const profile = await vpsGetProfile(user.id);
 
     return c.json({
@@ -1159,6 +1173,7 @@ auth.post("/refresh", async (c) => {
     if (!newRefresh) return c.json({ success: false, error: "Token rotation failed" }, 401);
 
     const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
+    setSessionCookie(c, accessToken);
 
     return c.json({
       success: true,
