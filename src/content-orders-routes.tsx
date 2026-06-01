@@ -51,10 +51,24 @@ function rowToOrder(r: any): ContentOrder {
 }
 
 // ── POST /orders ──
+// Audit INC-V1 (2026-05-31): venueId раньше брался из body — venue мог
+// создать заказ на ЛЮБОЙ другой venueId (impersonation, чужой venue
+// видит/оплачивает чужой заказ в своём GET /orders). Теперь venueId
+// фиксируется из JWT (c.get('userId') для venue role). Admin может
+// создавать от имени venue через body.venueId — для миграционных /
+// support-кейсов.
 app.post('/orders', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { venueId, venueName, contentType, text, style, duration, voiceType, price } = body;
+    const { venueName, contentType, text, style, duration, voiceType, price } = body;
+    const userId = c.get('userId' as never) as string | undefined;
+    const userRole = c.get('userRole' as never) as string | undefined;
+
+    // INC-V1: venueId = JWT identity для non-admin. Body.venueId игнорируется
+    // (admin/superadmin может явно указать — например импорт из старой
+    // CRM или support-операция).
+    const isAdmin = userRole === 'admin' || userRole === 'superadmin';
+    const venueId = isAdmin && body.venueId ? String(body.venueId) : userId;
 
     if (!venueId || !venueName || !contentType || !text || !style || !voiceType || !price) {
       return c.json({ success: false, error: 'Missing required fields' }, 400);
@@ -75,7 +89,7 @@ app.post('/orders', requireAuth, async (c) => {
       [orderId, venueId, venueName, contentType, text, style, duration || 30, voiceType, price]
     );
 
-    console.log(`Content order created: ${orderId} (${contentType})`);
+    console.log(`Content order created: ${orderId} (${contentType}) for venue=${venueId}`);
     return c.json({ success: true, order: rowToOrder(r.rows[0]) });
   } catch (error: any) {
     console.error('POST /orders error:', error);
