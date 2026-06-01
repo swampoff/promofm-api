@@ -371,8 +371,8 @@ app.put('/venue-requests/:id/complete', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
+    const { pool } = await import('./db-client.tsx');
     const requestId = c.req.param('id');
-    // Read current row для status guard + computing completed_plays.
     const requestsData = await radioVenueRequestsStore.get(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
     const idx = requests.findIndex((r: any) => r.id === requestId);
@@ -384,12 +384,28 @@ app.put('/venue-requests/:id/complete', requireAuth, async (c) => {
     }
 
     const req = requests[idx];
-    // Atomic UPDATE — race-free vs legacy whole-array set.
-    const updated = await updateRadioVenueRequest(station.id, requestId, {
-      status: 'completed',
-      completedAt: new Date().toISOString(),
-      completedPlays: req.targetPlays || req.completedPlays || 0,
-    });
+    // Audit A-R3 (2026-05-31): атомарный compare-and-swap. Раньше между
+    // status-check выше и updateRadioVenueRequest ниже был race-window —
+    // два параллельных complete от одного admin'а (двойной клик) или
+    // admin+radio оба завершали одну заявку → recordRevenue вызывался
+    // дважды (double billing). UPDATE WHERE status='in_progress' гарантирует
+    // что second call видит rowCount=0 и handler отвечает 409.
+    const completedPlays = req.targetPlays || req.completedPlays || 0;
+    const guardResult = await pool.query(
+      `UPDATE radio_venue_requests
+          SET status = 'completed',
+              completed_at = NOW(),
+              completed_plays = $3,
+              updated_at = NOW()
+        WHERE radio_id = $1 AND id = $2 AND status = 'in_progress'
+       RETURNING id`,
+      [station.id, requestId, completedPlays]
+    );
+    if (guardResult.rowCount === 0) {
+      // race: другой actor успел complete'нуть между check'ом и update'ом
+      return c.json({ error: 'Request already completed by another session' }, 409);
+    }
+    const updated = await updateRadioVenueRequest(station.id, requestId, {});
     Object.assign(req, updated || {});
 
     // Записать доход платформы (комиссия 15% от рекламной сделки)
