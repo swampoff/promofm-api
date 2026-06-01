@@ -8,6 +8,8 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsListProfiles } from './vps-userdata.tsx';
 import { requireAuth, requireOwner } from './auth-middleware.tsx';
+import { profileLimiter } from './rate-limiter.tsx';
+import { logUserAction } from './audit-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
 
 const app = new Hono();
@@ -427,7 +429,10 @@ app.get('/profile/:artistId', async (c) => {
  * PUT /profile/:artistId
  * Обновить профиль с валидацией полей
  */
-app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
+// Audit B-A2 (2026-05-31): profileLimiter (5/min) против abuse (burst-spam
+// email confirmation loop, XSS-exfil token abuse). B-A1: logUserAction
+// в конце handler'а (см. ниже return).
+app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileLimiter, async (c) => {
   const artistId = c.req.param('artistId');
   console.log(`[ArtistProfile] PUT ${artistId}`);
 
@@ -477,6 +482,12 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), async (c) =
     await saveToKv(artistId, updatedProfile);
 
     console.log(`[ArtistProfile] Updated: ${artistId}`);
+    logUserAction(c, {
+      action: 'artist_profile_update',
+      resourceType: 'artist_profile',
+      targetId: String(c.req.param('artistId')),
+      details: { fields: Object.keys(updates) },
+    });
     return c.json({ success: true, data: updatedProfile });
 
   } catch (error) {
@@ -494,7 +505,9 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), async (c) =
  * and clears any previous rejection reason, so an artist who was
  * rejected can submit a corrected request.
  */
-app.post('/request-verification', requireAuth, async (c) => {
+// Audit B-A2 (2026-05-31): profileLimiter — раньше можно было спамить
+// кнопку «Запросить верификацию» (заваливая admin-inbox).
+app.post('/request-verification', requireAuth, profileLimiter, async (c) => {
   const userId = c.get('userId' as never) as string | undefined;
   if (!userId) {
     return c.json({ success: false, error: 'Не авторизован' }, 401);
@@ -530,6 +543,11 @@ app.post('/request-verification', requireAuth, async (c) => {
     );
 
     console.log(`[ArtistProfile] Verification requested by ${userId}`);
+    logUserAction(c, {
+      action: 'artist_verification_request',
+      resourceType: 'artist_profile',
+      targetId: String(userId),
+    });
     return c.json({
       success: true,
       message: 'Заявка на верификацию отправлена. Ожидайте рассмотрения администратором.',

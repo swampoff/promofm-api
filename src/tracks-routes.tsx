@@ -9,6 +9,8 @@ import { getDbClient, pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
+import { profileLimiter } from './rate-limiter.tsx';
+import { logUserAction } from './audit-helper.tsx';
 import { scheduleAiCheck } from './ai-check.tsx';
 import { notifyTrackUpload } from './email-helper.tsx';
 
@@ -176,7 +178,8 @@ tracksRoutes.put('/:id', requireAuth, async (c) => {
 });
 
 // DELETE /:id — Delete track (ownership check: only track owner can delete)
-tracksRoutes.delete('/:id', requireAuth, async (c) => {
+// Audit B-A1+B-A2 (2026-05-31): добавлен audit log + rate-limit (5/min).
+tracksRoutes.delete('/:id', requireAuth, profileLimiter, async (c) => {
   try {
     const trackId = c.req.param('id');
     const userId = c.get('userId');
@@ -191,6 +194,12 @@ tracksRoutes.delete('/:id', requireAuth, async (c) => {
     }
 
     await typed.deleteTrack(trackId);
+    logUserAction(c, {
+      action: 'artist_track_delete',
+      resourceType: 'track',
+      targetId: String(trackId),
+      details: { title: existing.title, artist_name: existing.artist_name },
+    });
     return c.json({ success: true, message: 'Track deleted' });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);

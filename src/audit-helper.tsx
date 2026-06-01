@@ -42,10 +42,16 @@ function clientIp(c: Context): string {
 
 /**
  * Fire-and-forget. Не await'ить в hot path — пусть пишется в фоне.
- * actor_id берётся из JWT context (c.get('userId')) — это admin
- * совершивший действие.
+ * actor_id берётся из JWT context (c.get('userId')) — это user
+ * совершивший действие (admin / artist / любая роль).
+ *
+ * Изначально helper назывался logAdminAction (B-8, PR #139). Audit
+ * B-A1 (2026-05-31) расширил scope на artist self-service actions —
+ * функция identical, переименована в logUserAction. logAdminAction
+ * оставлен как alias для backward-compat с уже-залендженными
+ * call-site'ами (track-moderation, dj-mix, auth, etc.).
  */
-export function logAdminAction(c: Context, entry: AdminActionLog): void {
+export function logUserAction(c: Context, entry: AdminActionLog): void {
   const actorId = (c.get('userId') as string | undefined) || null;
   const ip = clientIp(c);
   pool.query(
@@ -56,13 +62,15 @@ export function logAdminAction(c: Context, entry: AdminActionLog): void {
       entry.action,
       actorId,
       entry.targetId ?? null,
-      entry.resourceType ?? 'admin',
+      entry.resourceType ?? 'user',
       JSON.stringify(entry.details ?? {}),
       ip,
       entry.status ?? 'success',
     ],
   ).catch((e: any) => {
-    // Логирование не должно ронять действие. Только console.
-    console.error('[audit] logAdminAction failed:', e?.message || e);
+    console.error('[audit] logUserAction failed:', e?.message || e);
   });
 }
+
+/** Backward-compat alias. Use logUserAction for new call sites. */
+export const logAdminAction = logUserAction;

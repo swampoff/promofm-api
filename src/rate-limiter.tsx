@@ -117,3 +117,14 @@ export const apiLimiter = createRateLimiter('api', {
   message: 'Rate limit exceeded, please slow down',
   skip: isSuperadminToken,
 });
+
+// Audit B-A2 (2026-05-31): destructive self-service endpoints (PUT /profile,
+// DELETE track, request-verification) не имели лимита. Артист с украденным
+// токеном через XSS (INC-A2) мог в burst удалить все треки / спамить
+// verification-team. 5/min per IP — достаточно для legit UX (никто не правит
+// профиль чаще), узко для abuse.
+export const profileLimiter = createRateLimiter('profile', {
+  windowMs: 60000,
+  max: 5,
+  message: 'Too many profile actions, please slow down',
+});
