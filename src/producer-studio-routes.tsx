@@ -1197,7 +1197,10 @@ app.post('/ai/analyze', requireAuth, async (c) => {
 
     const mistralKey = process.env.MISTRAL_API_KEY;
     if (!mistralKey) {
-      return c.json({ success: true, data: { response: fallbackRecs(dc), model: 'fallback' } });
+      // Audit INC-P3 (2026-05-31): aiAvailable=false + reason явно
+      // показывают frontend'у что это static-fallback. Frontend рендерит
+      // amber banner "AI недоступен" над текстом.
+      return c.json({ success: true, data: { response: fallbackRecs(dc), model: 'fallback', aiAvailable: false, reason: 'api_key_missing' } });
     }
 
     const resp = await fetch('https://api.mistral.ai/v1/chat/completions', {
@@ -1208,13 +1211,13 @@ app.post('/ai/analyze', requireAuth, async (c) => {
 
     if (!resp.ok) {
       console.log(`Mistral error: ${await resp.text()}`);
-      return c.json({ success: true, data: { response: fallbackRecs(dc), model: 'fallback' } });
+      return c.json({ success: true, data: { response: fallbackRecs(dc), model: 'fallback', aiAvailable: false, reason: 'api_error' } });
     }
 
     const data = await resp.json();
     const aiResp = data.choices[0].message.content;
     await setProducerAiLast(producerId, { question, response: aiResp, timestamp: nowIso() });
-    return c.json({ success: true, data: { response: aiResp, model: 'mistral-large' } });
+    return c.json({ success: true, data: { response: aiResp, model: 'mistral-large', aiAvailable: true } });
   } catch (error) { console.log(`AI error: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
@@ -1230,13 +1233,55 @@ app.get('/ai/history/:producerId', requireAuth, async (c) => {
   } catch (error) { return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
+/**
+ * Audit INC-P3 + A-P2 (2026-05-31): context-aware fallback.
+ *
+ * Раньше recommendations были hardcoded и не реагировали на состояние
+ * кабинета:
+ * - «Добавьте больше услуг» показывалось даже если у продюсера уже 10
+ *   услуг (line 1224 `< 3` был, но fallback всё равно ВСЕГДА говорил
+ *   «обновляйте портфолио» — без учёта когда last update'нули).
+ * - Не было видно что это static fallback, а не настоящий AI вывод
+ *   (model='fallback' в meta, но текст выглядел как Mistral response).
+ *
+ * Текущее поведение:
+ * - Banner «⚙️ Демо-рекомендации (AI временно недоступен)» в начале.
+ * - Recommendations только когда реально actionable (порог + skip if OK).
+ * - Если все категории в порядке — позитивное сообщение, а не невнятная
+ *   универсальная рекомендация.
+ *
+ * frontend (ProducerAI компонент) дополнительно отрисовывает amber banner
+ * над response когда `aiAvailable: false`.
+ */
 function fallbackRecs(d: any): string {
-  const t: string[] = ['📊 **Обзор кабинета**\n', `- Диалогов: ${d.conversations}`, `- Непрочитанных: ${d.totalUnread}`, `- Сессий: ${d.sessions} (предстоящих: ${d.upcomingSessions})`, `- Услуг: ${d.customServices}`, '', '💡 **Рекомендации:**'];
-  if (d.totalUnread > 0) t.push('- Ответьте на непрочитанные - быстрый отклик повышает рейтинг');
-  if (d.customServices < 3) t.push('- Добавьте больше услуг для расширения аудитории');
-  if (d.upcomingSessions < 2) t.push('- Мало сессий - активнее продвигайте услуги');
-  t.push('- Регулярно обновляйте портфолио');
-  if (d.vacationMode) t.push('- ⚠️ Режим отпуска включён');
+  const t: string[] = [
+    '> ⚙️ **Демо-рекомендации** — AI временно недоступен, показаны базовые подсказки на основе данных вашего кабинета.\n',
+    '📊 **Обзор кабинета**\n',
+    `- Диалогов: ${d.conversations}`,
+    `- Непрочитанных: ${d.totalUnread}`,
+    `- Сессий: ${d.sessions} (предстоящих: ${d.upcomingSessions})`,
+    `- Услуг: ${d.customServices}`,
+    '',
+    '💡 **Рекомендации:**',
+  ];
+  const recs: string[] = [];
+  if (d.totalUnread > 0) {
+    recs.push(`- Ответьте на ${d.totalUnread} непрочитанн${d.totalUnread === 1 ? 'ое' : 'ых'} сообщени${d.totalUnread === 1 ? 'е' : 'й'} — быстрый отклик повышает рейтинг`);
+  }
+  if (d.customServices < 3) {
+    recs.push(`- У вас ${d.customServices} услуг${d.customServices === 1 ? 'а' : ''} — добавьте ещё чтобы расширить выдачу в каталоге`);
+  }
+  if (d.upcomingSessions < 2 && d.customServices > 0) {
+    recs.push('- Мало запланированных сессий — поделитесь профилем в соцсетях, обновите описание услуг');
+  }
+  if (d.vacationMode) {
+    recs.push('- ⚠️ Режим отпуска включён — новые заказы не поступают. Выключите когда вернётесь.');
+  }
+  if (recs.length === 0) {
+    t.push('- Все базовые метрики в норме. Подключите MISTRAL_API_KEY чтобы получать персональные рекомендации.');
+  } else {
+    t.push(...recs);
+  }
   return t.join('\n');
 }
 
