@@ -348,13 +348,13 @@ auth.post("/signin", async (c) => {
     }
 
     log.info({ email, userId: user.id }, 'user_signed_in');
+    // Phase D C (2026-06-01): accessToken + refreshToken убраны из body —
+    // pf_session + pf_refresh cookies (Set-Cookie выше) единственный
+    // транспорт. Frontend B2 (#91) больше не читает body.accessToken.
     return c.json({
       success: true,
       data: {
         user: { id: user.id, email, name: profile.name || user.full_name, role: user.role, isEmailVerified: true, accountStatus: user.status },
-        accessToken, expiresAt: tokenExpiresAt(),
-        refreshToken: refreshTokenData.token,
-        refreshExpiresAt: Math.floor(refreshTokenData.expiresAt.getTime() / 1000),
       },
     });
   } catch (error) {
@@ -450,9 +450,10 @@ auth.post("/vk-callback", async (c) => {
       const ua = c.req.header("user-agent") || "unknown";
       const refreshData = await createRefreshToken(eu.id, ip, ua);
       setRefreshCookie(c, refreshData.token);
+      // Phase D C: accessToken + refreshToken убраны (cookies в Set-Cookie).
       return c.json({
         success: true, newUser: false,
-        data: { user: { id: eu.id, email: eu.email, name: profile?.name || eu.full_name || vkName, role }, accessToken, refreshToken: refreshData.token, refreshExpiresAt: Math.floor(refreshData.expiresAt.getTime() / 1000) },
+        data: { user: { id: eu.id, email: eu.email, name: profile?.name || eu.full_name || vkName, role } },
       });
     }
 
@@ -480,9 +481,10 @@ auth.post("/vk-callback", async (c) => {
           const accessToken = signToken({ id: eu.id, email: userEmail, role: eu.role || "artist" });
           setSessionCookie(c, accessToken);
           const profile = await vpsGetProfile(eu.id);
+          // Phase D C: accessToken убран (pf_session cookie через Set-Cookie).
           return c.json({
             success: true, newUser: false,
-            data: { user: { id: eu.id, email: userEmail, name: profile?.name || eu.full_name || vkName, role: eu.role || "artist" }, accessToken },
+            data: { user: { id: eu.id, email: userEmail, name: profile?.name || eu.full_name || vkName, role: eu.role || "artist" } },
           });
         }
         return c.json({ success: false, error: "Пользователь с таким email уже зарегистрирован." }, 409);
@@ -505,9 +507,10 @@ auth.post("/vk-callback", async (c) => {
     setRefreshCookie(c, refreshData2.token);
     log.info({ email: userEmail, userId }, 'vk_user_created');
 
+    // Phase D C: accessToken + refreshToken убраны (cookies в Set-Cookie).
     return c.json({
       success: true, newUser: true,
-      data: { user: { id: userId, email: userEmail, name: vkName, avatar: vkAvatar, role: vkRole }, accessToken, refreshToken: refreshData2.token, refreshExpiresAt: Math.floor(refreshData2.expiresAt.getTime() / 1000) },
+      data: { user: { id: userId, email: userEmail, name: vkName, avatar: vkAvatar, role: vkRole } },
     });
   } catch (error) {
     log.error({ err: error }, "vk_callback_error");
@@ -627,18 +630,13 @@ auth.get("/me", requireAuth, async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/signout
 // ──────────────────────────────────────────────────────────────────────
-// Phase D etap A (2026-06-01): дополнительно clear'им session cookie и
-// читаем token из cookie если Bearer header отсутствует.
-// Phase D pf_refresh (2026-06-01): дополнительно clear'им pf_refresh
-// cookie в обоих путях (success + catch). revokeAllRefreshTokens уже
-// инвалидирует все DB-токены пользователя — в т.ч. тот что лежит в
-// pf_refresh — так что специально revokeRefreshToken на cookie-токен
-// дублировать не нужно.
+// Phase D C (2026-06-01): cookie-only. Bearer header fallback убран
+// после B2 deploy. revokeAllRefreshTokens(decoded.sub) ниже revoke'ит
+// ВСЕ DB-refresh-токены юзера (включая тот в pf_refresh cookie),
+// поэтому отдельно revoke не нужно.
 auth.post("/signout", async (c) => {
   try {
-    const bearer = c.req.header("Authorization")?.split(" ")[1];
-    const cookieTok = getSessionCookie(c);
-    const token = bearer || cookieTok;
+    const token = getSessionCookie(c);
     if (token) {
       const decoded = verifyToken(token);
       if (decoded) {
@@ -1140,11 +1138,14 @@ auth.post("/exchange-auto-login", async (c) => {
     setSessionCookie(c, accessToken);
     const profile = await vpsGetProfile(user.id);
 
+    // Phase D C: accessToken убран. Auto-login через email-verification
+    // ставит cookie через Set-Cookie (см. setSessionCookie выше) — frontend
+    // не нуждается в JWT в body. Это закрывает XSS-vector (JWT через URL
+    // или local cache).
     return c.json({
       success: true,
       data: {
         user: { id: user.id, email: user.email, name: profile?.name || user.full_name, role: user.role },
-        accessToken, expiresAt: tokenExpiresAt(),
       },
     });
   } catch (error) {
@@ -1158,16 +1159,11 @@ auth.post("/exchange-auto-login", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/refresh", async (c) => {
   try {
-    // Phase D pf_refresh (2026-06-01): принимаем refresh-токен либо из
-    // body (legacy), либо из pf_refresh cookie (B2-ready). Body имеет
-    // приоритет — если frontend в transitional state шлёт оба, body
-    // — свежий после предыдущего ответа /refresh, cookie может быть
-    // тот же или старее.
-    //
-    // Empty-body case: cookie-only клиент шлёт POST без body. c.req.json()
-    // тогда throw — оборачиваем в catch, продолжаем с cookie.
-    const body = await c.req.json().catch(() => ({} as any));
-    const refreshToken: string | undefined = body?.refreshToken || getRefreshCookie(c);
+    // Phase D C (2026-06-01): cookie-only. Body fallback на refreshToken
+    // убран после B2 deploy — frontend шлёт пустой body, читаем
+    // pf_refresh из HttpOnly cookie. Если кто-то всё ещё передаёт
+    // body.refreshToken (curl, integration) — игнорируется.
+    const refreshToken = getRefreshCookie(c);
     if (!refreshToken) return c.json({ success: false, error: "Refresh token required" }, 400);
 
     const validation = await validateRefreshToken(refreshToken);
@@ -1199,14 +1195,10 @@ auth.post("/refresh", async (c) => {
     // следующем /refresh клиент пришлёт уже revoke'нутый старый.
     setRefreshCookie(c, newRefresh.token);
 
-    return c.json({
-      success: true,
-      data: {
-        accessToken, expiresAt: tokenExpiresAt(),
-        refreshToken: newRefresh.token,
-        refreshExpiresAt: Math.floor(newRefresh.expiresAt.getTime() / 1000),
-      },
-    });
+    // Phase D C: accessToken + refreshToken убраны. Frontend B2 шлёт
+    // POST /auth/refresh пустым body и не читает body response —
+    // достаточно Set-Cookie выше + 200 status.
+    return c.json({ success: true });
   } catch (error) {
     log.error({ err: error }, "refresh_error");
     return c.json({ success: false, error: "Internal server error" }, 500);
