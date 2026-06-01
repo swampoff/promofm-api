@@ -1,12 +1,21 @@
 /**
- * AUTH MIDDLEWARE — JWT verification for API routes
- * Drop-in replacement: same API as original
+ * AUTH MIDDLEWARE — JWT verification via HttpOnly cookie.
  *
- * Phase D etap A (2026-06-01): дополнительно читает HttpOnly cookie
- * `pf_session` если `Authorization: Bearer ...` header отсутствует.
- * Bearer priority — если оба присутствуют, header выигрывает (типичная
- * situation: frontend в transitional state — cookie старый, header
- * свежий после refresh).
+ * Phase D etap C (2026-06-01): cookie-only. Bearer header fallback убран
+ * после deploy этапа B2 (frontend больше не шлёт Bearer — все 73+
+ * direct-fetches и оба wrapper'а на `credentials: 'include'`).
+ *
+ * История:
+ *  - A (#160): backend начал ставить cookie + читать оба (Bearer | cookie),
+ *    Bearer priority.
+ *  - B1 (#82): frontend добавил credentials: 'include' для cookie transport.
+ *  - B2 (#91): frontend убрал localStorage tokens + Bearer header
+ *    injection. Bootstrap через GET /auth/me cookie-only.
+ *  - C (этот PR): backend убирает Bearer path. Cookie — единственный
+ *    транспорт.
+ *
+ * Если кто-то всё ещё шлёт Authorization: Bearer (стороннее integration,
+ * curl, etc.) — header игнорируется, cookie не передан → 401.
  */
 import { Context, Next } from 'hono';
 import jwt from 'jsonwebtoken';
@@ -17,10 +26,7 @@ import { createLogger } from "./logger.tsx";
 const log = createLogger("auth-mw");
 
 export async function requireAuth(c: Context, next: Next) {
-  const authHeader = c.req.header('Authorization');
-  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.replace('Bearer ', '') : null;
-  const cookieToken = getSessionCookie(c) || null;
-  const accessToken = bearerToken || cookieToken;
+  const accessToken = getSessionCookie(c) || null;
 
   if (!accessToken) {
     return c.json({ success: false, error: 'Authorization required' }, 401);
