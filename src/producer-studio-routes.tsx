@@ -963,6 +963,15 @@ app.put('/profile/update/:producerId', requireAuth, async (c) => {
       console.log(`[producer-profile] mirror to producer_profiles failed (non-fatal):`, mirrorErr);
     }
 
+    // Audit A-P1 (2026-05-31): forensic trail на изменения профиля —
+    // критично для верификационного процесса (admin потом смотрит
+    // bio/city/workPhilosophy которые могут быть сменены после approval).
+    logUserAction(c, {
+      action: 'producer_profile_update',
+      resourceType: 'producer_profile',
+      targetId: String(producerId),
+      details: { fields: Object.keys(body || {}) },
+    });
     return c.json({ success: true, data: updated });
   } catch (error) { console.log(`Error updating profile: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -1324,6 +1333,18 @@ app.post('/calendar/create', requireAuth, async (c) => {
 
     if (!producerId || !title || !date || !startTime || !endTime) {
       return c.json({ success: false, error: 'producerId, title, date, startTime, endTime are required' }, 400);
+    }
+
+    // Audit A-P4 (2026-05-31): time validation. Раньше принимались любые
+    // startTime/endTime строки — endTime < startTime создавал «отрицательную»
+    // сессию (UI вёл себя странно, statistics сломан). HH:mm format check +
+    // start < end.
+    const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (!HHMM_RE.test(String(startTime)) || !HHMM_RE.test(String(endTime))) {
+      return c.json({ success: false, error: 'startTime и endTime в формате HH:mm' }, 400);
+    }
+    if (String(startTime) >= String(endTime)) {
+      return c.json({ success: false, error: 'endTime должно быть позже startTime' }, 400);
     }
 
     const appId = genId('session');
