@@ -14,6 +14,27 @@ import { logUserAction } from './audit-helper.tsx';
 import { scheduleAiCheck } from './ai-check.tsx';
 import { notifyTrackUpload } from './email-helper.tsx';
 
+/**
+ * Streaming-link validator. Возвращает '' для пустой / битой ссылки,
+ * нормализованный URL для валидной. Закрывает 3 атаки:
+ *   1. javascript:/data: — XSS через <a href> на лендинге
+ *   2. внутренние URL — open-redirect (https://promofm.org/some/...)
+ *   3. > 2048 chars — DB CHECK constraint violation 500
+ */
+function sanitizeStreamingUrl(input: unknown): string {
+  if (typeof input !== 'string') return '';
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  if (trimmed.length > 2048) return '';
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return '';
+    return u.toString();
+  } catch {
+    return '';
+  }
+}
+
 const tracksRoutes = new Hono();
 // No demo fallback — all endpoints require auth
 
@@ -102,6 +123,12 @@ tracksRoutes.post('/', requireAuth, async (c) => {
       audio_url: body.audioUrl || body.audio_url || body.audio_file_url || body.audioFile || body.audio || '',
       cover_url: body.coverUrl || body.cover_url || body.cover_image_url || body.cover || '',
       moderation_status: body.status || 'draft',
+      // Streaming-links (migration 095) — camelCase из формы, валидируем.
+      yandex_music_url: sanitizeStreamingUrl(body.yandexMusicUrl ?? body.yandex_music_url),
+      spotify_url:      sanitizeStreamingUrl(body.spotifyUrl     ?? body.spotify_url),
+      apple_music_url:  sanitizeStreamingUrl(body.appleMusicUrl  ?? body.apple_music_url),
+      youtube_url:      sanitizeStreamingUrl(body.youtubeUrl     ?? body.youtube_url),
+      vk_music_url:     sanitizeStreamingUrl(body.vkMusicUrl     ?? body.vk_music_url),
       // Label-on-behalf context — native cols (migration 089). actingForArtistId
       // = artist_id (выше) — redundant, не сохраняем. Если actingForArtistId
       // не пришёл (обычный artist upload) — поля остаются NULL.
@@ -170,7 +197,25 @@ tracksRoutes.put('/:id', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Not authorized to edit this track' }, 403);
     }
 
-    const track = await typed.updateTrack(trackId, body);
+    // Streaming-links (migration 095) — нормализуем camelCase + валидируем
+    // URL. Sanitize'нутый ('') не перезаписывает уже сохранённое значение
+    // (не путать «не прислал» с «удалил»). Чтобы удалить — фронт шлёт null.
+    const normalized: Record<string, any> = { ...body };
+    for (const [camel, snake] of [
+      ['yandexMusicUrl', 'yandex_music_url'],
+      ['spotifyUrl',     'spotify_url'],
+      ['appleMusicUrl',  'apple_music_url'],
+      ['youtubeUrl',     'youtube_url'],
+      ['vkMusicUrl',     'vk_music_url'],
+    ] as const) {
+      const raw = body[camel] ?? body[snake];
+      if (raw === null) { normalized[snake] = null; delete normalized[camel]; continue; }
+      if (raw === undefined) { delete normalized[snake]; delete normalized[camel]; continue; }
+      normalized[snake] = sanitizeStreamingUrl(raw);
+      delete normalized[camel];
+    }
+
+    const track = await typed.updateTrack(trackId, normalized);
     return c.json({ success: true, data: track });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);

@@ -141,6 +141,7 @@ export async function insertTrack(track: Record<string, any>) {
       youtube_url: track.youtube_url || '',
       spotify_url: track.spotify_url || '',
       apple_music_url: track.apple_music_url || '',
+      vk_music_url: track.vk_music_url || '',
       uploaded_by_email: track.uploaded_by_email || '',
       tags: track.tags || [],
       credits: track.credits || {},

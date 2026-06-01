@@ -325,6 +325,7 @@ landing.get('/new-releases', async (c) => {
          SELECT DISTINCT ON (t.id)
            t.id, t.title, t.artist_name, t.genre, t.duration,
            t.audio_url, t.cover_url, t.likes_count, t.plays_count, t.created_at,
+           t.yandex_music_url, t.spotify_url, t.apple_music_url, t.youtube_url, t.vk_music_url,
            COALESCE(ap2.slug, ap.slug) AS artist_slug,
            COALESCE(ap2.is_verified, ap.is_verified) AS is_verified
          FROM tracks t
@@ -374,6 +375,13 @@ landing.get('/new-releases', async (c) => {
       stationsCount: pickupsMap[t.id]?.stationsCount || 0,
       broadcastCitiesCount: pickupsMap[t.id]?.broadcastCitiesCount || 0,
       stations: pickupsMap[t.id]?.stations || [],
+      // Streaming-сервисы (migration 095) — null если артист не заполнил.
+      // Player на лендинге рендерит кнопку только для непустых.
+      yandexMusicUrl: t.yandex_music_url || null,
+      spotifyUrl:     t.spotify_url || null,
+      appleMusicUrl:  t.apple_music_url || null,
+      youtubeUrl:     t.youtube_url || null,
+      vkMusicUrl:     t.vk_music_url || null,
     }));
 
     return c.json({
