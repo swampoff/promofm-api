@@ -24,6 +24,8 @@ import {
 import { getPaymentBalance, upsertPaymentBalance } from './db.tsx';
 import { getDbClient, pool } from "./db-client.tsx";
 import { requireAuth } from './auth-middleware.tsx';
+import { profileLimiter } from './rate-limiter.tsx';
+import { logUserAction } from './audit-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { saveUpload, IMAGE_EXTS, MAX_IMAGE_BYTES } from './cabinet-uploads.tsx';
 
@@ -620,7 +622,10 @@ app.put('/services/update/:serviceId', requireAuth, async (c) => {
   } catch (error) { console.log(`Error updating service: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
-app.delete('/services/delete/:serviceId', requireAuth, async (c) => {
+// Audit INC-P1+P2 (2026-05-31): profileLimiter + logUserAction. Раньше
+// destructive action без rate-limit (abuse через украденный JWT) и без
+// forensic trail (кто/когда удалил услугу из маркетплейса).
+app.delete('/services/delete/:serviceId', requireAuth, profileLimiter, async (c) => {
   try {
     const serviceId = c.req.param('serviceId');
     const producerId = c.get('userId'); // IDOR fix: use JWT userId
@@ -634,6 +639,11 @@ app.delete('/services/delete/:serviceId', requireAuth, async (c) => {
     if (r.rowCount === 0) return c.json({ success: false, error: 'Not found' }, 404);
     // Bridge: remove from marketplace
     await removeServiceFromMarketplace(serviceId);
+    logUserAction(c, {
+      action: 'producer_service_delete',
+      resourceType: 'producer_service',
+      targetId: String(serviceId),
+    });
     return c.json({ success: true });
   } catch (error) { console.log(`Error deleting service: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -868,7 +878,8 @@ app.put('/portfolio/v2/:id', requireAuth, async (c) => {
 });
 
 // DELETE /portfolio/v2/:id — удалить запись.
-app.delete('/portfolio/v2/:id', requireAuth, async (c) => {
+// Audit INC-P1+P2: rate-limit + audit log.
+app.delete('/portfolio/v2/:id', requireAuth, profileLimiter, async (c) => {
   const id = c.req.param('id');
   try {
     const userId = c.get('userId') as string;
@@ -880,6 +891,11 @@ app.delete('/portfolio/v2/:id', requireAuth, async (c) => {
     if (r.rows.length === 0) {
       return c.json({ success: false, error: 'Not found or not yours' }, 404);
     }
+    logUserAction(c, {
+      action: 'producer_portfolio_delete',
+      resourceType: 'producer_portfolio',
+      targetId: String(id),
+    });
     return c.json({ success: true });
   } catch (error: any) {
     console.error('Producer portfolio delete failed:', error);
@@ -1037,7 +1053,10 @@ app.get('/profile/edits/:producerId', requireAuth, async (c) => {
 // WALLET WITHDRAWAL
 // ════════════════════════════════════════
 
-app.post('/wallet/withdraw', requireAuth, async (c) => {
+// Audit INC-P1+P2: rate-limit + audit log. Withdraw = реальные деньги,
+// без forensic-trail невозможно расследовать спор «я не выводил». 5/min
+// достаточно для legit UX, узко для abuse.
+app.post('/wallet/withdraw', requireAuth, profileLimiter, async (c) => {
   try {
     const body = await c.req.json();
     const producerId = c.get('userId'); // IDOR fix: cannot withdraw from other wallets
@@ -1071,6 +1090,12 @@ app.post('/wallet/withdraw', requireAuth, async (c) => {
       id: wdId, producerId, amount: numAmount, method,
       methodLabel: methodLabel || method, status: 'pending', createdAt,
     };
+    logUserAction(c, {
+      action: 'producer_withdrawal_request',
+      resourceType: 'payment_withdrawal',
+      targetId: String(wdId),
+      details: { amount: numAmount, method, methodLabel: methodLabel || method },
+    });
     return c.json({ success: true, data: wd });
   } catch (error) { console.log(`Error creating withdrawal: ${error}`); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
