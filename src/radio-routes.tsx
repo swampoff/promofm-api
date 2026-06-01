@@ -39,6 +39,7 @@ import {
 import { resolveUserId } from './resolve-user-id.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { requireAuth, requireRole } from './auth-middleware.tsx';
+import { profileLimiter } from './rate-limiter.tsx';
 import { notifyArtistRequest, notifyVenueRequest } from './email-helper.tsx';
 import { logUserAction } from './audit-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -541,7 +542,9 @@ app.get('/orders', requireAuth, async (c) => {
 });
 
 // PUT /orders/:id/approve
-app.put('/orders/:id/approve', requireAuth, async (c) => {
+// Audit A-R2 (2026-05-31): profileLimiter — spam accept одной заявки
+// раньше был возможен (race на cross-station notifications).
+app.put('/orders/:id/approve', requireAuth, profileLimiter, async (c) => {
   try {
     const userId = await getRadioUserId(c);
     const station = await getStation(userId);
@@ -581,7 +584,8 @@ app.put('/orders/:id/approve', requireAuth, async (c) => {
 });
 
 // PUT /orders/:id/reject
-app.put('/orders/:id/reject', requireAuth, async (c) => {
+// Audit A-R2: profileLimiter — see /approve выше.
+app.put('/orders/:id/reject', requireAuth, profileLimiter, async (c) => {
   try {
     const userId = await getRadioUserId(c);
     const station = await getStation(userId);

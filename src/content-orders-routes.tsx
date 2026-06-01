@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { logAdminAction } from './audit-helper.tsx';
+import { profileLimiter } from './rate-limiter.tsx';
 import { pool } from './db-client.tsx';
 
 const app = new Hono();
@@ -51,13 +52,17 @@ function rowToOrder(r: any): ContentOrder {
 }
 
 // ── POST /orders ──
-// Audit INC-V1 (2026-05-31): venueId раньше брался из body — venue мог
-// создать заказ на ЛЮБОЙ другой venueId (impersonation, чужой venue
-// видит/оплачивает чужой заказ в своём GET /orders). Теперь venueId
-// фиксируется из JWT (c.get('userId') для venue role). Admin может
-// создавать от имени venue через body.venueId — для миграционных /
-// support-кейсов.
-app.post('/orders', requireAuth, async (c) => {
+// Audit INC-V1 + A-V1 (2026-05-31):
+// — INC-V1: venueId раньше брался из body — venue мог создать заказ
+//   на ЛЮБОЙ другой venueId (impersonation, чужой venue видит/
+//   оплачивает чужой заказ в своём GET /orders). Теперь venueId
+//   фиксируется из JWT (c.get('userId') для venue role). Admin может
+//   создавать от имени venue через body.venueId — для миграционных /
+//   support-кейсов.
+// — A-V1: profileLimiter — раньше venue мог спамить заказы
+//   (pending_payment status, реальный money damage зависел от
+//   payment gateway, но spam в admin queue + лишние notifications).
+app.post('/orders', requireAuth, profileLimiter, async (c) => {
   try {
     const body = await c.req.json();
     const { venueName, contentType, text, style, duration, voiceType, price } = body;
