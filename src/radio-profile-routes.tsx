@@ -124,10 +124,20 @@ function sanitizeUpdates(updates: Record<string, unknown>): Partial<RadioProfile
 /**
  * GET /profile/:radioId
  * Загрузка из KV → 404
+ *
+ * Audit INC-R2 (2026-05-31): requireAuth + ownsRadioProfile check.
+ * Раньше любой мог читать чужой profile через guess radioId — потенциально
+ * leak'ал email/phone владельца станции из jsonb. Public-snapshot для
+ * лендинга идёт отдельным endpoint'ом (через `radio_stations` table,
+ * без PII), этот же — owner-only (+ admin для модерации).
  */
-app.get('/profile/:radioId', async (c) => {
+app.get('/profile/:radioId', requireAuth, async (c) => {
   const radioId = c.req.param('radioId');
   console.log(`[RadioProfile] GET ${radioId}`);
+
+  if (!(await ownsRadioProfile(c, radioId))) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
 
   try {
     const kvProfile = await loadFromKv(radioId);
@@ -149,6 +159,14 @@ app.get('/profile/:radioId', async (c) => {
 app.put('/profile/:radioId', requireAuth, async (c) => {
   const radioId = c.req.param('radioId');
   console.log(`[RadioProfile] PUT ${radioId}`);
+
+  // Audit INC-R1 (2026-05-31): ownership check. Раньше любая авторизованная
+  // radio_station могла переписать чужой profile через crafted radioId.
+  // ownsRadioProfile проверяет radio_profiles.user_id == c.get('userId')
+  // (admin/superadmin auto-pass для модерации).
+  if (!(await ownsRadioProfile(c, radioId))) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
 
   try {
     const rawUpdates = await c.req.json();
