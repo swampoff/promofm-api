@@ -26,7 +26,7 @@
  */
 
 import { Hono } from 'hono';
-import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, getPlatformStats, setPlatformStats, getVenueRadioBrand, patchVenueRadioBrand, radioVenueRequestsStore, radioNotificationsStore, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, insertRadioVenueRequest, insertRadioNotification, type VenueAdCampaignRow } from './db.tsx';
+import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, getPlatformStats, setPlatformStats, getVenueRadioBrand, patchVenueRadioBrand, listRadioVenueRequestsByStation, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, insertRadioVenueRequest, insertRadioNotification, type VenueAdCampaignRow } from './db.tsx';
 import { pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
@@ -957,9 +957,9 @@ app.get('/radio-campaigns/:id/status', requireAuth, async (c) => {
     let radioStatus = null;
     let pricing = null;
     try {
-      // radioVenueRequestsStore.get() since migration 056 always returns array;
-      // legacy fallback `(...).data` no longer needed.
-      const requests = await radioVenueRequestsStore.get(campaign.stationId);
+      // Phase D KV→SQL closeout: Store facade удалён, использован
+      // explicit listRadioVenueRequestsByStation. Same shape (array).
+      const requests = await listRadioVenueRequestsByStation(campaign.stationId);
       const radioReq = requests.find((r: any) => r.campaignId === campaignId || r.id === campaignId);
       if (radioReq) {
         radioStatus = {

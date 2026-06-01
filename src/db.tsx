@@ -2218,90 +2218,13 @@ const RADIO_TABLE_CONFIG: Record<string, RadioRequestTableConfig> = {
   },
 };
 
-function makeRadioRequestArrayStore(
-  table: keyof typeof RADIO_TABLE_CONFIG,
-  mapRow: (r: any) => any,
-  normalize: (radioId: string, item: any) => any[],
-) {
-  const cfg = RADIO_TABLE_CONFIG[table];
-  return {
-    async get(stationId: string): Promise<any[]> {
-      const { pool } = await import('./db-client.tsx');
-      const r = await pool.query(
-        `SELECT ${cfg.selectCols} FROM ${table}
-          WHERE radio_id = $1
-          ${cfg.orderBy}`,
-        [stationId]
-      );
-      return r.rows.map(mapRow);
-    },
-    async set(stationId: string, value: any[]): Promise<void> {
-      const { pool } = await import('./db-client.tsx');
-      const items = Array.isArray(value) ? value : [];
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        const keptIds: string[] = [];
-        for (const item of items) {
-          const params = normalize(stationId, item);
-          keptIds.push(params[0]);
-          // Build INSERT ... ON CONFLICT (id) DO UPDATE SET <cols-from-EXCLUDED>
-          const colList = cfg.columns.split(',').map(c => c.trim());
-          // skip 'id' and 'radio_id' in UPDATE SET (PK + ownership) but
-          // also handle created_at — keep original on UPDATE.
-          const setParts = colList
-            .filter(c => c !== 'id' && c !== 'radio_id' && c !== 'created_at')
-            .map(c => `${c} = EXCLUDED.${c}`)
-            .concat(['updated_at = NOW()'])
-            .join(', ');
-          const placeholders = colList.map((_, i) => `$${i + 1}`);
-          // created_at is the last param; if null, default to NOW().
-          const createdAtIdx = colList.indexOf('created_at');
-          if (createdAtIdx >= 0) {
-            placeholders[createdAtIdx] = `COALESCE($${createdAtIdx + 1}::timestamptz, NOW())`;
-          }
-          // extra is jsonb — cast.
-          const extraIdx = colList.indexOf('extra');
-          if (extraIdx >= 0) placeholders[extraIdx] = `$${extraIdx + 1}::jsonb`;
-          // time_slots is jsonb for venue_requests.
-          const tsIdx = colList.indexOf('time_slots');
-          if (tsIdx >= 0) placeholders[tsIdx] = `$${tsIdx + 1}::jsonb`;
-          await client.query(
-            `INSERT INTO ${table} (${cfg.columns})
-             VALUES (${placeholders.join(', ')})
-             ON CONFLICT (id) DO UPDATE SET ${setParts}`,
-            params
-          );
-        }
-        // Delete rows for this station that weren't in the new array —
-        // matches legacy KV `.set` semantics (full overwrite).
-        if (keptIds.length > 0) {
-          await client.query(
-            `DELETE FROM ${table} WHERE radio_id = $1 AND id <> ALL($2::text[])`,
-            [stationId, keptIds]
-          );
-        } else {
-          await client.query(`DELETE FROM ${table} WHERE radio_id = $1`, [stationId]);
-        }
-        await client.query('COMMIT');
-      } catch (e) {
-        await client.query('ROLLBACK');
-        throw e;
-      } finally {
-        client.release();
-      }
-    },
-    async del(stationId: string): Promise<void> {
-      const { pool } = await import('./db-client.tsx');
-      await pool.query(`DELETE FROM ${table} WHERE radio_id = $1`, [stationId]);
-    },
-    async getAll(): Promise<any[]> {
-      // Legacy `.getAll()` возвращал все KV-value (массивы). Не используется
-      // в callers — возвращаем пустой массив для совместимости.
-      return [];
-    },
-  };
-}
+// Phase D KV→SQL closeout (2026-05-31): makeRadioRequestArrayStore удалён.
+// Был KV-shaped facade над row-per-entity tables (mig 056). Все callsites
+// заменены на explicit list helpers (listRadioArtistRequestsByStation,
+// listRadioVenueRequestsByStation, listRadioNotificationsByStation) ниже,
+// а write-path всегда был на native helpers (updateRadioArtistRequest,
+// updateRadioVenueRequest, insertRadioVenueRequest, insertRadioNotification,
+// markRadioNotificationRead, etc.) — race-free через миграцию 056.
 
 // ─── Store instances for all tables ───
 
@@ -3942,9 +3865,43 @@ export async function listChartSources(opts: { type?: string } = {}): Promise<Ch
 // через OPERATIONS_LOG).
 // radioFinanceStore — REMOVED (same — 0 writers anywhere в codebase).
 // radioTransactionsStore — REMOVED (same).
-export const radioArtistRequestsStore = makeRadioRequestArrayStore('radio_artist_requests', mapArtistRequestRow, normalizeArtistRequestForInsert);
-export const radioVenueRequestsStore  = makeRadioRequestArrayStore('radio_venue_requests',  mapVenueRequestRow,  normalizeVenueRequestForInsert);
-export const radioNotificationsStore  = makeRadioRequestArrayStore('radio_notifications',   mapRadioNotificationRow, normalizeRadioNotificationForInsert);
+//
+// Phase D KV→SQL closeout (2026-05-31): radioArtistRequestsStore /
+// radioVenueRequestsStore / radioNotificationsStore (KV-shaped facades
+// над row-per-entity native tables) удалены. Все 10 callsites в
+// radio-routes.tsx переведены на explicit list helpers ниже. Write-path
+// (update/insert/delete) уже был на native helpers через migration 056.
+// makeRadioRequestArrayStore тоже удалён — больше не используется.
+
+export async function listRadioArtistRequestsByStation(stationId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const cfg = RADIO_TABLE_CONFIG.radio_artist_requests;
+  const r = await pool.query(
+    `SELECT ${cfg.selectCols} FROM radio_artist_requests WHERE radio_id = $1 ${cfg.orderBy}`,
+    [stationId]
+  );
+  return r.rows.map(mapArtistRequestRow);
+}
+
+export async function listRadioVenueRequestsByStation(stationId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const cfg = RADIO_TABLE_CONFIG.radio_venue_requests;
+  const r = await pool.query(
+    `SELECT ${cfg.selectCols} FROM radio_venue_requests WHERE radio_id = $1 ${cfg.orderBy}`,
+    [stationId]
+  );
+  return r.rows.map(mapVenueRequestRow);
+}
+
+export async function listRadioNotificationsByStation(stationId: string): Promise<any[]> {
+  const { pool } = await import('./db-client.tsx');
+  const cfg = RADIO_TABLE_CONFIG.radio_notifications;
+  const r = await pool.query(
+    `SELECT ${cfg.selectCols} FROM radio_notifications WHERE radio_id = $1 ${cfg.orderBy}`,
+    [stationId]
+  );
+  return r.rows.map(mapRadioNotificationRow);
+}
 // venue_playlists перевели на row-per-playlist (migration 036). Доступ
 // через pool.query в venue-routes.tsx / venue-api-routes.tsx.
 // venue_ad_campaigns — row-per-campaign, native cols since migration 082.

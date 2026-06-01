@@ -30,9 +30,12 @@ import { Hono } from 'hono';
 import {
   getRadioAdSlot, listRadioAdSlotsByStation, countRadioAdSlots,
   upsertRadioAdSlot, deleteRadioAdSlot,
-  getRadioProfile, radioArtistRequestsStore,
-  radioNotificationsStore,
-  radioVenueRequestsStore,
+  getRadioProfile,
+  // Phase D KV→SQL closeout (2026-05-31): radio*Store facades заменены
+  // на explicit list helpers ниже.
+  listRadioArtistRequestsByStation,
+  listRadioVenueRequestsByStation,
+  listRadioNotificationsByStation,
   updateRadioArtistRequest, updateRadioVenueRequest, deleteRadioVenueRequest,
   markRadioNotificationRead, markRadioNotificationsAllRead,
 } from './db.tsx';
@@ -200,7 +203,7 @@ app.get('/artist-requests', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
-    const requestsData = await radioArtistRequestsStore.get(station.id);
+    const requestsData = await listRadioArtistRequestsByStation(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
 
     return c.json({ success: true, data: requests });
@@ -280,7 +283,7 @@ app.get('/venue-requests', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
-    const requestsData = await radioVenueRequestsStore.get(station.id);
+    const requestsData = await listRadioVenueRequestsByStation(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
 
     return c.json({ success: true, data: requests });
@@ -390,7 +393,7 @@ app.put('/venue-requests/:id/complete', requireAuth, async (c) => {
 
     const { pool } = await import('./db-client.tsx');
     const requestId = c.req.param('id');
-    const requestsData = await radioVenueRequestsStore.get(station.id);
+    const requestsData = await listRadioVenueRequestsByStation(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
     const idx = requests.findIndex((r: any) => r.id === requestId);
     if (idx === -1) {
@@ -487,7 +490,7 @@ app.get('/orders', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
-    const requestsData = await radioVenueRequestsStore.get(station.id);
+    const requestsData = await listRadioVenueRequestsByStation(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
 
     const orders = requests.map((req: any) => ({
@@ -555,7 +558,7 @@ app.put('/orders/:id/approve', requireAuth, profileLimiter, async (c) => {
     const orderId = c.req.param('id');
     const body = await c.req.json().catch(() => ({}));
     // Status guard + atomic UPDATE.
-    const requestsData = await radioVenueRequestsStore.get(station.id);
+    const requestsData = await listRadioVenueRequestsByStation(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
     const idx = requests.findIndex((r: any) => r.id === orderId);
     if (idx === -1) return c.json({ error: 'Order not found' }, 404);
@@ -595,7 +598,7 @@ app.put('/orders/:id/reject', requireAuth, profileLimiter, async (c) => {
 
     const orderId = c.req.param('id');
     const body = await c.req.json().catch(() => ({}));
-    const requestsData = await radioVenueRequestsStore.get(station.id);
+    const requestsData = await listRadioVenueRequestsByStation(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
     const idx = requests.findIndex((r: any) => r.id === orderId);
     if (idx === -1) return c.json({ error: 'Order not found' }, 404);
@@ -626,7 +629,7 @@ app.put('/orders/:id/fulfill', requireAuth, async (c) => {
     }
 
     const orderId = c.req.param('id');
-    const requestsData = await radioVenueRequestsStore.get(station.id);
+    const requestsData = await listRadioVenueRequestsByStation(station.id);
     const requests = Array.isArray(requestsData) ? requestsData : [];
     const idx = requests.findIndex((r: any) => r.id === orderId);
     if (idx === -1) return c.json({ error: 'Order not found' }, 404);
@@ -884,7 +887,7 @@ app.get('/notifications', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
-    const notifData = await radioNotificationsStore.get(station.id);
+    const notifData = await listRadioNotificationsByStation(station.id);
     const notifications = Array.isArray(notifData) ? notifData : [];
 
     return c.json({ success: true, notifications });
@@ -947,8 +950,8 @@ app.get('/analytics', requireAuth, async (c) => {
     // Собираем данные из разных stores. adSlotsCount — native COUNT(*)
     // вместо чтения JSON-массива из index-таблицы (migration 050 убрала её).
     const [artistReqData, venueReqData, adSlotsCount] = await Promise.all([
-      radioArtistRequestsStore.get(station.id),
-      radioVenueRequestsStore.get(station.id),
+      listRadioArtistRequestsByStation(station.id),
+      listRadioVenueRequestsByStation(station.id),
       countRadioAdSlots(station.id),
     ]);
 
