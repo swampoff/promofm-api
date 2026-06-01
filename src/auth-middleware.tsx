@@ -1,9 +1,16 @@
 /**
  * AUTH MIDDLEWARE — JWT verification for API routes
  * Drop-in replacement: same API as original
+ *
+ * Phase D etap A (2026-06-01): дополнительно читает HttpOnly cookie
+ * `pf_session` если `Authorization: Bearer ...` header отсутствует.
+ * Bearer priority — если оба присутствуют, header выигрывает (типичная
+ * situation: frontend в transitional state — cookie старый, header
+ * свежий после refresh).
  */
 import { Context, Next } from 'hono';
 import jwt from 'jsonwebtoken';
+import { getSessionCookie } from './cookie-helper.tsx';
 
 import { createLogger } from "./logger.tsx";
 
@@ -11,7 +18,9 @@ const log = createLogger("auth-mw");
 
 export async function requireAuth(c: Context, next: Next) {
   const authHeader = c.req.header('Authorization');
-  const accessToken = authHeader?.replace('Bearer ', '');
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.replace('Bearer ', '') : null;
+  const cookieToken = getSessionCookie(c) || null;
+  const accessToken = bearerToken || cookieToken;
 
   if (!accessToken) {
     return c.json({ success: false, error: 'Authorization required' }, 401);
