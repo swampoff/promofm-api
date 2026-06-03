@@ -253,6 +253,11 @@ import fs from 'node:fs/promises';
 // filename без allowlist (мог быть .php/.html).
 const ALLOWED_CONTENT_EXT = new Set(['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg', 'opus']);
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+// Audit 2026-06-03: size cap. Раньше hono parseBody принимал unlimited
+// payload — admin случайно/через XSS в админ-UI грузил 10GB файл,
+// fillил диск. 100MB — заведомо выше любого real-world audio-заказа
+// (5-минутный WAV ≈ 50MB, mp3 — единицы).
+const MAX_CONTENT_BYTES = 100 * 1024 * 1024;
 
 app.post('/upload', requireAuth, requireAdmin, async (c) => {
   try {
@@ -264,6 +269,13 @@ app.post('/upload', requireAuth, requireAdmin, async (c) => {
     // Validate orderId is a real UUID — no path traversal via filename.
     if (!UUID_RE.test(orderId)) {
       return c.json({ success: false, error: 'invalid orderId' }, 400);
+    }
+
+    if (file.size > MAX_CONTENT_BYTES) {
+      return c.json({ success: false, error: `file too large (max ${MAX_CONTENT_BYTES / 1024 / 1024}MB)` }, 413);
+    }
+    if (file.size === 0) {
+      return c.json({ success: false, error: 'file is empty' }, 400);
     }
 
     const buf = Buffer.from(await file.arrayBuffer());

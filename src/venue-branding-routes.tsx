@@ -305,11 +305,16 @@ app.get('/public/:venueId', async (c) => {
 // like PUT / does.
 const VENUE_LOGOS_DIR = '/opt/promofm-api/uploads/venue-logos';
 const MAX_LOGO_BYTES = 5 * 1024 * 1024;
+// Audit 2026-06-03: image/svg+xml убран. SVG поддерживает inline <script>,
+// и при рендере логотипа через <object>/<embed>/css background ⇒ XSS в
+// контексте поддомена promofm.org (cookie-стилет к JWT auth-cookie).
+// Все venue'ы реально используют PNG/JPG. Если когда-нибудь вернём SVG —
+// нужен sanitizer (DOMPurify в SVG-mode) ПЛЮС Content-Disposition:
+// attachment в nginx-route на /server/uploads/venue-logos/*.svg.
 const ALLOWED_LOGO_MIME: Record<string, string> = {
   'image/png':     'png',
   'image/jpeg':    'jpg',
   'image/webp':    'webp',
-  'image/svg+xml': 'svg',
   'image/gif':     'gif',
 };
 

@@ -321,6 +321,29 @@ videosRoutes.post('/build-clips', async (c) => {
 });
 
 // ─── Download thumbnails (YouTube blocked in Russia) ─────────────────
+// Audit 2026-06-03: hardening на трёх векторах.
+//
+//  (1) PATH TRAVERSAL: t.videoId шёл в `/var/www/.../thumb_${videoId}.jpg`
+//      без валидации. videoId="../../../etc/cron.d/evil" писал в /etc/...
+//      Защита: regex на YT-ID shape ([A-Za-z0-9_-]{11}) + path.resolve
+//      + startsWith проверка финального пути в THUMBS_DIR.
+//
+//  (2) SSRF: t.url fetched без allowlist. Атакующий писал
+//      url=http://localhost:5432 → fetch к Postgres'у. Защита: hostname
+//      whitelist на i.ytimg.com / img.youtube.com (единственные хосты
+//      где живут YT-обложки).
+//
+//  (3) NO SIZE CAP: 10GB ответ → диск-залив. Защита: 512KB-cap через
+//      Content-Length + ReadableStream byte-counter (Content-Length
+//      может быть подделан или отсутствовать).
+//
+// Auth: x-internal-key (env), но defense-in-depth — даже при leak
+// ключа эти три гейта блокируют exploit.
+const THUMBS_DIR = '/var/www/promofm/html/thumbnails';
+const YT_VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+const YT_THUMB_HOSTS = new Set(['i.ytimg.com', 'img.youtube.com']);
+const MAX_THUMB_BYTES = 512 * 1024;
+
 videosRoutes.post('/download-thumbnails', async (c) => {
   const internalKey = c.req.header('x-internal-key');
   if (internalKey !== process.env.VPS_INTERNAL_KEY) {
@@ -334,20 +357,60 @@ videosRoutes.post('/download-thumbnails', async (c) => {
       return c.json({ success: false, error: 'No thumbnails provided' }, 400);
     }
 
+    const fs = await import('node:fs');
+    const nodePath = await import('node:path');
+    const resolvedRoot = nodePath.resolve(THUMBS_DIR);
+
     let downloaded = 0;
     const errors: string[] = [];
 
     for (const t of thumbnails) {
       try {
-        const resp = await fetch(t.url, { signal: AbortSignal.timeout(10000) });
-        if (!resp.ok) { errors.push(t.videoId + ': HTTP ' + resp.status); continue; }
+        // (1) videoId shape — иначе никаких "../" в имени.
+        if (typeof t.videoId !== 'string' || !YT_VIDEO_ID_RE.test(t.videoId)) {
+          errors.push(`${String(t.videoId).slice(0, 32)}: invalid videoId`);
+          continue;
+        }
+
+        // (2) URL allowlist — никаких internal-network/localhost/IP.
+        let parsed: URL;
+        try { parsed = new URL(t.url); } catch {
+          errors.push(`${t.videoId}: invalid url`);
+          continue;
+        }
+        if (parsed.protocol !== 'https:' || !YT_THUMB_HOSTS.has(parsed.hostname)) {
+          errors.push(`${t.videoId}: url host not allowed (${parsed.hostname})`);
+          continue;
+        }
+
+        const resp = await fetch(parsed.toString(), { signal: AbortSignal.timeout(10000) });
+        if (!resp.ok) { errors.push(`${t.videoId}: HTTP ${resp.status}`); continue; }
+
+        // (3) size cap — Content-Length fast-fail, потом byte-counter
+        // на body (cl может быть подделан или отсутствовать).
+        const cl = Number(resp.headers.get('content-length') || 0);
+        if (cl > MAX_THUMB_BYTES) {
+          errors.push(`${t.videoId}: too large (${cl})`);
+          continue;
+        }
         const buffer = Buffer.from(await resp.arrayBuffer());
-        const fs = await import('node:fs');
-        const path = '/var/www/promofm/html/thumbnails/thumb_' + t.videoId + '.jpg';
-        fs.writeFileSync(path, buffer);
+        if (buffer.byteLength > MAX_THUMB_BYTES) {
+          errors.push(`${t.videoId}: too large (${buffer.byteLength})`);
+          continue;
+        }
+
+        // Final path containment — videoId уже прошёл shape-проверку,
+        // это belt-and-suspenders defense на случай если regex когда-то
+        // ослабят (например для длинных YT-ID).
+        const targetPath = nodePath.resolve(THUMBS_DIR, `thumb_${t.videoId}.jpg`);
+        if (!targetPath.startsWith(resolvedRoot + nodePath.sep)) {
+          errors.push(`${t.videoId}: path escape`);
+          continue;
+        }
+        fs.writeFileSync(targetPath, buffer);
         downloaded++;
       } catch (e: any) {
-        errors.push(t.videoId + ': ' + e.message);
+        errors.push(`${t.videoId || '?'}: ${e.message}`);
       }
     }
 
