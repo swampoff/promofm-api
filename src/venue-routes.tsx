@@ -333,7 +333,7 @@ app.get('/analytics/overview', requireAuth, async (c) => {
       data: {
         spending: {
           total: Math.round(totalSpending * 100) / 100,
-          growth: analytics?.spendingGrowth || -5.2,
+          growth: analytics?.spendingGrowth ?? 0, // Audit: was || -5.2 — fake constant shown to every venue (analytics={} dead store)
           thisMonth: Math.round((analytics?.monthlySpending || totalSpending) * 100) / 100,
         },
         campaigns: {
@@ -345,13 +345,13 @@ app.get('/analytics/overview', requireAuth, async (c) => {
         reach: {
           totalImpressions: analytics?.totalImpressions || 0,
           uniqueListeners: analytics?.uniqueListeners || 0,
-          growth: analytics?.reachGrowth || 32.5,
+          growth: analytics?.reachGrowth ?? 0, // Audit: was || 32.5 (fake)
           avgPerCampaign: campaigns.length ? Math.round((analytics?.totalImpressions || 0) / campaigns.length) : 0,
         },
         performance: {
           avgROI: analytics?.avgROI || 0,
           conversionRate: analytics?.conversionRate || 0,
-          engagementRate: analytics?.engagementRate || 82.3,
+          engagementRate: analytics?.engagementRate ?? 0, // Audit: was || 82.3 (fake)
         },
       },
     });
