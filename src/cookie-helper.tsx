@@ -58,7 +58,7 @@ import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
 export const SESSION_COOKIE_NAME = 'pf_session';
 export const REFRESH_COOKIE_NAME = 'pf_refresh';
 
-const SESSION_MAX_AGE_SECONDS = 2 * 60 * 60;          // 2h — = JWT_EXPIRES_IN
+const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60; // STOPGAP 2026-06-03 — 24h, синхрон с JWT_EXPIRES_IN. Откат на 2*60*60 после silent-refresh.          // 2h — = JWT_EXPIRES_IN
 const REFRESH_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;    // 30d — = REFRESH_TOKEN_DAYS (auth-security.tsx:285)
 
 /**
