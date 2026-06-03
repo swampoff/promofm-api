@@ -493,4 +493,110 @@ app.get('/home/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   }
 });
 
+// GET /radio-details/:artistId
+//
+// Detailed confirmed radio pickups for the artist's tracks — which
+// station, which city, how many rotations. This is the airplay
+// breakdown the artist cabinet renders (station names + broadcast
+// cities + rotation graph). DISTINCT from /downloads (which counts
+// download EVENTS from track_downloads_by_radio/_venue): this reads
+// track_radio_pickups, the manual airplay/rotation reports.
+//
+// Mirrors /home's pickup query exactly (JOIN tracks ON user_id,
+// report_status = 'confirmed') so the detail rows are consistent with
+// the SUM/COUNT totals already shown on the home page — /home only
+// aggregated these same rows, this endpoint returns them.
+//
+// COLUMN TYPES (same cabinet schema as /home):
+//   track_radio_pickups.track_id       : uuid (FK → tracks.id, no cast on JOIN)
+//   track_radio_pickups.station_name   : text
+//   track_radio_pickups.city           : text
+//   track_radio_pickups.rotation_count : integer
+//   track_radio_pickups.report_status  : text
+//   tracks.user_id                     : text → text=text compare, no cast
+app.get('/radio-details/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
+  const artistId = c.req.param('artistId');
+
+  try {
+    // Run the three aggregations in parallel — all read the same small
+    // confirmed-pickups set for this artist's tracks.
+    const [byStationRes, byCityRes, perTrackRes] = await Promise.all([
+      // By station: each station the artist rotates on, with how many
+      // distinct cities and total rotations.
+      pool.query(
+        `SELECT rp.station_name,
+                COUNT(DISTINCT rp.city) FILTER (WHERE rp.city IS NOT NULL AND rp.city <> '')::int AS city_count,
+                COALESCE(SUM(rp.rotation_count), 0)::int AS total_rotations
+           FROM track_radio_pickups rp
+           JOIN tracks t ON t.id = rp.track_id
+          WHERE t.user_id = $1 AND rp.report_status = 'confirmed'
+          GROUP BY rp.station_name
+          ORDER BY total_rotations DESC, rp.station_name ASC`,
+        [artistId],
+      ),
+      // By city: broadcast cities, with how many distinct stations and
+      // total rotations in each.
+      pool.query(
+        `SELECT COALESCE(NULLIF(rp.city, ''), '(не указан)') AS city,
+                COUNT(DISTINCT rp.station_name)::int AS station_count,
+                COALESCE(SUM(rp.rotation_count), 0)::int AS total_rotations
+           FROM track_radio_pickups rp
+           JOIN tracks t ON t.id = rp.track_id
+          WHERE t.user_id = $1 AND rp.report_status = 'confirmed'
+          GROUP BY COALESCE(NULLIF(rp.city, ''), '(не указан)')
+          ORDER BY total_rotations DESC, city ASC`,
+        [artistId],
+      ),
+      // Per track: each pickup row (station + city + rotations) so the UI
+      // can show a per-release breakdown and a rotation graph.
+      pool.query(
+        `SELECT t.id AS track_id, t.title,
+                rp.station_name,
+                COALESCE(NULLIF(rp.city, ''), NULL) AS city,
+                COALESCE(rp.rotation_count, 0)::int AS rotation_count
+           FROM track_radio_pickups rp
+           JOIN tracks t ON t.id = rp.track_id
+          WHERE t.user_id = $1 AND rp.report_status = 'confirmed'
+          ORDER BY t.title ASC, rp.rotation_count DESC`,
+        [artistId],
+      ),
+    ]);
+
+    // Group per-track rows into { track_id, title, pickups: [...] }.
+    const trackMap = new Map<string, { track_id: string; title: string; pickups: Array<{ station_name: string; city: string | null; rotation_count: number }> }>();
+    for (const r of perTrackRes.rows) {
+      if (!trackMap.has(r.track_id)) {
+        trackMap.set(r.track_id, { track_id: r.track_id, title: r.title || 'Без названия', pickups: [] });
+      }
+      trackMap.get(r.track_id)!.pickups.push({
+        station_name: r.station_name || '(без названия)',
+        city: r.city ?? null,
+        rotation_count: Number(r.rotation_count) || 0,
+      });
+    }
+
+    const totalRotations = byStationRes.rows.reduce((s: number, r: any) => s + (Number(r.total_rotations) || 0), 0);
+
+    return c.json({
+      success: true,
+      stations: byStationRes.rows,
+      cities: byCityRes.rows,
+      tracks: Array.from(trackMap.values()),
+      totals: {
+        stations:  byStationRes.rows.length,
+        // city list includes a synthetic '(не указан)' bucket for blank
+        // cities — exclude it from the honest city count.
+        cities:    byCityRes.rows.filter((r: any) => r.city !== '(не указан)').length,
+        rotations: totalRotations,
+      },
+    });
+  } catch (err) {
+    // Table may be absent in some envs, or a column missing — warn and
+    // return a 500 the frontend catches (section then hides) rather than
+    // crashing the analytics page.
+    console.error('[artist-analytics] /radio-details failed:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
 export default app;
