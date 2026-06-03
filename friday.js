@@ -13,8 +13,8 @@
 
 import 'dotenv/config';
 import { Pool } from 'pg';
-import { execSync } from 'child_process';
-import { readdirSync, statSync, mkdirSync, renameSync, existsSync } from 'fs';
+import { spawnSync } from 'child_process';
+import { readdirSync, mkdirSync, renameSync, existsSync, copyFileSync } from 'fs';
 import { join, basename, extname } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -24,6 +24,22 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 pool.on('connect', (client) => {
   client.query("SELECT set_config('app.current_role', 'admin', false)");
 });
+
+// ── CMD-injection safe wrapper ───────────────────────────
+// Audit 2026-06-03: всё ниже раньше шло через execSync(`ffprobe "${path}"`)
+// где path — basename из readdirSync, без санитизации. MP3 с именем вида
+// `track"; rm -rf / "x.mp3` в /opt/promofm-api/uploads/inbox вызывал бы
+// shell injection при cron-сканировании. spawnSync с массивом аргументов
+// не запускает шелл — никакая интерпретация специальных символов.
+function runCapture(cmd, args) {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  if (r.error || r.status !== 0) return null;
+  return r.stdout;
+}
+function runQuiet(cmd, args) {
+  const r = spawnSync(cmd, args, { stdio: 'ignore' });
+  return r.status === 0;
+}
 
 // ── Dedupe helper: skip if (artist, title) already imported ──
 async function isAlreadyImported(artistName, title) {
@@ -81,31 +97,33 @@ function formatDate(date) {
 
 // Get MP3 duration via ffprobe (fallback to 0)
 function getDuration(filePath) {
-  try {
-    const out = execSync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${filePath}" 2>/dev/null`, { encoding: 'utf8' });
-    return Math.round(parseFloat(out) || 0);
-  } catch {
-    return 0;
-  }
+  const out = runCapture('ffprobe', [
+    '-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', filePath,
+  ]);
+  return Math.round(parseFloat(out) || 0);
 }
 
 // Extract cover art from MP3
 function extractCover(filePath, outputPath) {
-  try {
-    // Check if MP3 has embedded cover
-    const probe = execSync(`ffprobe -v quiet -show_streams -select_streams v "${filePath}" 2>/dev/null`, { encoding: 'utf8' });
-    if (probe.includes('codec_name=mjpeg') || probe.includes('codec_name=png')) {
-      execSync(`ffmpeg -y -i "${filePath}" -an -vcodec mjpeg -q:v 2 "${outputPath}" 2>/dev/null`);
-      return true;
-    }
-  } catch {}
+  const probe = runCapture('ffprobe', [
+    '-v', 'quiet', '-show_streams', '-select_streams', 'v', filePath,
+  ]);
+  if (!probe) return false;
+  if (probe.includes('codec_name=mjpeg') || probe.includes('codec_name=png')) {
+    return runQuiet('ffmpeg', [
+      '-y', '-i', filePath, '-an', '-vcodec', 'mjpeg', '-q:v', '2', outputPath,
+    ]);
+  }
   return false;
 }
 
 // Get MP3 metadata via ffprobe
 function getMetadata(filePath) {
+  const out = runCapture('ffprobe', [
+    '-v', 'quiet', '-print_format', 'json', '-show_format', filePath,
+  ]);
+  if (!out) return { title: '', artist: '', album: '', genre: 'Pop', duration: 0 };
   try {
-    const out = execSync(`ffprobe -v quiet -print_format json -show_format "${filePath}" 2>/dev/null`, { encoding: 'utf8' });
     const data = JSON.parse(out);
     const tags = data.format?.tags || {};
     return {
@@ -125,16 +143,46 @@ function getMetadata(filePath) {
 async function scanAndCreate(trackDir) {
   console.log(`\n🎵 ПЯТНИЦА — Scanning: ${trackDir}\n`);
 
+  // Concurrent-cron guard: pg advisory lock — second invocation того же
+  // scan-job'а тихо завершится, не задвоив релиз / ON CONFLICT гонки на
+  // artist slug, не выслав 2x уведомлений (если когда-нибудь добавим).
+  // Lock key — произвольная константа; освобождается по pool.end().
+  const lockKey = 924173; // 'friday-cron'
+  const lockRes = await pool.query('SELECT pg_try_advisory_lock($1) AS got', [lockKey]);
+  if (!lockRes.rows[0].got) {
+    console.log('⚠ Another friday-cron is running, skipping.');
+    return;
+  }
+
   const files = readdirSync(trackDir).filter(f => extname(f).toLowerCase() === '.mp3');
   if (files.length === 0) {
     console.log('No MP3 files found.');
     return;
   }
 
+  // Setup nginx symlinks ONCE per run (раньше mkdir+ln звались на каждый
+  // трек — 200 треков = 600 syscalls без необходимости).
+  const destDir = '/opt/promofm-api/uploads/tracks';
+  const coversDir = '/opt/promofm-api/uploads/covers';
+  try {
+    mkdirSync(coversDir, { recursive: true });
+    mkdirSync('/var/www/promofm/html/server/uploads', { recursive: true });
+  } catch {}
+  runQuiet('ln', ['-sfn', '/opt/promofm-api/uploads/covers', '/var/www/promofm/html/server/uploads/covers']);
+  runQuiet('ln', ['-sfn', '/opt/promofm-api/uploads/tracks', '/var/www/promofm/html/server/uploads/tracks']);
+
   const now = new Date();
   const weekNum = getWeekNumber(now);
   const year = now.getFullYear();
   const trackIds = [];
+
+  // Audit 2026-06-03: раньше user_id = `system-friday-${Date.now()}` —
+  // менялся каждую итерацию цикла, плюс между artist INSERT и track
+  // INSERT, итог: каждый трек получал РАЗНЫЙ синтетический user_id, и
+  // artist_profiles накапливал «system-friday-1733...» как owner-ID
+  // которого нет в users → orphan FK + RLS-боль. Один константный
+  // owner-ID для всего friday-pipeline'а.
+  const SYSTEM_OWNER = 'system-friday';
 
   for (const file of files) {
     const filePath = join(trackDir, file);
@@ -155,52 +203,60 @@ async function scanAndCreate(trackDir) {
     const artists = artistName.split(/,\s*|&\s*|\s+feat\.?\s+/i).map(a => a.trim()).filter(Boolean);
     const primaryArtist = artists[0];
     const slug = slugify(primaryArtist);
-
-    // Upsert artist profile
-    const artistId = randomUUID();
-    const artistResult = await pool.query(`
-      INSERT INTO artist_profiles (id, user_id, slug, artist_name, genre)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (slug) DO UPDATE SET genre = COALESCE(NULLIF(artist_profiles.genre, ''), $5)
-      RETURNING id
-    `, [artistId, `system-friday-${Date.now()}`, slug, primaryArtist, genre]);
-
-    const finalArtistId = artistResult.rows[0].id;
-
-    // Copy file to uploads
-    const destDir = '/opt/promofm-api/uploads/tracks';
-    const destPath = join(destDir, file);
-    try {
-      execSync(`cp "${filePath}" "${destPath}"`);
-    } catch (e) {
-      console.error(`  Failed to copy ${file}: ${e.message}`);
-    }
-
-    // Symlink for nginx
-    const symlinkDir = '/var/www/promofm/uploads/tracks';
-    try {
-      execSync(`ln -sf ${destDir} ${symlinkDir} 2>/dev/null || true`);
-    } catch {}
-
-    // Insert track
     const trackId = randomUUID();
     const audioUrl = `/server/uploads/tracks/${encodeURIComponent(file)}`;
 
-    await pool.query(`
-      INSERT INTO tracks (id, artist_id, user_id, title, artist_name, genre, duration, audio_url, release_date, moderation_status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'published')
-      ON CONFLICT (id) DO NOTHING
-    `, [
-      trackId, finalArtistId, `system-friday-${Date.now()}`,
-      title, artistName, genre, duration, audioUrl,
-      now.toISOString(),
-    ]);
+    // ─── Атомарная вставка артиста+трека в одной транзакции ───
+    // Раньше: INSERT artist → cp file → ln → INSERT track → UPDATE cover.
+    // Если падало между artist INSERT и track INSERT — оставался orphan
+    // artist_profile без треков. Теперь всё в BEGIN/COMMIT, BEGIN-локально
+    // на одном client'е (pool.connect — не pool.query).
+    const client = await pool.connect();
+    let finalArtistId = null;
+    try {
+      await client.query('BEGIN');
+      const artistResult = await client.query(`
+        INSERT INTO artist_profiles (id, user_id, slug, artist_name, genre)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (slug) DO UPDATE SET genre = COALESCE(NULLIF(artist_profiles.genre, ''), $5)
+        RETURNING id
+      `, [randomUUID(), SYSTEM_OWNER, slug, primaryArtist, genre]);
+      finalArtistId = artistResult.rows[0].id;
 
-    // Extract cover art from MP3
-    const coversDir = '/opt/promofm-api/uploads/covers';
-    const coverSlug = slugify(title) || basename(file, extname(file)).replace(/^\d+\s*/, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+      // Copy file BEFORE track INSERT — если cp падает, не записываем
+      // в DB ссылку на несуществующий файл.
+      const destPath = join(destDir, file);
+      try {
+        copyFileSync(filePath, destPath);
+      } catch (e) {
+        throw new Error(`copy ${file} failed: ${e.message}`);
+      }
+
+      await client.query(`
+        INSERT INTO tracks (id, artist_id, user_id, title, artist_name, genre, duration, audio_url, release_date, moderation_status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'published')
+        ON CONFLICT (id) DO NOTHING
+      `, [
+        trackId, finalArtistId, SYSTEM_OWNER,
+        title, artistName, genre, duration, audioUrl,
+        now.toISOString(),
+      ]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error(`  ✗ ${artistName} — ${title} txn failed:`, e.message);
+      client.release();
+      continue;
+    }
+    client.release();
+
+    // Extract cover art from MP3 (вне транзакции — best-effort enrichment,
+    // если ffmpeg падает — трек уже опубликован без обложки, не блокер).
+    // Cover slug includes trackId tail для уникальности: иначе два трека
+    // с одинаковым title затирали бы обложку друг друга.
+    const baseCoverSlug = slugify(title) || basename(file, extname(file)).replace(/^\d+\s*/, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+    const coverSlug = `${baseCoverSlug}-${trackId.slice(0, 8)}`;
     const coverPath = join(coversDir, coverSlug + '.jpg');
-    try { execSync(`mkdir -p ${coversDir}`); } catch {}
 
     if (extractCover(filePath, coverPath)) {
       const coverUrl = '/server/uploads/covers/' + encodeURIComponent(coverSlug + '.jpg');
@@ -212,13 +268,6 @@ async function scanAndCreate(trackDir) {
         [coverUrl, finalArtistId]
       );
     }
-
-    // Ensure symlinks for nginx
-    try {
-      execSync('mkdir -p /var/www/promofm/html/server/uploads');
-      execSync('ln -sfn /opt/promofm-api/uploads/covers /var/www/promofm/html/server/uploads/covers');
-      execSync('ln -sfn /opt/promofm-api/uploads/tracks /var/www/promofm/html/server/uploads/tracks');
-    } catch {}
 
     trackIds.push(trackId);
     console.log(`  ✓ ${artistName} — ${title} (${Math.floor(duration/60)}:${(duration%60).toString().padStart(2,'0')})`);
@@ -297,17 +346,9 @@ async function showStatus() {
 
 
 // ── Auto-add new tracks to radio_library (ПРОМО.ЭИР) ──
-import { mkdirSync as _fmkdirSync, copyFileSync as _fcopyFileSync, existsSync as _fexistsSync } from 'node:fs';
-import { join as _fjoin } from 'node:path';
-import { execSync as _fexecSync } from 'node:child_process';
-
 async function addToRadioLibrary(weekNumber, year) {
-  // ESM-safe: используем module-level imports вместо require()
-  const fs = { mkdirSync: _fmkdirSync, copyFileSync: _fcopyFileSync, existsSync: _fexistsSync };
-  const path = { join: _fjoin };
-  const execSync = _fexecSync;
   const TARGET_DIR = '/mnt/data/promofm-music/tracks';
-  try { fs.mkdirSync(TARGET_DIR, { recursive: true }); } catch {}
+  try { mkdirSync(TARGET_DIR, { recursive: true }); } catch {}
 
   const r = await pool.query(
     `SELECT t.id, t.title, t.artist_name, t.genre, t.duration,
@@ -321,12 +362,12 @@ async function addToRadioLibrary(weekNumber, year) {
   let added = 0;
   for (const row of r.rows) {
     const decoded = decodeURIComponent(row.enc_filename || '');
-    const src = path.join('/opt/promofm-api/uploads/tracks', decoded);
-    if (!fs.existsSync(src)) continue;
+    const src = join('/opt/promofm-api/uploads/tracks', decoded);
+    if (!existsSync(src)) continue;
     const stdFilename = (`${row.artist_name} - ${row.title}.mp3`).replace(/\//g, '_');
-    const dest = path.join(TARGET_DIR, stdFilename);
-    if (!fs.existsSync(dest)) {
-      try { fs.copyFileSync(src, dest); } catch (e) { console.error('copy fail:', e.message); continue; }
+    const dest = join(TARGET_DIR, stdFilename);
+    if (!existsSync(dest)) {
+      try { copyFileSync(src, dest); } catch (e) { console.error('copy fail:', e.message); continue; }
     }
     try {
       await pool.query(

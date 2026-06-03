@@ -155,6 +155,29 @@ export interface CronResult {
 export async function expireTrialsOnce(): Promise<CronResult> {
   const result: CronResult = { scanned: 0, expired: 0, warned: 0, skipped: 0, errors: [] };
 
+  // Audit 2026-06-03: cron-secret endpoint /venue/cron/expire-trials может
+  // быть позван дважды конкурентно (manual + systemd-timer overlap, или
+  // оператор case'ит CRON_SECRET в curl и refresh'нул). Без локa оба
+  // вызова читают одинаковые row'ы → шлют дубликат writing+T-1 email'а
+  // venue, плюс могут оба пытаться tryAutoChargeAtTrialEnd (двойное
+  // списание с карты). Postgres advisory lock — лучший lightweight guard:
+  // session-scoped, освобождается на pool client release / disconnect,
+  // не требует таблиц/чистки. Конкурент видит got=false, выходит чисто.
+  // Key 770451 произвольный, уникален в рамках проекта (см. friday.js
+  // 924173 для другого cron'а).
+  const lockClient = await pool.connect();
+  try {
+    const lockRes = await lockClient.query('SELECT pg_try_advisory_lock(770451) AS got');
+    if (!lockRes.rows[0].got) {
+      console.log('[venue-trial] cron: another instance is running, skipping tick.');
+      lockClient.release();
+      return result;
+    }
+  } catch (err) {
+    lockClient.release();
+    throw err;
+  }
+
   let trialRows: Array<{ user_id: string; data: any; email: string | null; venue_name: string; created_at: string | null }>;
   try {
     const q = await pool.query(
@@ -171,6 +194,8 @@ export async function expireTrialsOnce(): Promise<CronResult> {
     trialRows = q.rows as any[];
   } catch (err: any) {
     console.error('[venue-trial] cron: failed to load trial profiles:', err?.message);
+    await lockClient.query('SELECT pg_advisory_unlock(770451)').catch(() => {});
+    lockClient.release();
     throw err;
   }
 
@@ -321,5 +346,7 @@ export async function expireTrialsOnce(): Promise<CronResult> {
   }
 
   console.log(`[venue-trial] cron tick: scanned=${result.scanned} expired=${result.expired} warned=${result.warned} skipped=${result.skipped} errors=${result.errors.length}`);
+  await lockClient.query('SELECT pg_advisory_unlock(770451)').catch(() => {});
+  lockClient.release();
   return result;
 }
