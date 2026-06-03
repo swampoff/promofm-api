@@ -657,17 +657,98 @@ paymentsRoutes.put('/admin/accounting/documents/:id', requireAuth, requireAdmin,
 /**
  * GET /admin/accounting/ledger - Бухгалтерские проводки
  */
+/**
+ * GET /admin/accounting/ledger - Бухгалтерские проводки.
+ *
+ * Audit 2026-06-01: раньше отдавал только содержимое accounting_ledger
+ * (отдельная таблица для ручных проводок). Никаких автоматических
+ * INSERT'ов на платежи не было — стол всегда пустой → бухгалтерия
+ * показывала «непонятные данные и фейки» (UI fallback'ы).
+ *
+ * Теперь: UNION ALL манульного ledger'а + auto-derived проводок из
+ * payment_transactions (реальные платежи: подписки, комиссии,
+ * выплаты). Каждый payment_tx → одна проводка с debit/credit
+ * выведенными из tx_type:
+ *   deposit/topup/donation/commission → 51 (касса) / 90 (выручка)
+ *   withdrawal/expense/payout         → 76 (расчёты) / 51 (касса)
+ *   refund                            → 90 (выручка) / 51 (касса)
+ *
+ * Ручные записи в accounting_ledger — для корректировок, налогов и т.п.
+ */
 paymentsRoutes.get('/admin/accounting/ledger', requireAuth, requireAdmin, async (c) => {
   try {
-    const { rows } = await pool.query(
+    // Manual entries from accounting_ledger
+    const { rows: manual } = await pool.query(
       `SELECT id, entry_date AS date, debit_account AS debit, credit_account AS credit,
               amount, description, extra,
               created_at AS "createdAt", updated_at AS "updatedAt"
          FROM accounting_ledger
          ORDER BY entry_date DESC NULLS LAST`
     );
-    const data = rows.map((r: any) => ({ ...r.extra, ...r, extra: undefined }));
-    return c.json({ success: true, data });
+    const manualEntries = manual.map((r: any) => ({
+      ...r.extra, ...r, extra: undefined, source: 'manual',
+    }));
+
+    // Auto-derived entries из payment_transactions. Лимит 1000 чтобы
+    // UI не задыхался; для аудита есть фильтры в /admin/transactions.
+    const { rows: auto } = await pool.query(
+      `SELECT app_id        AS id,
+              created_at    AS date,
+              tx_type       AS tx_type,
+              category      AS category,
+              amount        AS amount,
+              status        AS status,
+              description   AS description,
+              created_at    AS "createdAt"
+         FROM payment_transactions
+        WHERE status = 'completed'
+        ORDER BY created_at DESC
+        LIMIT 1000`
+    );
+
+    // Russian chart-of-accounts соответствие (упрощённое):
+    //   51 — касса/банк (платформа)
+    //   76 — расчёты с разными дебиторами/кредиторами (выплаты исполнителям)
+    //   90 — выручка
+    //   91 — прочие доходы/расходы (возвраты)
+    const DEBIT_CREDIT: Record<string, { debit: string; credit: string }> = {
+      deposit:    { debit: '51', credit: '90' },
+      topup:      { debit: '51', credit: '90' },
+      donation:   { debit: '51', credit: '90' },
+      commission: { debit: '51', credit: '90' },
+      withdrawal: { debit: '76', credit: '51' },
+      payout:     { debit: '76', credit: '51' },
+      expense:    { debit: '91', credit: '51' },
+      refund:     { debit: '90', credit: '51' },
+    };
+
+    const autoEntries = auto.map((r: any) => {
+      const dc = DEBIT_CREDIT[r.tx_type] || { debit: '76', credit: '51' };
+      return {
+        id: `auto-${r.id}`,
+        date: r.date instanceof Date
+          ? r.date.toISOString().slice(0, 10)
+          : String(r.date).slice(0, 10),
+        debit: dc.debit,
+        credit: dc.credit,
+        amount: Number(r.amount) || 0,
+        description: r.description
+          || `${r.tx_type}${r.category ? ` (${r.category})` : ''}`,
+        createdAt: r.createdAt,
+        source: 'payment_tx',
+        txType: r.tx_type,
+      };
+    });
+
+    // Merge — manual записи сначала, потом auto (по дате). Стабильная
+    // сортировка по date desc.
+    const all = [...manualEntries, ...autoEntries].sort((a, b) => {
+      const da = String(a.date || a.createdAt || '');
+      const db = String(b.date || b.createdAt || '');
+      return db.localeCompare(da);
+    });
+
+    return c.json({ success: true, data: all });
   } catch (error: any) {
     console.error('Error in GET /admin/accounting/ledger:', error);
     return c.json({ error: safeErrorMessage(error) }, 500);
