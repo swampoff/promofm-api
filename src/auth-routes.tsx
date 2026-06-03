@@ -30,7 +30,7 @@ const log = createLogger("auth");
 const PARTNER_ROLES = ['radio_station', 'radio', 'venue'];
 const MAX_FAILED_ATTEMPTS = 5;
 const JWT_SECRET = process.env.JWT_SECRET!;
-const JWT_EXPIRES_IN = '2h';
+const JWT_EXPIRES_IN = '24h'; // STOPGAP 2026-06-03 — откат на '2h' после доставки silent-refresh (#96 + AuthContext global-net). См. PR/OPERATIONS_LOG.
 
 // ── PostgreSQL ──
 let pool: Pool | null = null;
