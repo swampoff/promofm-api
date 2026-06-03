@@ -4,6 +4,7 @@
  * For read-only routes, caller can provide a fallback explicitly.
  */
 import jwt from 'jsonwebtoken';
+import { getSessionCookie } from './cookie-helper.tsx';
 
 /**
  * Resolve user ID strictly from JWT or internal API key.
@@ -19,6 +20,19 @@ export async function resolveUserId(c: any): Promise<string | null> {
       const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
       if (decoded.sub) return decoded.sub;
     } catch { /* invalid token — fall through */ }
+  }
+
+  // 1b. pf_session cookie (cookie-only auth с Phase D — фронт больше не шлёт
+  //     Bearer). Hotfix 2026-06-03 (incident: кик из «Мои треки»): эндпоинты
+  //     на resolveUserId БЕЗ requireAuth (напр. GET /tracks/radio-stats/all)
+  //     иначе 401-ят валидную cookie-сессию → fetchWithAuth refresh+retry →
+  //     снова 401 → auth-expired → кик. Читаем pf_session напрямую.
+  const cookieToken = getSessionCookie(c);
+  if (cookieToken) {
+    try {
+      const decoded = jwt.verify(cookieToken, process.env.JWT_SECRET!) as any;
+      if (decoded.sub) return decoded.sub;
+    } catch { /* invalid cookie token — fall through */ }
   }
 
   // 2. Middleware-set userId (from requireAuth)
