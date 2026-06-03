@@ -4,6 +4,7 @@
  */
 import 'dotenv/config';
 import { readFileSync, existsSync } from 'fs';
+import path from 'node:path';
 // Security: validate critical env vars at startup
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   // eslint-disable-next-line no-console
@@ -247,43 +248,75 @@ app.get('/api/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISO
 
 // Mount routes
 // ── Static files: tracks & covers ──
-app.get('/server/uploads/tracks/*', async (c) => {
-  const filename = decodeURIComponent(c.req.path.replace('/server/uploads/tracks/', ''));
-  const filePath = '/opt/promofm-api/uploads/tracks/' + filename;
-  try {
-    if (!existsSync(filePath)) return c.text('Not found', 404);
-    const file = readFileSync(filePath);
-    c.header('Content-Type', 'audio/mpeg');
-    c.header('Accept-Ranges', 'bytes');
-    c.header('Cache-Control', 'public, max-age=31536000');
-    c.header('Access-Control-Allow-Origin', '*');
-    return c.body(file);
-  } catch { return c.text('Not found', 404); }
-});
+//
+// Audit 2026-06-03 (CRITICAL path traversal):
+// Раньше эти три handler'а делали `'/opt/promofm-api/uploads/X/' + decodeURIComponent(rest)`
+// без проверки `..`/`/` и без path.resolve+startsWith. Запрос
+// `/server/uploads/tracks/..%2F..%2F..%2Fetc%2Fpasswd` → readFileSync
+// возвращал /etc/passwd как audio/mpeg. Любой неавторизованный
+// клиент мог прочитать любой файл, доступный пользователю node.
+//
+// Прим: цикл ниже (STATIC_UPLOAD_SUBDIRS, line ~300) уже имел этот
+// guard для dj/venue/apk subdirs, а tracks/covers/venue-content были
+// пропущены — несовместимый паттерн.
+//
+// Защита: один helper, тот же allowlist-стиль что и в track-download-
+// helper.tsx (после PR 4ff6eb4 review-blockers).
+function serveStaticFromUploads(
+  c: any,
+  subdir: string,
+  defaultMime: string,
+  mimeByExt?: Record<string, string>,
+): Response | Promise<Response> {
+  const prefix = `/server/uploads/${subdir}/`;
+  const raw = c.req.path.replace(prefix, '');
+  // Reject path-traversal markers BEFORE decode (foils %2e%2e tricks).
+  if (/%2e%2e|%2f|%5c|%00/i.test(raw)) return c.text('Forbidden', 403);
+  const filename = decodeURIComponent(raw);
+  // Post-decode guard: ни `..` сегментов, ни абсолютных путей, ни
+  // backslash (Windows-paths), ни NUL.
+  if (!filename
+    || filename.includes('..')
+    || filename.includes('/')
+    || filename.includes('\\')
+    || filename.includes('\0')
+    || filename.startsWith('.')) {
+    return c.text('Forbidden', 403);
+  }
+  const root = `/opt/promofm-api/uploads/${subdir}`;
+  const resolvedRoot = path.resolve(root);
+  const filePath = path.resolve(root, filename);
+  // Belt-and-suspenders: resolved path обязан быть внутри resolvedRoot.
+  if (!filePath.startsWith(resolvedRoot + path.sep)) {
+    return c.text('Forbidden', 403);
+  }
+  if (!existsSync(filePath)) return c.text('Not found', 404);
+  const file = readFileSync(filePath);
+  let mime = defaultMime;
+  if (mimeByExt) {
+    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    mime = mimeByExt[ext] || defaultMime;
+  }
+  c.header('Content-Type', mime);
+  c.header('Accept-Ranges', 'bytes');
+  c.header('Cache-Control', 'public, max-age=31536000');
+  c.header('Access-Control-Allow-Origin', '*');
+  return c.body(file);
+}
 
-app.get('/server/uploads/covers/*', async (c) => {
-  const filename = decodeURIComponent(c.req.path.replace('/server/uploads/covers/', ''));
-  const filePath = '/opt/promofm-api/uploads/covers/' + filename;
-  try {
-    if (!existsSync(filePath)) return c.text('Not found', 404);
-    const file = readFileSync(filePath);
-    c.header('Content-Type', 'image/jpeg');
-    c.header('Cache-Control', 'public, max-age=31536000');
-    c.header('Access-Control-Allow-Origin', '*');
-    return c.body(file);
-  } catch { return c.text('Not found', 404); }
-});
+app.get('/server/uploads/tracks/*', async (c) =>
+  serveStaticFromUploads(c, 'tracks', 'audio/mpeg'),
+);
 
-app.get('/server/uploads/venue-content/*', async (c) => {
-  const filename = decodeURIComponent(c.req.path.replace('/server/uploads/venue-content/', ''));
-  const filePath = '/opt/promofm-api/uploads/venue-content/' + filename;
-  const fs = await import('node:fs');
-  if (!fs.existsSync(filePath)) return c.json({ error: 'not found' }, 404);
-  const data = fs.readFileSync(filePath);
-  const ext = filename.split('.').pop()?.toLowerCase() || 'mp3';
-  const types: Record<string, string> = { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4' };
-  return new Response(data, { headers: { 'Content-Type': types[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' } });
-});
+app.get('/server/uploads/covers/*', async (c) =>
+  serveStaticFromUploads(c, 'covers', 'image/jpeg'),
+);
+
+app.get('/server/uploads/venue-content/*', async (c) =>
+  serveStaticFromUploads(c, 'venue-content', 'application/octet-stream', {
+    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+  }),
+);
 
 // DJ cabinet uploads: avatars, covers, mixes, mix covers, videos, portfolio
 // Subdirs served as static files at /server/uploads/<subdir>/<filename>.
