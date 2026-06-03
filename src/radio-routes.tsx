@@ -967,7 +967,10 @@ app.get('/analytics', requireAuth, async (c) => {
     const artistStats = {
       total: artistRequests.length,
       pending: artistRequests.filter((r: any) => r.status === 'pending').length,
-      approved: artistRequests.filter((r: any) => r.status === 'approved' || r.status === 'in_rotation').length,
+      // Audit 2026-06-04: the accept route writes status='accepted' (line ~228),
+      // but this bucket only matched approved/in_rotation → accepted requests were
+      // invisible in every bucket yet still counted in .total (total != p+a+r).
+      approved: artistRequests.filter((r: any) => r.status === 'approved' || r.status === 'in_rotation' || r.status === 'accepted').length,
       rejected: artistRequests.filter((r: any) => r.status === 'rejected').length,
     };
 
@@ -1013,7 +1016,7 @@ app.get('/analytics', requireAuth, async (c) => {
 
     // Топ артисты (по количеству треков в ротации)
     const topArtists = artistRequests
-      .filter((r: any) => r.status === 'approved' || r.status === 'in_rotation')
+      .filter((r: any) => r.status === 'approved' || r.status === 'in_rotation' || r.status === 'accepted')
       .sort((a: any, b: any) => (b.totalPlays || 0) - (a.totalPlays || 0))
       .slice(0, 5)
       .map((r: any) => ({

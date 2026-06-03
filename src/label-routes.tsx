@@ -1091,9 +1091,12 @@ app.get('/analytics/overview', requireAuth, async (c) => {
     const tr = await pool.query(
       `SELECT
          COUNT(*)                                  AS total_tracks,
-         COUNT(*) FILTER (WHERE t.moderation_status = 'approved') AS published_tracks,
-         COALESCE(SUM(t.likes_count), 0)           AS total_likes,
-         COALESCE(SUM(t.plays_count), 0)           AS total_track_plays
+         -- Audit 2026-06-04: 'approved' = hidden (is_hidden), NOT live; live is
+         -- 'published' (matches artist-profile-routes canonical). And plays/likes
+         -- must sum only 'published' or the label sees MORE than the artist's own page.
+         COUNT(*) FILTER (WHERE t.moderation_status = 'published') AS published_tracks,
+         COALESCE(SUM(t.likes_count) FILTER (WHERE t.moderation_status = 'published'), 0) AS total_likes,
+         COALESCE(SUM(t.plays_count) FILTER (WHERE t.moderation_status = 'published'), 0) AS total_track_plays
        FROM tracks t
        JOIN artist_profiles ap ON ap.id = t.artist_id
        WHERE ap.managed_by_label_id = $1 OR ap.label_id = $1`,
@@ -1117,7 +1120,7 @@ app.get('/analytics/overview', requireAuth, async (c) => {
       overview: {
         artistsManaged: Number(row.managed) || 0,
         artistsLinked: Number(row.linked) || 0,
-        totalPlays: Math.max(Number(row.total_plays) || 0, Number(trRow.total_track_plays) || 0),
+        totalPlays: Number(trRow.total_track_plays) || 0, // live published SUM (was Math.max with stale, unwritten ap.total_plays)
         totalLikes: Number(trRow.total_likes) || 0,
         totalFollowers: Number(row.total_followers) || 0,
         totalTracks: Number(trRow.total_tracks) || 0,

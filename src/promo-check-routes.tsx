@@ -88,7 +88,9 @@ app.get("/artist/:artistId", requireAuth, requireOwner("artistId"), async (c) =>
      LEFT JOIN promo_check_detections d
        ON d.track_id = t.id
        AND d.detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}
-     WHERE t.artist_id = $1
+     -- Audit 2026-06-04: caller passes userId (text), so filter tracks.user_id,
+     -- not tracks.artist_id (uuid) → was 0 rows → empty Promo.check feed.
+     WHERE t.user_id = $1
      GROUP BY t.id, t.title
      ORDER BY total DESC, t.created_at DESC
      LIMIT 50`,
@@ -128,7 +130,8 @@ app.get("/detections", requireAuth, async (c) => {
     sql += ` WHERE d.track_id = $${params.length + 1}`;
     params.push(trackId);
   } else if (artistId) {
-    sql += ` WHERE t.artist_id = $${params.length + 1}`;
+    // Audit 2026-06-04: artist_id query param is the caller's userId → user_id.
+    sql += ` WHERE t.user_id = $${params.length + 1}`;
     params.push(artistId);
   }
 
