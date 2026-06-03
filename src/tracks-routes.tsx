@@ -122,7 +122,13 @@ tracksRoutes.post('/', requireAuth, async (c) => {
       artist_name: artistName,
       audio_url: body.audioUrl || body.audio_url || body.audio_file_url || body.audioFile || body.audio || '',
       cover_url: body.coverUrl || body.cover_url || body.cover_image_url || body.cover || '',
-      moderation_status: body.status || 'draft',
+      // BLOCKER A (audit 2026-06-03): non-admin client мог отправить
+      // body.status='published' в POST /tracks и опубликовать трек
+      // мимо модерации. Forced 'draft' для всех ролей кроме admin.
+      // Admin retain'ит body.status для bulk-импорта / редакционных
+      // правок (см. friday.js: впрыскивает 'published' через прямой
+      // pool.query, не через эту ручку).
+      moderation_status: userRole === 'admin' ? (body.status || 'draft') : 'draft',
       // Streaming-links (migration 095) — camelCase из формы, валидируем.
       yandex_music_url: sanitizeStreamingUrl(body.yandexMusicUrl ?? body.yandex_music_url),
       spotify_url:      sanitizeStreamingUrl(body.spotifyUrl     ?? body.spotify_url),
