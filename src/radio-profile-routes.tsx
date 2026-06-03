@@ -259,8 +259,16 @@ app.post('/request-verification', requireAuth, async (c) => {
  * GET /profile/:radioId/stats
  * Статистика радиостанции
  */
-app.get('/profile/:radioId/stats', async (c) => {
+app.get('/profile/:radioId/stats', requireAuth, async (c) => {
   const radioId = c.req.param('radioId');
+
+  // Audit 2026-06-04 (security): this endpoint was missing requireAuth +
+  // ownership, unlike its siblings GET/PUT /profile/:radioId (lines 134/159).
+  // Anyone could enumerate radioId and read another station's revenue /
+  // audience / partners. Mirror the sibling guard (admin auto-passes).
+  if (!(await ownsRadioProfile(c, radioId))) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
 
   try {
     const profile = await loadFromKv(radioId);

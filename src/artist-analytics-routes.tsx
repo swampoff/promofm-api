@@ -215,11 +215,12 @@ app.get('/downloads/:artistId', requireAuth, requireOwner('artistId'), async (c)
   try {
     const artistId = c.req.param('artistId');
 
-    // The artistId param is artist_profiles.id (uuid). Tracks join via
-    // tracks.artist_id (uuid). pg-node parses bind-string as uuid — no
-    // ::text cast (see SQL pitfalls in CLAUDE.md).
+    // Audit 2026-06-04: requireOwner('artistId') forces artistId === userId
+    // (text from JWT), so this MUST filter tracks.user_id (text) — same as
+    // /home and /tracks. It used tracks.artist_id (uuid = artist_profiles.id)
+    // → 0 rows → the «Скачивания» card was empty by construction.
     const trackIdsRes = await pool.query(
-      `SELECT id, title FROM tracks WHERE artist_id = $1`,
+      `SELECT id, title FROM tracks WHERE user_id = $1`,
       [artistId]
     );
     if (trackIdsRes.rows.length === 0) {
