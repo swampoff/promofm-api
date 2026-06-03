@@ -14,6 +14,7 @@ import { findCampaignEmailEvent, upsertEmailHistory, getPublishEmailPrefs, setPu
 import { upsertEmailCampaign, getEmailCampaigns } from './db.tsx';
 import { smtpSendEmail, smtpSendBatch } from './smtp-sender.tsx';
 import { vpsListProfiles } from './vps-userdata.tsx';
+import { signRedirectUrl, isRedirectAllowed } from './track-url-token.tsx';
 
 const app = new Hono();
 
@@ -110,7 +111,8 @@ function injectClickTracking(html: string, campaignId: string, email: string): s
       if (url.startsWith('mailto:') || url.startsWith('tel:') || url.startsWith('#') || url.includes('/track/')) {
         return `${before}${url}${after}`;
       }
-      const trackUrl = `${baseUrl}/server/api/email-campaigns/track/click?url=${encodeURIComponent(url)}&c=${encodeURIComponent(campaignId)}&e=${encodeURIComponent(email)}`;
+      const signedSig = signRedirectUrl(url);
+      const trackUrl = `${baseUrl}/server/api/email-campaigns/track/click?url=${encodeURIComponent(url)}&c=${encodeURIComponent(campaignId)}&e=${encodeURIComponent(email)}&s=${signedSig}`;
       return `${before}${trackUrl}${after}`;
     }
   );
@@ -308,6 +310,7 @@ app.get('/track/click', async (c) => {
   const url = c.req.query('url') || '';
   const campaignId = c.req.query('c') || '';
   const email = c.req.query('e') || '';
+  const sig = c.req.query('s') || '';
 
   // Log click in background
   if (campaignId && email) {
@@ -335,9 +338,14 @@ app.get('/track/click', async (c) => {
     })();
   }
 
-  // Redirect to original URL
-  if (url) {
+  // Redirect to original URL — ТОЛЬКО если url подписан нами (валидный
+  // sig) ИЛИ ведёт на собственный домен. Иначе open-redirect → фишинг.
+  // См. track-url-token.tsx (audit 2026-06-03).
+  if (url && isRedirectAllowed(url, sig)) {
     return c.redirect(url, 302);
+  }
+  if (url) {
+    console.warn('[Campaigns] track/click blocked unsigned external redirect:', url.slice(0, 120));
   }
   return c.redirect('https://promofm.org', 302);
 });
