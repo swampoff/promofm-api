@@ -1608,34 +1608,117 @@ export async function getAllPaymentTxs(filters?: {
   type?: string; category?: string; status?: string; search?: string;
   limit?: number; offset?: number;
 }): Promise<{ txs: any[]; total: number }> {
-  // Count
-  let countQ = db().from('payment_txns').select('id', { count: 'exact', head: true });
-  if (filters?.type) countQ = countQ.eq('type', filters.type);
-  if (filters?.category) countQ = countQ.eq('category', filters.category);
-  if (filters?.status) countQ = countQ.eq('status', filters.status);
-  if (filters?.search) countQ = countQ.ilike('description', '%' + filters.search + '%');
-  const { count } = await countQ;
+  // Audit 2026-06-01: переписано на реальную payment_transactions (там
+  // INSERT'ятся комиссии, выплаты, подписки через recordRevenue/checkout).
+  // Раньше читалась payment_txns — мёртвая таблица без writers → admin
+  // /Финансы/Транзакции всегда пустые, моки.
+  //
+  // JOIN с users для name/email — раньше name=userId (UUID-показывалось).
+  // metadata.userName/userAvatar чтобы admin сразу видел.
+  const { pool } = await import('./db-client.tsx');
 
-  // Data
-  let q = db().from('payment_txns').select('*');
-  if (filters?.type) q = q.eq('type', filters.type);
-  if (filters?.category) q = q.eq('category', filters.category);
-  if (filters?.status) q = q.eq('status', filters.status);
-  if (filters?.search) q = q.ilike('description', '%' + filters.search + '%');
-  q = q.order('created_at', { ascending: false });
-  const lim = filters?.limit || 100;
+  // tx_type в БД маппится на FE-type: commission→commission, deposit→income,
+  // withdrawal→withdrawal, refund→refund.
+  const TYPE_MAP_INVERSE: Record<string, string[]> = {
+    income:      ['deposit', 'topup', 'donation'],
+    commission:  ['commission'],
+    withdrawal:  ['withdrawal'],
+    refund:      ['refund'],
+    expense:     ['expense', 'payout'],
+  };
+
+  const conds: string[] = [];
+  const vals: any[] = [];
+  if (filters?.type) {
+    const mapped = TYPE_MAP_INVERSE[filters.type] || [filters.type];
+    vals.push(mapped);
+    conds.push(`pt.tx_type = ANY($${vals.length}::text[])`);
+  }
+  if (filters?.category) {
+    vals.push(filters.category);
+    conds.push(`pt.category = $${vals.length}`);
+  }
+  if (filters?.status) {
+    vals.push(filters.status);
+    conds.push(`pt.status = $${vals.length}`);
+  }
+  if (filters?.search) {
+    vals.push('%' + filters.search + '%');
+    conds.push(`(pt.description ILIKE $${vals.length} OR u.email ILIKE $${vals.length} OR u.full_name ILIKE $${vals.length})`);
+  }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+  const countRes = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM payment_transactions pt
+       LEFT JOIN users u ON u.id::text = pt.user_id ${where}`,
+    vals
+  );
+
+  const lim = Math.min(filters?.limit || 100, 500);
   const off = filters?.offset || 0;
-  q = q.range(off, off + lim - 1);
-  const { data, error } = await q;
-  if (error) console.error('[db] getAllPaymentTxs:', error);
-  const txs = (data || []).map((r: any) => ({
-    id: r.id, userId: r.user_id, orderId: r.order_id, type: r.type,
-    category: r.category, amount: Number(r.amount), currency: r.currency,
-    gateway: r.gateway, description: r.description,
-    metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {}),
-    status: r.status, createdAt: r.created_at,
-  }));
-  return { txs, total: count || 0 };
+  vals.push(lim, off);
+  const dataRes = await pool.query(
+    `SELECT pt.app_id        AS id,
+            pt.user_id       AS user_id,
+            pt.tx_type       AS tx_type,
+            pt.category      AS category,
+            pt.amount        AS amount,
+            pt.currency      AS currency,
+            pt.status        AS status,
+            pt.description   AS description,
+            pt.metadata      AS metadata,
+            pt.created_at    AS created_at,
+            COALESCE(u.full_name, u.email, pt.user_id) AS user_name,
+            u.email          AS user_email,
+            u.avatar_url     AS user_avatar
+       FROM payment_transactions pt
+       LEFT JOIN users u ON u.id::text = pt.user_id
+       ${where}
+       ORDER BY pt.created_at DESC
+       LIMIT $${vals.length - 1} OFFSET $${vals.length}`,
+    vals
+  );
+
+  // Map tx_type → FE type. 'commission' / 'deposit' / 'topup' / 'donation' →
+  // 'income' для UI группировки (но сохраняем оригинал в metadata).
+  const TYPE_TO_FE: Record<string, string> = {
+    deposit:    'income',
+    topup:      'income',
+    donation:   'income',
+    commission: 'commission',
+    withdrawal: 'withdrawal',
+    refund:     'refund',
+    expense:    'expense',
+    payout:     'expense',
+  };
+
+  const txs = dataRes.rows.map((r: any) => {
+    const meta = typeof r.metadata === 'string'
+      ? (() => { try { return JSON.parse(r.metadata); } catch { return {}; } })()
+      : (r.metadata || {});
+    return {
+      id: r.id,
+      userId: r.user_id,
+      orderId: meta.orderId || null,
+      type: TYPE_TO_FE[r.tx_type] || r.tx_type || 'income',
+      category: r.category || 'subscription',
+      amount: Number(r.amount) || 0,
+      currency: r.currency || 'RUB',
+      gateway: meta.gateway || null,
+      description: r.description || '',
+      status: r.status || 'completed',
+      createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at,
+      metadata: {
+        ...meta,
+        userName: r.user_name,
+        userEmail: r.user_email,
+        userAvatar: r.user_avatar,
+        originalTxType: r.tx_type,
+      },
+    };
+  });
+
+  return { txs, total: countRes.rows[0]?.n || 0 };
 }
 
 export async function getPaymentTxStats(): Promise<{
@@ -1644,51 +1727,154 @@ export async function getPaymentTxStats(): Promise<{
   categoryBreakdown: { category: string; total: number }[];
   monthlyTrend: { month: string; income: number; expense: number; net: number }[];
 }> {
-  const { data: all, error } = await db().from('payment_txns').select('type, category, amount, status, created_at');
-  if (error) console.error('[db] getPaymentTxStats:', error);
-  const txs = all || [];
-  const totalIncome = txs.filter((t: any) => t.type === 'income' || t.type === 'donation').reduce((s: number, t: any) => s + Number(t.amount), 0);
-  const totalExpense = txs.filter((t: any) => t.type === 'expense' || t.type === 'withdrawal').reduce((s: number, t: any) => s + Number(t.amount), 0);
-  const totalRefund = txs.filter((t: any) => t.type === 'refund').reduce((s: number, t: any) => s + Number(t.amount), 0);
-  const pendingCount = txs.filter((t: any) => t.status === 'pending').length;
-  const catMap = new Map<string, number>();
-  for (const t of txs) catMap.set(t.category, (catMap.get(t.category) || 0) + Number(t.amount));
-  const categoryBreakdown = Array.from(catMap.entries()).map(([category, total]) => ({ category, total }));
-  const now = new Date();
-  const monthlyTrend: { month: string; income: number; expense: number; net: number }[] = [];
-  for (let i = 5; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const label = d.toISOString().slice(0, 7);
-    const nextMonth = new Date(d.getFullYear(), d.getMonth() + 1, 1);
-    const monthTxs = txs.filter((t: any) => {
-      const td = new Date(t.created_at);
-      return td >= d && td < nextMonth;
-    });
-    const income = monthTxs.filter((t: any) => t.type === 'income' || t.type === 'donation').reduce((s: number, t: any) => s + Number(t.amount), 0);
-    const expense = monthTxs.filter((t: any) => t.type === 'expense' || t.type === 'withdrawal').reduce((s: number, t: any) => s + Number(t.amount), 0);
-    monthlyTrend.push({ month: label, income, expense, net: income - expense });
-  }
-  return { totalIncome, totalExpense, totalRefund, netBalance: totalIncome - totalExpense - totalRefund, transactionCount: txs.length, pendingCount, categoryBreakdown, monthlyTrend };
+  // Audit 2026-06-01: SQL-aggregation из реальной payment_transactions.
+  // Раньше читалась payment_txns — пустая мёртвая таблица.
+  const { pool } = await import('./db-client.tsx');
+
+  const totalsRes = await pool.query(
+    `SELECT
+       COALESCE(SUM(amount) FILTER (
+         WHERE tx_type IN ('deposit','topup','donation','commission') AND status='completed'
+       ), 0)::numeric AS total_income,
+       COALESCE(SUM(amount) FILTER (
+         WHERE tx_type IN ('withdrawal','expense','payout') AND status='completed'
+       ), 0)::numeric AS total_expense,
+       COALESCE(SUM(amount) FILTER (
+         WHERE tx_type='refund' AND status='completed'
+       ), 0)::numeric AS total_refund,
+       COUNT(*)::int AS tx_count,
+       COUNT(*) FILTER (WHERE status='pending')::int AS pending_count
+     FROM payment_transactions`
+  );
+  const t = totalsRes.rows[0];
+
+  const catRes = await pool.query(
+    `SELECT COALESCE(category, 'other') AS category,
+            COALESCE(SUM(amount), 0)::numeric AS total
+       FROM payment_transactions
+      WHERE status='completed'
+      GROUP BY category
+      ORDER BY total DESC`
+  );
+
+  // monthlyTrend: последние 6 месяцев. date_trunc + generate_series для
+  // нулевых месяцев тоже (иначе пропуски в графике).
+  const trendRes = await pool.query(
+    `WITH months AS (
+       SELECT generate_series(
+         date_trunc('month', NOW() - INTERVAL '5 months'),
+         date_trunc('month', NOW()),
+         INTERVAL '1 month'
+       ) AS m
+     )
+     SELECT to_char(months.m, 'YYYY-MM') AS month,
+            COALESCE(SUM(pt.amount) FILTER (
+              WHERE pt.tx_type IN ('deposit','topup','donation','commission') AND pt.status='completed'
+            ), 0)::numeric AS income,
+            COALESCE(SUM(pt.amount) FILTER (
+              WHERE pt.tx_type IN ('withdrawal','expense','payout') AND pt.status='completed'
+            ), 0)::numeric AS expense
+       FROM months
+       LEFT JOIN payment_transactions pt
+              ON date_trunc('month', pt.created_at) = months.m
+      GROUP BY months.m
+      ORDER BY months.m`
+  );
+
+  const totalIncome = Number(t.total_income) || 0;
+  const totalExpense = Number(t.total_expense) || 0;
+  const totalRefund = Number(t.total_refund) || 0;
+
+  return {
+    totalIncome,
+    totalExpense,
+    totalRefund,
+    netBalance: totalIncome - totalExpense - totalRefund,
+    transactionCount: Number(t.tx_count) || 0,
+    pendingCount: Number(t.pending_count) || 0,
+    categoryBreakdown: catRes.rows.map((r: any) => ({
+      category: r.category,
+      total: Number(r.total) || 0,
+    })),
+    monthlyTrend: trendRes.rows.map((r: any) => {
+      const income = Number(r.income) || 0;
+      const expense = Number(r.expense) || 0;
+      return { month: r.month, income, expense, net: income - expense };
+    }),
+  };
 }
 
 export async function getPaymentTxUserSummaries(): Promise<any[]> {
-  const { data, error } = await db().from('payment_txns').select('user_id, type, amount, created_at');
-  if (error) console.error('[db] getPaymentTxUserSummaries:', error);
-  const txs = data || [];
-  const users = new Map<string, { totalSpent: number; totalEarned: number; count: number; lastTx: string | null }>();
-  for (const t of txs) {
-    const uid = t.user_id;
-    if (!users.has(uid)) users.set(uid, { totalSpent: 0, totalEarned: 0, count: 0, lastTx: null });
-    const u = users.get(uid)!;
-    u.count++;
-    if (t.type === 'income' || t.type === 'donation') u.totalEarned += Number(t.amount);
-    else u.totalSpent += Number(t.amount);
-    if (!u.lastTx || t.created_at > u.lastTx) u.lastTx = t.created_at;
-  }
-  return Array.from(users.entries()).map(([userId, s]) => ({
-    id: userId, name: userId, email: '', balance: s.totalEarned - s.totalSpent,
-    totalSpent: s.totalSpent, totalEarned: s.totalEarned, transactionsCount: s.count,
-    lastTransaction: s.lastTx, status: 'active',
+  // Audit 2026-06-01: JOIN с users для имени/email + читаем реальную
+  // payment_transactions + payment_balances. Раньше:
+  //   - читалась мёртвая payment_txns (всегда пусто)
+  //   - name = userId (UUID показывалось как имя)
+  //   - email = '' (пусто)
+  //   - balance = totalEarned - totalSpent (не реальный wallet balance)
+  //
+  // Сейчас: balance из payment_balances (где сидят реальные balances
+  // продюсеров/DJ/радио после ledger-update в recordRevenue + milestone
+  // approve).
+  const { pool } = await import('./db-client.tsx');
+
+  const rows = (await pool.query(
+    `SELECT
+       u.id::text                                    AS id,
+       COALESCE(NULLIF(u.full_name, ''), u.email, u.id::text) AS name,
+       u.email                                       AS email,
+       u.avatar_url                                  AS avatar,
+       u.role::text                                  AS role,
+       u.status::text                                AS user_status,
+       COALESCE(pb.available, 0)::numeric            AS balance,
+       COALESCE(spent.total, 0)::numeric             AS total_spent,
+       COALESCE(earned.total, 0)::numeric            AS total_earned,
+       COALESCE(tx_count.cnt, 0)::int                AS tx_count,
+       last_tx.last_at                               AS last_tx_at
+     FROM users u
+     LEFT JOIN payment_balances pb
+            ON pb.user_id = u.id::text
+     LEFT JOIN LATERAL (
+       SELECT SUM(amount) AS total
+         FROM payment_transactions
+        WHERE user_id = u.id::text AND status='completed'
+          AND tx_type IN ('withdrawal','expense','payout')
+     ) spent ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT SUM(amount) AS total
+         FROM payment_transactions
+        WHERE user_id = u.id::text AND status='completed'
+          AND tx_type IN ('deposit','topup','donation','commission')
+     ) earned ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT COUNT(*) AS cnt
+         FROM payment_transactions
+        WHERE user_id = u.id::text
+     ) tx_count ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT MAX(created_at) AS last_at
+         FROM payment_transactions
+        WHERE user_id = u.id::text
+     ) last_tx ON TRUE
+     WHERE u.deleted_at IS NULL
+       AND (COALESCE(tx_count.cnt, 0) > 0 OR COALESCE(pb.available, 0) > 0)
+     ORDER BY balance DESC, tx_count.cnt DESC NULLS LAST
+     LIMIT 500`
+  )).rows;
+
+  return rows.map((r: any) => ({
+    id: r.id,
+    name: r.name || r.id,
+    email: r.email || '',
+    avatar: r.avatar || '',
+    role: r.role || 'artist',
+    balance: Number(r.balance) || 0,
+    totalSpent: Number(r.total_spent) || 0,
+    totalEarned: Number(r.total_earned) || 0,
+    transactionsCount: Number(r.tx_count) || 0,
+    lastTransaction: r.last_tx_at instanceof Date ? r.last_tx_at.toISOString() : r.last_tx_at,
+    status: r.user_status === 'banned' ? 'blocked'
+          : r.user_status === 'pending' ? 'pending'
+          : 'active',
   }));
 }
 
