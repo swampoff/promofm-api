@@ -19,6 +19,38 @@ pool.on('error', (err) => {
 
 export { pool };
 
+// ─── Inline-ALTER helper с НЕ-silent error handling ──────────────────
+// По коду разбросан паттерн:
+//   await pool.query(`ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`).catch(() => {});
+// «.catch(() => {})» проглатывает ВСЕ ошибки — lock-timeout, deadlock,
+// permission denied, syntax error. Если column реально не добавилась,
+// последующий SELECT падает с «column does not exist», но root-cause
+// (ALTER fail) уже потерян, debugging превращается в перебор гипотез.
+//
+// Правильный паттерн: WARN-лог с указанием call-site'а; «known errors»
+// (race с другим concurrent ALTER, «already exists») лог-warn без panic;
+// unknown reasons — error лог с stack'ом, продолжаем (handler ловит и
+// отвечает 500'кой выше).
+//
+// Usage:
+//   await ensureSchemaInline('venue_ad_campaigns:payment_refund_cols',
+//     'ALTER TABLE venue_ad_campaigns ADD COLUMN IF NOT EXISTS ...');
+//
+// label — human-readable идентификатор site'а (фигурирует в логах).
+// НЕ передавать user input.
+export async function ensureSchemaInline(label: string, sql: string): Promise<void> {
+  try {
+    await pool.query(sql);
+  } catch (e: any) {
+    const msg = e?.message || String(e);
+    if (/already exists|tuple concurrently updated|deadlock detected/i.test(msg)) {
+      console.warn(`[ensureSchema:${label}] benign race:`, msg.slice(0, 200));
+      return;
+    }
+    console.error(`[ensureSchema:${label}] ALTER failed:`, msg);
+  }
+}
+
 // ─── RLS-aware query wrapper ─────────────────────────────────
 // Uses dedicated connection with SET LOCAL for RLS policy enforcement.
 // Falls back to plain pool.query() if no userId provided.

@@ -322,6 +322,102 @@ app.put('/venue-requests/:id/approve', requireAuth, async (c) => {
   }
 });
 
+// ─── Refund saga при reject оплаченной venue_ad_campaign (BLOCKER B) ───
+// До этого PR'а (audit 2026-06-03): если станция реджектила оплаченную
+// кампанию, /venue-requests/:id/reject и /orders/:id/reject просто
+// флипали status='rejected' БЕЗ возврата денег. Venue платил впустую.
+//
+// Этот helper вызывается из обоих reject-handler'ов (radio-routes.tsx:326
+// venue-requests и :591 orders). Идемпотентность через
+// idempotenceKey=`refund-campaign-${id}` одинакова из обоих путей →
+// двойной reject (через два разных endpoint'а) не приведёт к двойному
+// возврату.
+//
+// Failure modes:
+//   - Кампания не оплачена (paid_at IS NULL) → no-op, ok:true,
+//     needed:false
+//   - Уже refunded/cancelled → ok:true, already:'refunded', needed:false
+//   - payment_session не найден → ok:false, нужен ручной возврат
+//   - gateway != yookassa → ok:false, нужен manual в дашборде
+//   - yk.refund() exception → ok:false с error.message, лог-warn —
+//     reject status остаётся (радио сказало «нет», запись валидна),
+//     но админ должен ручно refund'нуть.
+async function refundVenueCampaignOnReject(
+  campaignId: string,
+  userId: string,
+  reason: string,
+): Promise<any> {
+  let refundResult: any = { needed: false };
+  try {
+    const { pool: rePool } = await import('./db-client.tsx');
+    const { ensureSchemaInline } = await import('./db-client.tsx');
+    // ensureSchema — на случай если миграция 101 не успела применена
+    // до restart. Не silent — log + benign-race detection.
+    await ensureSchemaInline(
+      'venue_ad_campaigns:payment_refund_cols',
+      `ALTER TABLE venue_ad_campaigns
+         ADD COLUMN IF NOT EXISTS payment_order_id TEXT,
+         ADD COLUMN IF NOT EXISTS payment_gateway  TEXT,
+         ADD COLUMN IF NOT EXISTS paid_at          TIMESTAMPTZ,
+         ADD COLUMN IF NOT EXISTS refunded_at      TIMESTAMPTZ,
+         ADD COLUMN IF NOT EXISTS refund_id        TEXT,
+         ADD COLUMN IF NOT EXISTS rejection_reason TEXT,
+         ADD COLUMN IF NOT EXISTS rejected_at      TIMESTAMPTZ`
+    );
+
+    const camp = await rePool.query(
+      `SELECT id, venue_id, budget, payment_order_id, payment_gateway, paid_at, status, refunded_at
+         FROM venue_ad_campaigns WHERE id = $1 LIMIT 1`,
+      [campaignId]
+    );
+    if (camp.rows.length === 0 || !camp.rows[0].payment_order_id || !camp.rows[0].paid_at) {
+      // Кампания не оплачена или не существует — нечего возвращать.
+      return refundResult;
+    }
+    const campaign = camp.rows[0];
+    if (campaign.status === 'refunded' || campaign.status === 'cancelled' || campaign.refunded_at) {
+      return { needed: false, already: campaign.status };
+    }
+
+    refundResult.needed = true;
+    const { getPaymentSession } = await import('./db.tsx');
+    const session = await getPaymentSession(campaign.payment_order_id) as any;
+    if (!session?.gatewayPaymentId) {
+      refundResult = { needed: true, ok: false, error: 'payment_session не найден — нужен ручной refund в дашборде ЮКассы' };
+      console.error('[venue-reject] payment_session not found', { campaignId });
+      return refundResult;
+    }
+    if (session.gateway !== 'yookassa') {
+      refundResult = { needed: true, ok: false, error: `Refund невозможен: gateway=${session.gateway} (Stripe/T-Bank auto-refund не настроен)` };
+      console.error('[venue-reject] refund gateway mismatch', { campaignId, gateway: session.gateway });
+      return refundResult;
+    }
+
+    const { YooKassaGateway } = await import('./gateway-yookassa.tsx');
+    const yk = new YooKassaGateway();
+    const refund = await yk.refund(session.gatewayPaymentId, Number(campaign.budget), {
+      description: `Возврат: радио отклонило кампанию #${campaignId}${reason ? ': ' + reason.slice(0, 100) : ''}`.slice(0, 250),
+      idempotenceKey: `refund-campaign-${campaignId}`,
+      metadata: { campaignId, refundedBy: userId, reason: reason || '' },
+    });
+    // Флипаем кампанию в refunded ТОЛЬКО при успехе refund'а.
+    await rePool.query(
+      `UPDATE venue_ad_campaigns
+          SET status='refunded',
+              refunded_at = NOW(),
+              refund_id = $2,
+              updated_at = NOW()
+        WHERE id = $1`,
+      [campaignId, refund.id]
+    );
+    refundResult = { needed: true, ok: true, refundId: refund.id, status: refund.status };
+  } catch (refundErr: any) {
+    console.error('[venue-reject] refund error:', refundErr);
+    refundResult = { needed: true, ok: false, error: refundErr?.message || 'Refund failed' };
+  }
+  return refundResult;
+}
+
 // PUT /venue-requests/:id/reject
 app.put('/venue-requests/:id/reject', requireAuth, async (c) => {
   try {
@@ -343,7 +439,17 @@ app.put('/venue-requests/:id/reject', requireAuth, async (c) => {
       return c.json({ error: 'Venue request not found' }, 404);
     }
 
-    return c.json({ success: true, data: updated });
+    // BLOCKER B: refund saga для оплаченной кампании.
+    const refundResult = await refundVenueCampaignOnReject(requestId, userId, body.reason || '');
+
+    logUserAction(c, {
+      action: 'radio_reject_venue_request',
+      resourceType: 'venue_request',
+      targetId: String(requestId),
+      details: { stationId: station.id, reason: body.reason || '', refund: refundResult },
+    });
+
+    return c.json({ success: true, data: updated, refund: refundResult });
   } catch (error: any) {
     console.error('Error rejecting venue request:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -612,7 +718,19 @@ app.put('/orders/:id/reject', requireAuth, profileLimiter, async (c) => {
       reviewedAt: new Date().toISOString(),
     });
 
-    return c.json({ success: true, data: updated || requests[idx] });
+    // BLOCKER B: эта ручка зовётся фронтом через rejectOrder() из секции
+    // «Заказы». До этого PR'а — только флипала status, без refund'а.
+    // Теперь оба reject-endpoint'а через один helper.
+    const refundResult = await refundVenueCampaignOnReject(orderId, userId, body.reason || '');
+
+    logUserAction(c, {
+      action: 'radio_reject_order',
+      resourceType: 'venue_request',
+      targetId: String(orderId),
+      details: { stationId: station.id, reason: body.reason || '', refund: refundResult },
+    });
+
+    return c.json({ success: true, data: updated || requests[idx], refund: refundResult });
   } catch (error: any) {
     console.error('Error rejecting order:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);

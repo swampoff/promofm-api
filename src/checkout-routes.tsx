@@ -422,6 +422,25 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           updatedAt: now,
         };
         await insertVenueAdCampaign(campaign);
+        // BLOCKER B (migration 101): записываем payment-метаданные сразу
+        // после INSERT, чтобы refund-helper в radio-routes мог найти
+        // session.gatewayPaymentId по campaign.payment_order_id. До этого
+        // PR'а insertVenueAdCampaign не знал об этих колонках; патч
+        // оставлен как inline UPDATE чтобы не расширять interface
+        // VenueAdCampaignRow одним PR'ом.
+        try {
+          const { pool: rcPool } = await import('./db-client.tsx');
+          await rcPool.query(
+            `UPDATE venue_ad_campaigns
+                SET payment_order_id = $2,
+                    payment_gateway  = $3,
+                    paid_at          = NOW()
+              WHERE id = $1`,
+            [campaign.id, session.orderId, session.gateway]
+          );
+        } catch (paymentMetaErr: any) {
+          log.warn({ campaignId: campaign.id, err: paymentMetaErr?.message }, 'radio_campaign_payment_meta_write_failed');
+        }
         log.info({ campaignId: campaign.id }, 'radio_campaign_created');
         
         // Notify station owner
