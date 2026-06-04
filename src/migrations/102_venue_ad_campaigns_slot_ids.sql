@@ -25,6 +25,13 @@
 --
 -- ⚠️ КОНВЕНЦИЯ ТРАНЗАКЦИИ: файл НЕ содержит BEGIN/COMMIT.
 --
+-- ⚠️ DEPENDENCY: миграция 101 из PR #183 (refund-saga) добавила колонки
+-- payment_order_id/payment_gateway/paid_at + статус 'pending_payment'.
+-- 102 self-heals эти колонки defensive'ным ADD COLUMN IF NOT EXISTS —
+-- если 101 ещё не накачена, fulfillment-webhook не упадёт runtime'ом
+-- из-за missing column. ИДЕАЛЬНЫЙ deploy order: 101 → 102. Но если
+-- порядок нарушен — обе миграции idempotent и работают независимо.
+--
 -- ПРЕД-ПРОВЕРКА (laptop):
 --   \d venue_ad_campaigns
 --
@@ -37,7 +44,12 @@
 --   2. cd /opt/promofm-api && git pull && sudo systemctl restart promofm-api
 
 ALTER TABLE venue_ad_campaigns
-  ADD COLUMN IF NOT EXISTS slot_ids TEXT[];
+  ADD COLUMN IF NOT EXISTS slot_ids TEXT[],
+  -- Defensive: эти колонки канонически приходят из migration 101 (#183).
+  -- Если порядок нарушен, добавляем здесь — webhook UPDATE не падает.
+  ADD COLUMN IF NOT EXISTS payment_order_id TEXT,
+  ADD COLUMN IF NOT EXISTS payment_gateway  TEXT,
+  ADD COLUMN IF NOT EXISTS paid_at          TIMESTAMPTZ;
 
 -- Индекс для admin-ревизии «кампании в новом flow без оплаты» —
 -- pending_payment'ы старше N дней могут быть abandoned.

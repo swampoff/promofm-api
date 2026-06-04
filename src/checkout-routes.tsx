@@ -394,20 +394,28 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         log.info({ purchaseId: purchase.id }, 'digital_good_fulfilled');
       }
       
-      if (itemType === 'radio_campaign' && session.metadata.stationId) {
-        // Migration 102 (BLOCKER C, a-style flow):
-        // Если session.metadata.campaignId передан → campaign уже создан
-        // в POST /venue/radio-campaigns со status='pending_payment' и
-        // server-computed budget. Webhook просто переводит status='paid'
-        // через UPDATE с authoritative gate ABS(budget-amount)<=0.01 в
-        // WHERE — даже если /create-session gate был обойдён, защита
-        // здесь блокирует активацию.
+      if (itemType === 'radio_campaign') {
+        // Authoritative server-side gate (migration 102). Активация ТОЛЬКО
+        // через gated UPDATE по pre-created campaign'у:
+        //   POST /venue/radio-campaigns → status='pending_payment' + budget
+        //   computed server-side из SUM(radio_ad_slots.price) для slotIds.
+        // Webhook переводит status→'paid' если ABS(budget-session.amount)<=0.01.
         //
-        // Legacy fallback (нет campaignId): старое поведение — INSERT
-        // нового row'а с session.amount как budget (без gate). Эта ветка
-        // удалится после того как frontend полностью перейдёт на slotIds.
+        // БЕЗ campaignId — refuse: цену верифицировать нельзя (slotIds на
+        // сервере не сохранены), любой INSERT здесь создал бы paid-campaign
+        // по client-controlled amount — это был bypass на 1₽. Legacy ветка
+        // удалена (была: `if (!campaignId) INSERT { budget: session.amount,
+        // status: 'paid' }` — закрыто в #185 BLOCKER-C).
         const declaredCampaignId = session.metadata.campaignId;
-        if (declaredCampaignId) {
+        if (!declaredCampaignId) {
+          log.error({
+            orderId: session.orderId,
+            sessionAmount: session.amount,
+            stationId: session.metadata.stationId,
+          }, 'radio_campaign_webhook_missing_campaignId');
+          // Не создаём ничего. Платёж ушёл на YooKassa, но активации не
+          // будет. Admin может оформить refund вручную через /admin/payments.
+        } else {
           const { pool: vacWebhookPool } = await import('./db-client.tsx');
           // Authoritative gate: status='pending_payment' AND budget match.
           // Если кто-то поднял amount в DevTools и обманул /create-session
@@ -427,7 +435,42 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             [declaredCampaignId, session.orderId, session.gateway, session.amount]
           );
           if (upd.rows.length === 0) {
-            log.warn({ campaignId: declaredCampaignId, sessionAmount: session.amount }, 'radio_campaign_activation_blocked');
+            // rowCount=0 ambiguous (review #185 medium): tampering vs
+            // idempotent repeat vs unknown. Уточняем диагностикой —
+            // читаем current state, чтобы алерт был осмысленным.
+            try {
+              const cur = await vacWebhookPool.query(
+                `SELECT status, budget, payment_order_id FROM venue_ad_campaigns WHERE id = $1`,
+                [declaredCampaignId]
+              );
+              if (cur.rows.length === 0) {
+                log.error({ campaignId: declaredCampaignId, orderId: session.orderId }, 'radio_campaign_activation_blocked_missing');
+              } else {
+                const row = cur.rows[0];
+                if (row.status === 'paid' && row.payment_order_id === session.orderId) {
+                  // Идемпотентный повтор того же webhook'а — OK, retry от YK.
+                  log.info({ campaignId: declaredCampaignId, orderId: session.orderId }, 'radio_campaign_activation_idempotent_repeat');
+                } else if (row.status !== 'pending_payment') {
+                  log.warn({
+                    campaignId: declaredCampaignId,
+                    currentStatus: row.status,
+                    expectedStatus: 'pending_payment',
+                    paymentOrderId: row.payment_order_id,
+                    incomingOrderId: session.orderId,
+                  }, 'radio_campaign_activation_blocked_status');
+                } else {
+                  // Real tampering — status корректный, но budget mismatch.
+                  log.error({
+                    campaignId: declaredCampaignId,
+                    expectedBudget: Number(row.budget),
+                    receivedAmount: session.amount,
+                    delta: Math.abs(Number(row.budget) - session.amount),
+                  }, 'radio_campaign_activation_blocked_budget_tampering');
+                }
+              }
+            } catch (diagErr: any) {
+              log.warn({ err: diagErr?.message, campaignId: declaredCampaignId }, 'radio_campaign_activation_diag_failed');
+            }
           } else {
             const camp = upd.rows[0];
             log.info({ campaignId: declaredCampaignId, amount: session.amount }, 'radio_campaign_activated');
@@ -483,53 +526,6 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
                 emitSSE(session.metadata.stationOwnerId, { type: 'new_radio_campaign', data: { campaignId: declaredCampaignId, budget: Number(camp.budget), packageType: camp.package_type } });
               } catch {}
             }
-          }
-        } else {
-          // LEGACY: создаём новый campaign (как было до migration 102).
-          const { insertVenueAdCampaign } = await import('./db.tsx');
-          const campaign = {
-            id: `bp-${crypto.randomUUID()}`,
-            venueId: session.userId,
-            stationId: session.metadata.stationId,
-            stationName: session.metadata.stationName || '',
-            advertiserId: session.userId,
-            packageType: session.metadata.packageType || 'standard',
-            status: 'paid',
-            audioUrl: null,
-            startDate: session.metadata.startDate || new Date().toISOString().split('T')[0],
-            endDate: session.metadata.endDate || '',
-            targetPlays: parseInt(session.metadata.targetPlays || '0'),
-            totalPlays: 0,
-            budget: session.amount,
-            spent: 0,
-            impressions: 0,
-            ctr: 0,
-            timeSlots: [],
-            extra: {},
-            createdAt: now,
-            updatedAt: now,
-          };
-          await insertVenueAdCampaign(campaign);
-          // BLOCKER B (migration 101): payment metadata после INSERT.
-          try {
-            const { pool: rcLegacyPool } = await import('./db-client.tsx');
-            await rcLegacyPool.query(
-              `UPDATE venue_ad_campaigns
-                  SET payment_order_id = $2,
-                      payment_gateway  = $3,
-                      paid_at          = NOW()
-                WHERE id = $1`,
-              [campaign.id, session.orderId, session.gateway]
-            );
-          } catch (legacyMetaErr: any) {
-            log.warn({ campaignId: campaign.id, err: legacyMetaErr?.message }, 'radio_campaign_payment_meta_write_failed');
-          }
-          log.info({ campaignId: campaign.id, flow: 'legacy' }, 'radio_campaign_created');
-          if (session.metadata.stationOwnerId) {
-            try {
-              const { emitSSE } = await import('./sse-routes.tsx');
-              emitSSE(session.metadata.stationOwnerId, { type: 'new_radio_campaign', data: { budget: session.amount, packageType: campaign.packageType } });
-            } catch {}
           }
         }
       }
@@ -1446,11 +1442,28 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         return c.json({ success: false, error: 'Не удалось проверить кампанию' }, 500);
       }
     }
-    // radio_campaign — BLOCKER C (a-style): server-side authoritative budget
-    // из radio_ad_slots.price (см. POST /venue/radio-campaigns с slotIds).
-    // Если metadata.campaignId передан — gate против campaign.budget;
-    // если нет — legacy flow (без проверки, как до этого PR'а).
-    if (type === 'purchase' && metadata?.type === 'radio_campaign' && metadata?.campaignId) {
+    // radio_campaign — BLOCKER C: server-side authoritative budget из
+    // radio_ad_slots.price (см. POST /venue/radio-campaigns с slotIds).
+    //
+    // Дискриминатор: metadata.type ИЛИ metadata.itemType (review #185
+    // root-cause — fulfillment-роутинг ниже драйвится itemType, а здесь
+    // была проверка только по type → расхождение полей открывало путь
+    // обхода: itemType='radio_campaign' без type → пройти gate. Теперь
+    // ЛЮБОЕ упоминание 'radio_campaign' в обоих полях требует campaignId
+    // и проходит authoritative проверку budget.
+    const wantsRadioCampaign =
+      metadata?.type === 'radio_campaign' || metadata?.itemType === 'radio_campaign';
+    if (type === 'purchase' && wantsRadioCampaign) {
+      if (!metadata?.campaignId) {
+        // Без campaignId backend не может верифицировать цену → отказ.
+        // Legacy flow (создать кампанию из webhook'а по session.amount)
+        // удалён в #185 BLOCKER-C — он позволял 1₽-bypass.
+        log.warn({ userId, metadata }, 'radio_campaign_create_session_no_campaignId');
+        return c.json({
+          success: false,
+          error: 'metadata.campaignId обязателен для radio_campaign — создайте кампанию через POST /venue/radio-campaigns',
+        }, 400);
+      }
       const campaignId = String(metadata.campaignId);
       try {
         const { pool: vacPool } = await import('./db-client.tsx');
@@ -1482,7 +1495,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
           return c.json({ success: false, error: 'Сумма не соответствует цене кампании' }, 400);
         }
       } catch (err) {
-        log.error({ err, campaignId }, 'radio_campaign_validation_error');
+        log.error({ err, campaignId: metadata.campaignId }, 'radio_campaign_validation_error');
         return c.json({ success: false, error: 'Не удалось проверить кампанию' }, 500);
       }
     }
