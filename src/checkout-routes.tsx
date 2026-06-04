@@ -1110,6 +1110,33 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           await createDonation(artistId, donationId, newDonation);
         }
         log.info({ donationId, artistId, amount: session.amount }, 'donation_fulfilled');
+
+        // Q1 (2026-06-04): уведомить артиста о донате. Раньше он узнавал ТОЛЬКО
+        // зайдя в кабинет (pull через GET /donations) — realtime/in-app push'а не было.
+        // SSE (мгновенно) + persisted cross-cabinet нотификация (инбокс артиста).
+        if (artistId !== 'unknown') {
+          const donorLabel = session.metadata.isAnonymous === 'true'
+            ? 'Анонимный слушатель'
+            : (session.metadata.donorName || 'Слушатель');
+          try {
+            // notifyCrossCabinet сам эмитит SSE (mapTypeToSSEEvent) сразу после
+            // persist — отдельный emitSSE убран (моб-ревью #196), чтобы артист
+            // не получал ДВА SSE-сообщения. sourceRole='system' — донат от
+            // слушателя/системы, не от админа.
+            const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+            await notifyCrossCabinet({
+              targetUserId: artistId,
+              targetRole: 'artist',
+              sourceRole: 'system',
+              type: 'donation_received',
+              title: 'Новый донат! 💜',
+              message: `${donorLabel} поддержал(а) вас на ${session.amount} ₽`,
+              metadata: { donationId, amount: Number(session.amount), donorName: donorLabel },
+            });
+          } catch (notifyErr) {
+            log.warn({ err: notifyErr, artistId, donationId }, 'donation_notify_failed');
+          }
+        }
       }
     } catch (err) {
       log.error({ err }, 'donation_fulfillment_error');
