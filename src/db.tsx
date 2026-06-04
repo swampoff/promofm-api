@@ -191,7 +191,11 @@ export async function getDonationsByArtist(artistId: string) {
 }
 
 export async function createDonation(artistId: string, donationId: string, donation: Record<string, any>) {
-  const row = {
+  // intended_artist_id (migration 103): когда у артиста нет внутреннего
+  // кабинета, recipient_id ставится на admin user, а intended_artist_id
+  // указывает исходного артиста для отчётов / future transfer'а.
+  // Для обычных донатов — NULL.
+  const row: Record<string, any> = {
     id: donationId,
     recipient_id: artistId,
     donor_id: donation.donor_id || null,
@@ -200,6 +204,7 @@ export async function createDonation(artistId: string, donationId: string, donat
     message: donation.message || '',
     is_anonymous: donation.is_anonymous || false,
     status: donation.status || 'completed',
+    intended_artist_id: donation.intended_artist_id || null,
   };
   const { error } = await db()
     .from('donations')

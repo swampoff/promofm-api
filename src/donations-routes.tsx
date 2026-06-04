@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth, optionalAuth } from './auth-middleware.tsx';
-import { pool } from './db-client.tsx';
+import { pool, ensureSchemaInline } from './db-client.tsx';
 import { SUBSCRIPTION_PLANS } from './subscriptions-routes.tsx';
 
 const donationsRoutes = new Hono();
@@ -186,17 +186,78 @@ donationsRoutes.get('/withdrawals', requireAuth, async (c) => {
 // body: { amount: number, paymentMethod?: string, paymentDetails?: any }
 // Минимум 1000 ₽. Комиссия зависит от тарифа артиста (10/7/5/3%
 // для spark/start/pro/elite — см. resolveDonationCommissionRate).
+// POST /donations/withdrawals — sync autopayout через ЮКассу.
+//
+// До: артист подавал заявку → INSERT pending → админ платил руками.
+// После: артист жмёт «Вывести» → backend сразу зовёт YK Payouts API
+// (zerкалит dj-studio-routes.tsx:1298) → ответ donor'у с реальным
+// status (succeeded / pending / failed).
+//
+// Body shape:
+//   amount: number               — РУБли, мин 1000
+//   method: 'sbp'|'yoomoney'|'card'
+//   phone?: string               — для sbp (+7XXXXXXXXXX)
+//   account?: string             — для yoomoney (15-20 цифр)
+//   payoutToken?: string         — для card (PCI-safe токен от YK widget)
+//   cardLast4?: string           — для card (UI label, не критично)
+//
+// Что должно стать правдой после merge:
+//   - Артист с balance >= 1000 ₽ жмёт «Вывести 1000 ₽ на СБП +79991234567»
+//     → POST /donations/withdrawals → 201 со status 'succeeded'/'pending',
+//     yooPayoutId сохранён.
+//   - При повторном клике с тем же app_id (idempotenceKey) — YK
+//     возвращает существующую выплату, ON CONFLICT (user_id, app_id)
+//     срабатывает, дубля нет.
+//   - При YK 4xx/5xx — 502, INSERT с status='failed' + error message,
+//     ничего не списано с баланса (commission_rate / payout записаны
+//     для отчётности; реального движения денег не было).
 donationsRoutes.post('/withdrawals', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
     const body = await c.req.json();
     const amount = Number(body.amount);
+    const method = String(body.method || 'sbp');
 
     if (!Number.isFinite(amount) || amount <= 0) {
       return c.json({ success: false, error: 'amount must be > 0' }, 400);
     }
     if (amount < 1000) {
       return c.json({ success: false, error: 'Минимальная сумма вывода — 1000 ₽' }, 400);
+    }
+    if (!['sbp', 'yoomoney', 'card'].includes(method)) {
+      return c.json({ success: false, error: 'Недопустимый способ вывода (sbp/yoomoney/card)' }, 400);
+    }
+
+    // Валидация destination по methodу — зеркало dj-studio-routes.tsx:1241.
+    let destination: any;
+    let destinationLabel = '';
+    if (method === 'sbp') {
+      const phone = String(body.phone || '').trim();
+      if (!/^\+?\d{10,15}$/.test(phone.replace(/\s/g, ''))) {
+        return c.json({ success: false, error: 'Укажите телефон в формате +7…' }, 400);
+      }
+      destination = { type: 'sbp', phone };
+      destinationLabel = `СБП ${phone.replace(/(\+\d{1,3})\d+(\d{4})/, '$1***$2')}`;
+    } else if (method === 'yoomoney') {
+      const account = String(body.account || '').replace(/\D/g, '');
+      if (!/^\d{11,20}$/.test(account)) {
+        return c.json({ success: false, error: 'Укажите номер кошелька ЮMoney (только цифры)' }, 400);
+      }
+      destination = { type: 'yoo_money', account };
+      destinationLabel = `ЮMoney …${account.slice(-4)}`;
+    } else {
+      // card — требует payoutToken (PCI-токен от виджета YK на фронте).
+      // Мы НИКОГДА не принимаем PAN в открытом виде — это PCI DSS scope.
+      const payoutToken = String(body.payoutToken || '');
+      const cardLast4 = String(body.cardLast4 || '').slice(0, 4);
+      if (!payoutToken) {
+        return c.json({
+          success: false,
+          error: 'Для вывода на карту нужен payoutToken (токенизация через ЮКасса-виджет)',
+        }, 400);
+      }
+      destination = { type: 'bank_card', payoutToken };
+      destinationLabel = cardLast4 ? `Карта …${cardLast4}` : 'Карта';
     }
 
     const balance = await getDonationBalance(userId);
@@ -217,7 +278,71 @@ donationsRoutes.post('/withdrawals', requireAuth, async (c) => {
     const id = `wd-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
 
-    const request = {
+    // Self-heal native columns added by migration 103. Защита от deploy-
+    // ordering — если миграция ещё не накачена, ALTER IF NOT EXISTS
+    // добавит их при первом запросе.
+    await ensureSchemaInline(
+      'payment_withdrawals:autopayout_cols',
+      `ALTER TABLE payment_withdrawals
+        ADD COLUMN IF NOT EXISTS yoo_payout_id     TEXT,
+        ADD COLUMN IF NOT EXISTS destination_label TEXT,
+        ADD COLUMN IF NOT EXISTS error             TEXT,
+        ADD COLUMN IF NOT EXISTS requested_at      TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS paid_at           TIMESTAMPTZ`,
+    );
+
+    // Сначала пытаемся создать выплату — только при успехе записываем
+    // succeeded/pending row. На фейле — INSERT failed-row, чтобы артист
+    // видел что произошло, и возвращаем 502.
+    let payoutId = '';
+    let payoutStatus: 'pending' | 'succeeded' | 'canceled' = 'pending';
+    try {
+      const { createYooKassaPayout } = await import('./gateway-yookassa-payouts.tsx');
+      const result = await createYooKassaPayout({
+        amountRub: payout,  // выплачиваем payout (после commission), не gross amount
+        destination,
+        description: `Выплата донатов артисту ${userId}`,
+        idempotenceKey: id,
+        metadata: { withdrawal_id: id, artist_id: userId, source: 'donation', commission, commission_rate: commissionRate },
+      });
+      payoutId = result.id;
+      payoutStatus = (result.status as any) === 'succeeded' ? 'succeeded'
+        : (result.status as any) === 'canceled' ? 'canceled' : 'pending';
+    } catch (payoutErr: any) {
+      console.error('YooKassa donation payout failed:', payoutErr);
+      const errMsg = payoutErr?.message || 'Не удалось создать выплату';
+      // Logging failed row — артист видит «не получилось, ошибка X».
+      // INSERT атомарно, никакого race condition.
+      await pool.query(
+        `INSERT INTO payment_withdrawals
+           (app_id, user_id, source, amount, commission, commission_rate,
+            commission_tier, payout, payment_method, destination_label,
+            status, error, requested_at)
+         VALUES ($1, $2, 'donation', $3, $4, $5, $6, $7, $8, $9, 'failed', $10, $11)
+         ON CONFLICT (user_id, app_id) DO NOTHING`,
+        [id, userId, amount, commission, commissionRate, tier, payout,
+         method, destinationLabel, errMsg, now]
+      );
+      return c.json({ success: false, error: errMsg }, 502);
+    }
+
+    // Успешный (или pending) payout — записываем с yoo_payout_id.
+    // payment_details оставляем NULL (raw destination содержит token/
+    // phone — не храним в БД даже зашифрованным; destination_label —
+    // достаточно для UI).
+    await pool.query(
+      `INSERT INTO payment_withdrawals
+         (app_id, user_id, source, amount, commission, commission_rate,
+          commission_tier, payout, payment_method, destination_label,
+          status, yoo_payout_id, requested_at, paid_at)
+       VALUES ($1, $2, 'donation', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       ON CONFLICT (user_id, app_id) DO NOTHING`,
+      [id, userId, amount, commission, commissionRate, tier, payout,
+       method, destinationLabel, payoutStatus, payoutId, now,
+       payoutStatus === 'succeeded' ? now : null]
+    );
+
+    const response = {
       id,
       source: 'donation',
       userId,
@@ -226,31 +351,17 @@ donationsRoutes.post('/withdrawals', requireAuth, async (c) => {
       commissionRate,
       commissionTier: tier,
       payout,
-      paymentMethod: body.paymentMethod || 'card',
-      paymentDetails: body.paymentDetails || null,
-      status: 'pending',
+      paymentMethod: method,
+      destinationLabel,
+      status: payoutStatus,
+      yooPayoutId: payoutId,
+      requestedAt: now,
       createdAt: now,
-      updatedAt: now,
     };
-
-    // row-per-withdrawal: INSERT — атомарно, никакого read-modify-write.
-    await pool.query(
-      `INSERT INTO payment_withdrawals
-         (app_id, user_id, source, amount, commission, commission_rate,
-          commission_tier, payout, payment_method, payment_details, status)
-       VALUES ($1, $2, 'donation', $3, $4, $5, $6, $7, $8, $9::jsonb, 'pending')
-       ON CONFLICT (user_id, app_id) DO NOTHING`,
-      [
-        request.id, userId, request.amount, request.commission,
-        request.commissionRate, request.commissionTier, request.payout,
-        request.paymentMethod,
-        request.paymentDetails ? JSON.stringify(request.paymentDetails) : null,
-      ]
-    );
 
     return c.json({
       success: true,
-      data: request,
+      data: response,
       balance: balance - amount,
     }, 201);
   } catch (error) {

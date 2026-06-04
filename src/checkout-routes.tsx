@@ -1069,47 +1069,151 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   }
 
   // ─── Fulfill donation ───
+  //
+  // Что должно стать правдой:
+  // 1. Артист С кабинетом получает донат → recipient_id=artistId, артисту
+  //    приходит cross-cabinet notification (in-app + SSE) с суммой и
+  //    именем донора.
+  // 2. Артист БЕЗ кабинета (artist_profile.user_id=NULL — импортирован
+  //    из чарта, ещё не зарегистрировался) → recipient_id=admin user,
+  //    donations.intended_artist_id хранит исходного артиста для
+  //    отчётов / future ручной передачи при регистрации. Админам
+  //    приходит system_alert. Деньги не зависают на чужом неактивном
+  //    балансе, владение чёткое.
+  //
+  // Раньше: фиксация donation + только log.info. Артист никогда не
+  // узнавал что получил донат до ручного захода в кабинет.
   if (session.type === 'donation' && session.metadata?.donationId) {
     try {
-      const { getDonation, createDonation } = await import('./db.tsx');
+      const { createDonation } = await import('./db.tsx');
+      const { pool: dPool } = await import('./db-client.tsx');
+      const { notifyCrossCabinet, notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
       const donationId = session.metadata.donationId;
       const artistId = session.metadata.artistId;
-      if (artistId && donationId) {
-        // Try to load existing donation record
-        let donation: any = null;
-        try {
-          const allDonations = await getDonation(artistId) as any;
-          if (Array.isArray(allDonations)) {
-            donation = allDonations.find((d: any) => d.id === donationId);
-          }
-        } catch {}
 
-        if (donation) {
-          // Update existing donation to completed
-          donation.status = 'completed';
-          donation.paidAt = now;
-          donation.paymentOrderId = session.orderId;
-          donation.paymentGateway = session.gateway;
-          await createDonation(artistId, donationId, donation);
-        } else {
-          // Create donation record from webhook data
-          const newDonation = {
-            id: donationId,
-            artistId,
-            donorId: session.userId,
-            donorName: session.metadata.donorName || 'Anonymous',
-            amount: session.amount,
-            currency: session.currency || 'RUB',
-            isAnonymous: session.metadata.isAnonymous === 'true',
-            status: 'completed',
-            paidAt: now,
-            paymentOrderId: session.orderId,
-            paymentGateway: session.gateway,
-            createdAt: now,
-          };
-          await createDonation(artistId, donationId, newDonation);
+      if (artistId && donationId) {
+        // Self-heal column added by migration 103. Безопасно при любом
+        // порядке деплоя (миграция руками или ещё нет).
+        const { ensureSchemaInline } = await import('./db-client.tsx');
+        await ensureSchemaInline(
+          'donations:intended_artist_id',
+          `ALTER TABLE donations ADD COLUMN IF NOT EXISTS intended_artist_id TEXT`,
+        );
+
+        // Resolve recipient: артист с кабинетом ИЛИ admin fallback.
+        // artist_profiles.user_id NULL означает «профиль есть в каталоге,
+        // но регистрации артиста ещё не было». donate туда → платформе.
+        const artistRow = await dPool.query(
+          `SELECT ap.user_id, ap.artist_name AS display_name,
+                  CASE WHEN u.id IS NOT NULL THEN true ELSE false END AS has_user
+             FROM artist_profiles ap
+             LEFT JOIN users u ON u.id::text = ap.user_id
+            WHERE ap.id::text = $1 LIMIT 1`,
+          [String(artistId)],
+        );
+        const hasArtistCabinet =
+          artistRow.rows.length > 0 && artistRow.rows[0].has_user === true;
+        const artistDisplayName: string =
+          artistRow.rows[0]?.display_name || 'артист';
+        const artistUserId: string | null =
+          hasArtistCabinet ? String(artistRow.rows[0].user_id) : null;
+
+        let actualRecipientId: string = artistId;
+        let intendedArtistId: string | null = null;
+        let adminFallback = false;
+
+        if (!hasArtistCabinet) {
+          // Найти любого admin'а (первого по id для стабильности) —
+          // recipient_id будет на нём. Старый row может «доплачивать»
+          // refund'ы / переатрибуции через admin /donations/transfer.
+          const adminRow = await dPool.query(
+            `SELECT id::text AS user_id FROM users
+              WHERE role::text IN ('admin', 'superadmin')
+              ORDER BY id LIMIT 1`,
+          );
+          if (adminRow.rows.length > 0) {
+            actualRecipientId = adminRow.rows[0].user_id;
+            intendedArtistId = artistId;
+            adminFallback = true;
+          }
+          // Если адмов нет вообще — оставляем артиста как recipient
+          // (status quo до этого PR'а). Лучше hold money on artist
+          // нет, чем потерять её.
         }
-        log.info({ donationId, artistId, amount: session.amount }, 'donation_fulfilled');
+
+        // Запись donation row. createDonation теперь пишет
+        // intended_artist_id (мерж 103). На old prod без миграции
+        // ensureSchemaInline выше уже добавил колонку.
+        await createDonation(actualRecipientId, donationId, {
+          donor_id: session.userId,
+          amount: session.amount,
+          currency: session.currency || 'RUB',
+          message: session.metadata.message || '',
+          is_anonymous: session.metadata.isAnonymous === 'true',
+          status: 'completed',
+          intended_artist_id: intendedArtistId,
+        });
+
+        // Notification: cross-cabinet (in-app feed + SSE).
+        const donorLabel =
+          session.metadata.isAnonymous === 'true'
+            ? 'Аноним'
+            : (session.metadata.donorName || 'Слушатель');
+        const amountLabel = `${session.amount} ${session.currency || 'RUB'}`;
+
+        if (adminFallback) {
+          // Платформе пришёл донат для неактивного артиста — админам
+          // нужно знать (если артист зарегистрируется, могут передать).
+          try {
+            await notifyAllAdmins({
+              sourceRole: 'admin',
+              type: 'system_alert',
+              title: 'Донат неактивному артисту',
+              message: `${donorLabel} задонатил ${amountLabel} для ${artistDisplayName}. Артист ещё не зарегистрирован, средства зачислены платформе.`,
+              link: '/ctrl-pm7k2f/donations',
+              metadata: {
+                kind: 'donation_no_cabinet',
+                donationId,
+                intendedArtistId: artistId,
+                intendedArtistName: artistDisplayName,
+                amount: session.amount,
+                currency: session.currency || 'RUB',
+              },
+            });
+          } catch (notifyErr: any) {
+            log.warn({ err: notifyErr?.message, donationId }, 'donation_admin_notify_failed');
+          }
+        } else if (artistUserId) {
+          // Обычный донат артисту с кабинетом → realtime push +
+          // запись в его feed.
+          try {
+            await notifyCrossCabinet({
+              targetUserId: artistUserId,
+              targetRole: 'artist',
+              sourceRole: 'admin', // фактически система, но для CabinetRole sourceRole = 'admin'
+              type: 'payment_received',
+              title: 'Получен донат',
+              message: `${donorLabel} задонатил ${amountLabel}`,
+              link: '/artist/donations',
+              metadata: {
+                donationId,
+                amount: session.amount,
+                currency: session.currency || 'RUB',
+                donorName: donorLabel,
+              },
+            });
+          } catch (notifyErr: any) {
+            log.warn({ err: notifyErr?.message, donationId, artistUserId }, 'donation_artist_notify_failed');
+          }
+        }
+
+        log.info({
+          donationId,
+          artistId,
+          actualRecipientId,
+          adminFallback,
+          amount: session.amount,
+        }, 'donation_fulfilled');
       }
     } catch (err) {
       log.error({ err }, 'donation_fulfillment_error');
