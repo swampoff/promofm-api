@@ -2472,11 +2472,22 @@ export interface ContractMilestone {
   description?: string;
   amount: number;
   dueDate?: string | null;
-  status: string;       // pending | in_progress | submitted | approved | revision
+  // status: pending | in_progress | submitted | approved | revision
+  //       | disputed  ← migration 103: client эскалировал submitted
+  //                    milestone; admin разрешает через resolve.
+  status: string;
   paidAt?: string | null;
   completedAt?: string | null;
   createdAt?: string;
   updatedAt?: string;
+  // Migration 103 dispute lifecycle (опциональные — для milestone'ов
+  // которые прошли через dispute → resolve flow).
+  disputedAt?: string | null;
+  disputeReason?: string | null;
+  resolvedAt?: string | null;
+  resolvedBy?: string | null;
+  adminResolution?: 'approve' | 'revoke' | null;
+  adminNote?: string | null;
 }
 
 export interface ContractRow {
