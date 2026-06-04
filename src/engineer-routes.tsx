@@ -595,4 +595,231 @@ app.get('/public/:userId/services', async (c) => {
   } catch { return c.json({ success: false, services: [] }); }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// ENGINEER ORDERS — маркетплейс заказов (слой 2).
+// Жизненный цикл (accept-first: деньги ТОЛЬКО после согласия инженера,
+// поэтому авто-возвраты не нужны — деньги не зависают):
+//   pending     — клиент оставил заявку, ждёт ответа инженера
+//   accepted    — инженер принял (цена подтверждена), ждёт оплаты клиента
+//   declined    — инженер отклонил (терминальный)
+//   cancelled   — клиент отменил до оплаты (терминальный)
+//   in_progress — клиент оплатил, инженер в работе
+//   delivered   — инженер сдал результат
+//   completed   — клиент подтвердил приём (терминальный)
+// Оплата — через общий /server/api/checkout/create-session
+// (type=purchase, metadata.type='engineer_order'); вебхук
+// (checkout-routes → processPaymentSuccess) переводит accepted→in_progress.
+// ═══════════════════════════════════════════════════════════════════
+let _engOrdersReady = false;
+async function ensureEngineerOrdersSchema() {
+  if (_engOrdersReady) return;
+  await ensureEngineerServicesSchema();
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS engineer_orders (
+      id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      service_id       uuid,
+      engineer_id      text NOT NULL,
+      client_id        text NOT NULL,
+      title            text NOT NULL,
+      service_type     text NOT NULL DEFAULT 'mixing',
+      price            numeric NOT NULL DEFAULT 0,
+      brief            text,
+      status           text NOT NULL DEFAULT 'pending',
+      delivery_url     text,
+      delivery_note    text,
+      payment_order_id text,
+      paid_at          timestamptz,
+      created_at       timestamptz NOT NULL DEFAULT now(),
+      updated_at       timestamptz NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_engineer_orders_engineer ON engineer_orders(engineer_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_engineer_orders_client ON engineer_orders(client_id);`);
+  _engOrdersReady = true;
+}
+
+const ENG_ORDER_COLS = `id, service_id, engineer_id, client_id, title, service_type, price, brief, status, delivery_url, delivery_note, payment_order_id, paid_at, created_at, updated_at`;
+function mapEngOrder(r: any) {
+  return {
+    id: r.id, serviceId: r.service_id, engineerId: r.engineer_id, clientId: r.client_id,
+    title: r.title, type: r.service_type, price: Number(r.price) || 0,
+    brief: r.brief || '', status: r.status,
+    deliveryUrl: r.delivery_url || '', deliveryNote: r.delivery_note || '',
+    paymentOrderId: r.payment_order_id || '', paidAt: r.paid_at,
+    createdAt: r.created_at, updatedAt: r.updated_at,
+  };
+}
+
+// POST /orders — клиент оставляет заявку на услугу инженера.
+// Цена и engineer_id берутся из engineer_services по serviceId (с сервера,
+// не из тела) — клиент не может ни занизить цену, ни подменить инженера.
+app.post('/orders', requireAuth, async (c) => {
+  const userId = c.get('userId') as string | undefined;
+  if (!userId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  try {
+    await ensureEngineerOrdersSchema();
+    const body = await c.req.json();
+    const serviceId = String(body.serviceId || '');
+    const brief = String(body.brief || '').slice(0, 4000);
+    if (!serviceId) return c.json({ success: false, error: 'serviceId обязателен' }, 400);
+    const svc = await pool.query(
+      `SELECT id, user_id, title, service_type, base_price, is_active FROM engineer_services WHERE id = $1`,
+      [serviceId],
+    );
+    if (!svc.rows.length || svc.rows[0].is_active === false) {
+      return c.json({ success: false, error: 'Услуга недоступна' }, 404);
+    }
+    const s = svc.rows[0];
+    if (s.user_id === userId) return c.json({ success: false, error: 'Нельзя заказать собственную услугу' }, 400);
+    const { rows } = await pool.query(
+      `INSERT INTO engineer_orders (service_id, engineer_id, client_id, title, service_type, price, brief, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'pending') RETURNING ${ENG_ORDER_COLS}`,
+      [s.id, s.user_id, userId, s.title, s.service_type, Math.max(0, Number(s.base_price) || 0), brief],
+    );
+    try {
+      const { emitSSE } = await import('./sse-routes.tsx');
+      emitSSE(s.user_id, { type: 'engineer_order_new', data: { title: s.title } });
+    } catch {}
+    return c.json({ success: true, order: mapEngOrder(rows[0]) });
+  } catch (error) { log.error({ error }, 'eng order create'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// GET /orders/incoming — входящие заказы инженера (ВАЖНО: до /orders/:id)
+app.get('/orders/incoming', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c); if (g instanceof Response) return g;
+  try {
+    await ensureEngineerOrdersSchema();
+    const { rows } = await pool.query(
+      `SELECT ${ENG_ORDER_COLS} FROM engineer_orders WHERE engineer_id = $1 ORDER BY created_at DESC LIMIT 500`,
+      [g.userId],
+    );
+    return c.json({ success: true, orders: rows.map(mapEngOrder) });
+  } catch (error) { log.error({ error }, 'eng orders incoming'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// GET /orders/my — заказы, которые разместил клиент (до /orders/:id)
+app.get('/orders/my', requireAuth, async (c) => {
+  const userId = c.get('userId') as string | undefined;
+  if (!userId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  try {
+    await ensureEngineerOrdersSchema();
+    const { rows } = await pool.query(
+      `SELECT ${ENG_ORDER_COLS} FROM engineer_orders WHERE client_id = $1 ORDER BY created_at DESC LIMIT 500`,
+      [userId],
+    );
+    return c.json({ success: true, orders: rows.map(mapEngOrder) });
+  } catch (error) { log.error({ error }, 'eng orders my'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// GET /orders/:id — одна карточка (доступна любой из двух сторон сделки)
+app.get('/orders/:id', requireAuth, async (c) => {
+  const userId = c.get('userId') as string | undefined;
+  if (!userId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  try {
+    await ensureEngineerOrdersSchema();
+    const { rows } = await pool.query(`SELECT ${ENG_ORDER_COLS} FROM engineer_orders WHERE id = $1`, [c.req.param('id')]);
+    if (!rows.length) return c.json({ success: false, error: 'Заказ не найден' }, 404);
+    const o = rows[0];
+    if (o.engineer_id !== userId && o.client_id !== userId) {
+      return c.json({ success: false, error: 'Нет доступа к заказу' }, 403);
+    }
+    return c.json({ success: true, order: mapEngOrder(o) });
+  } catch (error) { log.error({ error }, 'eng order get'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// PUT /orders/:id/accept — инженер принимает (pending → accepted), может уточнить цену
+app.put('/orders/:id/accept', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c); if (g instanceof Response) return g;
+  try {
+    await ensureEngineerOrdersSchema();
+    const body = await c.req.json().catch(() => ({}));
+    const id = c.req.param('id');
+    const hasPrice = body.price != null && Number.isFinite(Number(body.price)) && Number(body.price) >= 0;
+    const { rows } = await pool.query(
+      `UPDATE engineer_orders
+         SET status='accepted'${hasPrice ? ', price=$3' : ''}, updated_at=now()
+       WHERE id=$1 AND engineer_id=$2 AND status='pending'
+       RETURNING ${ENG_ORDER_COLS}`,
+      hasPrice ? [id, g.userId, Math.max(0, Number(body.price))] : [id, g.userId],
+    );
+    if (!rows.length) return c.json({ success: false, error: 'Заказ не в статусе «ожидает ответа» или не ваш' }, 409);
+    return c.json({ success: true, order: mapEngOrder(rows[0]) });
+  } catch (error) { log.error({ error }, 'eng order accept'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// PUT /orders/:id/decline — инженер отклоняет (pending → declined)
+app.put('/orders/:id/decline', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c); if (g instanceof Response) return g;
+  try {
+    await ensureEngineerOrdersSchema();
+    const { rows } = await pool.query(
+      `UPDATE engineer_orders SET status='declined', updated_at=now()
+       WHERE id=$1 AND engineer_id=$2 AND status='pending' RETURNING ${ENG_ORDER_COLS}`,
+      [c.req.param('id'), g.userId],
+    );
+    if (!rows.length) return c.json({ success: false, error: 'Заказ нельзя отклонить' }, 409);
+    return c.json({ success: true, order: mapEngOrder(rows[0]) });
+  } catch (error) { log.error({ error }, 'eng order decline'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// PUT /orders/:id/deliver — инженер сдаёт результат (in_progress → delivered)
+app.put('/orders/:id/deliver', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c); if (g instanceof Response) return g;
+  try {
+    await ensureEngineerOrdersSchema();
+    const body = await c.req.json().catch(() => ({}));
+    const deliveryUrl = String(body.deliveryUrl || '').slice(0, 2000);
+    const note = String(body.note || '').slice(0, 2000);
+    const { rows } = await pool.query(
+      `UPDATE engineer_orders SET status='delivered', delivery_url=$3, delivery_note=$4, updated_at=now()
+       WHERE id=$1 AND engineer_id=$2 AND status='in_progress' RETURNING ${ENG_ORDER_COLS}`,
+      [c.req.param('id'), g.userId, deliveryUrl, note],
+    );
+    if (!rows.length) return c.json({ success: false, error: 'Заказ не в работе или не ваш' }, 409);
+    try {
+      const { emitSSE } = await import('./sse-routes.tsx');
+      emitSSE(rows[0].client_id, { type: 'engineer_order_delivered', data: { title: rows[0].title } });
+    } catch {}
+    return c.json({ success: true, order: mapEngOrder(rows[0]) });
+  } catch (error) { log.error({ error }, 'eng order deliver'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// PUT /orders/:id/complete — клиент подтверждает приём (delivered → completed)
+app.put('/orders/:id/complete', requireAuth, async (c) => {
+  const userId = c.get('userId') as string | undefined;
+  if (!userId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  try {
+    await ensureEngineerOrdersSchema();
+    const { rows } = await pool.query(
+      `UPDATE engineer_orders SET status='completed', updated_at=now()
+       WHERE id=$1 AND client_id=$2 AND status='delivered' RETURNING ${ENG_ORDER_COLS}`,
+      [c.req.param('id'), userId],
+    );
+    if (!rows.length) return c.json({ success: false, error: 'Заказ не сдан или не ваш' }, 409);
+    try {
+      await pool.query(
+        `UPDATE engineer_profiles SET completed_orders = COALESCE(completed_orders,0)+1 WHERE user_id=$1`,
+        [rows[0].engineer_id],
+      );
+    } catch (e) { log.warn({ e }, 'completed_orders bump skipped'); }
+    return c.json({ success: true, order: mapEngOrder(rows[0]) });
+  } catch (error) { log.error({ error }, 'eng order complete'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// PUT /orders/:id/cancel — клиент отменяет до оплаты (pending/accepted → cancelled)
+app.put('/orders/:id/cancel', requireAuth, async (c) => {
+  const userId = c.get('userId') as string | undefined;
+  if (!userId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  try {
+    await ensureEngineerOrdersSchema();
+    const { rows } = await pool.query(
+      `UPDATE engineer_orders SET status='cancelled', updated_at=now()
+       WHERE id=$1 AND client_id=$2 AND status IN ('pending','accepted') RETURNING ${ENG_ORDER_COLS}`,
+      [c.req.param('id'), userId],
+    );
+    if (!rows.length) return c.json({ success: false, error: 'Заказ нельзя отменить (уже оплачен или завершён)' }, 409);
+    return c.json({ success: true, order: mapEngOrder(rows[0]) });
+  } catch (error) { log.error({ error }, 'eng order cancel'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
 export default app;
