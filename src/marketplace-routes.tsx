@@ -1573,6 +1573,12 @@ app.post('/digital-goods/:id/upload', requireAuth, async (c) => {
   try {
     const userId = c.get('userId') as string;
     const goodId = c.req.param('id');
+    // Hardening (audit #179): ранний 400 на малформенный id — до БД/ФС.
+    // Path-escape guard ниже (resolve+startsWith) и так ловит traversal;
+    // это defense-in-depth + чистый ответ на мусорный id.
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(goodId)) {
+      return c.json({ success: false, error: 'Некорректный id товара' }, 400);
+    }
 
     const good = await getDigitalGood(goodId);
     if (!good) return c.json({ success: false, error: 'Товар не найден' }, 404);
@@ -1682,6 +1688,10 @@ app.get('/digital-goods/:id/download', requireAuth, async (c) => {
     const userId = c.get('userId') as string;
     const userRole = (c.get('userRole') as string | undefined) || '';
     const goodId = c.req.param('id');
+    // Hardening (audit #179): ранний 400 на малформенный id — до БД/ФС.
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(goodId)) {
+      return c.json({ success: false, error: 'Некорректный id товара' }, 400);
+    }
 
     const good = await getDigitalGood(goodId);
     if (!good) return c.json({ success: false, error: 'Товар не найден' }, 404);
