@@ -472,4 +472,127 @@ app.get('/public/:userId', async (c) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// ENGINEER SERVICES — каталог услуг (сведение/мастеринг/запись/реставрация).
+// Маркетплейс заказов (engineer_orders + оплаты) строится поверх — след. слой.
+// Inline ensureSchema (memoized): таблица создаётся на первом обращении,
+// .sql не нужен (см. backend-migrations-mechanism — CREATE ... IF NOT EXISTS).
+// ═══════════════════════════════════════════════════════════════════
+let _engServicesReady = false;
+async function ensureEngineerServicesSchema() {
+  if (_engServicesReady) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS engineer_services (
+      id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id       text NOT NULL,
+      title         text NOT NULL,
+      service_type  text NOT NULL DEFAULT 'mixing',
+      base_price    numeric NOT NULL DEFAULT 0,
+      description   text,
+      delivery_days integer NOT NULL DEFAULT 3,
+      is_active     boolean NOT NULL DEFAULT true,
+      created_at    timestamptz NOT NULL DEFAULT now(),
+      updated_at    timestamptz NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_engineer_services_user ON engineer_services(user_id);`);
+  _engServicesReady = true;
+}
+
+// Engineer = post-production only (NOT producer's beats/arrangements).
+const ENGINEER_SERVICE_TYPES = new Set(['mixing', 'mastering', 'recording', 'restoration', 'dolby_atmos', 'vocal_tuning']);
+const ENG_SVC_COLS = `id, user_id, title, service_type, base_price, description, delivery_days, is_active, created_at`;
+function mapEngService(r: any) {
+  return {
+    id: r.id, title: r.title, type: r.service_type,
+    basePrice: Number(r.base_price) || 0, description: r.description || '',
+    deliveryDays: Number(r.delivery_days) || 0, isActive: r.is_active !== false,
+    createdAt: r.created_at,
+  };
+}
+
+// GET /services — own catalog
+app.get('/services', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c); if (g instanceof Response) return g;
+  try {
+    await ensureEngineerServicesSchema();
+    const { rows } = await pool.query(
+      `SELECT ${ENG_SVC_COLS} FROM engineer_services WHERE user_id = $1 ORDER BY created_at DESC`,
+      [g.userId],
+    );
+    return c.json({ success: true, services: rows.map(mapEngService) });
+  } catch (error) { log.error({ error }, 'eng services list'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// POST /services — create
+app.post('/services', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c); if (g instanceof Response) return g;
+  try {
+    await ensureEngineerServicesSchema();
+    const body = await c.req.json();
+    const title = String(body.title || '').trim().slice(0, 200);
+    const type = ENGINEER_SERVICE_TYPES.has(body.type) ? body.type : 'mixing';
+    const basePrice = Math.max(0, Number(body.basePrice) || 0);
+    const description = String(body.description || '').slice(0, 2000);
+    const deliveryDays = Math.max(1, Math.min(365, Number(body.deliveryDays) || 3));
+    if (!title) return c.json({ success: false, error: 'Название обязательно' }, 400);
+    const { rows } = await pool.query(
+      `INSERT INTO engineer_services (user_id, title, service_type, base_price, description, delivery_days)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING ${ENG_SVC_COLS}`,
+      [g.userId, title, type, basePrice, description, deliveryDays],
+    );
+    return c.json({ success: true, service: mapEngService(rows[0]) });
+  } catch (error) { log.error({ error }, 'eng service create'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// PUT /services/:id — update own
+app.put('/services/:id', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c); if (g instanceof Response) return g;
+  try {
+    await ensureEngineerServicesSchema();
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const sets: string[] = []; const vals: any[] = []; let i = 1;
+    if (typeof body.title === 'string')       { sets.push(`title=$${i++}`); vals.push(body.title.trim().slice(0, 200)); }
+    if (typeof body.type === 'string' && ENGINEER_SERVICE_TYPES.has(body.type)) { sets.push(`service_type=$${i++}`); vals.push(body.type); }
+    if (body.basePrice != null)               { sets.push(`base_price=$${i++}`); vals.push(Math.max(0, Number(body.basePrice) || 0)); }
+    if (typeof body.description === 'string')  { sets.push(`description=$${i++}`); vals.push(body.description.slice(0, 2000)); }
+    if (body.deliveryDays != null)            { sets.push(`delivery_days=$${i++}`); vals.push(Math.max(1, Math.min(365, Number(body.deliveryDays) || 3))); }
+    if (typeof body.isActive === 'boolean')   { sets.push(`is_active=$${i++}`); vals.push(body.isActive); }
+    if (!sets.length) return c.json({ success: false, error: 'Нет полей для обновления' }, 400);
+    sets.push(`updated_at=now()`);
+    vals.push(id, g.userId);
+    const { rows } = await pool.query(
+      `UPDATE engineer_services SET ${sets.join(', ')} WHERE id=$${i++} AND user_id=$${i} RETURNING ${ENG_SVC_COLS}`,
+      vals,
+    );
+    if (!rows.length) return c.json({ success: false, error: 'Услуга не найдена' }, 404);
+    return c.json({ success: true, service: mapEngService(rows[0]) });
+  } catch (error) { log.error({ error }, 'eng service update'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// DELETE /services/:id — delete own
+app.delete('/services/:id', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c); if (g instanceof Response) return g;
+  try {
+    await ensureEngineerServicesSchema();
+    const { rowCount } = await pool.query(
+      `DELETE FROM engineer_services WHERE id=$1 AND user_id=$2`, [c.req.param('id'), g.userId],
+    );
+    return c.json({ success: (rowCount || 0) > 0 });
+  } catch (error) { log.error({ error }, 'eng service delete'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+// GET /public/:userId/services — active catalog for the marketplace (no auth)
+app.get('/public/:userId/services', async (c) => {
+  try {
+    await ensureEngineerServicesSchema();
+    const { rows } = await pool.query(
+      `SELECT ${ENG_SVC_COLS} FROM engineer_services WHERE user_id = $1 AND is_active = true ORDER BY base_price ASC`,
+      [c.req.param('userId')],
+    );
+    return c.json({ success: true, services: rows.map(mapEngService) });
+  } catch { return c.json({ success: false, services: [] }); }
+});
+
 export default app;
