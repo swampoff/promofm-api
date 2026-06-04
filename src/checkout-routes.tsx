@@ -11,7 +11,7 @@
  */
 
 import { Hono } from 'hono';
-import { claimPaymentSessionForProcessing, createCoinTransactionKv, creditAvailableAtomic, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, incrementCoinBalanceAtomic, revertPaymentSessionToPending, setCoinBalance, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx } from './db.tsx';
+import { claimPaymentSessionForProcessing, createCoinTransactionKv, creditAvailableAtomic, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, incrementCoinBalanceAtomic, revertPaymentSessionToPending, setCoinBalance, setPaymentSessionShopId, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx } from './db.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import {
@@ -1574,13 +1574,20 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
       return c.json({ success: true, message: 'Session not in DB — acknowledged' });
     }
 
-    // Migration 100: persist resolvedShopId на session. Если verifyWebhook
-    // прошёл через legacy creds (old shop) — записываем это в session,
-    // чтобы future refund по этому payment_id ушёл с правильными creds
-    // автоматически.
+    // Migration 100: persist resolvedShopId на session — targeted UPDATE
+    // только колонки shop_id (и mirror в data->>shop_id), БЕЗ записи
+    // полного in-memory session blob. Полная upsertPaymentSession здесь
+    // была бы blind-write: переписала бы status/data, потенциально
+    // откатывая параллельный claimPaymentSessionForProcessing и
+    // пере-открывая double-credit race. Targeted UPDATE по WHERE
+    // COALESCE(shop_id,'')<>$1 идемпотентен и orthogonal к claim.
     if (payload.resolvedShopId && (existing as any).shop_id !== payload.resolvedShopId) {
-      (existing as any).shop_id = payload.resolvedShopId;
-      await upsertPaymentSession(existing.orderId, existing);
+      try {
+        await setPaymentSessionShopId(existing.orderId, payload.resolvedShopId);
+        (existing as any).shop_id = payload.resolvedShopId;
+      } catch (shopErr) {
+        log.warn({ err: shopErr, orderId: existing.orderId, resolvedShopId: payload.resolvedShopId }, 'shop_id_persist_failed');
+      }
     }
 
     // Refunds operate on already-succeeded sessions, so they bypass the

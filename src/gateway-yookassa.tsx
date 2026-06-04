@@ -263,16 +263,44 @@ export class YooKassaGateway implements PaymentGateway {
       description: opts?.description?.slice(0, 250),
       metadata: opts?.metadata || {},
     };
+    const idempotenceKey = opts?.idempotenceKey || `refund-${paymentId}-${Date.now()}`;
+    const payload = JSON.stringify(body);
 
-    const response = await fetch(`${API_BASE}/refunds`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': getAuthHeader(opts?.shopId),
-        'Idempotence-Key': opts?.idempotenceKey || `refund-${paymentId}-${Date.now()}`,
-      },
-      body: JSON.stringify(body),
-    });
+    const doRefund = async (auth: string): Promise<Response> => {
+      return fetch(`${API_BASE}/refunds`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': auth,
+          'Idempotence-Key': idempotenceKey,
+        },
+        body: payload,
+      });
+    };
+
+    // Migration 100 dual-try (как в verifyWebhook): caller передаёт hint,
+    // но если hint stale/wrong (например, payment_sessions.shop_id NULL
+    // из-за пропущенного backfill) — первый запрос уйдёт на current creds
+    // и провалится 401/404. Fallback на «другие» creds (current↔legacy)
+    // закрывает migration window seamless.
+    let response = await doRefund(getAuthHeader(opts?.shopId));
+    if (response.status === 401 || response.status === 404) {
+      const triedShopId = opts?.shopId || getCurrentShopId();
+      const legacy = getLegacyCredentials();
+      // Если первая попытка шла под current — fallback на legacy.
+      // Если первая шла под legacy — fallback на current.
+      let fallbackAuth: string | null = null;
+      if (legacy && triedShopId !== legacy.shopId) {
+        fallbackAuth = 'Basic ' + btoa(`${legacy.shopId}:${legacy.secretKey}`);
+      } else if (triedShopId !== getCurrentShopId()) {
+        fallbackAuth = getAuthHeader();
+      }
+      if (fallbackAuth) {
+        console.log(`[YooKassa] refund ${response.status} on ${triedShopId}, retrying with fallback creds`);
+        response = await doRefund(fallbackAuth);
+      }
+    }
+
     const data = await response.json();
     if (!response.ok) {
       console.error('YooKassa refund error:', data);
