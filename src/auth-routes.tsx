@@ -970,7 +970,7 @@ auth.get("/admin/pending-users", requireAuth, requireAdmin, async (c) => {
       sql(`SELECT u.id, u.email, u.full_name, u.role::text AS role, u.created_at, u.is_email_verified,
                   rp.station_name, rp.website, rp.stream_url, rp.frequency, rp.phone, rp.data AS radio_data
              FROM users u
-             LEFT JOIN radio_profiles rp ON rp.user_id = u.id
+             LEFT JOIN radio_profiles rp ON rp.user_id = u.id::text
             WHERE u.status = 'pending'
             ORDER BY u.created_at DESC
             LIMIT $1 OFFSET $2`, [limit, offset]),
