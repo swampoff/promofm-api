@@ -193,10 +193,34 @@ function mapMsgRow(row: any): Message {
 const MSG_COLS = `app_id, conversation_id, body, sender, attachment,
   is_read, created_at`;
 
+// ─── IDOR guard: producer-conversation ownership ───
+// Audit 2026-06-04: до этого PR'а 4 endpoint'а (/messages/:convId,
+// /messages/:convId/poll, /messages/send, /messages/read) принимали
+// conversationId из URL или body БЕЗ проверки что conv принадлежит JWT
+// userId. Атакующий guess'ил/enumerate'ил conversationId → читал чужую
+// переписку или slammed чужой unread counter.
+//
+// Helper делает один SELECT по (app_id, producer_id) — если no row,
+// либо conv не существует, либо не моя. Используется во всех 4
+// handler'ах ниже.
+async function ownsProducerConversation(c: any, convId: string): Promise<boolean> {
+  if (!convId) return false;
+  const userId = c.get('userId') as string | undefined;
+  if (!userId) return false;
+  const r = await pool.query(
+    `SELECT 1 FROM producer_convs WHERE app_id = $1 AND producer_id = $2 LIMIT 1`,
+    [convId, userId]
+  );
+  return r.rows.length > 0;
+}
+
 // GET /messages/:conversationId
 app.get('/messages/:conversationId', requireAuth, async (c) => {
   try {
     const convId = c.req.param('conversationId');
+    if (!(await ownsProducerConversation(c, convId))) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
     const r = await pool.query(
       `SELECT ${MSG_COLS} FROM producer_messages
         WHERE conversation_id = $1 ORDER BY created_at ASC`,
@@ -214,6 +238,9 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
 app.get('/messages/:conversationId/poll', requireAuth, async (c) => {
   try {
     const convId = c.req.param('conversationId');
+    if (!(await ownsProducerConversation(c, convId))) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
     const since = c.req.query('since') || '1970-01-01T00:00:00Z';
 
     const r = await pool.query(
@@ -239,11 +266,18 @@ app.get('/messages/:conversationId/poll', requireAuth, async (c) => {
 app.post('/messages/send', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { conversationId, producerId, text, sender, attachment } = body;
+    const { conversationId, text, sender, attachment } = body;
 
     if (!conversationId || !text || !sender) {
       return c.json({ success: false, error: 'conversationId, text, and sender are required' }, 400);
     }
+    // IDOR fix: только владелец conv может отправлять сообщения. Раньше
+    // body.producerId трастился, любой мог spoof'нуть его и slammed чужие
+    // unread counters / отправлять от чужого имени.
+    if (!(await ownsProducerConversation(c, conversationId))) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    const producerId = c.get('userId') as string;
 
     const appId = genId('msg');
     // INSERT — никаких race condition'ов на массиве.
@@ -260,19 +294,18 @@ app.post('/messages/send', requireAuth, async (c) => {
     const msg = mapMsgRow(msgRes.rows[0]);
 
     // Update conversation meta (lastMessage, lastTime, unread+1 если client).
-    // Один UPDATE — атомарно, никакого read-modify-write массива.
-    if (producerId) {
-      const lastMessage = text.length > 60 ? text.slice(0, 57) + '...' : text;
-      await pool.query(
-        `UPDATE producer_convs
-            SET last_message = $1,
-                last_time = $2,
-                unread = unread + CASE WHEN $3 = 'client' THEN 1 ELSE 0 END,
-                updated_at = NOW()
-          WHERE app_id = $4 AND producer_id = $5`,
-        [lastMessage, timeHHmm(), sender, conversationId, producerId]
-      );
-    }
+    // producer_id из JWT (НЕ body) — гарантия что обновляется только своя
+    // conversation row.
+    const lastMessage = text.length > 60 ? text.slice(0, 57) + '...' : text;
+    await pool.query(
+      `UPDATE producer_convs
+          SET last_message = $1,
+              last_time = $2,
+              unread = unread + CASE WHEN $3 = 'client' THEN 1 ELSE 0 END,
+              updated_at = NOW()
+        WHERE app_id = $4 AND producer_id = $5`,
+      [lastMessage, timeHHmm(), sender, conversationId, producerId]
+    );
 
     return c.json({ success: true, data: msg });
   } catch (error) {
@@ -284,10 +317,16 @@ app.post('/messages/send', requireAuth, async (c) => {
 // POST /messages/read
 app.post('/messages/read', requireAuth, async (c) => {
   try {
-    const { conversationId, producerId } = await c.req.json();
+    const { conversationId } = await c.req.json();
     if (!conversationId) {
       return c.json({ success: false, error: 'conversationId required' }, 400);
     }
+    // IDOR fix: только владелец conv может пометить прочитанным. До
+    // этого PR'а body.producerId трастился без validation.
+    if (!(await ownsProducerConversation(c, conversationId))) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    const producerId = c.get('userId') as string;
 
     // Mark all client messages as read. UPDATE через partial-index'ный
     // фильтр (idx_pc_msgs_unread покрывает is_read=FALSE).
@@ -298,15 +337,13 @@ app.post('/messages/read', requireAuth, async (c) => {
       [conversationId]
     );
 
-    // Reset unread counter
-    if (producerId) {
-      await pool.query(
-        `UPDATE producer_convs
-            SET unread = 0, updated_at = NOW()
-          WHERE app_id = $1 AND producer_id = $2 AND unread > 0`,
-        [conversationId, producerId]
-      );
-    }
+    // Reset unread counter — JWT producerId, не body.
+    await pool.query(
+      `UPDATE producer_convs
+          SET unread = 0, updated_at = NOW()
+        WHERE app_id = $1 AND producer_id = $2 AND unread > 0`,
+      [conversationId, producerId]
+    );
 
     return c.json({ success: true });
   } catch (error) {
