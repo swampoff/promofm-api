@@ -2606,6 +2606,13 @@ export interface DigitalGood {
   views: number;
   status: string;
   createdAt: string;
+  // Migration 097 — delivery (физический файл товара + preview).
+  // file_url = '' (или null в БД) значит файл ещё не выложен; UI/checkout
+  // показывают такой товар как «в подготовке», покупка блокирована.
+  fileUrl?: string;
+  fileBytes?: number;
+  fileMime?: string;
+  previewUrl?: string;
 }
 
 function mapDigitalGoodRow(r: any): DigitalGood | null {
@@ -2627,11 +2634,16 @@ function mapDigitalGoodRow(r: any): DigitalGood | null {
     views: Number(r.views),
     status: r.status,
     createdAt: iso(r.created_at),
+    fileUrl: r.file_url || '',
+    fileBytes: r.file_bytes != null ? Number(r.file_bytes) : undefined,
+    fileMime: r.file_mime || '',
+    previewUrl: r.preview_url || '',
   };
 }
 
 const DIGITAL_GOOD_COLS = `id, title, producer, producer_id, category, description,
-  price, tags, file_size, format, rating, sales, views, status, created_at`;
+  price, tags, file_size, format, rating, sales, views, status, created_at,
+  file_url, file_bytes, file_mime, preview_url`;
 
 export interface ListDigitalGoodsOpts {
   search?: string;
@@ -2727,6 +2739,28 @@ export async function insertDigitalGood(good: DigitalGood): Promise<void> {
       good.status || 'active', good.createdAt || null,
     ]
   );
+}
+
+/**
+ * Записать file-metadata после успешного producer upload'а.
+ * Migration 097 — delivery. Атомарный UPDATE по (id, producer_id):
+ * producer не может через подмену body перезаписать чужой товар.
+ * Возвращает true если row найден и обновлён, false иначе.
+ */
+export async function setDigitalGoodFile(
+  id: string,
+  producerId: string,
+  file: { url: string; bytes: number; mime: string },
+): Promise<boolean> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `UPDATE digital_goods
+        SET file_url = $1, file_bytes = $2, file_mime = $3
+      WHERE id = $4 AND producer_id = $5
+      RETURNING id`,
+    [file.url, file.bytes, file.mime, id, producerId]
+  );
+  return r.rowCount! > 0;
 }
 
 /**
