@@ -159,7 +159,7 @@ auth.post("/signup", async (c) => {
     const parsed = await safeJsonParse(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
-    const { email, password, name, role, consentPersonalData, consentNewsletter, captchaToken } = body;
+    const { email, password, name, role, consentPersonalData, consentNewsletter, captchaToken, applicationDetails } = body;
     // H6: reCAPTCHA v3 verification (skipped if not configured)
     const captchaResult = await verifyCaptcha(captchaToken, 'signup');
     if (!captchaResult.ok) return c.json({ success: false, error: captchaResult.error || 'Проверка CAPTCHA не пройдена' }, 403);
@@ -173,6 +173,31 @@ auth.post("/signup", async (c) => {
     // (those are server-assigned only). Fallback to 'artist' for any unknown input.
     const userRole = (role && isValidRole(role) && role !== "admin" && role !== "superadmin") ? role : "artist";
     const isPartner = PARTNER_ROLES.includes(userRole);
+
+    // Радиостанция/радио — ОБЯЗАТЕЛЬНЫЕ данные заявки для верификации админом.
+    // Раньше партнёр уходил в pending без какой-либо информации → админ не мог
+    // проверить легитимность (любой мог подать заявку). Теперь форма обязана
+    // прислать applicationDetails, иначе 400.
+    const RADIO_APP_ROLES = ['radio_station', 'radio'];
+    let radioApp: any = null;
+    if (RADIO_APP_ROLES.includes(userRole)) {
+      const a = applicationDetails || {};
+      const stationName = String(a.stationName || '').trim().slice(0, 200);
+      const broadcastType = a.broadcastType === 'online' ? 'online' : 'fm';
+      const frequency = String(a.frequency || '').trim().slice(0, 60);
+      const streamUrl = String(a.streamUrl || '').trim().slice(0, 500);
+      const website = String(a.website || '').trim().slice(0, 500);
+      const phone = String(a.phone || '').trim().slice(0, 60);
+      const position = String(a.position || '').trim().slice(0, 120);
+      if (!stationName) return c.json({ success: false, error: 'Укажите название радиостанции' }, 400);
+      if (broadcastType === 'fm' && !frequency) return c.json({ success: false, error: 'Укажите частоту вещания (FM)' }, 400);
+      if (broadcastType === 'online' && !streamUrl) return c.json({ success: false, error: 'Укажите ссылку на эфир (интернет-радио)' }, 400);
+      if (!website) return c.json({ success: false, error: 'Укажите сайт радиостанции' }, 400);
+      if (!phone) return c.json({ success: false, error: 'Укажите контактный телефон' }, 400);
+      if (!position) return c.json({ success: false, error: 'Укажите вашу должность' }, 400);
+      radioApp = { stationName, broadcastType, frequency, streamUrl, website, phone, position };
+    }
+
     const accountStatus = isPartner ? 'pending' : 'active';
     const userName = name || email.split("@")[0];
     const passwordHash = await bcrypt.hash(password, 12);
@@ -204,6 +229,23 @@ auth.post("/signup", async (c) => {
     if (!profileOk) {
       return c.json({ success: false, error: 'Ошибка регистрации — не удалось создать профиль. Попробуйте ещё раз.' }, 500);
     }
+
+    // Радиозаявка: пишем данные в radio_profiles (колонки уже есть) +
+    // position/broadcastType в data jsonb — чтобы админ верифицировал перед approve.
+    if (radioApp) {
+      try {
+        await sql(
+          `UPDATE radio_profiles
+              SET station_name = $2, name = $2, website = $3,
+                  stream_url = NULLIF($4, ''), frequency = NULLIF($5, ''), phone = $6,
+                  data = COALESCE(data, '{}'::jsonb) || $7::jsonb, updated_at = now()
+            WHERE user_id = $1`,
+          [userId, radioApp.stationName, radioApp.website, radioApp.streamUrl, radioApp.frequency, radioApp.phone,
+           JSON.stringify({ application: { position: radioApp.position, broadcastType: radioApp.broadcastType, submittedAt: new Date().toISOString() } })]
+        );
+      } catch (e) { log.warn({ err: e, userId }, 'radio_application_store_failed'); }
+    }
+
     log.info({ email, userId, role: userRole, status: accountStatus }, 'user_registered');
     logAuthEvent('signup_success', {
       userId, description: `Регистрация: ${email}, роль: ${userRole}`,
@@ -211,7 +253,7 @@ auth.post("/signup", async (c) => {
       userAgent: c.req.header('user-agent') || '',
     });
 
-    notifyNewUser({ email, name: userName, role: userRole, via: "email", needsApproval: isPartner }).catch(() => {});
+    notifyNewUser({ email, name: userName, role: userRole, via: "email", needsApproval: isPartner, application: radioApp || undefined }).catch(() => {});
 
     const verificationToken = crypto.randomUUID();
     await vpsStoreToken(userId, verificationToken, "email_verify", 24);
@@ -923,10 +965,14 @@ auth.get("/admin/pending-users", requireAuth, requireAdmin, async (c) => {
     const offset = Math.max(parseInt(c.req.query('offset') || '0', 10) || 0, 0);
 
     const [rows, totalRow] = await Promise.all([
-      sql(`SELECT id, email, full_name, role::text, created_at, is_email_verified
-             FROM users
-            WHERE status = 'pending'
-            ORDER BY created_at DESC
+      // LEFT JOIN radio_profiles — заявка радиостанции (название/частота/сайт/
+      // эфир/телефон/должность) чтобы админ верифицировал перед approve/reject.
+      sql(`SELECT u.id, u.email, u.full_name, u.role::text AS role, u.created_at, u.is_email_verified,
+                  rp.station_name, rp.website, rp.stream_url, rp.frequency, rp.phone, rp.data AS radio_data
+             FROM users u
+             LEFT JOIN radio_profiles rp ON rp.user_id = u.id
+            WHERE u.status = 'pending'
+            ORDER BY u.created_at DESC
             LIMIT $1 OFFSET $2`, [limit, offset]),
       sql(`SELECT COUNT(*)::int AS total FROM users WHERE status = 'pending'`),
     ]);
@@ -937,6 +983,15 @@ auth.get("/admin/pending-users", requireAuth, requireAdmin, async (c) => {
       data: rows.rows.map((u: any) => ({
         userId: u.id, email: u.email, name: u.full_name, role: u.role,
         createdAt: u.created_at, isEmailVerified: !!u.is_email_verified,
+        application: (u.role === 'radio_station' || u.role === 'radio') ? {
+          stationName: u.station_name || null,
+          website: u.website || null,
+          streamUrl: u.stream_url || null,
+          frequency: u.frequency || null,
+          phone: u.phone || null,
+          position: u.radio_data?.application?.position || null,
+          broadcastType: u.radio_data?.application?.broadcastType || null,
+        } : undefined,
       })),
       pagination: { total, limit, offset, hasMore: offset + rows.rows.length < total },
     });
