@@ -395,41 +395,142 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       }
       
       if (itemType === 'radio_campaign' && session.metadata.stationId) {
-        // Create radio campaign after payment. Native row-per-campaign since
-        // migration 082. Fixes legacy bug — set(campaign.id) wrote to wrong PK
-        // на per-venue таблице, кампания была невидима в venue cabinet.
-        const { insertVenueAdCampaign } = await import('./db.tsx');
-        const campaign = {
-          id: `bp-${crypto.randomUUID()}`,
-          venueId: session.userId,
-          stationId: session.metadata.stationId,
-          stationName: session.metadata.stationName || '',
-          advertiserId: session.userId,
-          packageType: session.metadata.packageType || 'standard',
-          status: 'paid',
-          audioUrl: null,
-          startDate: session.metadata.startDate || new Date().toISOString().split('T')[0],
-          endDate: session.metadata.endDate || '',
-          targetPlays: parseInt(session.metadata.targetPlays || '0'),
-          totalPlays: 0,
-          budget: session.amount,
-          spent: 0,
-          impressions: 0,
-          ctr: 0,
-          timeSlots: [],
-          extra: {},
-          createdAt: now,
-          updatedAt: now,
-        };
-        await insertVenueAdCampaign(campaign);
-        log.info({ campaignId: campaign.id }, 'radio_campaign_created');
-        
-        // Notify station owner
-        if (session.metadata.stationOwnerId) {
+        // Migration 102 (BLOCKER C, a-style flow):
+        // Если session.metadata.campaignId передан → campaign уже создан
+        // в POST /venue/radio-campaigns со status='pending_payment' и
+        // server-computed budget. Webhook просто переводит status='paid'
+        // через UPDATE с authoritative gate ABS(budget-amount)<=0.01 в
+        // WHERE — даже если /create-session gate был обойдён, защита
+        // здесь блокирует активацию.
+        //
+        // Legacy fallback (нет campaignId): старое поведение — INSERT
+        // нового row'а с session.amount как budget (без gate). Эта ветка
+        // удалится после того как frontend полностью перейдёт на slotIds.
+        const declaredCampaignId = session.metadata.campaignId;
+        if (declaredCampaignId) {
+          const { pool: vacWebhookPool } = await import('./db-client.tsx');
+          // Authoritative gate: status='pending_payment' AND budget match.
+          // Если кто-то поднял amount в DevTools и обманул /create-session
+          // gate, эта UPDATE не сработает (rowCount=0).
+          const upd = await vacWebhookPool.query(
+            `UPDATE venue_ad_campaigns
+                SET status = 'paid',
+                    paid_at = NOW(),
+                    payment_order_id = $2,
+                    payment_gateway = $3,
+                    updated_at = NOW()
+              WHERE id = $1
+                AND status = 'pending_payment'
+                AND ABS(budget - $4::numeric) <= 0.01
+              RETURNING id, venue_id, station_id, budget, package_type, audio_url,
+                        start_date, end_date, target_plays`,
+            [declaredCampaignId, session.orderId, session.gateway, session.amount]
+          );
+          if (upd.rows.length === 0) {
+            log.warn({ campaignId: declaredCampaignId, sessionAmount: session.amount }, 'radio_campaign_activation_blocked');
+          } else {
+            const camp = upd.rows[0];
+            log.info({ campaignId: declaredCampaignId, amount: session.amount }, 'radio_campaign_activated');
+            // Теперь создаём radio_venue_requests чтобы радио увидело
+            // оплаченную кампанию в своём кабинете. До оплаты radio её
+            // не видел (status='pending_payment').
+            try {
+              const { insertRadioVenueRequest, insertRadioNotification } = await import('./db.tsx');
+              const startMs = new Date(camp.start_date || Date.now()).getTime();
+              const endMs = new Date(camp.end_date || Date.now()).getTime();
+              const durationDays = Math.max(1, Math.ceil((endMs - startMs) / 86400000));
+              const playsPerDay = camp.target_plays
+                ? Math.ceil(camp.target_plays / durationDays)
+                : 0;
+              await insertRadioVenueRequest({
+                radioId: camp.station_id,
+                id: camp.id,
+                venueId: camp.venue_id,
+                venueName: session.metadata.venueName || 'Unknown',
+                venueCity: session.metadata.venueCity || '',
+                packageType: camp.package_type,
+                audioUrl: camp.audio_url,
+                startDate: camp.start_date,
+                endDate: camp.end_date,
+                targetPlays: camp.target_plays,
+                playsPerDay,
+                durationDays,
+                totalPrice: Number(camp.budget),
+                platformFee: Math.round(Number(camp.budget) * 0.15),
+                stationPayout: Math.round(Number(camp.budget) * 0.85),
+                timeSlots: [],
+                status: 'pending',
+                submittedAt: new Date().toISOString(),
+              });
+              await insertRadioNotification({
+                radioId: camp.station_id,
+                id: `notif-${Date.now()}`,
+                type: 'venue_request',
+                title: 'Оплаченная кампания',
+                message: `Venue оплатил кампанию (${camp.budget} RUB) — на рассмотрении.`,
+                priority: 'high',
+                read: false,
+                relatedId: camp.id,
+                createdAt: new Date().toISOString(),
+              });
+            } catch (rvqErr: any) {
+              log.error({ err: rvqErr?.message, campaignId: declaredCampaignId }, 'radio_venue_request_create_failed');
+            }
+            // Notify station owner
+            if (session.metadata.stationOwnerId) {
+              try {
+                const { emitSSE } = await import('./sse-routes.tsx');
+                emitSSE(session.metadata.stationOwnerId, { type: 'new_radio_campaign', data: { campaignId: declaredCampaignId, budget: Number(camp.budget), packageType: camp.package_type } });
+              } catch {}
+            }
+          }
+        } else {
+          // LEGACY: создаём новый campaign (как было до migration 102).
+          const { insertVenueAdCampaign } = await import('./db.tsx');
+          const campaign = {
+            id: `bp-${crypto.randomUUID()}`,
+            venueId: session.userId,
+            stationId: session.metadata.stationId,
+            stationName: session.metadata.stationName || '',
+            advertiserId: session.userId,
+            packageType: session.metadata.packageType || 'standard',
+            status: 'paid',
+            audioUrl: null,
+            startDate: session.metadata.startDate || new Date().toISOString().split('T')[0],
+            endDate: session.metadata.endDate || '',
+            targetPlays: parseInt(session.metadata.targetPlays || '0'),
+            totalPlays: 0,
+            budget: session.amount,
+            spent: 0,
+            impressions: 0,
+            ctr: 0,
+            timeSlots: [],
+            extra: {},
+            createdAt: now,
+            updatedAt: now,
+          };
+          await insertVenueAdCampaign(campaign);
+          // BLOCKER B (migration 101): payment metadata после INSERT.
           try {
-            const { emitSSE } = await import('./sse-routes.tsx');
-            emitSSE(session.metadata.stationOwnerId, { type: 'new_radio_campaign', data: { budget: session.amount, packageType: campaign.packageType } });
-          } catch {}
+            const { pool: rcLegacyPool } = await import('./db-client.tsx');
+            await rcLegacyPool.query(
+              `UPDATE venue_ad_campaigns
+                  SET payment_order_id = $2,
+                      payment_gateway  = $3,
+                      paid_at          = NOW()
+                WHERE id = $1`,
+              [campaign.id, session.orderId, session.gateway]
+            );
+          } catch (legacyMetaErr: any) {
+            log.warn({ campaignId: campaign.id, err: legacyMetaErr?.message }, 'radio_campaign_payment_meta_write_failed');
+          }
+          log.info({ campaignId: campaign.id, flow: 'legacy' }, 'radio_campaign_created');
+          if (session.metadata.stationOwnerId) {
+            try {
+              const { emitSSE } = await import('./sse-routes.tsx');
+              emitSSE(session.metadata.stationOwnerId, { type: 'new_radio_campaign', data: { budget: session.amount, packageType: campaign.packageType } });
+            } catch {}
+          }
         }
       }
     
@@ -1342,6 +1443,46 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         }
       } catch (err) {
         log.error({ err, bannerId }, 'banner_publish_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить кампанию' }, 500);
+      }
+    }
+    // radio_campaign — BLOCKER C (a-style): server-side authoritative budget
+    // из radio_ad_slots.price (см. POST /venue/radio-campaigns с slotIds).
+    // Если metadata.campaignId передан — gate против campaign.budget;
+    // если нет — legacy flow (без проверки, как до этого PR'а).
+    if (type === 'purchase' && metadata?.type === 'radio_campaign' && metadata?.campaignId) {
+      const campaignId = String(metadata.campaignId);
+      try {
+        const { pool: vacPool } = await import('./db-client.tsx');
+        const r = await vacPool.query(
+          `SELECT venue_id, budget, status
+             FROM venue_ad_campaigns WHERE id = $1 LIMIT 1`,
+          [campaignId]
+        );
+        if (r.rows.length === 0) {
+          return c.json({ success: false, error: 'Кампания не найдена' }, 404);
+        }
+        const camp = r.rows[0];
+        if (String(camp.venue_id) !== userId) {
+          log.warn({ userId, campaignId, ownerId: camp.venue_id }, 'radio_campaign_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужую кампанию' }, 403);
+        }
+        if (camp.status !== 'pending_payment') {
+          return c.json({
+            success: false,
+            error: `Кампания должна быть в статусе pending_payment (текущий: ${camp.status})`,
+          }, 400);
+        }
+        const expected = Number(camp.budget);
+        if (expected <= 0) {
+          return c.json({ success: false, error: 'Цена кампании не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, campaignId, expected, received: amount }, 'radio_campaign_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене кампании' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, campaignId }, 'radio_campaign_validation_error');
         return c.json({ success: false, error: 'Не удалось проверить кампанию' }, 500);
       }
     }

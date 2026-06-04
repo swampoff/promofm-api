@@ -762,6 +762,22 @@ app.get('/radio-campaigns', requireAuth, async (c) => {
 });
 
 // POST /radio-campaigns - Создать рекламную кампанию
+//
+// Migration 102 (BLOCKER C): server-side budget из radio_ad_slots.price.
+// До этого PR'а body.budget принимался без проверки → 1₽-bypass.
+//
+// Новый flow (если body.slotIds[] передан):
+//   1. validate все slot_ids принадлежат body.stationId, status='available'
+//   2. compute authoritativeBudget = SUM(slot.price) * durationDays
+//   3. body.budget IGNORED (log warn если != authoritative)
+//   4. INSERT campaign с status='pending_payment', slot_ids, authoritative budget
+//   5. radio_venue_requests НЕ создаётся (radio видит campaign только после
+//      оплаты через webhook)
+//
+// Legacy fallback (body.slotIds отсутствует/пустой):
+//   - Старое поведение: body.budget принимается, status='pending',
+//     radio_venue_requests создаётся сразу. Warn-log про deprecation.
+//   - Frontend должен мигрировать на slotIds; legacy path удалится после.
 app.post('/radio-campaigns', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
@@ -771,6 +787,58 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
     }
 
     const body = await c.req.json();
+    const slotIds: string[] = Array.isArray(body.slotIds)
+      ? body.slotIds.filter((s: any) => typeof s === 'string' && s.length > 0)
+      : [];
+    const isNewFlow = slotIds.length > 0;
+
+    // ── Compute authoritative budget (new flow) ───────────────────────
+    let authoritativeBudget = Number(body.budget) || 0;
+    let durationDays = 0;
+    if (isNewFlow) {
+      if (!body.stationId) {
+        return c.json({ success: false, error: 'stationId обязателен при выборе slot_ids' }, 400);
+      }
+      // duration в днях между start/end
+      const startMs = new Date(body.startDate || Date.now()).getTime();
+      const endMs = new Date(body.endDate || Date.now()).getTime();
+      durationDays = Math.max(1, Math.ceil((endMs - startMs) / 86400000));
+
+      // SELECT slots, проверка ownership и доступности
+      const { pool } = await import('./db-client.tsx');
+      const slotsRes = await pool.query(
+        `SELECT id, price, status FROM radio_ad_slots
+          WHERE id = ANY($1::text[]) AND radio_id = $2`,
+        [slotIds, body.stationId]
+      );
+      if (slotsRes.rows.length !== slotIds.length) {
+        return c.json({
+          success: false,
+          error: `Некоторые слоты не найдены или не принадлежат станции (запрошено ${slotIds.length}, найдено ${slotsRes.rows.length})`,
+        }, 400);
+      }
+      const unavailable = slotsRes.rows.filter((r: any) => r.status !== 'available');
+      if (unavailable.length > 0) {
+        return c.json({
+          success: false,
+          error: `Слоты недоступны: ${unavailable.map((r: any) => r.id).join(', ')}`,
+        }, 409);
+      }
+
+      // Authoritative: SUM(price) * durationDays. price — за day-slot rental.
+      const slotsSum = slotsRes.rows.reduce((s: number, r: any) => s + Number(r.price), 0);
+      authoritativeBudget = slotsSum * durationDays;
+
+      // Если client прислал body.budget — log warn если расходится
+      // (фронт должен показывать тот же расчёт). Это сигнал что фронт
+      // отстал от backend pricing или попытка tampering.
+      if (Number(body.budget) > 0 && Math.abs(Number(body.budget) - authoritativeBudget) > 0.01) {
+        console.warn(`[radio-campaign] body.budget=${body.budget} != authoritative=${authoritativeBudget} (slots=${slotsRes.rows.length}, days=${durationDays})`);
+      }
+    } else {
+      console.warn(`[radio-campaign] LEGACY flow — body.slotIds пуст, body.budget=${body.budget} принят без validate. Frontend должен мигрировать на slotIds.`);
+    }
+
     const now = new Date().toISOString();
     const campaign: VenueAdCampaignRow = {
       id: `camp-${crypto.randomUUID()}`,
@@ -779,18 +847,20 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
       stationName: body.stationName || '',
       advertiserId: null,
       packageType: body.packageType || 'slot_15sec',
-      status: 'pending',
+      // New flow: pending_payment → радио НЕ видит до оплаты, webhook
+      // переводит в 'paid'. Legacy: 'pending' как раньше.
+      status: isNewFlow ? 'pending_payment' : 'pending',
       audioUrl: body.audioUrl || '',
       startDate: body.startDate,
       endDate: body.endDate,
       totalPlays: 0,
       targetPlays: body.targetPlays || 0,
-      budget: body.budget || 0,
+      budget: authoritativeBudget,
       spent: 0,
       impressions: 0,
       ctr: 0,
       timeSlots: body.timeSlots || [],
-      extra: {},
+      extra: isNewFlow ? { slotIds, durationDays } : {},
       createdAt: now,
       updatedAt: now,
     };
@@ -798,8 +868,25 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
     // Atomic INSERT — no race window vs legacy get-push-set.
     await insertVenueAdCampaign(campaign);
 
-    // Push venue request to radio side so radio station sees it in orders
-    if (campaign.stationId) {
+    // Migration 102: записываем slot_ids в native column отдельным UPDATE
+    // (insertVenueAdCampaign не знает о новой колонке — патч оставлен
+    // inline чтобы не расширять interface VenueAdCampaignRow одним PR'ом).
+    if (isNewFlow) {
+      try {
+        const { pool: vrPool } = await import('./db-client.tsx');
+        await vrPool.query(
+          `UPDATE venue_ad_campaigns SET slot_ids = $2::text[] WHERE id = $1`,
+          [campaign.id, slotIds]
+        );
+      } catch (slotMetaErr: any) {
+        console.warn('[radio-campaign] slot_ids native write failed:', slotMetaErr?.message);
+      }
+    }
+
+    // Legacy flow: радио сразу видит запрос (radio_venue_requests INSERT).
+    // New flow: НЕ создаём radio_venue_requests здесь — webhook делает это
+    // после оплаты, чтобы radio не видел unpaid campaigns в своём cabinet.
+    if (campaign.stationId && !isNewFlow) {
       const venueRequest = {
         id: campaign.id,
         venueId: profile.id,
