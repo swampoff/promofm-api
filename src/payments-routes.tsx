@@ -1032,4 +1032,166 @@ paymentsRoutes.get('/admin/accounting/summary', requireAuth, requireAdmin, async
   }
 });
 
+/**
+ * POST /admin/payments/:orderId/refund — универсальный admin refund.
+ *
+ * Покрывает 9 paid-product типов которые НЕ имели specific refund route:
+ *   - track_publish      (артист оплатил публикацию → отмена)
+ *   - dj_mix_publish     (DJ оплатил публикацию микса → отмена)
+ *   - distribution_order (артист оплатил distribution → DSP отказал)
+ *   - content_order      (заказ контента → отмена)
+ *   - venue_radio_subscription (venue передумал → pro-rata)
+ *   - banner_publish     (баннерная кампания → admin рефанд)
+ *   - production_360_payment
+ *   - donation / topup   (admin может рефаднуть по запросу)
+ *   - любой другой по orderId
+ *
+ * Specific refund routes (marketplace beat/digital, booking, radio reject)
+ * НЕ покрываются этим endpoint'ом — они имеют свою бизнес-логику
+ * (snapshot purchase, cancel campaign, etc.) и должны идти через
+ * специальные ручки.
+ *
+ * Что делает:
+ *   1. Lookup payment_session по orderId
+ *   2. yk.refund() с idempotenceKey + shopId hint (если migration 100
+ *      применена)
+ *   3. UPDATE payment_session.status='refunded', payment_session.data
+ *      обогащается refund metadata
+ *   4. Запись в platform_revenue_log с типом 'refund' (отрицательная
+ *      сумма для accounting)
+ *   5. SSE userId о возврате
+ *
+ * Что НЕ делает (admin manual):
+ *   - НЕ откатывает product status (track moderation_status, dj_mix
+ *     status, distribution status и т.д.) — это admin делает руками
+ *     через type-specific endpoint'ы. Причина: разные типы имеют разный
+ *     workflow (трек после рефанда может остаться 'rejected' для history,
+ *     dj_mix → 'rejected' если уже approved + paid, distribution →
+ *     'cancelled' и т.д.). Универсальное решение «всё в rejected» сломало
+ *     бы accounting/SSE flows.
+ *   - НЕ возвращает coins за topup (если topup рефандится, coins не
+ *     отнимаются автоматически — admin должен это сделать через
+ *     coins-routes manually). Reverse операция на coins-counter без
+ *     escrow → потенциальный отрицательный balance.
+ *
+ * Body: { amount?, reason }
+ *   - amount: опциональный partial refund. По умолчанию — полная сумма
+ *     payment_session.amount.
+ *   - reason: обязательный, идёт в YK metadata + ledger.
+ *
+ * Idempotency: idempotenceKey = `refund-${orderId}` — повторный вызов
+ * с тем же orderId не делает второй refund (YooKassa дедуп + status
+ * check ниже).
+ */
+paymentsRoutes.post('/admin/payments/:orderId/refund', requireAuth, requireAdmin, async (c) => {
+  try {
+    const orderId = c.req.param('orderId');
+    const adminId = c.get('userId') as string;
+    const body = await c.req.json().catch(() => ({}));
+    const reason = String(body.reason || '').trim().slice(0, 250);
+    const partialAmount = Number(body.amount);
+
+    if (!orderId) {
+      return c.json({ success: false, error: 'orderId обязателен' }, 400);
+    }
+    if (!reason) {
+      return c.json({ success: false, error: 'reason обязателен' }, 400);
+    }
+
+    // 1. Lookup payment session
+    const { getPaymentSession } = await import('./db.tsx');
+    const session = await getPaymentSession(orderId) as any;
+    if (!session) {
+      return c.json({ success: false, error: 'Payment session не найдена' }, 404);
+    }
+    if (session.status === 'refunded') {
+      return c.json({
+        success: false,
+        error: 'Платёж уже возвращён',
+        data: { refundId: session.refundId, refundedAt: session.refundedAt },
+      }, 409);
+    }
+    if (!session.gatewayPaymentId) {
+      return c.json({ success: false, error: 'gatewayPaymentId не сохранён — рефанд через YooKassa-дашборд' }, 422);
+    }
+    if (session.gateway !== 'yookassa') {
+      return c.json({ success: false, error: `Gateway ${session.gateway} не поддерживается auto-refund'ом` }, 501);
+    }
+
+    // 2. Refund via YooKassa
+    const refundAmount = Number.isFinite(partialAmount) && partialAmount > 0
+      ? Math.min(partialAmount, Number(session.amount))
+      : Number(session.amount);
+
+    const { YooKassaGateway } = await import('./gateway-yookassa.tsx');
+    const yk = new YooKassaGateway();
+    let refund: any;
+    try {
+      refund = await yk.refund(session.gatewayPaymentId, refundAmount, {
+        description: `Возврат ${session.purpose || session.type || 'платежа'} #${orderId}${reason ? ': ' + reason : ''}`.slice(0, 250),
+        idempotenceKey: `refund-${orderId}`,
+        metadata: { orderId, refundedBy: adminId, reason },
+        // shopId hint — graceful когда PR #184 (yookassa dual-creds bridge)
+        // мержится: type там расширяется, тут уже передаём. До merge'а #184
+        // — `as any` молча проигнорирует параметр.
+        ...({ shopId: session.shop_id || session.shopId } as any),
+      });
+    } catch (refundErr: any) {
+      console.error('[admin/payments/refund] yk.refund failed:', refundErr?.message);
+      return c.json({
+        success: false,
+        error: 'YooKassa отклонила refund: ' + (refundErr?.message || 'unknown'),
+      }, 502);
+    }
+
+    // 3. Mark session as refunded
+    const refundedAt = new Date().toISOString();
+    const { upsertPaymentSession } = await import('./db.tsx');
+    await upsertPaymentSession(orderId, {
+      ...session,
+      status: 'refunded',
+      refundId: refund.id,
+      refundedAt,
+      refundedBy: adminId,
+      refundReason: reason,
+      refundAmount,
+    });
+
+    // 4. Platform-revenue ledger — отрицательная запись для accounting
+    try {
+      const { recordRevenue } = await import('./platform-revenue.tsx');
+      await recordRevenue({
+        userId: session.userId,
+        type: 'refund',
+        gross: -refundAmount,
+        commission: 0,
+        net: -refundAmount,
+        description: `Admin refund ${session.purpose || session.type}: ${reason}`,
+        metadata: { orderId, refundId: refund.id, originalGateway: session.gateway, originalAmount: session.amount, refundedBy: adminId },
+      } as any).catch(() => {});
+    } catch {}
+
+    // 5. SSE user
+    try {
+      const { emitSSE } = await import('./sse-routes.tsx');
+      emitSSE(session.userId, {
+        type: 'payment_refunded',
+        data: {
+          title: 'Возврат средств',
+          message: `Платёж на ${refundAmount.toLocaleString('ru-RU')} ₽ возвращён${reason ? ': ' + reason : ''}`,
+          orderId, refundId: refund.id, amount: refundAmount,
+        },
+      });
+    } catch {}
+
+    return c.json({
+      success: true,
+      data: { orderId, refundId: refund.id, amount: refundAmount, status: refund.status },
+    });
+  } catch (error: any) {
+    console.error('POST /admin/payments/:orderId/refund error:', error);
+    return c.json({ success: false, error: 'Ошибка возврата' }, 500);
+  }
+});
+
 export default paymentsRoutes;
