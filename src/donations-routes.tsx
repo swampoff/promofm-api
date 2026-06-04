@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, optionalAuth } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { SUBSCRIPTION_PLANS } from './subscriptions-routes.tsx';
 
@@ -259,9 +259,13 @@ donationsRoutes.post('/withdrawals', requireAuth, async (c) => {
 });
 
 // ── POST /donations — create a pending donation and route to payment gateway ──
-donationsRoutes.post('/', requireAuth, async (c) => {
+// PUBLIC (optionalAuth): донатить может ЛЮБОЙ — фанат/слушатель без аккаунта.
+// Раньше стоял requireAuth → незалогиненный получал 401 «Authorization required»
+// → платёж не создавался → кнопка «Поддержать» «не перекидывала» на ЮKassa.
+// Залогинен → donorId = его id; аноним → donorId = null (+ donorName/isAnonymous из body).
+donationsRoutes.post('/', optionalAuth, async (c) => {
   try {
-    const userId = c.get('userId');
+    const userId = c.get('userId') || null;
     const body = await c.req.json();
     const donationId = `donation-${crypto.randomUUID()}`;
     const now = new Date().toISOString();

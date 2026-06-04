@@ -60,6 +60,36 @@ export async function requireAuth(c: Context, next: Next) {
   }
 }
 
+/**
+ * OPTIONAL AUTH — как requireAuth, но НЕ блокирует анонимов.
+ * Валидная cookie → ставит userId/email/role. Нет cookie / протухла /
+ * token_version mismatch / битый JWT → продолжает БЕЗ 401 (userId unset).
+ * Для публичных эндпоинтов, где залогиненность опциональна: напр. ДОНАТ —
+ * платить может любой (фанат без аккаунта), но залогиненному пишем donorId.
+ */
+export async function optionalAuth(c: Context, next: Next) {
+  const accessToken = getSessionCookie(c) || null;
+  if (accessToken) {
+    try {
+      const decoded = jwt.verify(accessToken, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as any;
+      let valid = true;
+      if (decoded.tv !== undefined) {
+        const { pool } = await import('./db-client.tsx');
+        const res = await pool.query('SELECT token_version FROM users WHERE id = $1', [decoded.sub]);
+        if (res.rows.length > 0 && res.rows[0].token_version > (decoded.tv || 0)) valid = false;
+      }
+      if (valid) {
+        c.set('userId', decoded.sub);
+        c.set('userEmail', decoded.email || '');
+        c.set('userRole', decoded.role || 'artist');
+      }
+    } catch {
+      // невалидный/протухший токен → трактуем как аноним, без 401
+    }
+  }
+  await next();
+}
+
 export async function requireAdmin(c: Context, next: Next) {  const role = c.get("userRole");  const email = c.get("userEmail");  const { SUPERADMIN_EMAIL } = await import("./roles.tsx");  if ((role !== "admin" && role !== "superadmin") || email !== SUPERADMIN_EMAIL) {    return c.json({ success: false, error: "Admin access required" }, 403);  }  await next();}
 
 export function requireOwner(paramName: string) {
