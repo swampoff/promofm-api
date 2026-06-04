@@ -1195,6 +1195,12 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
               title: 'Получен донат',
               message: `${donorLabel} задонатил ${amountLabel}`,
               link: '/artist/donations',
+              // bypassDedup: каждый донат — отдельное событие. Без этого
+              // dedup-окно (5 мин, fingerprint = target|type|title, title
+              // здесь константа «Получен донат») молча проглатывает второй
+              // донат тому же артисту — артист не узнаёт о деньгах. Сумма
+              // в message разная, но dedup её не учитывает.
+              bypassDedup: true,
               metadata: {
                 donationId,
                 amount: session.amount,

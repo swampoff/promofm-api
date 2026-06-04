@@ -232,8 +232,14 @@ donationsRoutes.post('/withdrawals', requireAuth, async (c) => {
     let destination: any;
     let destinationLabel = '';
     if (method === 'sbp') {
-      const phone = String(body.phone || '').trim();
-      if (!/^\+?\d{10,15}$/.test(phone.replace(/\s/g, ''))) {
+      // Нормализуем СРАЗУ: выкидываем всё кроме цифр и ведущего «+».
+      // Это чинит две вещи: (1) пользователь вводит «+7 (999) 123-45-67»
+      // — раньше .replace(/\s/g) убирал только пробелы, скобки/дефисы
+      // валили валидацию; (2) маскировка ниже требует непрерывных цифр —
+      // на номере с пробелами regex не матчился и в destination_label
+      // (→ UI/логи) утекал ПОЛНЫЙ номер артиста.
+      const phone = String(body.phone || '').replace(/[^\d+]/g, '');
+      if (!/^\+?\d{10,15}$/.test(phone)) {
         return c.json({ success: false, error: 'Укажите телефон в формате +7…' }, 400);
       }
       destination = { type: 'sbp', phone };
@@ -432,6 +438,10 @@ donationsRoutes.post('/', optionalAuth, async (c) => {
           ...(trackId ? { trackId } : {}),
           donorName: donorLabel,
           isAnonymous: String(body.isAnonymous || false),
+          // message: сопровождающий текст доната. Без него webhook читал
+          // session.metadata.message → undefined → '' → текст терялся.
+          // Обрезаем до 500 символов чтобы metadata не пухла.
+          ...(body.message ? { message: String(body.message).slice(0, 500) } : {}),
         },
       });
 
@@ -451,6 +461,8 @@ donationsRoutes.post('/', optionalAuth, async (c) => {
           ...(trackId ? { trackId } : {}),
           donorName: donorLabel,
           isAnonymous: String(body.isAnonymous || false),
+          // см. коммент выше — message должен дожить до webhook fulfillment.
+          ...(body.message ? { message: String(body.message).slice(0, 500) } : {}),
         },
         savePaymentMethod: false,
         confirmationUrl: result.confirmationUrl,
