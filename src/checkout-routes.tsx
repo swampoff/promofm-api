@@ -1017,6 +1017,38 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill engineer_order (маркетплейс звукоинженера) ───
+  // accepted → in_progress после успешной оплаты. Идемпотентно:
+  // WHERE status='accepted' гарантирует, что повторный вебхук не сбросит
+  // уже продвинутый заказ (delivered/completed) назад в in_progress.
+  if (session.metadata?.type === 'engineer_order' && session.metadata?.engineerOrderId) {
+    const engOrderId = String(session.metadata.engineerOrderId);
+    try {
+      const { pool: vpool } = await import('./db-client.tsx');
+      const upd = await vpool.query(
+        `UPDATE engineer_orders
+           SET status='in_progress', payment_order_id=$1, paid_at=NOW(), updated_at=NOW()
+         WHERE id=$2 AND status='accepted'
+         RETURNING engineer_id, client_id, title`,
+        [session.orderId, engOrderId],
+      );
+      if (upd.rows.length > 0) {
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(upd.rows[0].engineer_id, {
+            type: 'engineer_order_paid',
+            data: { title: upd.rows[0].title, orderId: engOrderId, amount: session.amount },
+          });
+        } catch {}
+        log.info({ engOrderId, amount: session.amount, orderId: session.orderId }, 'engineer_order_paid');
+      } else {
+        log.warn({ engOrderId, orderId: session.orderId }, 'engineer_order_not_accepted_for_fulfillment');
+      }
+    } catch (err) {
+      log.error({ err, engOrderId: session.metadata.engineerOrderId }, 'engineer_order_fulfillment_error');
+    }
+  }
+
   // ─── Fulfill donation ───
   if (session.type === 'donation' && session.metadata?.donationId) {
     try {
@@ -1311,6 +1343,45 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       } catch (err) {
         log.error({ err, bannerId }, 'banner_publish_validation_error');
         return c.json({ success: false, error: 'Не удалось проверить кампанию' }, 500);
+      }
+    }
+    // engineer_order — оплата заказа услуги звукоинженера. Клиент платит
+    // ТОЛЬКО за свой собственный заказ в статусе 'accepted' (инженер уже
+    // согласовал цену). Сумма берётся с сервера (engineer_orders.price) —
+    // занижение через DevTools заблокировано, как у track_publish.
+    if (type === 'purchase' && metadata?.type === 'engineer_order') {
+      const engOrderId = metadata?.engineerOrderId;
+      if (!engOrderId) {
+        return c.json({ success: false, error: 'metadata.engineerOrderId обязателен для engineer_order' }, 400);
+      }
+      try {
+        const { pool: vpool } = await import('./db-client.tsx');
+        const { rows } = await vpool.query(
+          `SELECT client_id, status, price FROM engineer_orders WHERE id = $1 LIMIT 1`,
+          [String(engOrderId)],
+        );
+        if (rows.length === 0) {
+          return c.json({ success: false, error: 'Заказ не найден' }, 404);
+        }
+        const ord = rows[0];
+        if (ord.client_id !== userId) {
+          log.warn({ userId, engOrderId, ownerId: ord.client_id }, 'engineer_order_pay_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужой заказ' }, 403);
+        }
+        if (ord.status !== 'accepted') {
+          return c.json({ success: false, error: `Заказ должен быть принят инженером (текущий статус: ${ord.status})` }, 400);
+        }
+        const expected = Number(ord.price) || 0;
+        if (expected <= 0) {
+          return c.json({ success: false, error: 'Цена заказа не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, engOrderId, expected, received: amount }, 'engineer_order_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене заказа' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, engOrderId }, 'engineer_order_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить заказ' }, 500);
       }
     }
     if (!returnUrl) {
