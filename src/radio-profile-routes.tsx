@@ -368,4 +368,49 @@ app.post('/profile/:radioId/cover', requireAuth, async (c) => {
   }
 });
 
+/**
+ * GET /profile/:radioId/ad-slots — venue-facing каталог рекламных слотов.
+ *
+ * До этого PR'а такого endpoint'а не было — venue не мог программно
+ * получить список слотов конкретной станции с ценами, поэтому BLOCKER C
+ * (1₽-bypass) держался: venue cabinet UI присылал любой `budget` на
+ * сервер без выбора реальных slots. Этот endpoint открывает каталог
+ * для venue → выбор slot_id'ов → backend считает SUM(price)*days как
+ * authoritative budget (см. promofm-api PR #185).
+ *
+ * Auth: requireAuth (только залогиненные). RLS не применяется — слот
+ * c status='available' это публичный оффер станции в кабинет venue.
+ */
+app.get('/profile/:radioId/ad-slots', requireAuth, async (c) => {
+  const radioId = c.req.param('radioId');
+  if (!radioId) {
+    return c.json({ success: false, error: 'radioId required' }, 400);
+  }
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `SELECT id, slot_type, time_slot, price, duration, max_per_hour, description
+         FROM radio_ad_slots
+        WHERE radio_id = $1 AND status = 'available'
+        ORDER BY price ASC, time_slot ASC`,
+      [radioId]
+    );
+    return c.json({
+      success: true,
+      data: r.rows.map((row: any) => ({
+        id: row.id,
+        slotType: row.slot_type,
+        timeSlot: row.time_slot,
+        price: Number(row.price),
+        duration: Number(row.duration),
+        maxPerHour: Number(row.max_per_hour),
+        description: row.description || '',
+      })),
+    });
+  } catch (error: any) {
+    console.error(`[RadioProfile] ad-slots error:`, error?.message);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
 export default app;
