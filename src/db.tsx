@@ -181,7 +181,13 @@ export async function getDonationsByArtist(artistId: string) {
     .eq('recipient_id', artistId)
     .order('created_at', { ascending: false });
   if (error) console.error('[db] getDonationsByArtist:', error);
-  return (data || []).map((r: any) => r.data || r);
+  // FIX (2026-06-04): донаты пишутся в КОЛОНКИ (recipient_id/amount/status),
+  // а `data` jsonb остаётся '{}'. Старое `r.data || r` для пустого {} (truthy)
+  // возвращало {} → баланс/список донатов были пустыми у ВСЕХ артистов
+  // (рублёвый кошелёк показывал 0). Берём строку, когда data пустой/NULL.
+  return (data || []).map((r: any) =>
+    (r.data && typeof r.data === 'object' && Object.keys(r.data).length > 0) ? r.data : r
+  );
 }
 
 export async function createDonation(artistId: string, donationId: string, donation: Record<string, any>) {
