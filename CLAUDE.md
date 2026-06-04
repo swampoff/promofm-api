@@ -65,6 +65,72 @@ npx tsx src/index.ts            # Run dev server
 - All data stays on own VPS (PostgreSQL + Node.js + JWT)
 - Quality > Speed — always do it right, never cut corners
 
+### Принципы работы (adopted 2026-06-03)
+
+Четыре правила из `forrestchang/andrej-karpathy-skills` — конкретные
+поправки на типовые ошибки последних сессий.
+
+1. **Think Before Coding.** Не можешь сформулировать в одном
+   предложении *что* и *зачем* меняется — рано писать. Сначала
+   grep/read соседних файлов + проверь схему через `\d <table>` (laptop)
+   или `information_schema.columns` (cloud). Признак нарушения —
+   «диагностика без телеметрии». 2026-06-03 cookie-инцидент: лэптоп
+   принёс `56× 401 / 174× 200` за 10 мин (телеметрия), я — теорию
+   из чтения кода. Корни совпали, но это случайность не метод.
+
+2. **Simplicity First.** Перед новым слоем абстракции / новым файлом /
+   новым pattern'ом — проверь нет ли existing в codebase. Уже есть:
+   `ensureSchemaInline` (не-silent ALTER), `safeErrorMessage`,
+   `pg_try_advisory_lock` (cron dedup), HMAC-токены
+   (`unsub-token.tsx`, `track-url-token.tsx`), path-traversal helper
+   через `path.resolve+startsWith` (см. `index.ts` static handlers).
+   Использовать существующее, не плодить параллельные реализации.
+
+3. **Surgical Changes.** Один PR — одна тема. Audit-ветка ≠ feature-ветка.
+   Антипример из 2026-06-03: ветка `claude/add-external-clips-HK56I`
+   с 10 несвязанными коммитами (security, finance, cron, uploads,
+   payment) — пришлось переразрезать на 6 узких PR'ов. Должно было
+   быть так с самого начала.
+
+4. **Goal-Driven.** Каждый commit/PR имеет проверяемый критерий
+   успеха, не описание процесса. Не «улучшил webhook» — а «webhook
+   idempotent по `payment_order_id`: при повторе YooKassa retry
+   создаётся 0 новых строк в `digital_purchases` вместо 2».
+
+### Декларативный критерий > императивная инструкция
+
+В описании PR/commit формулируй *что должно стать правдой после
+мерж'а*, а не *что я сделал*. Первое верифицируемо одним сценарием.
+Второе — описание процесса, не результата. Пример из недавнего:
+
+❌ «закрыть BLOCKER C — добавить amount-check на webhook»
+✅ «попытка оплатить track_publish 1 ₽ при цене 5000 ₽ → 400 на
+   /create-session; даже если session создан, webhook UPDATE
+   tracks SET status='paid' WHERE ABS(payment_amount-session.amount)
+   ≤ 0.01 возвращает 0 строк → status не меняется → трек не
+   публикуется»
+
+### Не додумывай требования молча
+
+Недоговоренное — спросить Никиту явно ОДНИМ вопросом ДО кода.
+5 минут на ответ лучше часа на гадание и переделку. Хороший пример
+из 2026-06-03: pricing для `radio_campaign` — остановился и спросил
+«где источник истины — `timeSlots[]` это slot_id'ы, или packageType
+→ pricing-таблица, или цена реально by-agreement» — вместо того
+чтобы патчить наугад и сломать рабочий venue↔radio flow. Это
+**правильно**, а не задержка.
+
+### Cherry-pick / переписывать с нуля?
+
+Если cherry-pick из старой ветки в новую (от свежего main) даёт
+конфликты по платёжной/security-логике — НЕ решать конфликты
+вслепую. Переписать с нуля против чистого main. Конфликт-резолюция
+в money-handler'е через `git mergetool` — high-risk silent-bug
+вектор. Антипример из 2026-06-03: `claude/add-external-clips`
+коммиты B+C (refund + amount-gate) — main эволюционировал, cherry-
+pick падал. Решение: переписать с нуля → PR #173 (A), PR'ы по B+C
+ждут ответа на pricing-вопрос → новый чистый патч.
+
 ## ⛔ FORBIDDEN: создавать новые KV-store таблицы
 
 Активный мандат сессии — **переезд KV-store на нормальный SQL**
