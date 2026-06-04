@@ -622,8 +622,21 @@ export async function getBeat(beatId: string) {
   // в очереди), но delivery-колонки уже native. Мержим: jsonb-содержимое
   // приоритетно (это body), сверху native delivery-fields, чтобы handler'ы
   // видели fileUrl/fileBytes/fileMime/previewUrl как обычные поля.
+  // Review #180: try/catch на JSON.parse — битый jsonb в одной строке
+  // больше не валит весь endpoint. Fallback на пустой body — handler
+  // увидит only native delivery cols + id и решит как обрабатывать.
   const body = (data as any).data || data;
-  const merged = typeof body === 'string' ? JSON.parse(body) : { ...body };
+  let merged: any = {};
+  if (typeof body === 'string') {
+    try {
+      merged = JSON.parse(body);
+    } catch (parseErr) {
+      console.error('[db] getBeat: malformed jsonb body for', beatId, parseErr);
+      merged = { id: beatId };
+    }
+  } else {
+    merged = { ...body };
+  }
   if ((data as any).file_url    != null) merged.fileUrl    = (data as any).file_url;
   if ((data as any).file_bytes  != null) merged.fileBytes  = Number((data as any).file_bytes);
   if ((data as any).file_mime   != null) merged.fileMime   = (data as any).file_mime;

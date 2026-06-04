@@ -38,14 +38,10 @@
 --      chown -R www-data:www-data /opt/promofm-api/uploads/beats*
 --   3. cd /opt/promofm-api && git pull && sudo systemctl restart promofm-api
 
--- Bootstrap legacy KV-таблицы если ещё не создана.
-CREATE TABLE IF NOT EXISTS beats (
-  id TEXT PRIMARY KEY,
-  data JSONB DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
+-- Review #180: Bootstrap CREATE TABLE убран — таблица beats не предмет
+-- этой миграции (создаётся lazy через jsonbStore либо более ранней
+-- миграцией). Если её нет в проде — ALTER упадёт с понятной ошибкой,
+-- лучше чем тихо создать pre-KV структуру и потом рассинхронизироваться.
 ALTER TABLE beats
   ADD COLUMN IF NOT EXISTS file_url    TEXT,
   ADD COLUMN IF NOT EXISTS file_bytes  BIGINT,
