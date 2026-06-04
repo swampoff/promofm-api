@@ -1119,18 +1119,15 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             ? 'Анонимный слушатель'
             : (session.metadata.donorName || 'Слушатель');
           try {
-            const { emitSSE } = await import('./sse-routes.tsx');
-            emitSSE(artistId, {
-              type: 'donation_received',
-              data: { amount: session.amount, donorName: donorLabel, donationId },
-            });
-          } catch {}
-          try {
+            // notifyCrossCabinet сам эмитит SSE (mapTypeToSSEEvent) сразу после
+            // persist — отдельный emitSSE убран (моб-ревью #196), чтобы артист
+            // не получал ДВА SSE-сообщения. sourceRole='system' — донат от
+            // слушателя/системы, не от админа.
             const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
             await notifyCrossCabinet({
               targetUserId: artistId,
               targetRole: 'artist',
-              sourceRole: 'admin',
+              sourceRole: 'system',
               type: 'donation_received',
               title: 'Новый донат! 💜',
               message: `${donorLabel} поддержал(а) вас на ${session.amount} ₽`,

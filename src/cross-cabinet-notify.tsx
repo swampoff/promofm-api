@@ -43,9 +43,11 @@ export type NotificationType =
   | 'subscription_payment'
   | 'payment_update'
   | 'support_ticket_new'
-  | 'live_chat_message';
+  | 'live_chat_message'
+  | 'donation_received';
 
-export type CabinetRole = 'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer' | 'label';
+// 'system' — нечеловеческий источник (донат от слушателя, авто-события).
+export type CabinetRole = 'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer' | 'label' | 'system';
 
 export interface CrossCabinetNotification {
   id: string;
@@ -331,6 +333,7 @@ function mapTypeToSSEEvent(type: NotificationType): string {
     payment_update: 'payment_update',
     support_ticket_new: 'support_ticket_new',
     live_chat_message: 'live_chat_message',
+    donation_received: 'donation_received',
   };
   return directMap[type] || 'notification';
 }
