@@ -41,6 +41,14 @@ export interface WebhookPayload {
   metadata: Record<string, string>;
   paymentMethodId?: string;
   raw: any;
+  /**
+   * Migration 100 (YooKassa shop rotation safety): сообщает caller'у
+   * под каким shop_id был верифицирован payment. Caller сохраняет это
+   * в payment_sessions.shop_id для future refund'а под правильными
+   * legacy creds. Опционально — другие шлюзы (Stripe, T-Bank) могут не
+   * заполнять.
+   */
+  resolvedShopId?: string;
 }
 
 export interface RecurringChargeRequest {

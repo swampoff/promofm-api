@@ -281,6 +281,16 @@ export async function getPaymentSession(orderId: string) {
 }
 
 export async function upsertPaymentSession(orderId: string, session: Record<string, any>) {
+  // Migration 100: пишем shop_id для yookassa-сессий. Для других gateway'ев
+  // (Stripe, T-Bank) — поле остаётся NULL, gateway-обработчики его не
+  // используют. При обновлении session — shop_id может прийти из
+  // resolvedShopId (после webhook verify); если нет — берём текущий
+  // YOOKASSA_SHOP_ID из env (для свежесозданных сессий).
+  const provider = session.gateway || session.provider || 'yookassa';
+  let shopId: string | null = session.shop_id || session.shopId || null;
+  if (!shopId && provider === 'yookassa') {
+    shopId = process.env.YOOKASSA_SHOP_ID || null;
+  }
   const row: Record<string, any> = {
     order_id: orderId,
     user_id: session.userId || session.user_id || 'unknown',
@@ -288,9 +298,10 @@ export async function upsertPaymentSession(orderId: string, session: Record<stri
     currency: session.currency || 'RUB',
     purpose: session.type || session.purpose || null,
     status: session.status || 'created',
-    provider: session.gateway || session.provider || 'yookassa',
+    provider,
     provider_session_id: session.gatewayPaymentId || session.provider_session_id || null,
-    data: session,
+    shop_id: shopId,
+    data: { ...session, shop_id: shopId },
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()

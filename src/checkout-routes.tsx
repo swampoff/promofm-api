@@ -1574,6 +1574,15 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
       return c.json({ success: true, message: 'Session not in DB — acknowledged' });
     }
 
+    // Migration 100: persist resolvedShopId на session. Если verifyWebhook
+    // прошёл через legacy creds (old shop) — записываем это в session,
+    // чтобы future refund по этому payment_id ушёл с правильными creds
+    // автоматически.
+    if (payload.resolvedShopId && (existing as any).shop_id !== payload.resolvedShopId) {
+      (existing as any).shop_id = payload.resolvedShopId;
+      await upsertPaymentSession(existing.orderId, existing);
+    }
+
     // Refunds operate on already-succeeded sessions, so they bypass the
     // pending→processing claim that succeeded/canceled events use.
     if (payload.eventType === 'payment.refunded') {
