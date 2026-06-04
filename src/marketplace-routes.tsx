@@ -61,9 +61,10 @@ import {
   listBeatFavorites, toggleBeatFavorite,
   // contracts — native cols since migration 080:
   getContractByOrderId, insertContract, updateContractByOrderId, type ContractRow,
-  // digital_goods — native cols since migration 075:
+  // digital_goods — native cols since migration 075 + delivery (097):
   listDigitalGoods, getDigitalGood, insertDigitalGood,
-  incrementDigitalGoodViews, type DigitalGood, type ListDigitalGoodsOpts,
+  incrementDigitalGoodViews, setDigitalGoodFile,
+  type DigitalGood, type ListDigitalGoodsOpts,
   // platform_revenue_log promoted to native (migration 084) — using listPlatformRevenue
   listPlatformRevenue,
   getPlatformStats, setPlatformStats, 
@@ -1436,6 +1437,16 @@ app.post('/digital-goods/:id/purchase', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Item is not available' }, 400);
     }
 
+    // Migration 097: блок покупки товаров без выложенного файла.
+    // До этого PR'а можно было заплатить за «пустой» товар — деньги
+    // принимались, файла нет → саппорт-нагрузка «оплатил, ничего нет».
+    if (!good.fileUrl) {
+      return c.json({
+        success: false,
+        error: 'Файл товара ещё не выложен продюсером. Покупка временно недоступна.',
+      }, 409);
+    }
+
     // Создаём платёжную сессию YooKassa. Покупка создаётся в webhook после оплаты.
     const { getGateway } = await import('./payment-gateway.tsx');
     const { upsertPaymentSession } = await import('./db.tsx');
@@ -1492,6 +1503,236 @@ app.post('/digital-goods/:id/purchase', requireAuth, async (c) => {
   } catch (error) {
     console.log('POST /digital-goods/:id/purchase error:', error);
     return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// ═══════════════════════════════════════════════
+//  D I G I T A L  G O O D S  -  D E L I V E R Y
+//  (migration 097)
+// ═══════════════════════════════════════════════
+//
+// До этого PR'а marketplace digital goods был «order-only»: producer
+// создаёт лот, юзер платит, в `digital_purchases` появляется запись —
+// но самого ФАЙЛА товара нет, ни одного endpoint'а его не отдаёт.
+// Producer связывался с buyer'ом off-platform.
+//
+// Этот блок закрывает delivery:
+//   POST /digital-goods/:id/upload    — producer-only, кладёт файл
+//   GET  /digital-goods/:id/download  — отдаёт файл с auth-check
+//                                       (producer-self / admin / buyer)
+//
+// Authorization model:
+//   - Producer (good.producer_id === userId)          — может upload + download
+//   - Admin                                            — может download (модерация)
+//   - Buyer (есть completed запись в digital_purchases) — может download
+//
+// Хранилище:
+//   /opt/promofm-api/uploads/digital-goods/
+//   serve'ится ТОЛЬКО через эндпоинт (нет static-handler'а на этот subdir),
+//   потому что доступ обусловлен auth-check'ом.
+
+const DG_UPLOAD_DIR = '/opt/promofm-api/uploads/digital-goods';
+const DG_MAX_BYTES = 500 * 1024 * 1024; // 500 MB — sample-pack'и бывают большие
+
+// Allowlist расширений + соответствующих magic bytes. Расширение
+// определяется по filename, magic bytes по первым 4-8 байтам буфера.
+// Запись { ext: validator } — validator true если буфер действительно
+// этого формата. Защищает от .php переименованного в .wav.
+type MagicCheck = (buf: Buffer) => boolean;
+const DG_ALLOWED_FORMATS: Record<string, { mime: string; check: MagicCheck }> = {
+  wav:  { mime: 'audio/wav',  check: (b) => b.length >= 12 && b.slice(0,4).toString('ascii') === 'RIFF' && b.slice(8,12).toString('ascii') === 'WAVE' },
+  mp3:  { mime: 'audio/mpeg', check: (b) => b.length >= 3 && (b.slice(0,3).toString('ascii') === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) },
+  flac: { mime: 'audio/flac', check: (b) => b.length >= 4 && b.slice(0,4).toString('ascii') === 'fLaC' },
+  ogg:  { mime: 'audio/ogg',  check: (b) => b.length >= 4 && b.slice(0,4).toString('ascii') === 'OggS' },
+  zip:  { mime: 'application/zip',  check: (b) => b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && (b[2] === 0x03 || b[2] === 0x05 || b[2] === 0x07) },
+};
+
+/**
+ * POST /digital-goods/:id/upload — producer выкладывает файл товара.
+ *
+ * Auth: requireAuth + producer-self check (good.producer_id === userId).
+ *       Admin может (через `actAs` body? нет — не делаем для упрощения).
+ *
+ * Body: multipart/form-data, поле `file`.
+ *
+ * Гарантии безопасности:
+ *   - filename рендомизирован: `${goodId}-${randomUUID()}.${ext}` —
+ *     producer не может предсказать или подменить чужой файл
+ *   - extension по whitelist (DG_ALLOWED_FORMATS)
+ *   - Content-Type по MAGIC BYTES (не trust client) — защита от
+ *     .php переименованного в .wav
+ *   - size cap 500MB
+ *   - path.resolve + startsWith — defense-in-depth против path-traversal
+ *     даже если whitelist'у когда-то ослабят
+ *
+ * Идемпотентность: при повторном upload'е тем же producer'ом старый
+ * file_url перезатирается новым (старый файл остаётся на диске —
+ * cleanup отдельной cron'ой задачей; не блокер).
+ */
+app.post('/digital-goods/:id/upload', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId') as string;
+    const goodId = c.req.param('id');
+
+    const good = await getDigitalGood(goodId);
+    if (!good) return c.json({ success: false, error: 'Товар не найден' }, 404);
+    if (good.producerId !== userId) {
+      return c.json({ success: false, error: 'Нельзя загружать файл к чужому товару' }, 403);
+    }
+
+    const body = await c.req.parseBody().catch(() => null);
+    const file = body?.file as File | undefined;
+    if (!file || typeof (file as any).arrayBuffer !== 'function') {
+      return c.json({ success: false, error: 'file обязателен (multipart/form-data)' }, 400);
+    }
+
+    // Extension по имени файла
+    const rawName = String((file as any).name || 'file');
+    const ext = rawName.split('.').pop()?.toLowerCase() || '';
+    const fmt = DG_ALLOWED_FORMATS[ext];
+    if (!fmt) {
+      return c.json({
+        success: false,
+        error: `Формат .${ext} не поддерживается. Разрешено: ${Object.keys(DG_ALLOWED_FORMATS).join(', ')}`,
+      }, 400);
+    }
+
+    // Size cap
+    if (typeof file.size === 'number' && file.size > DG_MAX_BYTES) {
+      return c.json({
+        success: false,
+        error: `Файл слишком большой (${Math.round(file.size / 1024 / 1024)} MB). Максимум ${DG_MAX_BYTES / 1024 / 1024} MB.`,
+      }, 413);
+    }
+
+    const buf = Buffer.from(await file.arrayBuffer());
+    if (buf.byteLength === 0) {
+      return c.json({ success: false, error: 'Файл пустой' }, 400);
+    }
+    if (buf.byteLength > DG_MAX_BYTES) {
+      return c.json({ success: false, error: `Файл слишком большой (${Math.round(buf.byteLength / 1024 / 1024)} MB).` }, 413);
+    }
+
+    // Magic-bytes check
+    if (!fmt.check(buf)) {
+      return c.json({
+        success: false,
+        error: `Файл не соответствует формату .${ext} (magic bytes mismatch)`,
+      }, 400);
+    }
+
+    // Write
+    const nodeFs = await import('node:fs');
+    const nodePath = await import('node:path');
+    if (!nodeFs.existsSync(DG_UPLOAD_DIR)) nodeFs.mkdirSync(DG_UPLOAD_DIR, { recursive: true });
+
+    const filename = `${goodId}-${crypto.randomUUID()}.${ext}`;
+    const resolvedRoot = nodePath.resolve(DG_UPLOAD_DIR);
+    const targetPath = nodePath.resolve(DG_UPLOAD_DIR, filename);
+    if (!targetPath.startsWith(resolvedRoot + nodePath.sep)) {
+      return c.json({ success: false, error: 'path escape (impossible)' }, 400);
+    }
+    nodeFs.writeFileSync(targetPath, buf);
+
+    // Запись в БД (atomic UPDATE с owner-check)
+    const fileUrl = `/server/uploads/digital-goods/${filename}`;
+    const ok = await setDigitalGoodFile(goodId, userId, {
+      url: fileUrl,
+      bytes: buf.byteLength,
+      mime: fmt.mime,
+    });
+    if (!ok) {
+      // race: товар удалён между checks и UPDATE
+      try { nodeFs.unlinkSync(targetPath); } catch {}
+      return c.json({ success: false, error: 'Товар не найден или удалён' }, 404);
+    }
+
+    return c.json({
+      success: true,
+      data: {
+        fileUrl,
+        fileBytes: buf.byteLength,
+        fileMime: fmt.mime,
+        message: 'Файл загружен. Покупатели смогут скачать его после оплаты.',
+      },
+    });
+  } catch (error: any) {
+    console.error('POST /digital-goods/:id/upload error:', error);
+    return c.json({ success: false, error: 'Не удалось загрузить файл' }, 500);
+  }
+});
+
+/**
+ * GET /digital-goods/:id/download — buyer/producer/admin качает файл.
+ *
+ * Access-check (в порядке проверки):
+ *   1. Producer: good.producer_id === userId
+ *   2. Admin: userRole === 'admin'
+ *   3. Buyer: запись в digital_purchases (buyer_id=userId, good_id=id, status='completed')
+ *
+ * Никто из 1-3 → 403.
+ *
+ * Делаем прямой stream через c.body(buf) — не отдаём static URL и не
+ * редиректим, чтобы access-check был обязательной точкой прохода.
+ * Cache-Control: private, no-store — чтобы CDN/прокси не закешировал
+ * приватный контент.
+ */
+app.get('/digital-goods/:id/download', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId') as string;
+    const userRole = (c.get('userRole') as string | undefined) || '';
+    const goodId = c.req.param('id');
+
+    const good = await getDigitalGood(goodId);
+    if (!good) return c.json({ success: false, error: 'Товар не найден' }, 404);
+    if (!good.fileUrl) {
+      return c.json({ success: false, error: 'Файл ещё не выложен продюсером' }, 404);
+    }
+
+    // Access-check
+    let allowed = false;
+    if (good.producerId === userId) allowed = true;
+    else if (userRole === 'admin') allowed = true;
+    else {
+      const pr = await mpPool.query(
+        `SELECT 1 FROM digital_purchases
+          WHERE good_id = $1 AND buyer_id = $2 AND status = 'completed'
+          LIMIT 1`,
+        [goodId, userId]
+      );
+      if (pr.rows.length > 0) allowed = true;
+    }
+    if (!allowed) {
+      return c.json({ success: false, error: 'Нужно купить товар чтобы его скачать' }, 403);
+    }
+
+    // Stream файла. fileUrl формата '/server/uploads/digital-goods/<filename>' —
+    // безопасно резолвится только в DG_UPLOAD_DIR.
+    const nodeFs = await import('node:fs');
+    const nodePath = await import('node:path');
+    const filename = decodeURIComponent(good.fileUrl.replace('/server/uploads/digital-goods/', ''));
+    if (!filename || filename.includes('..') || filename.includes('/') || filename.includes('\\') || filename.includes('\0') || filename.startsWith('.')) {
+      return c.json({ success: false, error: 'invalid stored filename' }, 500);
+    }
+    const resolvedRoot = nodePath.resolve(DG_UPLOAD_DIR);
+    const filePath = nodePath.resolve(DG_UPLOAD_DIR, filename);
+    if (!filePath.startsWith(resolvedRoot + nodePath.sep)) {
+      return c.json({ success: false, error: 'path escape (impossible)' }, 500);
+    }
+    if (!nodeFs.existsSync(filePath)) {
+      console.error('[digital-goods] file missing on disk:', filePath);
+      return c.json({ success: false, error: 'Файл недоступен. Свяжитесь с поддержкой.' }, 500);
+    }
+
+    const buf = nodeFs.readFileSync(filePath);
+    const downloadFilename = `${good.title.replace(/[^a-zA-Z0-9\-_.]/g, '_').slice(0, 80)}.${filename.split('.').pop()}`;
+    c.header('Content-Type', good.fileMime || 'application/octet-stream');
+    c.header('Content-Disposition', `attachment; filename="${downloadFilename}"`);
+    c.header('Cache-Control', 'private, no-store');
+    return c.body(buf);
+  } catch (error: any) {
+    console.error('GET /digital-goods/:id/download error:', error);
+    return c.json({ success: false, error: 'Ошибка скачивания' }, 500);
   }
 });
 
