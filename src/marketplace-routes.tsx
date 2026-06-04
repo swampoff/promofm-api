@@ -1741,6 +1741,161 @@ app.get('/digital-goods/:id/download', requireAuth, async (c) => {
 // ═══════════════════════════════════════════════
 
 /**
+ * POST /admin/purchases/refund — рефанд marketplace-покупки (beat / digital).
+ *
+ * До этого PR'а если buyer хотел возврат денег по marketplace-покупке —
+ * админ делал refund вручную в дашборде YooKassa + ручной UPDATE статуса.
+ * Не масштабируется. Этот endpoint автоматизирует:
+ *   1. Lookup покупки по типу+id, читает paymentOrderId из data jsonb
+ *   2. Lookup payment_sessions по orderId → gatewayPaymentId
+ *   3. yk.refund() с idempotenceKey (защита от двойного возврата при retry)
+ *   4. UPDATE purchase.status='refunded' + проводки в data
+ *   5. SSE buyer ('purchase_refunded') + producer ('sale_refunded')
+ *
+ * Auth: admin-only. Buyer-self refund (с anti-abuse: только если не
+ * скачано, в окне N дней) — отдельная задача, требует download-tracking
+ * в digital_purchases которого пока нет.
+ *
+ * Body: { type: 'beat'|'digital', purchaseId, reason }
+ *
+ * Идемпотентность: idempotenceKey = `refund-mp-${type}-${purchaseId}` —
+ * повторный вызов с тем же purchaseId не делает второй refund (YooKassa
+ * дедуплицирует), плюс status='refunded' check ниже короткозамыкает.
+ *
+ * Failure modes:
+ *   - Purchase already refunded → 409 + ok=false (no-op)
+ *   - Gateway не yookassa (Stripe/T-Bank) → 501 (NotImplemented)
+ *   - Refund успешен, UPDATE status не отработал (race) → status
+ *     остаётся 'completed', админ ретраит — idempotenceKey спасёт от
+ *     второго списания.
+ */
+app.post('/admin/purchases/refund', requireAuth, requireAdmin, async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const type = String(body.type || '').toLowerCase();
+    const purchaseId = String(body.purchaseId || '');
+    const reason = String(body.reason || '').slice(0, 250);
+    const adminId = c.get('userId') as string;
+
+    if (type !== 'beat' && type !== 'digital') {
+      return c.json({ success: false, error: 'type должен быть "beat" или "digital"' }, 400);
+    }
+    if (!purchaseId) {
+      return c.json({ success: false, error: 'purchaseId обязателен' }, 400);
+    }
+
+    const table = type === 'beat' ? 'beat_purchases' : 'digital_purchases';
+    const ownerField = type === 'beat' ? 'producer_id' : null;
+
+    // 1. Lookup purchase row
+    const pr = await mpPool.query(
+      `SELECT id, buyer_id, amount, status, data,
+              ${ownerField ? ownerField + ',' : ''}
+              ${type === 'beat' ? 'beat_id' : 'good_id'} AS subject_id
+         FROM ${table}
+        WHERE id = $1
+        LIMIT 1`,
+      [purchaseId]
+    );
+    if (pr.rows.length === 0) {
+      return c.json({ success: false, error: 'Покупка не найдена' }, 404);
+    }
+    const purchase = pr.rows[0];
+
+    // 2. Idempotency short-circuit
+    const purchaseData = (typeof purchase.data === 'string' ? JSON.parse(purchase.data) : (purchase.data || {})) as any;
+    const currentStatus = purchase.status || purchaseData.status;
+    if (currentStatus === 'refunded') {
+      return c.json({
+        success: false,
+        error: 'Покупка уже возвращена',
+        data: { refundId: purchaseData.refundId, refundedAt: purchaseData.refundedAt },
+      }, 409);
+    }
+    const paymentOrderId = purchaseData.paymentOrderId;
+    if (!paymentOrderId) {
+      return c.json({ success: false, error: 'orderId не сохранён в покупке — рефанд через YooKassa-дашборд' }, 422);
+    }
+
+    // 3. Lookup payment session
+    const { getPaymentSession } = await import('./db.tsx');
+    const session = await getPaymentSession(paymentOrderId) as any;
+    if (!session?.gatewayPaymentId) {
+      return c.json({ success: false, error: 'payment_session не найден' }, 404);
+    }
+    if (session.gateway !== 'yookassa') {
+      return c.json({ success: false, error: `Gateway ${session.gateway} не поддерживается auto-refund'ом` }, 501);
+    }
+
+    // 4. Refund via YooKassa
+    const { YooKassaGateway } = await import('./gateway-yookassa.tsx');
+    const yk = new YooKassaGateway();
+    let refund: any;
+    try {
+      refund = await yk.refund(session.gatewayPaymentId, Number(purchase.amount), {
+        description: `Возврат marketplace ${type} #${purchaseId}${reason ? ': ' + reason : ''}`.slice(0, 250),
+        idempotenceKey: `refund-mp-${type}-${purchaseId}`,
+        metadata: { purchaseId, type, reason, refundedBy: adminId },
+      });
+    } catch (refundErr: any) {
+      console.error('[admin/refund] yk.refund failed:', refundErr?.message);
+      return c.json({
+        success: false,
+        error: 'YooKassa отклонила refund: ' + (refundErr?.message || 'unknown'),
+      }, 502);
+    }
+
+    // 5. Mark purchase as refunded
+    const refundedAt = new Date().toISOString();
+    const nextData = {
+      ...purchaseData,
+      status: 'refunded',
+      refundId: refund.id,
+      refundedAt,
+      refundedBy: adminId,
+      refundReason: reason,
+    };
+    await mpPool.query(
+      `UPDATE ${table}
+          SET status = 'refunded',
+              data = $2::jsonb
+        WHERE id = $1`,
+      [purchaseId, JSON.stringify(nextData)]
+    );
+
+    // 6. SSE buyer + producer (если producer_id есть — у beat есть native,
+    // у digital в data jsonb).
+    const producerId = type === 'beat' ? purchase.producer_id : purchaseData.producerId;
+    try {
+      emitSSE(purchase.buyer_id, {
+        type: 'purchase_refunded',
+        data: { purchaseId, type, amount: Number(purchase.amount), refundId: refund.id },
+      });
+      if (producerId) {
+        emitSSE(producerId, {
+          type: 'sale_refunded',
+          data: { purchaseId, type, amount: Number(purchase.amount), refundId: refund.id },
+        });
+      }
+    } catch {}
+
+    return c.json({
+      success: true,
+      data: {
+        purchaseId,
+        type,
+        refundId: refund.id,
+        amount: Number(purchase.amount),
+        status: refund.status,
+      },
+    });
+  } catch (error: any) {
+    console.error('POST /admin/purchases/refund error:', error);
+    return c.json({ success: false, error: 'Ошибка рефанда' }, 500);
+  }
+});
+
+/**
  * GET /admin/transactions - ВСЕ финансовые сделки платформы (для admin-панели)
  * Источник: platform:revenue:log (единый реестр из platform-revenue.tsx)
  * Query: channel (marketplace_beat|dj_booking|track_test|...), limit, offset
