@@ -315,6 +315,47 @@ app.put('/venue-requests/:id/approve', requireAuth, async (c) => {
     // Email admin about approved venue request
     notifyVenueRequest({ venueName: updated.venueName || 'Unknown', venueCity: updated.venueCity, totalPrice: updated.totalPrice, stationId: station.id }).catch(() => {});
 
+    // 2026-06-05: оповестить САМО заведение об approve. Раньше письмо
+    // notifyVenueRequest выше шло только админу, venue узнавал о
+    // подтверждении ТОЛЬКО при reload кабинета. PROMO.FM-аудит перед
+    // рассылкой по радиостанциям выявил этот sync-gap.
+    // venue_id в radio_venue_requests — это venue_profiles.id (uuid);
+    // user_id заведения достаём отдельным lookup'ом (venue_profiles.user_id = TEXT).
+    if (updated.venueId) {
+      try {
+        const { pool } = await import('./db-client.tsx');
+        const vRes = await pool.query<{ user_id: string }>(
+          `SELECT user_id FROM venue_profiles WHERE id::text = $1 LIMIT 1`,
+          [updated.venueId],
+        );
+        const venueUserId = vRes.rows[0]?.user_id;
+        if (venueUserId) {
+          const stationLabel = (station as any).stationName || (station as any).name || 'Радиостанция';
+          try {
+            const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+            await notifyCrossCabinet({
+              targetUserId: venueUserId,
+              targetRole: 'venue',
+              sourceRole: 'radio',
+              type: 'venue_request_approved',
+              title: 'Радиостанция приняла вашу заявку',
+              message: `${stationLabel} одобрила вашу рекламную кампанию на ${updated.totalPrice} ₽. Эфир скоро начнётся.`,
+              metadata: {
+                campaignId: updated.id,
+                stationId: station.id,
+                stationName: stationLabel,
+                totalPrice: Number(updated.totalPrice) || 0,
+              },
+            });
+          } catch (notifyErr) {
+            console.warn('[venue_request_approved] cross-cabinet notify failed:', String(notifyErr));
+          }
+        }
+      } catch (lookupErr) {
+        console.warn('[venue_request_approved] venue user lookup failed:', String(lookupErr));
+      }
+    }
+
     return c.json({ success: true, data: updated });
   } catch (error: any) {
     console.error('Error approving venue request:', error);
