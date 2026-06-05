@@ -306,11 +306,12 @@ async function extractChartWithMistral(
   sourceConfig: ChartSourceConfig,
   pageText: string,
 ): Promise<ChartTrackEntry[] | null> {
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
   const geminiKey = process.env.GEMINI_API_KEY;
   const geminiProxyUrl = process.env.GEMINI_PROXY_URL;
   const geminiProxyKey = process.env.GEMINI_PROXY_KEY || '';
-  if (!geminiKey) {
-    console.log('No GEMINI_API_KEY set, skipping chart extraction');
+  if (!anthropicKey && !geminiKey) {
+    console.log('No ANTHROPIC_API_KEY or GEMINI_API_KEY set, skipping chart extraction');
     return null;
   }
 
@@ -328,35 +329,63 @@ ${sourceConfig.parsingHint}
 - НЕ ПРИДУМЫВАЙ треки. Возвращай ТОЛЬКО то, что реально есть на странице.
 - Если нашёл меньше треков чем запрошено — верни только найденные, НЕ заполняй остальное плейсхолдерами`;
 
-  try {
-    const geminiModel = 'gemini-2.0-flash';
-    const geminiUrl = geminiProxyUrl
-      ? `${geminiProxyUrl}/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`
-      : `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`;
-    const resp = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(geminiProxyKey ? { 'x-proxy-key': geminiProxyKey } : {}),
-      },
-      body: JSON.stringify({
-        contents: [
-          { role: 'user', parts: [{ text: systemPrompt + '\n\n---\n\nВот текст страницы чарта "' + sourceConfig.name + '" (' + sourceConfig.url + '):\n\n' + pageText }] },
-        ],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 4000 },
-      }),
-    });
+  const userText = 'Вот текст страницы чарта "' + sourceConfig.name + '" (' + sourceConfig.url + '):\n\n' + pageText;
 
-    if (!resp.ok) {
-      console.log(`Gemini chart extraction error for ${sourceConfig.id}: ${await resp.text()}`);
-      return null;
+  try {
+    let content: string | undefined;
+
+    if (anthropicKey) {
+      // Claude (Anthropic) — основной парсер; Gemini free-tier обнулился 2026-06.
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': anthropicKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: process.env.ANTHROPIC_CHART_MODEL || 'claude-haiku-4-5-20251001',
+          max_tokens: 4000,
+          temperature: 0.1,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userText }],
+        }),
+      });
+      if (!resp.ok) {
+        console.log(`Claude chart extraction error for ${sourceConfig.id}: ${await resp.text()}`);
+        return null;
+      }
+      const data = await resp.json();
+      content = data.content?.[0]?.text;
+    } else {
+      // Fallback: Gemini (если задан только GEMINI_API_KEY)
+      const geminiModel = 'gemini-2.0-flash';
+      const geminiUrl = geminiProxyUrl
+        ? `${geminiProxyUrl}/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`
+        : `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`;
+      const resp = await fetch(geminiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(geminiProxyKey ? { 'x-proxy-key': geminiProxyKey } : {}),
+        },
+        body: JSON.stringify({
+          contents: [
+            { role: 'user', parts: [{ text: systemPrompt + '\n\n---\n\n' + userText }] },
+          ],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 4000 },
+        }),
+      });
+      if (!resp.ok) {
+        console.log(`Gemini chart extraction error for ${sourceConfig.id}: ${await resp.text()}`);
+        return null;
+      }
+      const data = await resp.json();
+      content = data.candidates?.[0]?.content?.parts?.[0]?.text || data.choices?.[0]?.message?.content;
     }
 
-    const data = await resp.json();
-    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || data.choices?.[0]?.message?.content;
-
     if (!content) {
-      console.log(`Gemini returned empty content for ${sourceConfig.id}`);
+      console.log(`Empty extraction content for ${sourceConfig.id}`);
       return null;
     }
 
@@ -2149,3 +2178,4 @@ charts.post('/fetch-international', requireAdminOrKey, async (c) => {
 });
 
 export default charts;
+
