@@ -659,6 +659,9 @@ app.post(
             description: `Возврат по букингу #${bookingId}: ${reason.slice(0, 100)}`,
             idempotenceKey: `refund-booking-${bookingId}-${pmt.id}`,
             metadata: { bookingId, paymentType: pmt.payment_type, refundedBy: user.id },
+            // Migration 100: передаём shop_id из session чтобы рефанд старого
+            // платежа (под legacy shop) шёл с правильными creds автоматически.
+            shopId: (session as any).shop_id || undefined,
           });
           refundResults.push({
             paymentType: pmt.payment_type,

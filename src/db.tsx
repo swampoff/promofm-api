@@ -286,7 +286,39 @@ export async function getPaymentSession(orderId: string) {
   return data ? (data.data || data) : null;
 }
 
+// Self-heal payment_sessions.shop_id — migration 100 is manual, but the
+// code below writes shop_id unconditionally. If a deploy reaches code
+// before the migration runs (or on a fresh PG instance), every upsert
+// would 500 with "column shop_id does not exist". Memoized ALTER TABLE
+// ADD COLUMN IF NOT EXISTS makes this safe regardless of deploy order.
+let _paymentSessionsShopIdReady: Promise<void> | null = null;
+function ensurePaymentSessionsShopId(): Promise<void> {
+  if (_paymentSessionsShopIdReady) return _paymentSessionsShopIdReady;
+  _paymentSessionsShopIdReady = (async () => {
+    try {
+      const { pool } = await import('./db-client.tsx');
+      await pool.query(`ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS shop_id TEXT`);
+    } catch (err) {
+      console.error('[db] ensurePaymentSessionsShopId failed:', err);
+      _paymentSessionsShopIdReady = null; // allow retry on next request
+      throw err;
+    }
+  })();
+  return _paymentSessionsShopIdReady;
+}
+
 export async function upsertPaymentSession(orderId: string, session: Record<string, any>) {
+  // Migration 100: пишем shop_id для yookassa-сессий. Для других gateway'ев
+  // (Stripe, T-Bank) — поле остаётся NULL, gateway-обработчики его не
+  // используют. При обновлении session — shop_id может прийти из
+  // resolvedShopId (после webhook verify); если нет — берём текущий
+  // YOOKASSA_SHOP_ID из env (для свежесозданных сессий).
+  await ensurePaymentSessionsShopId();
+  const provider = session.gateway || session.provider || 'yookassa';
+  let shopId: string | null = session.shop_id || session.shopId || null;
+  if (!shopId && provider === 'yookassa') {
+    shopId = process.env.YOOKASSA_SHOP_ID || null;
+  }
   const row: Record<string, any> = {
     order_id: orderId,
     user_id: session.userId || session.user_id || 'unknown',
@@ -294,15 +326,41 @@ export async function upsertPaymentSession(orderId: string, session: Record<stri
     currency: session.currency || 'RUB',
     purpose: session.type || session.purpose || null,
     status: session.status || 'created',
-    provider: session.gateway || session.provider || 'yookassa',
+    provider,
     provider_session_id: session.gatewayPaymentId || session.provider_session_id || null,
-    data: session,
+    shop_id: shopId,
+    data: { ...session, shop_id: shopId },
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()
     .from('payment_sessions')
     .upsert(row, { onConflict: 'order_id' });
   if (error) console.error('[db] upsertPaymentSession:', error);
+}
+
+// Migration 100: targeted UPDATE для записи только shop_id, БЕЗ риска
+// перезаписать status/data из stale in-memory копии. Используется в
+// webhook handler'ах, где мы хотим зафиксировать resolvedShopId
+// (после verifyWebhook с legacy creds) без побочных эффектов на
+// claimPaymentSessionForProcessing / processPaymentSuccess.
+//
+// WHERE-clause проверяет COALESCE(shop_id,'')<>$1 — UPDATE не происходит
+// если shop_id уже совпадает (избегаем лишнего write'а и trigger'а
+// updated_at). Возвращает true если строка обновилась.
+export async function setPaymentSessionShopId(orderId: string, shopId: string): Promise<boolean> {
+  if (!shopId) return false;
+  await ensurePaymentSessionsShopId();
+  const { pool } = await import('./db-client.tsx');
+  const res = await pool.query(
+    `UPDATE payment_sessions
+        SET shop_id = $1,
+            data    = jsonb_set(COALESCE(data, '{}'::jsonb), '{shop_id}', to_jsonb($1::text)),
+            updated_at = NOW()
+      WHERE order_id = $2
+        AND COALESCE(shop_id, '') <> $1`,
+    [shopId, orderId],
+  );
+  return (res.rowCount ?? 0) > 0;
 }
 
 /**
