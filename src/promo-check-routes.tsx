@@ -6,7 +6,8 @@
 import { Hono } from "hono";
 import { spawn } from "child_process";
 import { pool } from "./db-client.tsx";
-import { requireAuth, requireOwner } from "./auth-middleware.tsx";
+import { requireAuth, requireOwner, requireRole } from "./auth-middleware.tsx";
+import { getRadioProfile } from "./db.tsx";
 
 const app = new Hono();
 
@@ -238,6 +239,137 @@ app.get("/dashboard", requireAuth, async (c) => {
     tracks_monitored: parseInt(summary?.tracks_monitored || "0"),
     top_tracks: topTracks.rows,
     top_stations: topStations.rows,
+  });
+});
+
+// ─── Radio cabinet: airplay reports ──────────────────────────────────────────
+//
+// GET /promo-check/radio/airplay?days=30 — отчёт по эфирам для самой
+// радиостанции. Match станции по совпадению имени: radio_profiles.station_name
+// (текущий userId) ↔ promo_check_monitoring.station_name (text, UNIQUE index
+// от 010_promo_check_monitoring_seed.sql).
+//
+// Состояния ответа:
+//   - radio_profile отсутствует → 404
+//   - profile есть, но stationName пустой → monitoring.status = 'not_configured'
+//   - stationName есть, но НЕТ записи в promo_check_monitoring →
+//     monitoring.status = 'not_connected', тотлы и списки пустые. На фронте —
+//     onboarding с CTA на поддержку.
+//   - запись в monitoring есть → monitoring.status = 'active' (или 'paused'
+//     если active=false), плюс реальные totals/by_track/timeline.
+//
+// Период: ?days= 1-365, дефолт 30.
+//
+// PROMO.FM-аудит 2026-06-05: до этого endpoint'а у радио НЕ БЫЛО способа
+// увидеть свой PROMO.CHECK-отчёт в кабинете. Сама system-движок (watermark
+// при upload артистом + Python listener на VPS + INSERT в
+// promo_check_detections) работала, но визуальная панель для радио — нет.
+// LP /radio-stations был помечен «Кабинет с отчётами по эфирам — в ближайшем
+// релизе»; этот endpoint и frontend-секция к нему этот «релиз» закрывают.
+app.get("/radio/airplay", requireAuth, requireRole('radio_station'), async (c) => {
+  const userId = (c as any).get('userId') as string;
+  if (!userId) {
+    return c.json({ error: 'UNAUTHORIZED_NO_USER_ID' }, 401);
+  }
+  const days = Math.max(1, Math.min(Number(c.req.query("days") || "30"), 365));
+
+  const radio = await getRadioProfile(userId);
+  if (!radio) {
+    return c.json({ error: 'Radio profile not found' }, 404);
+  }
+  const stationName = (radio as any).stationName || '';
+  if (!stationName) {
+    return c.json({
+      monitoring: { status: 'not_configured', stationName: '' },
+      totals: null,
+      by_track: [],
+      timeline: [],
+      period_days: days,
+    });
+  }
+
+  const monRes = await query<{
+    station_name: string; stream_url: string | null; active: boolean;
+    last_scanned_at: string | null; error_count: number; last_error: string | null;
+  }>(
+    `SELECT station_name, stream_url, active, last_scanned_at, error_count, last_error
+     FROM promo_check_monitoring WHERE station_name = $1 LIMIT 1`,
+    [stationName],
+  );
+  if (monRes.rows.length === 0) {
+    return c.json({
+      monitoring: { status: 'not_connected', stationName },
+      totals: null,
+      by_track: [],
+      timeline: [],
+      period_days: days,
+    });
+  }
+  const mon = monRes.rows[0];
+
+  const [totals, byTrack, timeline] = await Promise.all([
+    query<{ total: string; confirmed: string; unique_tracks: string }>(
+      `SELECT COUNT(*) as total,
+              COUNT(*) FILTER (WHERE watermark_confirmed = true) as confirmed,
+              COUNT(DISTINCT track_id) as unique_tracks
+       FROM promo_check_detections
+       WHERE station_name = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${days}`,
+      [stationName],
+    ),
+    query<{
+      track_id: string; title: string | null; artist_name: string | null;
+      rotations: string; confirmed: string; last_detected: string | null;
+    }>(
+      `SELECT t.id::text as track_id, t.title, t.artist_name,
+              COUNT(d.id) as rotations,
+              COUNT(d.id) FILTER (WHERE d.watermark_confirmed = true) as confirmed,
+              MAX(d.detected_at) as last_detected
+       FROM promo_check_detections d
+       LEFT JOIN tracks t ON t.id = d.track_id
+       WHERE d.station_name = $1 AND d.detected_at >= NOW() - INTERVAL '1 day' * ${days}
+       GROUP BY t.id, t.title, t.artist_name
+       ORDER BY rotations DESC, last_detected DESC
+       LIMIT 50`,
+      [stationName],
+    ),
+    query<{ day: string; count: string }>(
+      `SELECT DATE(detected_at) as day, COUNT(*) as count
+       FROM promo_check_detections
+       WHERE station_name = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${days}
+       GROUP BY DATE(detected_at)
+       ORDER BY day ASC`,
+      [stationName],
+    ),
+  ]);
+
+  const t = totals.rows[0];
+  return c.json({
+    monitoring: {
+      status: mon.active ? 'active' : 'paused',
+      stationName: mon.station_name,
+      streamUrl: mon.stream_url,
+      lastScannedAt: mon.last_scanned_at,
+      errorCount: mon.error_count,
+      lastError: mon.last_error,
+    },
+    totals: {
+      rotations: parseInt(t?.total || '0'),
+      confirmed: parseInt(t?.confirmed || '0'),
+      uniqueTracks: parseInt(t?.unique_tracks || '0'),
+    },
+    by_track: byTrack.rows.map(r => ({
+      trackId: r.track_id,
+      title: r.title || 'Без названия',
+      artistName: r.artist_name || 'Неизвестный артист',
+      rotations: parseInt(r.rotations || '0'),
+      confirmed: parseInt(r.confirmed || '0'),
+      lastDetected: r.last_detected,
+    })),
+    timeline: timeline.rows.map(r => ({
+      day: r.day,
+      count: parseInt(r.count || '0'),
+    })),
+    period_days: days,
   });
 });
 
