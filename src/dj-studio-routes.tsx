@@ -2005,6 +2005,12 @@ app.post('/mixes', requireAuth, requireDjRole, async (c) => {
        isPremium, isPremium]                  // distribute_radio/venues включаются для premium
     );
 
+    // demo_start_sec — секунда начала превью (отдельным UPDATE, чтобы не трогать большой INSERT).
+    const demoStartSec = parseInt(String(body.demo_start_sec || body.demoStartSec || ''), 10);
+    if (Number.isFinite(demoStartSec) && demoStartSec > 0) {
+      await pool.query(`UPDATE dj_mixes SET demo_start_sec = $1 WHERE id = $2`, [demoStartSec, id]).catch(() => {});
+    }
+
     return c.json({
       success: true,
       data: {
@@ -2167,3 +2173,4 @@ app.get('/promotion/targets', requireAuth, requireDjRole, async (c) => {
 });
 
 export default app;
+
