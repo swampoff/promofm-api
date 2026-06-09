@@ -55,6 +55,11 @@ async function ensureSchema(): Promise<void> {
     }
 
     // 2. label_profiles — one row per user with role='label'.
+    // try/catch: CREATE INDEX IF NOT EXISTS проверяет владельца ДО existence-чека,
+    // поэтому на таблице, которой app-роль не владеет, бросает «must be owner»
+    // даже если индекс уже есть. Не должно валить весь роутер — схема может быть
+    // уже провижинена миграцией под postgres.
+    try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS label_profiles (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -77,6 +82,9 @@ async function ensureSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_label_profiles_user_id ON label_profiles(user_id);
       CREATE INDEX IF NOT EXISTS idx_label_profiles_slug ON label_profiles(slug);
     `);
+    } catch (e: any) {
+      if (!/already exists|must be owner/i.test(e?.message || '')) console.warn('[label] label_profiles schema:', e?.message);
+    }
 
     // 3. Extend artist_profiles for managed + linked roster. user_id becomes
     // nullable; managed_by_label_id/label_id encode roster relationship.
@@ -120,6 +128,9 @@ async function ensureSchema(): Promise<void> {
 
 
     // 4. label_invitations — pending/accepted/declined invitations to existing artists.
+    // try/catch — таблица может принадлежать postgres (создана миграцией вручную),
+    // тогда CREATE INDEX под app-ролью бросит «must be owner»; не валим роутер.
+    try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS label_invitations (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -142,6 +153,9 @@ async function ensureSchema(): Promise<void> {
         ON label_invitations(label_id, COALESCE(artist_user_id::text, lower(invited_email)))
         WHERE status = 'pending';
     `);
+    } catch (e: any) {
+      if (!/already exists|must be owner/i.test(e?.message || '')) console.warn('[label] label_invitations schema:', e?.message);
+    }
   })();
   return schemaReady;
 }
