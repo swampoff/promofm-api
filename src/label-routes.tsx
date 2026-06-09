@@ -80,24 +80,44 @@ async function ensureSchema(): Promise<void> {
 
     // 3. Extend artist_profiles for managed + linked roster. user_id becomes
     // nullable; managed_by_label_id/label_id encode roster relationship.
-    await pool.query(`
-      ALTER TABLE artist_profiles
-        ALTER COLUMN user_id DROP NOT NULL;
-    `).catch((e) => {
-      // The constraint may already be dropped on re-runs, or the column was
-      // never NOT NULL on this deployment — either is fine.
-      if (!/cannot|does not exist/i.test(e?.message || '')) {
-        console.warn('[label] artist_profiles user_id drop not null:', e?.message);
+    try {
+      await pool.query(`
+        ALTER TABLE artist_profiles
+          ALTER COLUMN user_id DROP NOT NULL;
+      `);
+    } catch (e: any) {
+      const msg = e?.message || '';
+      if (!/cannot|does not exist|must be owner/i.test(msg)) {
+        console.warn('[label] artist_profiles user_id drop not null:', msg);
       }
-    });
-    await pool.query(`
-      ALTER TABLE artist_profiles
-        ADD COLUMN IF NOT EXISTS managed_by_label_id UUID NULL REFERENCES label_profiles(id) ON DELETE SET NULL,
-        ADD COLUMN IF NOT EXISTS is_managed BOOLEAN NOT NULL DEFAULT false,
-        ADD COLUMN IF NOT EXISTS label_id UUID NULL REFERENCES label_profiles(id) ON DELETE SET NULL;
-      CREATE INDEX IF NOT EXISTS idx_artist_profiles_managed_by ON artist_profiles(managed_by_label_id) WHERE managed_by_label_id IS NOT NULL;
-      CREATE INDEX IF NOT EXISTS idx_artist_profiles_label_id   ON artist_profiles(label_id) WHERE label_id IS NOT NULL;
-    `);
+    }
+
+    try {
+      await pool.query(`
+        ALTER TABLE artist_profiles
+          ADD COLUMN IF NOT EXISTS managed_by_label_id UUID NULL REFERENCES label_profiles(id) ON DELETE SET NULL,
+          ADD COLUMN IF NOT EXISTS is_managed BOOLEAN NOT NULL DEFAULT false,
+          ADD COLUMN IF NOT EXISTS label_id UUID NULL REFERENCES label_profiles(id) ON DELETE SET NULL;
+      `);
+    } catch (e: any) {
+      const msg = e?.message || '';
+      if (!/already exists|must be owner/i.test(msg)) {
+        console.warn('[label] artist_profiles add columns failed:', msg);
+      }
+    }
+
+    try {
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_artist_profiles_managed_by ON artist_profiles(managed_by_label_id) WHERE managed_by_label_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_artist_profiles_label_id   ON artist_profiles(label_id) WHERE label_id IS NOT NULL;
+      `);
+    } catch (e: any) {
+      const msg = e?.message || '';
+      if (!/already exists|must be owner/i.test(msg)) {
+        console.warn('[label] artist_profiles create indexes failed:', msg);
+      }
+    }
+
 
     // 4. label_invitations — pending/accepted/declined invitations to existing artists.
     await pool.query(`
@@ -1230,4 +1250,3 @@ app.post('/profile/cover', requireAuth, async (c) => {
 });
 
 export default app;
-
