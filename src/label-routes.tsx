@@ -454,6 +454,51 @@ app.put('/roster/managed/:id', requireAuth, async (c) => {
   }
 });
 
+// Avatar/cover upload for a managed artist (file from computer, not URL).
+app.post('/roster/managed/:id/avatar', requireAuth, async (c) => {
+  try {
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    if (!gate.labelId) return c.json({ success: false, error: 'Сначала заполните профиль лейбла' }, 400);
+    const id = c.req.param('id');
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+    const uploaded = await saveUpload(file, 'artist-avatars', `artist-${id}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+    const r = await pool.query(
+      `UPDATE artist_profiles SET avatar_url = $1, updated_at = NOW() WHERE id = $2 AND managed_by_label_id = $3 RETURNING id`,
+      [uploaded.url, id, gate.labelId]
+    );
+    if (r.rowCount === 0) return c.json({ success: false, error: 'Артист не найден в вашем ростере' }, 404);
+    return c.json({ success: true, data: { url: uploaded.url } });
+  } catch (error: any) {
+    console.error('Managed artist avatar upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
+  }
+});
+
+app.post('/roster/managed/:id/cover', requireAuth, async (c) => {
+  try {
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    if (!gate.labelId) return c.json({ success: false, error: 'Сначала заполните профиль лейбла' }, 400);
+    const id = c.req.param('id');
+    const body = await c.req.parseBody();
+    const file = body.file as File | undefined;
+    if (!file) return c.json({ success: false, error: 'Файл не передан' }, 400);
+    const uploaded = await saveUpload(file, 'artist-covers', `artist-${id}`, IMAGE_EXTS, MAX_IMAGE_BYTES);
+    const r = await pool.query(
+      `UPDATE artist_profiles SET cover_url = $1, updated_at = NOW() WHERE id = $2 AND managed_by_label_id = $3 RETURNING id`,
+      [uploaded.url, id, gate.labelId]
+    );
+    if (r.rowCount === 0) return c.json({ success: false, error: 'Артист не найден в вашем ростере' }, 404);
+    return c.json({ success: true, data: { url: uploaded.url } });
+  } catch (error: any) {
+    console.error('Managed artist cover upload failed:', error);
+    return c.json({ success: false, error: error?.message || 'Upload failed' }, 400);
+  }
+});
+
 app.delete('/roster/managed/:id', requireAuth, async (c) => {
   try {
     await ensureSchema();
@@ -1185,3 +1230,4 @@ app.post('/profile/cover', requireAuth, async (c) => {
 });
 
 export default app;
+
