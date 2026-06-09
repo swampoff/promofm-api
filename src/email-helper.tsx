@@ -135,7 +135,7 @@ export async function sendEmail(opts: EmailOptions): Promise<boolean> {
 
 // ── Email Templates ──
 
-const emailWrapper = (content: string) => `
+export const emailWrapper = (content: string) => `
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
@@ -149,7 +149,9 @@ const emailWrapper = (content: string) => `
         <tr><td style="padding: 32px 40px; color: #e0e0e0; font-size: 16px; line-height: 1.6;">
           ${content}
         </td></tr>
-        <tr><td style="padding: 20px 40px 32px; color: #666; font-size: 12px; border-top: 1px solid #2a2a3e;">
+        <tr><td style="padding: 24px 40px 32px; color: #666; font-size: 12px; border-top: 1px solid #2a2a3e; text-align: center;">
+          <img src="${SITE_URL}/logo.png" alt="ПРОМО.МУЗЫКА" style="height: 34px; margin-bottom: 10px;" />
+          <p style="margin: 0 0 10px; color: #e0e0e0; font-size: 14px; font-weight: 600;">Команда ПРОМО.Музыка</p>
           <p style="margin: 0;">&copy; ${new Date().getFullYear()} ПРОМО.МУЗЫКА — платформа продвижения музыки</p>
           <p style="margin: 4px 0 0;"><a href="${SITE_URL}" style="color: #FF577F; text-decoration: none;">promo-music.ru</a></p>
         </td></tr>
@@ -742,4 +744,5 @@ export async function sendVenueRadioChangesRequestedEmail(data: { toEmail: strin
     html,
   });
 }
+
 
