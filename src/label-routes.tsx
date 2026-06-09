@@ -393,7 +393,7 @@ app.get('/roster', requireAuth, async (c) => {
 
 const ALLOWED_MANAGED_FIELDS = [
   'artist_name', 'slug', 'genre', 'sub_genres', 'country', 'city', 'bio',
-  'avatar_url', 'cover_url', 'data',
+  'avatar_url', 'cover_url', 'data', 'social_links',
 ] as const;
 
 app.post('/roster/managed', requireAuth, async (c) => {
@@ -419,8 +419,8 @@ app.post('/roster/managed', requireAuth, async (c) => {
     const r = await pool.query(
       `INSERT INTO artist_profiles
          (artist_name, slug, genre, sub_genres, country, city, bio,
-          avatar_url, cover_url, data, is_managed, managed_by_label_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11)
+          avatar_url, cover_url, data, social_links, is_managed, managed_by_label_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, $12)
        RETURNING id, slug, artist_name, avatar_url, city, is_verified, created_at`,
       [
         displayName,
@@ -433,6 +433,7 @@ app.post('/roster/managed', requireAuth, async (c) => {
         body?.avatar_url || null,
         body?.cover_url || null,
         body?.data ? JSON.stringify(body.data) : null,
+        body?.social_links ? JSON.stringify(body.social_links) : null,
         gate.labelId,
       ]
     );
@@ -466,7 +467,7 @@ app.put('/roster/managed/:id', requireAuth, async (c) => {
       const incomingKey = key === 'artist_name' && body.display_name !== undefined ? 'display_name' : key;
       if (Object.prototype.hasOwnProperty.call(body, incomingKey)) {
         sets.push(`${key} = $${i++}`);
-        args.push(key === 'data' ? JSON.stringify((body as any)[incomingKey]) : (body as any)[incomingKey]);
+        args.push((key === 'data' || key === 'social_links') ? JSON.stringify((body as any)[incomingKey]) : (body as any)[incomingKey]);
       }
     }
     if (sets.length === 0) {
@@ -1264,3 +1265,4 @@ app.post('/profile/cover', requireAuth, async (c) => {
 });
 
 export default app;
+
