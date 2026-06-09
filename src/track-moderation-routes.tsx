@@ -276,6 +276,25 @@ app.post('/submitTrack', requireAuth, async (c) => {
       return c.json({ error: 'Failed to create track' }, 500);
     }
 
+    // Доп. метаданные релиза: lyrics → колонка, продюсер/год/демо/сообщество → data jsonb.
+    try {
+      const extras: Record<string, any> = {};
+      if (body.producer && String(body.producer).trim()) extras.producer = String(body.producer).trim().slice(0, 200);
+      if (body.recording_year && String(body.recording_year).trim()) extras.recording_year = String(body.recording_year).trim().slice(0, 10);
+      if (body.demo_start_sec && String(body.demo_start_sec).trim()) extras.demo_start_sec = String(body.demo_start_sec).trim().slice(0, 10);
+      if (body.community_url && String(body.community_url).trim()) extras.community_url = String(body.community_url).trim().slice(0, 500);
+      const lyricsVal = body.lyrics && String(body.lyrics).trim() ? String(body.lyrics).trim().slice(0, 8000) : null;
+      if (lyricsVal || Object.keys(extras).length > 0) {
+        const { pool } = await import('./db-client.tsx');
+        await pool.query(
+          `UPDATE tracks SET lyrics = COALESCE($1, lyrics), data = COALESCE(data, '{}'::jsonb) || $2::jsonb, updated_at = NOW() WHERE id = $3`,
+          [lyricsVal, JSON.stringify(extras), track.id]
+        );
+      }
+    } catch (e: any) {
+      console.warn('[submitTrack] extra metadata save failed:', e?.message);
+    }
+
     // Fire-and-forget AI analysis (don't block the response)
     const audioUrl = track.audio_url || body.audio_file_url || body.audio_url || '';
     if (audioUrl) {
@@ -1304,3 +1323,4 @@ app.post('/ai-check/backfill', requireAuth, requireAdmin, async (c) => {
 });
 
 export default app;
+
