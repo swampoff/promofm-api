@@ -11,8 +11,28 @@ import {
 } from './db.tsx';
 import { requireAuth, requireAdmin, requireOwner } from './auth-middleware.tsx';
 import { smtpSendEmail } from './smtp-sender.tsx';
+import { unsubscribeToken, escapeHtml } from './email-helper.tsx';
 
 const app = new Hono();
+
+// ============================================
+// PUBLIC — отписка от рассылок (HMAC-токен, без авторизации)
+// ============================================
+app.get('/unsubscribe', async (c) => {
+  const email = String(c.req.query('e') || '').toLowerCase().trim();
+  const token = String(c.req.query('t') || '');
+  const SITE = 'https://promo-music.ru';
+  const page = (msg: string) => c.html(`<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ПРОМО.МУЗЫКА</title></head><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0a0a1a;color:#e0e0e0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;"><div style="text-align:center;max-width:440px;padding:32px;"><img src="${SITE}/logo.png" alt="ПРОМО.МУЗЫКА" style="height:40px;margin-bottom:20px;"/><p style="font-size:16px;line-height:1.6;">${msg}</p></div></body></html>`);
+  if (!email || !token || token !== unsubscribeToken(email)) {
+    return page('Ссылка для отписки недействительна или устарела.');
+  }
+  try {
+    const { pool } = await import('./db-client.tsx');
+    await pool.query(`CREATE TABLE IF NOT EXISTS email_unsubscribes (email TEXT PRIMARY KEY, unsubscribed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), source TEXT)`);
+    await pool.query(`INSERT INTO email_unsubscribes (email, source) VALUES ($1, 'campaign') ON CONFLICT (email) DO NOTHING`, [email]);
+  } catch { /* best effort */ }
+  return page(`Адрес <b>${escapeHtml(email)}</b> отписан от рассылки ПРОМО.МУЗЫКА. Больше писем на него не пришлём.`);
+});
 
 // No more KV prefixes — all data access goes through typed stores from db.tsx
 

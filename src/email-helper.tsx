@@ -2,11 +2,28 @@
  * EMAIL HELPER — Отправка email через SMTP (Reg.ru) с fallback на Resend HTTP API
  */
 import nodemailer from 'nodemailer';
+import crypto from 'crypto';
 
 const ADMIN_EMAIL = 'info@promofm.ru';
 const FROM_EMAIL = '"ПРОМО.МУЗЫКА" <noreply@promo-music.ru>';
 const REPLY_TO = 'noreply@promo-music.ru';
 const SITE_URL = 'https://promo-music.ru';
+
+// ── Отписка от рассылок: HMAC-токен (без хранения), ссылка, проверка статуса ──
+const UNSUB_KEY = process.env.UNSUBSCRIBE_SECRET || process.env.JWT_SECRET || 'promofm-unsub-key-v1';
+export function unsubscribeToken(email: string): string {
+  return crypto.createHmac('sha256', UNSUB_KEY).update(String(email).toLowerCase().trim()).digest('hex').slice(0, 32);
+}
+export function unsubscribeLink(email: string): string {
+  return `${SITE_URL}/server/email/unsubscribe?e=${encodeURIComponent(String(email).toLowerCase().trim())}&t=${unsubscribeToken(email)}`;
+}
+export async function isUnsubscribed(email: string): Promise<boolean> {
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query('SELECT 1 FROM email_unsubscribes WHERE email = $1', [String(email).toLowerCase().trim()]);
+    return r.rows.length > 0;
+  } catch { return false; }
+}
 const API_BASE = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/server` : 'https://promo-music.ru/server';
 
 // ── Telegram notification ──
