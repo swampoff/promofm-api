@@ -1004,6 +1004,28 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
         }).catch((err: any) => console.error('[approve-paid] inbox notif failed:', err?.message || err));
       }
 
+      // Email-оповещение артисту: трек прошёл модерацию → «Скоро» (с именем, БЕЗ доступа в кабинет — просто уведомление).
+      try {
+        let notifyEmail = (snapshot as any).uploaded_by_email || '';
+        if (!notifyEmail && snapshot.user_id) {
+          const ur = await pool.query('SELECT email FROM users WHERE id::text = $1', [String(snapshot.user_id)]);
+          notifyEmail = ur.rows[0]?.email || '';
+        }
+        if (notifyEmail) {
+          const aName = (snapshot as any).artist_name || (snapshot as any).artist || 'артист';
+          const subj = `Ваш трек «${snapshot.title}» прошёл модерацию — размещён в разделе «Скоро»`;
+          const eHtml = '<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#222;line-height:1.6;">'
+            + '<h2 style="color:#3B82F6;margin:0 0 16px;">PROMO.MUSIC</h2>'
+            + '<p>Здравствуйте, <b>' + escapeHtml(aName) + '</b>!</p>'
+            + '<p>Ваш трек <b>«' + escapeHtml(snapshot.title) + '»</b> успешно прошёл модерацию и размещён в разделе <b>«Скоро»</b> на PROMO.MUSIC. Через ' + UPCOMING_DAYS + ' дня он появится в новинках.</p>'
+            + '<p>Спасибо, что вы с нами!</p>'
+            + '<p style="color:#888;font-size:13px;">Это автоматическое уведомление, отвечать на него не нужно.</p></div>';
+          sendEmail({ to: notifyEmail, subject: subj, html: eHtml })
+            .then(() => sendEmail({ to: 'info@promofm.ru', subject: '[КОПИЯ] ' + subj + ' (' + notifyEmail + ')', html: eHtml }))
+            .catch((e: any) => console.error('[approve-paid] upcoming email failed:', e?.message || e));
+        }
+      } catch (e: any) { console.error('[approve-paid] upcoming email lookup failed:', e?.message || e); }
+
       updated++;
     }
 
@@ -1323,4 +1345,5 @@ app.post('/ai-check/backfill', requireAuth, requireAdmin, async (c) => {
 });
 
 export default app;
+
 
