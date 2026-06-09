@@ -4,7 +4,7 @@
  * One table, one row per track. No separate moderation store.
  */
 
-import { notifyTrackUpload, sendEmail, escapeHtml } from './email-helper.tsx';
+import { notifyTrackUpload, sendEmail, escapeHtml, emailWrapper } from './email-helper.tsx';
 import { logAdminAction } from './audit-helper.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { upsertNotification } from './db.tsx';
@@ -1014,12 +1014,13 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
         if (notifyEmail) {
           const aName = (snapshot as any).artist_name || (snapshot as any).artist || 'артист';
           const subj = `Ваш трек «${snapshot.title}» прошёл модерацию — размещён в разделе «Скоро»`;
-          const eHtml = '<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#222;line-height:1.6;">'
-            + '<h2 style="color:#3B82F6;margin:0 0 16px;">PROMO.MUSIC</h2>'
+          const eHtml = emailWrapper(
+            '<h2 style="margin:0 0 16px; color:#fff; font-size:20px;">Трек прошёл модерацию ✓</h2>'
             + '<p>Здравствуйте, <b>' + escapeHtml(aName) + '</b>!</p>'
-            + '<p>Ваш трек <b>«' + escapeHtml(snapshot.title) + '»</b> успешно прошёл модерацию и размещён в разделе <b>«Скоро»</b> на PROMO.MUSIC. Через ' + UPCOMING_DAYS + ' дня он появится в новинках.</p>'
+            + '<p>Ваш трек <b style="color:#fff;">«' + escapeHtml(snapshot.title) + '»</b> успешно прошёл модерацию и размещён в разделе <b style="color:#FF577F;">«Скоро»</b>. Через ' + UPCOMING_DAYS + ' дня он появится в новинках на ПРОМО.МУЗЫКА.</p>'
             + '<p>Спасибо, что вы с нами!</p>'
-            + '<p style="color:#888;font-size:13px;">Это автоматическое уведомление, отвечать на него не нужно.</p></div>';
+            + '<p style="color:#999; font-size:13px; margin-top:20px;">Это автоматическое уведомление, отвечать на него не нужно.</p>'
+          );
           sendEmail({ to: notifyEmail, subject: subj, html: eHtml })
             .then(() => sendEmail({ to: 'info@promofm.ru', subject: '[КОПИЯ] ' + subj + ' (' + notifyEmail + ')', html: eHtml }))
             .catch((e: any) => console.error('[approve-paid] upcoming email failed:', e?.message || e));
