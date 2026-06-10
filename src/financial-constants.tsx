@@ -133,3 +133,34 @@ export function calculateProduction360Price(
     addonsBreakdown: addons.map(a => ({ name: a, price: PRODUCTION_360_ADDON_PRICES[a] || 0 })),
   };
 }
+
+// ── Radio partner commission ──
+//
+// Когда заведение оплачивает рекламную кампанию на радиостанции
+// (radio_venue_requests), платформа удерживает RADIO_COMMISSION_RATE,
+// остальное (payout) причитается станции. До 2026-06-10 ставка 0.15
+// хардкодилась 6× в radio-routes.tsx (платёжный split + analytics +
+// finance) — drift-риск как DJ_PLANS/VENUE_PLANS: поменяешь одно
+// место, забудешь другое → station_payout разойдётся с тем, что
+// реально удержано. Единый источник.
+//
+// Отдельно от MARKETPLACE_COMMISSION_RATE (10% на beats/digital/
+// services) — у радио своя ставка 15%.
+
+export const RADIO_COMMISSION_RATE = 0.15;
+
+/** Разбивка суммы рекламной кампании заведения: комиссия платформы
+ *  (15%) + выплата станции (85%). Округление до рубля (как
+ *  исторически Math.round). */
+export function splitRadioCampaignAmount(grossPrice: number): {
+  platformFee: number;
+  stationPayout: number;
+  rate: number;
+} {
+  const platformFee = Math.round(grossPrice * RADIO_COMMISSION_RATE);
+  return {
+    platformFee,
+    stationPayout: grossPrice - platformFee,
+    rate: RADIO_COMMISSION_RATE,
+  };
+}

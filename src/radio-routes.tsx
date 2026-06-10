@@ -46,6 +46,7 @@ import { profileLimiter } from './rate-limiter.tsx';
 import { notifyArtistRequest, notifyVenueRequest } from './email-helper.tsx';
 import { logUserAction } from './audit-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { RADIO_COMMISSION_RATE, splitRadioCampaignAmount } from './financial-constants.tsx';
 
 const app = new Hono();
 
@@ -575,9 +576,9 @@ app.put('/venue-requests/:id/complete', requireAuth, async (c) => {
     const updated = await updateRadioVenueRequest(station.id, requestId, {});
     Object.assign(req, updated || {});
 
-    // Записать доход платформы (комиссия 15% от рекламной сделки)
+    // Записать доход платформы (комиссия RADIO_COMMISSION_RATE от рекламной сделки)
     const totalPrice = req.totalPrice || 0;
-    const platformFee = req.platformFee || Math.round(totalPrice * 0.15);
+    const platformFee = req.platformFee || splitRadioCampaignAmount(totalPrice).platformFee;
     const stationPayout = req.stationPayout || (totalPrice - platformFee);
 
     if (totalPrice > 0) {
@@ -587,7 +588,7 @@ app.put('/venue-requests/:id/complete', requireAuth, async (c) => {
         grossAmount: totalPrice,
         platformRevenue: platformFee,
         payoutAmount: stationPayout,
-        commissionRate: 0.15,
+        commissionRate: RADIO_COMMISSION_RATE,
         payerId: req.venueId || 'venue',
         payerName: req.venueName || 'Заведение',
         payeeId: station.id,
@@ -657,8 +658,8 @@ app.get('/orders', requireAuth, async (c) => {
       discountAmount: 0,
       demandSurcharge: 0,
       paymentAmount: req.totalPrice || 0,
-      commissionAmount: req.platformFee || Math.round((req.totalPrice || 0) * 0.15),
-      netAmountToRadio: req.stationPayout || Math.round((req.totalPrice || 0) * 0.85),
+      commissionAmount: req.platformFee || splitRadioCampaignAmount(req.totalPrice || 0).platformFee,
+      netAmountToRadio: req.stationPayout || splitRadioCampaignAmount(req.totalPrice || 0).stationPayout,
       commissionStatus: req.status === 'completed' ? 'collected' : 'pending',
       pricingDetails: {
         basePricePerSlot: (req.totalPrice || 0) / Math.max((req.playsPerDay || 1) * (req.durationDays || 1), 1),
@@ -805,10 +806,9 @@ app.put('/orders/:id/fulfill', requireAuth, async (c) => {
     });
     Object.assign(req, updated || {});
 
-    // Platform revenue: 15% commission
+    // Platform revenue: RADIO_COMMISSION_RATE commission
     const totalPrice = req.totalPrice || 0;
-    const platformFee = Math.round(totalPrice * 0.15);
-    const stationPayout = totalPrice - platformFee;
+    const { platformFee, stationPayout } = splitRadioCampaignAmount(totalPrice);
 
     if (totalPrice > 0) {
       await recordRevenue({
@@ -817,7 +817,7 @@ app.put('/orders/:id/fulfill', requireAuth, async (c) => {
         grossAmount: totalPrice,
         platformRevenue: platformFee,
         payoutAmount: stationPayout,
-        commissionRate: 0.15,
+        commissionRate: RADIO_COMMISSION_RATE,
         payerId: req.venueId || 'venue',
         payerName: req.venueName || 'Venue',
         payeeId: station.id,

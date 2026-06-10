@@ -32,6 +32,7 @@ import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { notifyVenueRequest } from './email-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { splitRadioCampaignAmount } from './financial-constants.tsx';
 import {
   getEffectiveVenuePlan,
   getEffectiveVenueLimits,
@@ -813,8 +814,8 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
         playsPerDay: Math.ceil((campaign.targetPlays || 0) / Math.max(1, Math.ceil(((new Date(campaign.endDate || Date.now()).getTime()) - (new Date(campaign.startDate || Date.now()).getTime())) / 86400000))),
         durationDays: Math.ceil(((new Date(campaign.endDate || Date.now()).getTime()) - (new Date(campaign.startDate || Date.now()).getTime())) / 86400000) || 1,
         totalPrice: campaign.budget,
-        platformFee: Math.round((campaign.budget || 0) * 0.15),
-        stationPayout: Math.round((campaign.budget || 0) * 0.85),
+        platformFee: splitRadioCampaignAmount(campaign.budget || 0).platformFee,
+        stationPayout: splitRadioCampaignAmount(campaign.budget || 0).stationPayout,
         timeSlots: campaign.timeSlots,
         status: 'pending',
         submittedAt: new Date().toISOString(),
@@ -972,12 +973,15 @@ app.get('/radio-campaigns/:id/status', requireAuth, async (c) => {
           impressions: radioReq.impressions || 0,
           rejectionReason: radioReq.rejectionReason || null,
         };
-        const commissionRate = 0.15;
         const baseAmount = radioReq.totalPrice || campaign.budget || 0;
         const discountAmount = radioReq.discountAmount || 0;
         const paymentAmount = baseAmount - discountAmount;
-        const commissionAmount = Math.round(paymentAmount * commissionRate);
-        const netAmountToRadio = paymentAmount - commissionAmount;
+        // Commission applies on the post-discount paymentAmount, not the base.
+        const {
+          platformFee: commissionAmount,
+          stationPayout: netAmountToRadio,
+          rate: commissionRate,
+        } = splitRadioCampaignAmount(paymentAmount);
         pricing = { baseAmount, discountAmount, paymentAmount, commissionAmount, netAmountToRadio, commissionRate };
       }
     } catch (_) { /* radio side may not exist yet */ }
