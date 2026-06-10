@@ -81,6 +81,7 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   { loc: '/promotion', changefreq: 'weekly', priority: '0.8' },
   { loc: '/get-in-chart', changefreq: 'weekly', priority: '0.8' },
   { loc: '/tv-rotation', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/how-to-grow-track', changefreq: 'monthly', priority: '0.8' },
   { loc: '/for-tv', changefreq: 'monthly', priority: '0.6' },
   { loc: '/for-labels', changefreq: 'weekly', priority: '0.7' },
   { loc: '/for-media', changefreq: 'monthly', priority: '0.6' },
