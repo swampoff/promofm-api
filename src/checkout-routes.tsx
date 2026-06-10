@@ -37,6 +37,11 @@ const MAX_PAYMENT_AMOUNT_RUB = 1_000_000;
 // Must match PUBLICATION_PRICE in track-moderation-routes.tsx.
 const DEFAULT_TRACK_PUBLICATION_PRICE_RUB = 5000;
 
+// Marketplace commission на beat / digital purchases. Bug E из аудита —
+// раньше hardcoded `Math.round(price * 0.1)` в двух местах fulfillment.
+// Вынесено в const чтобы менять можно было через ENV без перебоя hardcode.
+const MARKETPLACE_COMMISSION_RATE = Number(process.env.MARKETPLACE_COMMISSION_RATE) || 0.1;
+
 const log = createLogger("checkout");
 
 const checkoutRoutes = new Hono();
@@ -891,9 +896,19 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   }
 
   // ─── Fulfill beat_purchase (Beats Marketplace) ───
+  // Audit 2026-06-03 — закрываем bugs A, B, C, E из marketplace audit:
+  //   A: idempotency через UNIQUE INDEX uq_beat_purchases_payment_order_id
+  //      (миграция 099) + INSERT ... ON CONFLICT (payment_order_id)
+  //      DO NOTHING → YK retry дедуплицируется атомарно
+  //   B: good-not-found (beat удалён между checkout и webhook) больше не
+  //      silent — пишем persistent admin notification + structured log
+  //   C: buyer теперь тоже получает SSE ('beat_purchase_completed')
+  //      с тем же набором полей, что и producer
+  //   E: hardcoded 10% commission заменён на MARKETPLACE_COMMISSION_RATE
+  //      (см. ниже)
   if (session.metadata?.type === 'beat_purchase' && session.metadata?.beatId) {
     try {
-      const { getBeat, upsertBeat } = await import('./db.tsx');
+      const { getBeat, incrementBeatPurchases } = await import('./db.tsx');
       const { pool: cPool3 } = await import('./db-client.tsx');
       const { recordPlatformCommission } = await import('./platform-revenue.tsx');
       const beatId = session.metadata.beatId;
@@ -902,10 +917,27 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       const buyerName = session.metadata.buyerName || 'Покупатель';
 
       const raw = await getBeat(beatId);
-      if (raw) {
+      if (!raw) {
+        // Bug B fix: alerting вместо silent return. Beat удалён между
+        // /create-session и webhook'ом — деньги получены, но запись
+        // создать не на чём. Шлём persistent admin notification, лог
+        // с warn-уровнем для PagerDuty/Sentry.
+        log.warn({ beatId, orderId: session.orderId, buyerId, price: session.amount }, 'beat_purchase_orphan_paid');
+        try {
+          const { notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
+          await notifyAllAdmins({
+            sourceRole: 'admin',
+            type: 'system_alert',
+            title: 'Marketplace: оплата без товара (beat)',
+            message: `Buyer ${buyerName} (${buyerId}) оплатил beat ${beatId} (₽${session.amount}, orderId ${session.orderId}), но beat в БД отсутствует. Нужен ручной refund.`,
+            link: '/ctrl-pm7k2f/finances',
+            metadata: { kind: 'orphan_payment', purchaseType: 'beat', beatId, buyerId, orderId: session.orderId, amount: session.amount },
+          }).catch(() => {});
+        } catch {}
+      } else {
         const beat = typeof raw === 'string' ? JSON.parse(raw) : raw;
         const price = session.amount;
-        const commission = Math.round(price * 0.1);
+        const commission = Math.round(price * MARKETPLACE_COMMISSION_RATE);
         const producerPayout = price - commission;
         const purchaseId = 'bp_' + Math.random().toString(36).substring(2, 12);
 
@@ -917,31 +949,55 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           createdAt: now,
         };
 
-        await cPool3.query(
-          `INSERT INTO beat_purchases (id, beat_id, buyer_id, producer_id, amount, license_type, status, data, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7::jsonb, NOW())
-           ON CONFLICT (id) DO NOTHING`,
+        // Bug A fix: ON CONFLICT (payment_order_id) DO NOTHING. Native
+        // payment_order_id колонка + UNIQUE INDEX (миграция 099) делают
+        // YK retry idempotent. rowCount === 0 → это retry, не делаем
+        // SSE/commission/counter повторно.
+        const insertResult = await cPool3.query(
+          `INSERT INTO beat_purchases (id, beat_id, buyer_id, producer_id, amount, license_type, status, data, payment_order_id, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7::jsonb, $8, NOW())
+           ON CONFLICT (payment_order_id) DO NOTHING
+           RETURNING id`,
           [purchaseId, beatId, buyerId, beat.producerId || null, price, licenseType,
-           JSON.stringify(purchase)]
+           JSON.stringify(purchase), session.orderId]
         );
+        const isDuplicate = insertResult.rowCount === 0;
 
-        beat.purchases = (beat.purchases || 0) + 1;
-        if (licenseType === 'exclusive') beat.status = 'sold';
-        await upsertBeat(beatId, JSON.stringify(beat));
+        if (isDuplicate) {
+          log.info({ beatId, orderId: session.orderId }, 'beat_purchase_retry_deduplicated');
+        } else {
+          // Bug D fix (закреплён здесь, основной helper в #180):
+          // atomic increment вместо get-mutate-set.
+          await incrementBeatPurchases(beatId);
+          if (licenseType === 'exclusive') {
+            // exclusive — finite-supply, нужен atomic transition status.
+            // upsertBeat остаётся (status это бизнес-state, не counter).
+            const { upsertBeat } = await import('./db.tsx');
+            beat.status = 'sold';
+            await upsertBeat(beatId, JSON.stringify(beat));
+          }
 
-        await recordPlatformCommission('beat', beat.title, price, commission, producerPayout, {
-          producerId: beat.producerId, producerName: beat.producer, buyerId, buyerName,
-        });
-
-        try {
-          const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(beat.producerId, {
-            type: 'beat_purchased',
-            data: { title: 'Продажа бита', purchaseId, beatId, licenseType, price, producerPayout },
+          await recordPlatformCommission('beat', beat.title, price, commission, producerPayout, {
+            producerId: beat.producerId, producerName: beat.producer, buyerId, buyerName,
           });
-        } catch {}
 
-        log.info({ beatId, purchaseId, price, orderId: session.orderId }, 'beat_purchase_fulfilled');
+          try {
+            const { emitSSE } = await import('./sse-routes.tsx');
+            // Producer SSE — было раньше.
+            emitSSE(beat.producerId, {
+              type: 'beat_purchased',
+              data: { title: 'Продажа бита', purchaseId, beatId, beatTitle: beat.title, licenseType, price, producerPayout },
+            });
+            // Bug C fix: buyer SSE — не было. Без этого buyer-кабинет не
+            // знал о состоявшейся покупке.
+            emitSSE(buyerId, {
+              type: 'beat_purchase_completed',
+              data: { title: `Бит «${beat.title}» куплен`, purchaseId, beatId, beatTitle: beat.title, licenseType, price },
+            });
+          } catch {}
+
+          log.info({ beatId, purchaseId, price, orderId: session.orderId }, 'beat_purchase_fulfilled');
+        }
       }
     } catch (err) {
       log.error({ err, beatId: session.metadata.beatId }, 'beat_purchase_fulfillment_error');
@@ -949,6 +1005,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   }
 
   // ─── Fulfill digital_purchase (Digital Goods Marketplace) ───
+  // Симметрично beat_purchase выше — закрыты bugs A, B, C, E из аудита.
   if (session.metadata?.type === 'digital_purchase' && session.metadata?.digitalGoodId) {
     try {
       const { getDigitalGood, incrementDigitalGoodSales } = await import('./db.tsx');
@@ -959,9 +1016,23 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       const buyerName = session.metadata.buyerName || 'Покупатель';
 
       const good = await getDigitalGood(goodId);
-      if (good) {
+      if (!good) {
+        // Bug B fix: alerting на orphan-payment вместо silent return.
+        log.warn({ goodId, orderId: session.orderId, buyerId, price: session.amount }, 'digital_purchase_orphan_paid');
+        try {
+          const { notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
+          await notifyAllAdmins({
+            sourceRole: 'admin',
+            type: 'system_alert',
+            title: 'Marketplace: оплата без товара (digital)',
+            message: `Buyer ${buyerName} (${buyerId}) оплатил digital good ${goodId} (₽${session.amount}, orderId ${session.orderId}), но товар в БД отсутствует. Нужен ручной refund.`,
+            link: '/ctrl-pm7k2f/finances',
+            metadata: { kind: 'orphan_payment', purchaseType: 'digital', goodId, buyerId, orderId: session.orderId, amount: session.amount },
+          }).catch(() => {});
+        } catch {}
+      } else {
         const price = session.amount;
-        const commission = Math.round(price * 0.1);
+        const commission = Math.round(price * MARKETPLACE_COMMISSION_RATE);
         const producerPayout = price - commission;
         const purchaseId = 'dgp_' + Math.random().toString(36).substring(2, 12);
 
@@ -973,29 +1044,43 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           createdAt: now,
         };
 
-        await cPool4.query(
-          `INSERT INTO digital_purchases (id, good_id, buyer_id, amount, data, created_at)
-           VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
-           ON CONFLICT (id) DO NOTHING`,
-          [purchaseId, goodId, buyerId, price, JSON.stringify(purchase)]
+        // Bug A fix: ON CONFLICT (payment_order_id) DO NOTHING с native
+        // payment_order_id и UNIQUE INDEX (миграция 099).
+        const insertResult = await cPool4.query(
+          `INSERT INTO digital_purchases (id, good_id, buyer_id, amount, data, payment_order_id, created_at)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6, NOW())
+           ON CONFLICT (payment_order_id) DO NOTHING
+           RETURNING id`,
+          [purchaseId, goodId, buyerId, price, JSON.stringify(purchase), session.orderId]
         );
+        const isDuplicate = insertResult.rowCount === 0;
 
-        // Atomic UPDATE sales = sales + 1 (race-free на YooKassa retry).
-        await incrementDigitalGoodSales(goodId);
+        if (isDuplicate) {
+          log.info({ goodId, orderId: session.orderId }, 'digital_purchase_retry_deduplicated');
+        } else {
+          // Atomic UPDATE sales = sales + 1 (race-free на YooKassa retry).
+          await incrementDigitalGoodSales(goodId);
 
-        await recordPlatformCommission('digital_good', good.title, price, commission, producerPayout, {
-          producerId: good.producerId, producerName: good.producer, buyerId, buyerName,
-        });
-
-        try {
-          const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(good.producerId, {
-            type: 'digital_purchased',
-            data: { title: 'Продажа цифрового товара', purchaseId, digitalGoodId: goodId, price, producerPayout },
+          await recordPlatformCommission('digital_good', good.title, price, commission, producerPayout, {
+            producerId: good.producerId, producerName: good.producer, buyerId, buyerName,
           });
-        } catch {}
 
-        log.info({ goodId, purchaseId, price, orderId: session.orderId }, 'digital_purchase_fulfilled');
+          try {
+            const { emitSSE } = await import('./sse-routes.tsx');
+            // Producer SSE — было.
+            emitSSE(good.producerId, {
+              type: 'digital_purchased',
+              data: { title: 'Продажа цифрового товара', purchaseId, digitalGoodId: goodId, goodTitle: good.title, price, producerPayout },
+            });
+            // Bug C fix: buyer SSE.
+            emitSSE(buyerId, {
+              type: 'digital_purchase_completed',
+              data: { title: `Товар «${good.title}» куплен`, purchaseId, digitalGoodId: goodId, goodTitle: good.title, price },
+            });
+          } catch {}
+
+          log.info({ goodId, purchaseId, price, orderId: session.orderId }, 'digital_purchase_fulfilled');
+        }
       }
     } catch (err) {
       log.error({ err, goodId: session.metadata.digitalGoodId }, 'digital_purchase_fulfillment_error');
