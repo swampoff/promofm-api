@@ -853,14 +853,44 @@ app.get('/finance/overview', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
-    // radio_finance dead store — 0 writers anywhere. Returns zeros (как и до cleanup).
+    // 2026-06-10: radio_finance таблица — dead store (0 writers), её
+    // чтение давало вечный ₽0. Реальный доход станции от рекламы
+    // заведений живёт в radio_venue_requests: stationPayout = 85% от
+    // totalPrice, посчитан при создании кампании (line 581). Тот же
+    // источник, что уже агрегирует /analytics — finance/overview
+    // просто его не использовал. Радио из рассылки видело ₽0 дохода.
+    const venueRequests = await listRadioVenueRequestsByStation((station as any).id);
+    const now = new Date();
+    const thisMonth = now.getMonth();
+    const thisYear = now.getFullYear();
+    const inMonth = (iso: string | null, m: number, y: number): boolean => {
+      if (!iso) return false;
+      const d = new Date(iso);
+      return !isNaN(d.getTime()) && d.getMonth() === m && d.getFullYear() === y;
+    };
+    // earned = завершённые кампании (деньги отработаны).
+    // pending = оплаченные но ещё не завершённые (approved/in_progress) —
+    // деньги у платформы, станции причитаются после complete.
+    const earned = venueRequests.filter((r: any) => r.status === 'completed');
+    const pending = venueRequests.filter((r: any) => r.status === 'approved' || r.status === 'in_progress');
+    const sum = (arr: any[], key: string) => arr.reduce((s: number, r: any) => s + (Number(r[key]) || 0), 0);
+
+    const lastM = thisMonth === 0 ? 11 : thisMonth - 1;
+    const lastY = thisMonth === 0 ? thisYear - 1 : thisYear;
+
     const finance = {
-      totalRevenue: 0,
-      monthlyRevenue: 0,
-      adRevenue: 0,
+      // Доход станции (85%) от завершённых рекламных кампаний.
+      totalRevenue: sum(earned, 'stationPayout'),
+      monthlyRevenue: sum(earned.filter((r: any) => inMonth(r.completedAt || r.createdAt, thisMonth, thisYear)), 'stationPayout'),
+      lastMonthRevenue: sum(earned.filter((r: any) => inMonth(r.completedAt || r.createdAt, lastM, lastY)), 'stationPayout'),
+      // Весь доход станции — реклама заведений (subscription у радио нет).
+      adRevenue: sum(earned, 'stationPayout'),
       subscriptionRevenue: 0,
-      pendingPayments: 0,
-      growth: 0,
+      // Ожидается к выплате — оплаченные кампании в работе.
+      pendingPayments: sum(pending, 'stationPayout'),
+      // Комиссия платформы (15%) для прозрачности.
+      platformCommission: sum(earned, 'platformFee'),
+      completedCampaigns: earned.length,
     };
 
     return c.json({ success: true, finance });
@@ -879,9 +909,29 @@ app.get('/finance/transactions', requireAuth, async (c) => {
       return c.json({ error: 'Radio station not found' }, 404);
     }
 
-    // radio_transactions never populated — placeholder. Returns empty list
-    // как и до cleanup (table had no writers anywhere in codebase).
-    const transactions: any[] = [];
+    // 2026-06-10: radio_transactions — dead store (0 writers). Реальные
+    // транзакции станции = рекламные кампании заведений из
+    // radio_venue_requests. Каждая оплаченная/завершённая кампания —
+    // строка истории: сколько станция получила (stationPayout), сколько
+    // удержала платформа (platformFee), статус.
+    const venueRequests = await listRadioVenueRequestsByStation((station as any).id);
+    const transactions = venueRequests
+      .filter((r: any) => r.status === 'completed' || r.status === 'approved' || r.status === 'in_progress')
+      .map((r: any) => ({
+        id: r.id,
+        type: 'ad_campaign',
+        venueName: r.venueName || 'Заведение',
+        venueCity: r.venueCity || null,
+        grossAmount: Number(r.totalPrice) || 0,
+        stationPayout: Number(r.stationPayout) || 0,
+        platformFee: Number(r.platformFee) || 0,
+        status: r.status,
+        // 'completed' = выплачено/отработано; иначе — в обработке.
+        settlementStatus: r.status === 'completed' ? 'settled' : 'pending',
+        createdAt: r.createdAt || null,
+        completedAt: r.completedAt || null,
+      }))
+      .sort((a: any, b: any) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
     return c.json({ success: true, transactions });
   } catch (error: any) {
