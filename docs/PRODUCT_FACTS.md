@@ -610,7 +610,11 @@ When `available=false` → «скоро будет» banner instead of dead link
 
 ## DJ cabinet
 
-**Source:** `src/dj-studio-routes.tsx` `DJ_PLANS` (line 623+).
+**Source of truth:** `src/dj-plans-constants.tsx` `DJ_PLANS_CORE`
+(money + limits, used by `dj-studio-routes.tsx` GET /plans + quota
+checks AND by `checkout-routes.tsx` webhook subscription activation).
+Marketing copy (description/features/popular/color) lives next to
+GET /plans in `dj-studio-routes.tsx` `DJ_PLANS_MARKETING`.
 
 | Plan      | Price/mo | Price/yr | mixes | events/mo | analytics |
 |-----------|----------|----------|-------|-----------|-----------|
@@ -620,6 +624,30 @@ When `available=false` → «скоро будет» banner instead of dead link
 
 `-1` = unlimited. Resolver: `getDjPlanLimits(djId)` — reads
 `djSubscriptionsStore`, defaults to starter when no record.
+
+### Mix publication price flow
+
+**Source:** `src/dj-mix-moderation-routes.tsx` `MIX_PUBLICATION_PRICE` (line 27).
+
+- `MIX_PUBLICATION_PRICE = 5000` ₽ (зеркало `tracks` `PUBLICATION_PRICE`).
+- **«Первый микс бесплатно» — ОТКЛЮЧЕНО** (URGENT business decision
+  2026-05-31, commit `aedec9e` «полный снос dead-code», симметрично
+  отключению `resolveTrackPublicationPrice` для треков). Сейчас:
+  - `requires_payment = TRUE` ВСЕГДА для каждого approved-микса
+    (`dj-mix-moderation-routes.tsx:158`)
+  - `payment_amount = MIX_PUBLICATION_PRICE` (5000 ₽) hardcoded
+  - `first_mix_free_applied = FALSE` hardcoded
+    (`dj-mix-moderation-routes.tsx:160`)
+  - колонка `first_mix_free_applied` historic, осталась только
+    для совместимости read-пути
+  - ⚠️ **Не реализовывать обратно** без явного указания Никиты —
+    тот же риск, что в track-first-free: stale запись чуть не
+    привела к ре-имплементации отключённой акции (2026-06-10,
+    PR #218).
+- Webhook fulfill: `checkout-routes.tsx:761` `dj_mix_publish` →
+  `dj_mixes.moderation_status = 'upcoming'` на UPCOMING_DAYS=3,
+  затем cron promote-upcoming переводит в `published`. Симметрично
+  track_publish.
 
 Enforced endpoints (audit pass 2026-05-25 closed multiple gaps):
 - `POST /dj-studio/mixes` — `limits.mixes` (count vs cap)
