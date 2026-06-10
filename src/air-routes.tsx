@@ -346,19 +346,42 @@ app.post("/library/sync", async (c) => {
     let synced = 0;
     const errors: string[] = [];
 
+    // Containment guard: filename берётся из audio_url (из БД), а
+    // path.join сам по себе НЕ предотвращает `../`-escape. Тот же
+    // паттерн уже защищён на download-стороне (track-download-helper.tsx
+    // resolveLocalPath через path.resolve+startsWith). Здесь — зеркало:
+    // декодируем, отвергаем `..`/абсолютные/NUL, и финально проверяем
+    // что resolved path физически внутри допустимого root'а. Без этого
+    // audio_url вида `/server/uploads/tracks/../../../etc/passwd`
+    // указал бы fs.copyFileSync на файл вне uploads/.
+    const safeResolveInRoot = (root: string, rawTail: string): string | null => {
+      if (rawTail.includes("\0") || rawTail.includes("..") || rawTail.startsWith("/") || rawTail.startsWith("\\")) {
+        return null;
+      }
+      const abs = path.resolve(root, rawTail);
+      const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+      if (!abs.startsWith(rootWithSep) && abs !== root) return null;
+      return abs;
+    };
+
     for (const track of platformTracks) {
       try {
-        let srcPath = "";
+        let srcPath: string | null = null;
         const audioUrl = track.audio_url as string;
 
         if (audioUrl.startsWith("/server/uploads/tracks/")) {
           const filename = decodeURIComponent(audioUrl.replace("/server/uploads/tracks/", ""));
-          srcPath = path.join(UPLOADS_DIR, filename);
+          srcPath = safeResolveInRoot(UPLOADS_DIR, filename);
         } else if (audioUrl.startsWith("https://promo-music.ru/uploads/track-audio/")) {
           const filename = decodeURIComponent(audioUrl.replace("https://promo-music.ru/uploads/track-audio/", ""));
-          srcPath = path.join("/opt/promofm-api/uploads/track-audio", filename);
+          srcPath = safeResolveInRoot("/opt/promofm-api/uploads/track-audio", filename);
         } else {
           errors.push("Unknown audio_url format: " + audioUrl);
+          continue;
+        }
+
+        if (!srcPath) {
+          errors.push("Rejected unsafe audio path: " + audioUrl);
           continue;
         }
 
