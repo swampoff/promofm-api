@@ -298,6 +298,7 @@ async function scanAndCreate(trackDir) {
     { name: 'Радио Energy', cities: ['Москва', 'Санкт-Петербург', 'Новосибирск', 'Краснодар'] },
     { name: 'Record', cities: ['Москва', 'Санкт-Петербург'] },
     { name: 'Наше Радио', cities: ['Москва', 'Санкт-Петербург'] },
+    { name: 'Радио Геленджик 95.7 FM', cities: ['Геленджик'] },
   ];
 
   let pickupCount = 0;
@@ -407,3 +408,4 @@ switch (command) {
     console.log('Usage: node friday.js <scan|status> [path]');
     pool.end();
 }
+
