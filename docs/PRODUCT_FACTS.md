@@ -188,15 +188,23 @@ Public:
 **Source:** `src/track-moderation-routes.tsx`.
 
 - `PUBLICATION_PRICE = 5000` ₽ (line 26)
-- "Первый трек бесплатно" — `resolveTrackPublicationPrice(userId, trackId)`:
-  if the artist has zero paid publications AND no prior
-  first-track-free usage → returns 0 → track auto-promotes
-  `moderation_status: 'upcoming'`, `is_hidden: false`,
-  `data.first_track_free_applied: true`. Effectively skips the
-  payment gate.
-- **AI-flagged tracks ignore the first-free quota** — they always
-  pay full PUBLICATION_PRICE (the AI-catalog flow is a separate
-  product). Their first non-AI submission still gets the free slot.
+- **«Первый трек бесплатно» — ОТКЛЮЧЕНО** (URGENT business
+  decision 2026-05-31, commits `7d0a5ea` + `aedec9e`). Акция
+  отменена немедленно после инцидента с артистом «Deafness»
+  (письмо противоречило само себе: «бесплатно по акции» + «ждём
+  оплату»). Сейчас:
+  - `requires_payment = true` ВСЕГДА, для каждого трека и микса
+  - `payment_amount = PUBLICATION_PRICE` (треки) /
+    `MIX_PUBLICATION_PRICE` (миксы)
+  - `first_track_free_applied = false` hardcoded
+    (track-moderation-routes.tsx:441, 766)
+  - функция `resolveTrackPublicationPrice` снесена из кода
+    полностью (commit `aedec9e` «полный снос dead-code»)
+  - ⚠️ **Не реализовывать обратно** без явного указания Никиты —
+    аудит-агент 2026-06-10 чуть не «починил» акцию, посчитав её
+    регрессией, потому что эта запись была stale.
+- AI-flagged треки идут в отдельный AI-catalog flow — тоже
+  полная цена.
 
 ### Track lifecycle states (moderation_status)
 
