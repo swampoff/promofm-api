@@ -1227,11 +1227,36 @@ app.put('/contracts/:id/milestones/:mid', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Only client can perform this action' }, 403);
     }
 
+    // ── ESCROW NOT IMPLEMENTED — milestone-approve gate ──
+    // CONTEXT (2026-06-10 producer audit): action='approve' раньше
+    // делал `milestone.paidAt = nowIso()` + recordPlatformCommission()
+    // ВТИХУЮ — клиент кнопкой «принять этап» подтверждал приёмку,
+    // платформа учитывала доход (revenue/payout/commission в БД),
+    // НО реального вызова YooKassa createPayment() не было нигде.
+    // Деньги клиента не списывались, продюсер ничего не получал,
+    // только row в revenue-таблице с фиктивным «доходом».
+    //
+    // Полноценный escrow (предоплата клиентом на milestone → escrow
+    // hold → release продюсеру на approve) — отдельная feature,
+    // не surgical fix. До её реализации блокируем approve, чтобы
+    // не плодить фиктивные revenue-rows и не вводить пользователей
+    // в заблуждение про «оплаченные этапы».
+    //
+    // submit/revision (статус-переходы без денег) остаются — они не
+    // трогают payment-логику.
+    if (action === 'approve') {
+      return c.json({
+        success: false,
+        error: 'Оплата этапов в разработке. Пожалуйста, расплатитесь напрямую с продюсером, а статус заказа отметим вручную — свяжитесь с поддержкой.',
+        feature: 'milestone_escrow_not_ready',
+      }, 503);
+    }
+
     milestone.status = transition.to;
     milestone.updatedAt = nowIso();
 
     // При approve - эмуляция оплаты
-    if (action === 'approve') {
+    if ((action as string) === 'approve') {
       milestone.paidAt = nowIso();
       milestone.completedAt = nowIso();
       contract.paidAmount = (contract.paidAmount || 0) + milestone.amount;
