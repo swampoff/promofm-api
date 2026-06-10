@@ -44,7 +44,10 @@ export type NotificationType =
   | 'payment_update'
   | 'support_ticket_new'
   | 'live_chat_message'
-  | 'donation_received';
+  | 'donation_received'
+  | 'airtime_purchase_new'
+  | 'airtime_approved'
+  | 'airtime_rejected';
 
 // 'system' — нечеловеческий источник (донат от слушателя, авто-события).
 export type CabinetRole = 'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer' | 'label' | 'system';
@@ -334,6 +337,9 @@ function mapTypeToSSEEvent(type: NotificationType): string {
     support_ticket_new: 'support_ticket_new',
     live_chat_message: 'live_chat_message',
     donation_received: 'donation_received',
+    airtime_purchase_new: 'airtime_purchase_new',
+    airtime_approved: 'airtime_approved',
+    airtime_rejected: 'airtime_rejected',
   };
   return directMap[type] || 'notification';
 }

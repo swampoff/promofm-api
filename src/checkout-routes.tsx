@@ -451,7 +451,54 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           } catch {}
         }
       }
-    
+
+      // AIRTIME sales — артист купил эфирное время у радио (PROMO.FM аудит 2026-06-05)
+      // Idempotent: UPDATE WHERE status='pending_payment' — повторный webhook никого не задвоит.
+      if (itemType === 'radio_airtime' && session.metadata.purchaseId) {
+        const { pool: airPool } = await import('./db-client.tsx');
+        const purchaseId = String(session.metadata.purchaseId);
+        const upd = await airPool.query(
+          `UPDATE radio_airtime_purchases SET
+             status = 'paid',
+             payment_session_id = $2,
+             updated_at = NOW()
+           WHERE id::text = $1 AND status = 'pending_payment'
+           RETURNING id, slot_id, radio_id, artist_id, format, total_price`,
+          [purchaseId, session.orderId || session.sessionId || null],
+        );
+        if (upd.rows.length > 0) {
+          const purchase = upd.rows[0];
+          log.info({
+            purchaseId: purchase.id, radioId: purchase.radio_id,
+            artistId: purchase.artist_id, format: purchase.format,
+            amount: session.amount,
+          }, 'radio_airtime_paid');
+
+          // Notify radio о новой оплаченной заявке
+          try {
+            const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+            await notifyCrossCabinet({
+              targetUserId: purchase.radio_id,
+              targetRole: 'radio',
+              sourceRole: 'artist',
+              type: 'airtime_purchase_new',
+              title: 'Новая заявка на эфирное время',
+              message: `Артист оплатил «${purchase.format}» на ${session.amount} ₽. Заявка ждёт одобрения в кабинете.`,
+              metadata: {
+                purchaseId: purchase.id,
+                slotId: purchase.slot_id,
+                format: purchase.format,
+                amount: Number(session.amount) || 0,
+              },
+            });
+          } catch (notifyErr) {
+            log.warn({ err: notifyErr, purchaseId }, 'airtime_purchase_new_notify_failed');
+          }
+        } else {
+          log.info({ purchaseId }, 'radio_airtime_webhook_noop');
+        }
+      }
+
       if (itemType === 'content_order' && session.metadata.contentOrderId) {
         const { pool: coPool } = await import('./db-client.tsx');
         const coid = session.metadata.contentOrderId;
