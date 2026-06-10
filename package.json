@@ -5,7 +5,11 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "type-check": "tsc --noEmit",
+    "type-check:regression": "bash scripts/check-ts-regression.sh",
+    "type-check:baseline-update": "bash scripts/check-ts-regression.sh --update",
+    "check": "npm run type-check:regression"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
