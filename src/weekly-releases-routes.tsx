@@ -126,11 +126,38 @@ app.get('/current', async (c) => {
       radioPickups: pickupsMap[t.id] || { radioCount: 0, cityCount: 0, stations: [], cities: [] },
     }));
 
+    // DJ-миксы недели (migration 104 mix_ids). Колонки может не быть
+    // до применения миграции — try/catch, пакет без миксов валиден.
+    let mixes: any[] = [];
+    try {
+      const mixIds: string[] = release.mix_ids || [];
+      if (mixIds.length > 0) {
+        const mixesResult = await pool.query(`
+          SELECT
+            m.id, m.title, m.genre, m.duration, m.audio_url, m.cover_url,
+            m.bpm_range, m.plays_count, m.created_at,
+            COALESCE(NULLIF(dp.dj_name, ''), dp.data->>'djName', 'DJ') AS dj_name,
+            COALESCE(dp.data->>'avatarUrl', dp.data->>'photoUrl') AS dj_avatar,
+            COALESCE(NULLIF(dp.location, ''), dp.data->>'city') AS dj_city
+          FROM dj_mixes m
+          LEFT JOIN dj_profiles dp ON dp.user_id = m.dj_id
+          WHERE m.id = ANY($1)
+            AND m.moderation_status = 'published'
+            AND m.is_hidden = false
+          ORDER BY array_position($1::text[], m.id)
+        `, [mixIds]);
+        mixes = mixesResult.rows;
+      }
+    } catch (mixErr) {
+      console.warn('[weekly-releases] mixes fetch skipped:', String(mixErr));
+    }
+
     return c.json({
       success: true,
       data: {
         ...release,
         tracks,
+        mixes,
       },
     });
   } catch (error) {

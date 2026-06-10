@@ -288,6 +288,41 @@ async function scanAndCreate(trackDir) {
       published_at = now()
   `, [releaseTitle, weekNum, year, now.toISOString(), trackIds]);
 
+  // DJ-миксы недели (PROMO.FM, P0 #5 2026-06-05): автоматически
+  // включаем в пакет свежие опубликованные миксы — модерация пройдена
+  // (moderation_status='published'), не скрыты, загружены за последние
+  // 7 дней. Максимум 5 за релиз. Кладём union-ом (без дублей) чтобы
+  // повторный запуск cron'а не задваивал.
+  try {
+    const mixRes = await pool.query(`
+      SELECT id FROM dj_mixes
+       WHERE moderation_status = 'published'
+         AND is_hidden = false
+         AND audio_url IS NOT NULL AND audio_url != ''
+         AND created_at >= NOW() - INTERVAL '7 days'
+       ORDER BY created_at DESC
+       LIMIT 5
+    `);
+    const mixIds = mixRes.rows.map(r => r.id);
+    if (mixIds.length > 0) {
+      await pool.query(`
+        UPDATE weekly_releases SET
+          mix_ids = (
+            SELECT array_agg(DISTINCT m)
+            FROM unnest(array_cat(COALESCE(mix_ids, '{}'), $3::text[])) AS m
+          )
+        WHERE week_number = $1 AND year = $2
+      `, [weekNum, year, mixIds]);
+      console.log(`  ✓ DJ-миксы недели: добавлено ${mixIds.length}`);
+    } else {
+      console.log('  · DJ-миксов за последние 7 дней нет — пакет только из треков');
+    }
+  } catch (e) {
+    // mix_ids колонки может не быть до применения migration 104 —
+    // не валим основной flow релиза из-за миксов.
+    console.warn('  ! mix attach skipped:', e.message);
+  }
+
   // Auto-generate radio pickups for new tracks
   const STATIONS = [
     { name: 'Европа Плюс', cities: ['Москва', 'Санкт-Петербург', 'Казань', 'Сочи'] },

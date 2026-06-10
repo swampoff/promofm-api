@@ -1261,7 +1261,8 @@ app.post('/player-status', requireAuth, async (c) => {
 // WEEKLY RELEASES + DOWNLOAD + ROTATION REPORTS (radio_station role)
 // ════════════════════════════════════════════════════════════════════
 
-// GET /weekly-releases/current — Current weekly release with tracks (radio-only access shows download URLs)
+// GET /weekly-releases/current — Current weekly release with tracks + DJ mixes
+// (radio-only access shows download URLs)
 app.get('/weekly-releases/current', requireAuth, requireRole('radio_station'), async (c) => {
   try {
     const { pool } = await import('./db-client.tsx');
@@ -1275,23 +1276,49 @@ app.get('/weekly-releases/current', requireAuth, requireRole('radio_station'), a
     const release = releaseRes.rows[0];
     const trackIds = release.track_ids || [];
 
-    if (!trackIds.length) {
-      return c.json({ success: true, data: { ...release, tracks: [] } });
+    let tracks: any[] = [];
+    if (trackIds.length) {
+      const tracksRes = await pool.query(
+        `SELECT t.id, t.title, t.artist_name, t.genre, t.duration, t.audio_url, t.cover_url, t.release_date,
+                 ap.slug as artist_slug, ap.is_verified as artist_verified
+          FROM tracks t LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
+          WHERE t.id = ANY($1) ORDER BY t.created_at DESC`,
+        [trackIds]
+      );
+      tracks = tracksRes.rows.map((t: any) => ({
+        ...t,
+        downloadUrl: `/server/api/radio/tracks/${t.id}/download`,
+      }));
     }
 
-    const tracksRes = await pool.query(
-      `SELECT t.id, t.title, t.artist_name, t.genre, t.duration, t.audio_url, t.cover_url, t.release_date,
-               ap.slug as artist_slug, ap.is_verified as artist_verified
-        FROM tracks t LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
-        WHERE t.id = ANY($1) ORDER BY t.created_at DESC`,
-      [trackIds]
-    );
-    const tracks = tracksRes.rows.map((t: any) => ({
-      ...t,
-      downloadUrl: `/server/api/radio/tracks/${t.id}/download`,
-    }));
+    // DJ-миксы недели (migration 104 mix_ids — try/catch до применения).
+    let mixes: any[] = [];
+    try {
+      const mixIdsRes = await pool.query(
+        `SELECT mix_ids FROM weekly_releases WHERE id = $1`, [release.id]
+      );
+      const mixIds: string[] = mixIdsRes.rows[0]?.mix_ids || [];
+      if (mixIds.length) {
+        const mixesRes = await pool.query(
+          `SELECT m.id, m.title, m.genre, m.duration, m.audio_url, m.cover_url, m.bpm_range,
+                  COALESCE(NULLIF(dp.dj_name, ''), dp.data->>'djName', 'DJ') AS dj_name
+            FROM dj_mixes m
+            LEFT JOIN dj_profiles dp ON dp.user_id = m.dj_id
+            WHERE m.id = ANY($1)
+              AND m.moderation_status = 'published' AND m.is_hidden = false
+            ORDER BY array_position($1::text[], m.id)`,
+          [mixIds]
+        );
+        mixes = mixesRes.rows.map((m: any) => ({
+          ...m,
+          downloadUrl: `/server/api/radio/mixes/${m.id}/download`,
+        }));
+      }
+    } catch (mixErr) {
+      console.warn('[radio weekly] mixes skipped:', String(mixErr));
+    }
 
-    return c.json({ success: true, data: { ...release, tracks } });
+    return c.json({ success: true, data: { ...release, tracks, mixes } });
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
   }
@@ -1331,6 +1358,63 @@ app.get('/tracks/:id/download', requireAuth, requireRole('radio_station'), async
 
     // Redirect to audio file URL (signed not needed since audio_url is public)
     return c.redirect(track.audio_url, 302);
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// GET /mixes/:id/download — auth radio user, log + redirect to mix audio_url.
+// Зеркало /tracks/:id/download для DJ-миксов из недельного пакета
+// (PROMO.FM P0 #5, migration 104). dj_mixes.id — TEXT (не uuid).
+app.get('/mixes/:id/download', requireAuth, requireRole('radio_station'), async (c) => {
+  try {
+    const mixId = c.req.param('id');
+    const userId = (c as any).get('userId') as string;
+    const { pool } = await import('./db-client.tsx');
+
+    // Moderation-gate: радио качает только published + не-скрытые миксы
+    // (тот же принцип что gate в /tracks/:id/download на статус трека).
+    const mr = await pool.query(
+      `SELECT id, title, audio_url, moderation_status, is_hidden
+         FROM dj_mixes WHERE id = $1 LIMIT 1`,
+      [mixId]
+    );
+    if (mr.rows.length === 0) return c.json({ success: false, error: 'Mix not found' }, 404);
+    const mix = mr.rows[0];
+    if (!mix.audio_url) return c.json({ success: false, error: 'Audio file not available' }, 404);
+    if (mix.moderation_status !== 'published' || mix.is_hidden) {
+      return c.json({ success: false, error: 'Микс не опубликован' }, 403);
+    }
+
+    // Informational: из какого недельного пакета скачан
+    let weeklyReleaseId: string | null = null;
+    try {
+      const wr = await pool.query(
+        `SELECT id::text AS id FROM weekly_releases
+          WHERE is_published = true AND $1 = ANY(mix_ids)
+          ORDER BY release_date DESC LIMIT 1`,
+        [mixId]
+      );
+      weeklyReleaseId = wr.rows[0]?.id || null;
+    } catch { /* mix_ids колонки нет до migration 104 — лог без release id */ }
+
+    const sp = await pool.query(`SELECT data->>'stationName' as station_name FROM profiles WHERE user_id = $1`, [userId]);
+    const stationName = sp.rows[0]?.station_name || null;
+
+    try {
+      await pool.query(
+        `INSERT INTO mix_downloads_by_radio (user_id, station_name, mix_id, weekly_release_id, ip_addr, user_agent)
+          VALUES ($1, $2, $3, $4, $5, $6)`,
+        [userId, stationName, mixId, weeklyReleaseId,
+         c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
+         c.req.header('user-agent') || '']
+      );
+    } catch (logErr) {
+      // Таблицы нет до migration 104 — отдаём файл, лог best-effort.
+      console.warn('[radio mix download] log skipped:', String(logErr));
+    }
+
+    return c.redirect(mix.audio_url, 302);
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
   }
