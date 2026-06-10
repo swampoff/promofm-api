@@ -1071,6 +1071,102 @@ function inCurrentMonth(iso: string | undefined): boolean {
 }
 
 // GET /finances/overview — балансы DJ (рассчитываются из событий + транзакций)
+// GET /mix-downloads/summary — агрегат "мой микс скачали N станций"
+// и "всего скачиваний за N дней". Источник: mix_downloads_by_radio
+// (migration 104 из PR #215). До миграции таблицы нет — возвращаем
+// нули через try/catch вместо 500.
+app.get('/mix-downloads/summary', requireAuth, requireDjRole, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const days = Math.max(1, Math.min(365, parseInt(c.req.query('days') || '30')));
+
+    // 4 запроса в Promise.all — totals, по станциям top-20, timeline по
+    // дням, top миксов dj по числу скачиваний. Если таблицы ещё нет
+    // (миграция 104 не применена) — каждый падает в graceful default.
+    const noMixes: any = { rows: [] };
+    const [totals, byStation, timeline, topMixes] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::int AS downloads,
+                COUNT(DISTINCT user_id)::int AS stations,
+                COUNT(DISTINCT mix_id)::int AS mixes
+           FROM mix_downloads_by_radio d
+           JOIN dj_mixes m ON m.id = d.mix_id
+          WHERE m.dj_id = $1
+            AND d.downloaded_at >= NOW() - INTERVAL '1 day' * $2`,
+        [userId, days]
+      ).catch(() => ({ rows: [{ downloads: 0, stations: 0, mixes: 0 }] })),
+      pool.query(
+        `SELECT COALESCE(NULLIF(d.station_name, ''), 'Радиостанция') AS station_name,
+                COALESCE(d.city, '') AS city,
+                COUNT(*)::int AS downloads,
+                MAX(d.downloaded_at) AS last_download
+           FROM mix_downloads_by_radio d
+           JOIN dj_mixes m ON m.id = d.mix_id
+          WHERE m.dj_id = $1
+            AND d.downloaded_at >= NOW() - INTERVAL '1 day' * $2
+          GROUP BY 1, 2
+          ORDER BY downloads DESC, last_download DESC
+          LIMIT 20`,
+        [userId, days]
+      ).catch(() => noMixes),
+      pool.query(
+        `SELECT DATE(d.downloaded_at)::text AS day, COUNT(*)::int AS count
+           FROM mix_downloads_by_radio d
+           JOIN dj_mixes m ON m.id = d.mix_id
+          WHERE m.dj_id = $1
+            AND d.downloaded_at >= NOW() - INTERVAL '1 day' * $2
+          GROUP BY 1 ORDER BY 1`,
+        [userId, days]
+      ).catch(() => noMixes),
+      pool.query(
+        `SELECT m.id, m.title, m.cover_url,
+                COUNT(d.id)::int AS downloads,
+                COUNT(DISTINCT d.user_id)::int AS stations,
+                MAX(d.downloaded_at) AS last_download
+           FROM dj_mixes m
+           LEFT JOIN mix_downloads_by_radio d
+             ON d.mix_id = m.id
+            AND d.downloaded_at >= NOW() - INTERVAL '1 day' * $2
+          WHERE m.dj_id = $1 AND m.is_hidden = false
+          GROUP BY m.id, m.title, m.cover_url
+          ORDER BY downloads DESC, m.created_at DESC
+          LIMIT 10`,
+        [userId, days]
+      ).catch(() => noMixes),
+    ]);
+
+    return c.json({
+      success: true,
+      data: {
+        periodDays: days,
+        totals: {
+          downloads: totals.rows[0]?.downloads || 0,
+          stations: totals.rows[0]?.stations || 0,
+          mixes: totals.rows[0]?.mixes || 0,
+        },
+        byStation: byStation.rows.map((r: any) => ({
+          stationName: r.station_name,
+          city: r.city || null,
+          downloads: r.downloads,
+          lastDownload: r.last_download instanceof Date ? r.last_download.toISOString() : r.last_download,
+        })),
+        timeline: timeline.rows.map((r: any) => ({ day: r.day, count: r.count })),
+        topMixes: topMixes.rows.map((r: any) => ({
+          id: r.id,
+          title: r.title,
+          coverUrl: r.cover_url || null,
+          downloads: r.downloads,
+          stations: r.stations,
+          lastDownload: r.last_download instanceof Date ? r.last_download.toISOString() : r.last_download,
+        })),
+      },
+    });
+  } catch (error: any) {
+    console.error('[dj-studio] mix-downloads/summary error:', error);
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
 app.get('/finances/overview', requireAuth, requireDjRole, async (c) => {
   try {
     const userId = await getUserId(c);
