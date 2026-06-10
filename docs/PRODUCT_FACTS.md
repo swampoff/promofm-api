@@ -236,6 +236,95 @@ publication fee. Source: `tracks-page.tsx:775` (Promomusicfigma) +
 
 ---
 
+## PROMO.CHECK — watermark, fingerprint, airplay monitoring
+
+**Источник истины:** `src/promo-check-routes.tsx` +
+`src/track-moderation-routes.tsx:312-328` +
+`src/radio-routes.tsx:1394-1448` + Python-инжектор на VPS
+(`/opt/promofm-promo-check/fingerprinter.py`, не в git-репо).
+
+### Что это и зачем
+Система автоматического учёта ротаций треков платформы на радио.
+**Радиостанция НЕ ведёт ручных отчётов** в РАО/ВОИС/чарты по нашим
+трекам — мы сами фиксируем каждое проигрывание через watermark в
+файле. Используется и для маркетинга («автоучёт ротаций»), и для
+анти-пиратства, и для статистики артиста в кабинете «Мои треки».
+
+### Когда прошивается watermark — НЕ при скачивании радио, а при upload артистом
+
+Это критично для маркетинговой формулировки.
+
+1. **Артист загружает трек** через `TrackUploadPage`
+   (`POST /api/tracks` или `POST /track-moderation/submit`).
+2. **Fire-and-forget queue** в `track-moderation-routes.tsx:325-328`:
+   ```ts
+   if (audioUrl) {
+     fetch(`http://127.0.0.1:3000/server/api/promo-check/process/${track.id}`,
+           { method: 'POST' }).catch(() => {});
+   }
+   ```
+   То же самое mirror'ится из `/api/tracks` (комментарий в коде L323).
+3. **`POST /promo-check/process/:trackId`** (`promo-check-routes.tsx:165-198`):
+   - INSERT в `promo_check_fingerprints` со `status='pending'`,
+     `watermark_id = gen_random_uuid()::text`, `ON CONFLICT (track_id)
+     DO UPDATE SET status = 'pending'` (re-process idempotent).
+   - Spawn detached Python: `spawn('python3', ['/opt/promofm-promo-check/fingerprinter.py', '--track-id', trackId], { detached: true, stdio: 'ignore' }); child.unref();`
+4. **`fingerprinter.py`** (на VPS, не в репо) читает оригинальный
+   MP3, прошивает watermark, генерит fingerprint, обновляет
+   `promo_check_fingerprints` (`fingerprint`, `duration`,
+   `status='ready'` или `'error'`).
+
+**Следствие:** к моменту, когда радио скачивает трек, файл на
+диске уже содержит watermark. Не «прошивается при скачивании», а
+«уже прошит». Радио получает готовый идентифицируемый файл.
+
+### Что делает download для радио — только логирование
+
+`radio-routes.tsx:1399` `GET /tracks/:id/download`:
+- Проверка `moderation_status IN ('published', 'upcoming')`.
+- Получение `weekly_release_id` (informational) и `stationName`.
+- **INSERT в `track_downloads_by_radio`** (`user_id`, `station_name`,
+  `track_id`, `weekly_release_id`, `ip_addr`, `user_agent`) — это
+  логирование скачивания, НЕ инжекция watermark.
+- `streamTrackAudio(c, track.audio_url, filename)` —
+  `track-download-helper.tsx:191` — простой `createReadStream` +
+  `Readable.toWeb` без модификации содержимого.
+
+### Слушающий сервис и хранилища
+
+- **Мониторинг 7 станций seed:** `src/migrations/010_promo_check_monitoring_seed.sql` (`promo_check_monitoring` rows со
+  `station_id`, `station_name`, `stream_url`, `active`).
+- **Детекции:** `promo_check_detections` (`track_id`,
+  `station_id`, `watermark_confirmed bool`, `detected_at`).
+- **API статистики:** `promo-check-routes.tsx:24-71`
+  `GET /stats/:trackId` (rotations по станциям + count
+  `watermark_confirmed = true`); `:75-111` `GET /artist/:artistId`
+  (агрегация по треку артиста); `:146-163` `GET /stations`
+  (список мониторинга с `last_scanned_at`, `error_count`).
+
+### Что НЕ работает / в активной разработке (по состоянию 2026-06-05)
+
+- **Кабинет «отчёты по эфирам» в radio-UI** — сама система-движок
+  работает, но визуальная панель в `src/radio/components/*` пока
+  не зарелизена. На LP `/radio-stations` помечено «в ближайшем
+  релизе».
+- **Сравнение детекций с РАО-отчётами** (диспутный механизм) — нет.
+
+### Где НЕ повторять ошибку маркетинга
+
+- Watermark **не прошивается при скачивании радио**. Прошивается
+  при upload артистом. LP-формулировка должна быть «платформа
+  автоматически прошивает в каждый трек watermark, радио скачивает
+  уже идентифицируемый файл».
+- Аудит-агент в сессии 2026-06-05 ошибочно заключил что watermark
+  «не реализован» потому что не нашёл инжекции в
+  `streamTrackAudio` — но инжекция идёт через Python-процесс на
+  VPS до download'а. Это типичный артефакт reading-from-code
+  без VPS-доступа. Перед утверждениями типа «фича X не работает»
+  цитируй файл — но и помни про детач'ные процессы вне git-репо.
+
+---
+
 ## Venue cabinet
 
 ### Subscription tiers (venue-side, NOT artist)
