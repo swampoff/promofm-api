@@ -175,19 +175,16 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // the period is computed from `subscriptionExpiresAt` which only
   // gets extended forward, never duplicated.
   //
-  // Source-of-truth for VENUE_PLANS lives in
-  // src/venue-billing-routes.tsx; this table duplicates the
-  // minimum fields the webhook needs to avoid pulling the Hono app
-  // graph into this module.
+  // Money source of truth — shared venue-plans-constants.tsx
+  // (PR 2026-06-10). Раньше тут жил VENUE_PLANS_LOCAL дубликат с
+  // комментарием «duplicates minimum fields» — drift-риск как DJ_PLANS
+  // (PR #221). venue-plans-constants — листовой модуль (без Hono app
+  // graph), dynamic import дешёвый.
   if (session.type === 'venue_subscription' && session.metadata?.planKey) {
     try {
-      const VENUE_PLANS_LOCAL: Record<string, { name: string; price_month: number; price_year: number }> = {
-        start:    { name: 'Старт',   price_month: 4990,  price_year: 49900 },
-        business: { name: 'Бизнес',  price_month: 9990,  price_year: 99900 },
-        network:  { name: 'Сеть',    price_month: 14990, price_year: 149900 },
-      };
+      const { VENUE_PLANS_CORE } = await import('./venue-plans-constants.tsx');
       const planKey = session.metadata.planKey;
-      const plan = VENUE_PLANS_LOCAL[planKey];
+      const plan = VENUE_PLANS_CORE[planKey as keyof typeof VENUE_PLANS_CORE];
       if (plan) {
         const interval = session.metadata.interval === 'year' ? 'year' : 'month';
         const daysToAdd = interval === 'year' ? 365 : 30;
