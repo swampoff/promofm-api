@@ -891,9 +891,13 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   }
 
   // ─── Fulfill beat_purchase (Beats Marketplace) ───
+  // Idempotency на YK retry (review #180 BLOCKER 2): purchaseId
+  // детерминирован от session.orderId, ON CONFLICT (id) DO NOTHING
+  // RETURNING id → rowCount=0 значит повтор → пропускаем
+  // commission/increment/SSE/upsertBeat (status='sold' для exclusive).
   if (session.metadata?.type === 'beat_purchase' && session.metadata?.beatId) {
     try {
-      const { getBeat, upsertBeat } = await import('./db.tsx');
+      const { getBeat, upsertBeat, incrementBeatPurchases } = await import('./db.tsx');
       const { pool: cPool3 } = await import('./db-client.tsx');
       const { recordPlatformCommission } = await import('./platform-revenue.tsx');
       const beatId = session.metadata.beatId;
@@ -907,7 +911,10 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         const price = session.amount;
         const commission = Math.round(price * 0.1);
         const producerPayout = price - commission;
-        const purchaseId = 'bp_' + Math.random().toString(36).substring(2, 12);
+        // Детерминированный purchaseId от orderId — повторный YK webhook
+        // с тем же orderId генерирует тот же purchaseId → ON CONFLICT
+        // (id) сработает как защита от дубля.
+        const purchaseId = `bp_${session.orderId}`;
 
         const purchase = {
           id: purchaseId, beatId, beatTitle: beat.title,
@@ -917,31 +924,53 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           createdAt: now,
         };
 
-        await cPool3.query(
+        const insertResult = await cPool3.query(
           `INSERT INTO beat_purchases (id, beat_id, buyer_id, producer_id, amount, license_type, status, data, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7::jsonb, NOW())
-           ON CONFLICT (id) DO NOTHING`,
+           ON CONFLICT (id) DO NOTHING
+           RETURNING id`,
           [purchaseId, beatId, buyerId, beat.producerId || null, price, licenseType,
            JSON.stringify(purchase)]
         );
 
-        beat.purchases = (beat.purchases || 0) + 1;
-        if (licenseType === 'exclusive') beat.status = 'sold';
-        await upsertBeat(beatId, JSON.stringify(beat));
+        if (insertResult.rowCount === 0) {
+          // Повторная webhook-доставка от YK — purchase уже есть.
+          // НЕ инкрементируем counter, НЕ платим повторно commission,
+          // НЕ шлём дубликат SSE.
+          log.info({ beatId, purchaseId, orderId: session.orderId }, 'beat_purchase_retry_deduplicated');
+        } else {
+          // Atomic counter increment (review #180 BLOCKER 1) — заменяет
+          // race-prone get-modify-set (`beat.purchases = (beat.purchases||
+          // 0)+1; upsertBeat(...)`).
+          await incrementBeatPurchases(beatId);
 
-        await recordPlatformCommission('beat', beat.title, price, commission, producerPayout, {
-          producerId: beat.producerId, producerName: beat.producer, buyerId, buyerName,
-        });
+          // exclusive license — atomic transition status='sold'. Отдельный
+          // UPDATE по jsonb_set, не блокируется counter-increment'ом
+          // (Postgres сериализует UPDATE'ы на одной row).
+          if (licenseType === 'exclusive') {
+            await cPool3.query(
+              `UPDATE beats
+                  SET data = jsonb_set(data, '{status}', '"sold"'),
+                      updated_at = NOW()
+                WHERE id = $1`,
+              [beatId]
+            );
+          }
 
-        try {
-          const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(beat.producerId, {
-            type: 'beat_purchased',
-            data: { title: 'Продажа бита', purchaseId, beatId, licenseType, price, producerPayout },
+          await recordPlatformCommission('beat', beat.title, price, commission, producerPayout, {
+            producerId: beat.producerId, producerName: beat.producer, buyerId, buyerName,
           });
-        } catch {}
 
-        log.info({ beatId, purchaseId, price, orderId: session.orderId }, 'beat_purchase_fulfilled');
+          try {
+            const { emitSSE } = await import('./sse-routes.tsx');
+            emitSSE(beat.producerId, {
+              type: 'beat_purchased',
+              data: { title: 'Продажа бита', purchaseId, beatId, licenseType, price, producerPayout },
+            });
+          } catch {}
+
+          log.info({ beatId, purchaseId, price, orderId: session.orderId }, 'beat_purchase_fulfilled');
+        }
       }
     } catch (err) {
       log.error({ err, beatId: session.metadata.beatId }, 'beat_purchase_fulfillment_error');

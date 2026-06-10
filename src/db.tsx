@@ -681,7 +681,80 @@ export async function getBeat(beatId: string) {
     .eq('id', beatId)
     .maybeSingle();
   if (error) console.error('[db] getBeat:', error);
-  return data ? (data.data || data) : null;
+  if (!data) return null;
+  // Migration 098: beats всё ещё на jsonb-store (полный KV→native ждёт
+  // в очереди), но delivery-колонки уже native. Мержим: jsonb-содержимое
+  // приоритетно (это body), сверху native delivery-fields, чтобы handler'ы
+  // видели fileUrl/fileBytes/fileMime/previewUrl как обычные поля.
+  // Review #180: try/catch на JSON.parse — битый jsonb в одной строке
+  // больше не валит весь endpoint. Fallback на пустой body — handler
+  // увидит only native delivery cols + id и решит как обрабатывать.
+  const body = (data as any).data || data;
+  let merged: any = {};
+  if (typeof body === 'string') {
+    try {
+      merged = JSON.parse(body);
+    } catch (parseErr) {
+      console.error('[db] getBeat: malformed jsonb body for', beatId, parseErr);
+      merged = { id: beatId };
+    }
+  } else {
+    merged = { ...body };
+  }
+  if ((data as any).file_url    != null) merged.fileUrl    = (data as any).file_url;
+  if ((data as any).file_bytes  != null) merged.fileBytes  = Number((data as any).file_bytes);
+  if ((data as any).file_mime   != null) merged.fileMime   = (data as any).file_mime;
+  if ((data as any).preview_url != null) merged.previewUrl = (data as any).preview_url;
+  return merged;
+}
+
+/**
+ * Atomic UPDATE delivery-fields бита после успешного producer upload'а.
+ * Migration 098 — delivery. Owner-check защищает от подмены чужого бита.
+ * Возвращает true если row найден и принадлежит этому producer'у.
+ */
+export async function setBeatFile(
+  beatId: string,
+  producerId: string,
+  file: { url: string; bytes: number; mime: string },
+): Promise<boolean> {
+  const { pool } = await import('./db-client.tsx');
+  // owner-check читает producer_id ИЛИ data->>'producerId' для совместимости
+  // с beats до KV→native refactor'а.
+  const r = await pool.query(
+    `UPDATE beats
+        SET file_url = $1, file_bytes = $2, file_mime = $3, updated_at = NOW()
+      WHERE id = $4
+        AND (data->>'producerId' = $5 OR data->>'producer_id' = $5)
+      RETURNING id`,
+    [file.url, file.bytes, file.mime, beatId, producerId]
+  );
+  return r.rowCount! > 0;
+}
+
+/**
+ * Atomic increment beat.purchases — закрывает bug D (race на counter).
+ * До этого упомянутый паттерн get→mutate→set в webhook теряет
+ * counter под concurrent покупками (rare но возможно).
+ *
+ * UPDATE на native колонке невозможен пока beats на jsonb-store, поэтому
+ * пишем через jsonb_set с atomic SET data['purchases'] = ((data->>'purchases')::int + 1).
+ * Это safe в Postgres — UPDATE атомарен на row-level, concurrent UPDATE'ы
+ * сериализуются.
+ */
+export async function incrementBeatPurchases(beatId: string): Promise<void> {
+  const { pool } = await import('./db-client.tsx');
+  await pool.query(
+    `UPDATE beats
+        SET data = jsonb_set(
+              data,
+              '{purchases}',
+              to_jsonb(COALESCE((data->>'purchases')::int, 0) + 1)
+            ),
+            updated_at = NOW()
+      WHERE id = $1`,
+    [beatId]
+  );
 }
 
 export async function upsertBeat(beatId: string, beat: Record<string, any>) {

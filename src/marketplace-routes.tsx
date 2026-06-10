@@ -54,6 +54,8 @@ import { Hono } from 'hono';
 import { pool as mpPool } from './db-client.tsx';
 import {
   deleteBeat, getBeat, getBeats, upsertBeat, upsertNotification,
+  // beats delivery (migration 098):
+  setBeatFile, incrementBeatPurchases,
   // beat_reviews (native cols since migration 066):
   getBeatReview, upsertBeatReview, listBeatReviewsByBeat,
   getBeatReviewsAggregateStats, findBeatReviewByUser,
@@ -490,6 +492,16 @@ app.post('/beats/:id/purchase', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Beat is not available for purchase' }, 400);
     }
 
+    // Migration 098: блок покупки битов без выложенного файла. До этого
+    // PR'а можно было заплатить за «пустой» бит — деньги принимались,
+    // файла нет → саппорт-нагрузка «оплатил, ничего нет».
+    if (!beat.fileUrl) {
+      return c.json({
+        success: false,
+        error: 'Файл бита ещё не выложен продюсером. Покупка временно недоступна.',
+      }, 409);
+    }
+
     const price = beat.licenseTypes?.[licenseType] || beat.price || 0;
     if (!price) {
       return c.json({ success: false, error: 'Invalid license type' }, 400);
@@ -553,6 +565,183 @@ app.post('/beats/:id/purchase', requireAuth, async (c) => {
   } catch (error) {
     console.log('POST /beats/:id/purchase error:', error);
     return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// ═══════════════════════════════════════════════
+//  B E A T S  -  D E L I V E R Y
+//  (migration 098)
+// ═══════════════════════════════════════════════
+//
+// Симметрично digital_goods delivery (migration 097): producer
+// загружает файл к биту, buyer'у с completed-покупкой выдаём по
+// access-check'у. До этого PR'а beats marketplace был «order-only».
+
+const BEAT_UPLOAD_DIR = '/opt/promofm-api/uploads/beats';
+const BEAT_MAX_BYTES = 200 * 1024 * 1024; // 200 MB — один бит обычно сильно меньше pack'а
+
+// Allowlist + magic bytes (тот же подход что digital_goods).
+type BeatMagicCheck = (buf: Buffer) => boolean;
+const BEAT_ALLOWED_FORMATS: Record<string, { mime: string; check: BeatMagicCheck }> = {
+  wav:  { mime: 'audio/wav',  check: (b) => b.length >= 12 && b.slice(0,4).toString('ascii') === 'RIFF' && b.slice(8,12).toString('ascii') === 'WAVE' },
+  mp3:  { mime: 'audio/mpeg', check: (b) => b.length >= 3 && (b.slice(0,3).toString('ascii') === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) },
+  flac: { mime: 'audio/flac', check: (b) => b.length >= 4 && b.slice(0,4).toString('ascii') === 'fLaC' },
+  // Beats обычно поставляются как mp3/wav. zip разрешён на случай pack'а
+  // с stems (как минимум стандарт в Splice).
+  zip:  { mime: 'application/zip', check: (b) => b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && (b[2] === 0x03 || b[2] === 0x05 || b[2] === 0x07) },
+};
+
+/**
+ * POST /beats/:id/upload — producer выкладывает файл бита.
+ * Аналогично POST /digital-goods/:id/upload (там подробный комментарий).
+ */
+app.post('/beats/:id/upload', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId') as string;
+    const beatId = c.req.param('id');
+
+    const raw = await getBeat(beatId);
+    if (!raw) return c.json({ success: false, error: 'Бит не найден' }, 404);
+    const beat = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (beat.producerId !== userId) {
+      return c.json({ success: false, error: 'Нельзя загружать файл к чужому биту' }, 403);
+    }
+
+    const body = await c.req.parseBody().catch(() => null);
+    const file = body?.file as File | undefined;
+    if (!file || typeof (file as any).arrayBuffer !== 'function') {
+      return c.json({ success: false, error: 'file обязателен (multipart/form-data)' }, 400);
+    }
+
+    const rawName = String((file as any).name || 'file');
+    const ext = rawName.split('.').pop()?.toLowerCase() || '';
+    const fmt = BEAT_ALLOWED_FORMATS[ext];
+    if (!fmt) {
+      return c.json({
+        success: false,
+        error: `Формат .${ext} не поддерживается. Разрешено: ${Object.keys(BEAT_ALLOWED_FORMATS).join(', ')}`,
+      }, 400);
+    }
+
+    if (typeof file.size === 'number' && file.size > BEAT_MAX_BYTES) {
+      return c.json({
+        success: false,
+        error: `Файл слишком большой (${Math.round(file.size / 1024 / 1024)} MB). Максимум ${BEAT_MAX_BYTES / 1024 / 1024} MB.`,
+      }, 413);
+    }
+
+    const buf = Buffer.from(await file.arrayBuffer());
+    if (buf.byteLength === 0) return c.json({ success: false, error: 'Файл пустой' }, 400);
+    if (buf.byteLength > BEAT_MAX_BYTES) {
+      return c.json({ success: false, error: `Файл слишком большой (${Math.round(buf.byteLength / 1024 / 1024)} MB).` }, 413);
+    }
+
+    if (!fmt.check(buf)) {
+      return c.json({ success: false, error: `Файл не соответствует формату .${ext} (magic bytes mismatch)` }, 400);
+    }
+
+    const nodeFs = await import('node:fs');
+    const nodePath = await import('node:path');
+    if (!nodeFs.existsSync(BEAT_UPLOAD_DIR)) nodeFs.mkdirSync(BEAT_UPLOAD_DIR, { recursive: true });
+
+    const filename = `${beatId}-${crypto.randomUUID()}.${ext}`;
+    const resolvedRoot = nodePath.resolve(BEAT_UPLOAD_DIR);
+    const targetPath = nodePath.resolve(BEAT_UPLOAD_DIR, filename);
+    if (!targetPath.startsWith(resolvedRoot + nodePath.sep)) {
+      return c.json({ success: false, error: 'path escape (impossible)' }, 400);
+    }
+    nodeFs.writeFileSync(targetPath, buf);
+
+    const fileUrl = `/server/uploads/beats/${filename}`;
+    const ok = await setBeatFile(beatId, userId, {
+      url: fileUrl,
+      bytes: buf.byteLength,
+      mime: fmt.mime,
+    });
+    if (!ok) {
+      try { nodeFs.unlinkSync(targetPath); } catch {}
+      return c.json({ success: false, error: 'Бит не найден или принадлежит другому producer\'у' }, 404);
+    }
+
+    return c.json({
+      success: true,
+      data: {
+        fileUrl,
+        fileBytes: buf.byteLength,
+        fileMime: fmt.mime,
+        message: 'Файл бита загружен. Покупатели смогут скачать его после оплаты.',
+      },
+    });
+  } catch (error: any) {
+    console.error('POST /beats/:id/upload error:', error);
+    return c.json({ success: false, error: 'Не удалось загрузить файл' }, 500);
+  }
+});
+
+/**
+ * GET /beats/:id/download — отдать файл бита с access-check.
+ * Аналогично GET /digital-goods/:id/download.
+ *
+ * Access:
+ *   - producer-self (beat.producerId === userId)
+ *   - admin
+ *   - buyer с completed beat_purchases
+ */
+app.get('/beats/:id/download', requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId') as string;
+    const userRole = (c.get('userRole') as string | undefined) || '';
+    const beatId = c.req.param('id');
+
+    const raw = await getBeat(beatId);
+    if (!raw) return c.json({ success: false, error: 'Бит не найден' }, 404);
+    const beat = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!beat.fileUrl) {
+      return c.json({ success: false, error: 'Файл ещё не выложен продюсером' }, 404);
+    }
+
+    let allowed = false;
+    if (beat.producerId === userId) allowed = true;
+    else if (userRole === 'admin') allowed = true;
+    else {
+      const pr = await mpPool.query(
+        `SELECT 1 FROM beat_purchases
+          WHERE beat_id = $1 AND buyer_id = $2 AND status = 'completed'
+          LIMIT 1`,
+        [beatId, userId]
+      );
+      if (pr.rows.length > 0) allowed = true;
+    }
+    if (!allowed) {
+      return c.json({ success: false, error: 'Нужно купить бит чтобы его скачать' }, 403);
+    }
+
+    const nodeFs = await import('node:fs');
+    const nodePath = await import('node:path');
+    const filename = decodeURIComponent(String(beat.fileUrl).replace('/server/uploads/beats/', ''));
+    if (!filename || filename.includes('..') || filename.includes('/') || filename.includes('\\') || filename.includes('\0') || filename.startsWith('.')) {
+      return c.json({ success: false, error: 'invalid stored filename' }, 500);
+    }
+    const resolvedRoot = nodePath.resolve(BEAT_UPLOAD_DIR);
+    const filePath = nodePath.resolve(BEAT_UPLOAD_DIR, filename);
+    if (!filePath.startsWith(resolvedRoot + nodePath.sep)) {
+      return c.json({ success: false, error: 'path escape (impossible)' }, 500);
+    }
+    if (!nodeFs.existsSync(filePath)) {
+      console.error('[beats] file missing on disk:', filePath);
+      return c.json({ success: false, error: 'Файл недоступен. Свяжитесь с поддержкой.' }, 500);
+    }
+
+    const buf = nodeFs.readFileSync(filePath);
+    const safeTitle = String(beat.title || 'beat').replace(/[^a-zA-Z0-9\-_.]/g, '_').slice(0, 80);
+    const downloadFilename = `${safeTitle}.${filename.split('.').pop()}`;
+    c.header('Content-Type', beat.fileMime || 'application/octet-stream');
+    c.header('Content-Disposition', `attachment; filename="${downloadFilename}"`);
+    c.header('Cache-Control', 'private, no-store');
+    return c.body(buf);
+  } catch (error: any) {
+    console.error('GET /beats/:id/download error:', error);
+    return c.json({ success: false, error: 'Ошибка скачивания' }, 500);
   }
 });
 
