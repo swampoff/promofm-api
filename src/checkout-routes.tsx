@@ -905,8 +905,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       if (raw) {
         const beat = typeof raw === 'string' ? JSON.parse(raw) : raw;
         const price = session.amount;
-        const commission = Math.round(price * 0.1);
-        const producerPayout = price - commission;
+        const { splitMarketplaceAmount: splitBp } = await import('./marketplace-commission.tsx');
+        const { commission, payout: producerPayout } = splitBp(price);
         const purchaseId = 'bp_' + Math.random().toString(36).substring(2, 12);
 
         const purchase = {
@@ -961,8 +961,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       const good = await getDigitalGood(goodId);
       if (good) {
         const price = session.amount;
-        const commission = Math.round(price * 0.1);
-        const producerPayout = price - commission;
+        const { splitMarketplaceAmount: splitDg } = await import('./marketplace-commission.tsx');
+        const { commission, payout: producerPayout } = splitDg(price);
         const purchaseId = 'dgp_' + Math.random().toString(36).substring(2, 12);
 
         const purchase = {
@@ -1160,7 +1160,10 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // Record platform revenue (using existing platform-revenue if available)
   try {
     const { recordRevenue } = await import('./platform-revenue.tsx');
-    const commissionRate = session.type === 'donation' ? 0 : 0.1; // 10% commission except donations
+    const { MARKETPLACE_COMMISSION_RATE } = await import('./marketplace-commission.tsx');
+    // 10% на любые non-donation покупки. Donation — 0 (custom withdrawal
+    // commission tier-aware в donations-routes.tsx, не здесь).
+    const commissionRate = session.type === 'donation' ? 0 : MARKETPLACE_COMMISSION_RATE;
     await recordRevenue({
       channel: session.type === 'purchase' ? (session.metadata.itemType || 'purchase') : session.type,
       description: session.description,

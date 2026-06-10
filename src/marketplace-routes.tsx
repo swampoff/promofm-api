@@ -103,13 +103,14 @@ async function recordPlatformCommission(
   producerPayout: number,
   meta: Record<string, any>,
 ) {
+  const { MARKETPLACE_COMMISSION_RATE } = await import('./marketplace-commission.tsx');
   await recordRevenue({
     channel: `marketplace_${type}`,
     description: itemTitle,
     grossAmount: totalPrice,
     platformRevenue: commission,
     payoutAmount: producerPayout,
-    commissionRate: 0.10,
+    commissionRate: MARKETPLACE_COMMISSION_RATE,
     payerId: meta.buyerId || '',
     payerName: meta.buyerName || 'Покупатель',
     payeeId: meta.producerId,
@@ -895,8 +896,8 @@ app.post('/services/:id/order', requireAuth, async (c) => {
     const basePrice = service.basePrice || service.price || 0;
     const urgencyMult = urgency === 'urgent' ? 2 : urgency === 'fast' ? 1.5 : 1;
     const totalPrice = Math.round(basePrice * urgencyMult);
-    const commission = Math.round(totalPrice * 0.1);
-    const producerPayout = totalPrice - commission;
+    const { splitMarketplaceAmount } = await import('./marketplace-commission.tsx');
+    const { commission, payout: producerPayout } = splitMarketplaceAmount(totalPrice);
 
     const orderId = genId('sord');
     const order = {
@@ -1261,9 +1262,12 @@ app.put('/contracts/:id/milestones/:mid', requireAuth, async (c) => {
         amount: milestone.amount,
       });
 
-      // Записать комиссию платформы за этап
-      const msCommission = Math.round(milestone.amount * 0.1);
-      const msPayout = milestone.amount - msCommission;
+      // Записать комиссию платформы за этап. Сейчас unreachable
+      // после фикса escrow-gate в PR #223 (action='approve' возвращает
+      // 503 ДО этого блока). Оставляю shared split на случай восстановления
+      // через escrow, чтобы не плодить рассинхрон с beat/digital webhook'ами.
+      const { splitMarketplaceAmount: splitMs } = await import('./marketplace-commission.tsx');
+      const { commission: msCommission, payout: msPayout } = splitMs(milestone.amount);
       await recordPlatformCommission(
         'service',
         `${contract.serviceTitle} - ${milestone.title}`,
