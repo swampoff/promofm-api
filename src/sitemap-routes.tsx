@@ -78,6 +78,9 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   { loc: '/for-producers', changefreq: 'weekly', priority: '0.7' },
   { loc: '/for-engineers', changefreq: 'weekly', priority: '0.6' },
   { loc: '/for-venues', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/promotion', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/get-in-chart', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/tv-rotation', changefreq: 'weekly', priority: '0.8' },
   { loc: '/for-tv', changefreq: 'monthly', priority: '0.6' },
   { loc: '/for-labels', changefreq: 'weekly', priority: '0.7' },
   { loc: '/for-media', changefreq: 'monthly', priority: '0.6' },
@@ -355,3 +358,4 @@ sitemapRoutes.post('/sitemap/indexnow', requireAdminOrKey, async (c) => {
 });
 
 export default sitemapRoutes;
+
