@@ -13,13 +13,11 @@ import { getPaymentMethods, upsertPaymentSession, getPaymentSession, insertPayme
 import { recordRevenue } from './platform-revenue.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
-// Same plan table as venue-billing-routes.tsx — duplicated to avoid
-// a circular import (routes → helpers → routes). Keep in sync.
-const VENUE_PLANS: Record<string, { name: string; price_month: number; price_year: number }> = {
-  start:    { name: 'Старт',   price_month: 4990,  price_year: 49900 },
-  business: { name: 'Бизнес',  price_month: 9990,  price_year: 99900 },
-  network:  { name: 'Сеть',    price_month: 14990, price_year: 149900 },
-};
+// Money source of truth — shared venue-plans-constants.tsx (PR 2026-06-10).
+// Раньше тут была копия (комментарий «duplicated to avoid circular
+// import»). venue-plans-constants — листовой модуль без импортов
+// routes/helpers, так что circular-import больше не возникает.
+import { VENUE_PLANS_CORE as VENUE_PLANS } from './venue-plans-constants.tsx';
 
 /**
  * Attempt to charge the venue's saved card for the first paid month

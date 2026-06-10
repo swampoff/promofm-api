@@ -61,24 +61,25 @@ import { emitSSE } from './sse-routes.tsx';
 const app = new Hono();
 
 // ──────────────────────────────────────────────────────────────────
-// VENUE_PLANS — source of truth for backend pricing.
+// VENUE_PLANS — money source of truth. Реэкспорт из shared-модуля
+// venue-plans-constants.tsx (PR 2026-06-10): раньше таблица была
+// продублирована тут + в venue-billing-helpers + в checkout-routes,
+// drift-риск как у DJ_PLANS (PR #221). Реэкспорт держит старый
+// импорт-контракт (другие места импортируют VENUE_PLANS отсюда)
+// при едином источнике.
 //
 // Mirrors the frontend `venue/constants/subscription-plans.ts` so
 // the API can validate amount-tampering and pick the right amount
-// at recurring-charge time. Keep in sync whenever frontend changes.
+// at recurring-charge time. Frontend правят ОТДЕЛЬНО — это
+// бэкенд-зеркало; при расхождении amount-check на /subscribe
+// поймает (берёт цену отсюда, не из body).
+//
+// enterprise has no fixed price — manual contracts, not subscribable.
 // ──────────────────────────────────────────────────────────────────
 
-export const VENUE_PLANS: Record<string, {
-  name: string;
-  price_month: number;
-  price_year: number;
-}> = {
-  start:    { name: 'Старт',   price_month: 4990,  price_year: 49900 },
-  business: { name: 'Бизнес',  price_month: 9990,  price_year: 99900 },
-  network:  { name: 'Сеть',    price_month: 14990, price_year: 149900 },
-  // enterprise has no fixed price — manual contracts. Not subscribable
-  // via this endpoint.
-};
+import { VENUE_PLANS_CORE } from './venue-plans-constants.tsx';
+
+export const VENUE_PLANS = VENUE_PLANS_CORE;
 
 function parse(data: any): any {
   if (!data) return null;
