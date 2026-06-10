@@ -1,0 +1,574 @@
+src/ai-agent.ts(111,37): error TS2304: Cannot find name 'newArticles'.
+src/ai-agent.ts(116,23): error TS2304: Cannot find name 'newArticles'.
+src/ai-agent.ts(116,39): error TS2304: Cannot find name 'pending'.
+src/ai-agent.ts(120,23): error TS2304: Cannot find name 'newArticles'.
+src/ai-agent.ts(120,53): error TS2304: Cannot find name 'newArticles'.
+src/ai-agent.ts(31,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/ai-charts-routes.tsx(32,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/api-docs-routes.tsx(10,36): error TS2339: Property 'dir' does not exist on type 'ImportMeta'.
+src/api-docs-routes.tsx(10,67): error TS2339: Property 'dir' does not exist on type 'ImportMeta'.
+src/artist-profile-routes.tsx(162,5): error TS1117: An object literal cannot have multiple properties with the same name.
+src/artist-profile-routes.tsx(190,34): error TS2352: Conversion of type 'ArtistProfile' to type 'Record<string, unknown>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+src/artist-profile-routes.tsx(460,31): error TS2769: No overload matches this call.
+src/artist-profile-routes.tsx(463,9): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/auth-routes.tsx(1268,26): error TS2769: No overload matches this call.
+src/auth-routes.tsx(1269,35): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/auth-routes.tsx(1346,26): error TS2769: No overload matches this call.
+src/auth-routes.tsx(1350,45): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/auth-routes.tsx(1366,26): error TS2769: No overload matches this call.
+src/auth-routes.tsx(1376,22): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/auth-routes.tsx(1390,26): error TS2769: No overload matches this call.
+src/auth-routes.tsx(1391,40): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/auth-routes.tsx(160,35): error TS2339: Property 'response' does not exist on type '{ ok: true; body: any; } | { ok: false; response: any; }'.
+src/auth-routes.tsx(256,100): error TS2353: Object literal may only specify known properties, and 'application' does not exist in type '{ email: string; name: string; role: string; via?: string; needsApproval?: boolean; }'.
+src/auth-routes.tsx(298,35): error TS2339: Property 'response' does not exist on type '{ ok: true; body: any; } | { ok: false; response: any; }'.
+src/auth-routes.tsx(415,39): error TS2339: Property 'response' does not exist on type '{ ok: true; body: any; } | { ok: false; response: any; }'.
+src/auth-routes.tsx(568,27): error TS2769: No overload matches this call.
+src/auth-routes.tsx(569,29): error TS2769: No overload matches this call.
+src/auth-routes.tsx(570,30): error TS2769: No overload matches this call.
+src/auth-routes.tsx(590,43): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/auth-routes.tsx(626,57): error TS2345: Argument of type '{ timestamp: string; actorId: unknown; actorEmail: unknown; actorRole: unknown; targetUserId: any; previousRole: any; newRole: any; reason: any; ip: string; }' is not assignable to parameter of type 'RoleChangeLog'.
+src/auth-routes.tsx(649,26): error TS2769: No overload matches this call.
+src/banner-routes.tsx(128,26): error TS2769: No overload matches this call.
+src/banner-routes.tsx(198,7): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/banner-routes.tsx(251,49): error TS2769: No overload matches this call.
+src/banner-routes.tsx(305,38): error TS2769: No overload matches this call.
+src/banner-routes.tsx(336,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/banner-routes.tsx(95,26): error TS2769: No overload matches this call.
+src/banner-routes.tsx(96,50): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/booking-routes.tsx(164,30): error TS2769: No overload matches this call.
+src/booking-routes.tsx(164,54): error TS2769: No overload matches this call.
+src/booking-routes.tsx(164,80): error TS2769: No overload matches this call.
+src/booking-routes.tsx(249,52): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/booking-routes.tsx(266,30): error TS2339: Property 'id' does not exist on type '{ venueName: any; description: any; venueType: any; address: any; city: any; country: any; capacity: any; logoUrl: any; coverImageUrl: any; genres: any; socialLinks: any; workingHours: any; isVerified: any; ... 4 more ...; verificationRejectionReason: any; }'.
+src/booking-routes.tsx(309,33): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/booking-routes.tsx(339,30): error TS2769: No overload matches this call.
+src/booking-routes.tsx(339,54): error TS2769: No overload matches this call.
+src/booking-routes.tsx(339,80): error TS2769: No overload matches this call.
+src/booking-routes.tsx(345,49): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/booking-routes.tsx(381,30): error TS2769: No overload matches this call.
+src/booking-routes.tsx(381,54): error TS2769: No overload matches this call.
+src/booking-routes.tsx(381,80): error TS2769: No overload matches this call.
+src/booking-routes.tsx(410,30): error TS2769: No overload matches this call.
+src/booking-routes.tsx(410,54): error TS2769: No overload matches this call.
+src/booking-routes.tsx(410,80): error TS2769: No overload matches this call.
+src/booking-routes.tsx(459,30): error TS2769: No overload matches this call.
+src/booking-routes.tsx(459,54): error TS2769: No overload matches this call.
+src/booking-routes.tsx(459,80): error TS2769: No overload matches this call.
+src/booking-routes.tsx(525,30): error TS2769: No overload matches this call.
+src/booking-routes.tsx(525,54): error TS2769: No overload matches this call.
+src/booking-routes.tsx(525,80): error TS2769: No overload matches this call.
+src/booking-routes.tsx(598,32): error TS2769: No overload matches this call.
+src/booking-routes.tsx(598,55): error TS2769: No overload matches this call.
+src/booking-routes.tsx(661,67): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/cabinet-ai-routes.tsx(118,26): error TS2769: No overload matches this call.
+src/cabinet-ai-routes.tsx(156,26): error TS2769: No overload matches this call.
+src/charts-routes.tsx(1032,24): error TS2339: Property 'results' does not exist on type 'unknown'.
+src/charts-routes.tsx(1033,50): error TS2339: Property 'results' does not exist on type 'unknown'.
+src/charts-routes.tsx(1034,41): error TS2339: Property 'results' does not exist on type 'unknown'.
+src/charts-routes.tsx(1592,32): error TS2304: Cannot find name 'pool'.
+src/charts-routes.tsx(19,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/charts-routes.tsx(359,22): error TS2339: Property 'content' does not exist on type 'unknown'.
+src/charts-routes.tsx(384,22): error TS2339: Property 'candidates' does not exist on type 'unknown'.
+src/charts-routes.tsx(384,73): error TS2339: Property 'choices' does not exist on type 'unknown'.
+src/charts-routes.tsx(666,37): error TS2339: Property 'trackIds' does not exist on type 'unknown'.
+src/charts-routes.tsx(670,14): error TS2339: Property 'tracksById' does not exist on type 'unknown'.
+src/charts-routes.tsx(671,49): error TS2339: Property 'tracksById' does not exist on type 'unknown'.
+src/charts-routes.tsx(676,53): error TS2339: Property 'tracks' does not exist on type 'unknown'.
+src/charts-routes.tsx(677,28): error TS2339: Property 'tracks' does not exist on type 'unknown'.
+src/chat-routes.tsx(148,26): error TS2769: No overload matches this call.
+src/chat-routes.tsx(171,28): error TS2769: No overload matches this call.
+src/chat-routes.tsx(86,30): error TS2769: No overload matches this call.
+src/chat-support-routes.tsx(466,34): error TS2769: No overload matches this call.
+src/chat-support-routes.tsx(541,34): error TS2769: No overload matches this call.
+src/checkout-routes.tsx(1074,15): error TS2339: Property 'getDonation' does not exist on type 'typeof import("/home/user/promofm-api/src/db")'.
+src/checkout-routes.tsx(1255,26): error TS2769: No overload matches this call.
+src/checkout-routes.tsx(1455,7): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/checkout-routes.tsx(1466,7): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/checkout-routes.tsx(1508,26): error TS2769: No overload matches this call.
+src/checkout-routes.tsx(1535,26): error TS2769: No overload matches this call.
+src/checkout-routes.tsx(1536,45): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/checkout-routes.tsx(1548,26): error TS2769: No overload matches this call.
+src/checkout-routes.tsx(1550,45): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/checkout-routes.tsx(812,13): error TS2322: Type '"mix_published"' is not assignable to type 'NotificationType'.
+src/checkout-routes.tsx(898,15): error TS2339: Property 'recordPlatformCommission' does not exist on type 'typeof import("/home/user/promofm-api/src/platform-revenue")'.
+src/checkout-routes.tsx(930,34): error TS2345: Argument of type 'string' is not assignable to parameter of type 'Record<string, any>'.
+src/checkout-routes.tsx(956,15): error TS2339: Property 'recordPlatformCommission' does not exist on type 'typeof import("/home/user/promofm-api/src/platform-revenue")'.
+src/coins-routes.tsx(105,7): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/coins-routes.tsx(11,26): error TS2769: No overload matches this call.
+src/coins-routes.tsx(12,45): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/coins-routes.tsx(22,26): error TS2769: No overload matches this call.
+src/coins-routes.tsx(23,47): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/coins-routes.tsx(33,26): error TS2769: No overload matches this call.
+src/coins-routes.tsx(48,45): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/coins-routes.tsx(53,29): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/coins-routes.tsx(56,36): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/coins-routes.tsx(69,26): error TS2769: No overload matches this call.
+src/collaboration-routes.tsx(178,26): error TS2769: No overload matches this call.
+src/collaboration-routes.tsx(238,26): error TS2769: No overload matches this call.
+src/collaboration-routes.tsx(277,26): error TS2769: No overload matches this call.
+src/collaboration-routes.tsx(316,26): error TS2769: No overload matches this call.
+src/collaboration-routes.tsx(89,30): error TS2769: No overload matches this call.
+src/concert-agent-routes.tsx(28,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/concert-agent.tsx(111,27): error TS2339: Property 'results' does not exist on type 'unknown'.
+src/concert-agent.tsx(277,26): error TS2339: Property 'choices' does not exist on type 'unknown'.
+src/concerts-routes.tsx(107,26): error TS2769: No overload matches this call.
+src/concerts-routes.tsx(151,26): error TS2769: No overload matches this call.
+src/concerts-routes.tsx(171,26): error TS2769: No overload matches this call.
+src/concerts-routes.tsx(172,52): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/concerts-routes.tsx(198,26): error TS2769: No overload matches this call.
+src/concerts-routes.tsx(276,26): error TS2769: No overload matches this call.
+src/concerts-routes.tsx(285,44): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/concerts-routes.tsx(63,26): error TS2769: No overload matches this call.
+src/concerts-routes.tsx(78,26): error TS2769: No overload matches this call.
+src/content-health-routes.tsx(362,75): error TS2339: Property 'result' does not exist on type 'unknown'.
+src/content-health-routes.tsx(364,54): error TS2339: Property 'result' does not exist on type 'unknown'.
+src/content-health-routes.tsx(444,63): error TS2339: Property 'result' does not exist on type 'unknown'.
+src/content-health-routes.tsx(445,54): error TS2339: Property 'result' does not exist on type 'unknown'.
+src/content-orders-routes.tsx(110,28): error TS2769: No overload matches this call.
+src/content-orders-routes.tsx(111,26): error TS2769: No overload matches this call.
+src/content-orders-routes.tsx(154,28): error TS2769: No overload matches this call.
+src/content-orders-routes.tsx(155,26): error TS2769: No overload matches this call.
+src/curator-routes.tsx(28,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/db.tsx(89,49): error TS2552: Cannot find name 'error'. Did you mean 'Error'?
+src/db.tsx(89,7): error TS2552: Cannot find name 'error'. Did you mean 'Error'?
+src/dj-marketplace-routes.tsx(445,20): error TS2304: Cannot find name 'dataJsonb'.
+src/dj-studio-routes.tsx(1291,16): error TS2304: Cannot find name 'generateId'.
+src/dj-studio-routes.tsx(1478,16): error TS2304: Cannot find name 'generateId'.
+src/dj-studio-routes.tsx(1574,19): error TS2304: Cannot find name 'generateId'.
+src/dj-studio-routes.tsx(302,24): error TS2769: No overload matches this call.
+src/dj-studio-routes.tsx(384,19): error TS2304: Cannot find name 'generateId'.
+src/dj-studio-routes.tsx(636,16): error TS2304: Cannot find name 'generateId'.
+src/donations-routes.tsx(134,26): error TS2769: No overload matches this call.
+src/donations-routes.tsx(135,53): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/donations-routes.tsx(145,26): error TS2769: No overload matches this call.
+src/donations-routes.tsx(146,53): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/donations-routes.tsx(147,46): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/donations-routes.tsx(167,26): error TS2769: No overload matches this call.
+src/donations-routes.tsx(170,54): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/donations-routes.tsx(171,46): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/donations-routes.tsx(191,26): error TS2769: No overload matches this call.
+src/donations-routes.tsx(202,46): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/donations-routes.tsx(268,26): error TS2769: No overload matches this call.
+src/donations-routes.tsx(311,45): error TS2345: Argument of type '{ orderId: `${string}-${string}-${string}-${string}-${string}`; amount: any; currency: string; description: string; returnUrl: string; metadata: { donorName: any; isAnonymous: string; trackId?: string; type: string; donationId: string; artistId: any; }; }' is not assignable to parameter of type 'PaymentSessionRequest'.
+src/donations-routes.tsx(331,34): error TS2339: Property 'paymentId' does not exist on type 'PaymentSessionResult'.
+src/ecosystem-routes.tsx(32,37): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/elevenlabs-integration.tsx(25,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/elevenlabs-integration.tsx(261,20): error TS2339: Property 'voices' does not exist on type 'unknown'.
+src/email-helper.tsx(142,54): error TS2339: Property 'id' does not exist on type 'unknown'.
+src/email-routes.tsx(192,37): error TS2339: Property 'ok' does not exist on type 'SmtpResult'.
+src/email-routes.tsx(193,23): error TS2339: Property 'ok' does not exist on type 'SmtpResult'.
+src/engineer-routes.tsx(657,24): error TS2769: No overload matches this call.
+src/engineer-routes.tsx(702,24): error TS2769: No overload matches this call.
+src/engineer-routes.tsx(716,24): error TS2769: No overload matches this call.
+src/engineer-routes.tsx(789,24): error TS2769: No overload matches this call.
+src/engineer-routes.tsx(811,24): error TS2769: No overload matches this call.
+src/engineer-routes.tsx(89,24): error TS2769: No overload matches this call.
+src/gateway-stripe.tsx(140,28): error TS2339: Property 'error' does not exist on type 'unknown'.
+src/gateway-stripe.tsx(144,23): error TS2339: Property 'id' does not exist on type 'unknown'.
+src/gateway-stripe.tsx(145,29): error TS2339: Property 'url' does not exist on type 'unknown'.
+src/gateway-stripe.tsx(245,28): error TS2339: Property 'error' does not exist on type 'unknown'.
+src/gateway-stripe.tsx(249,23): error TS2339: Property 'id' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(174,19): error TS2339: Property 'Success' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(175,32): error TS2339: Property 'Message' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(175,84): error TS2339: Property 'ErrorCode' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(181,27): error TS2339: Property 'PaymentId' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(192,21): error TS2339: Property 'Success' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(193,34): error TS2339: Property 'Message' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(193,90): error TS2339: Property 'ErrorCode' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(197,36): error TS2339: Property 'PaymentId' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(88,15): error TS2339: Property 'Success' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(90,28): error TS2339: Property 'Message' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(90,44): error TS2339: Property 'Details' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(90,77): error TS2339: Property 'ErrorCode' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(94,30): error TS2339: Property 'PaymentId' does not exist on type 'unknown'.
+src/gateway-tbank.tsx(95,29): error TS2339: Property 'PaymentURL' does not exist on type 'unknown'.
+src/gateway-yookassa-payouts.tsx(114,27): error TS2339: Property 'description' does not exist on type 'unknown'.
+src/gateway-yookassa-payouts.tsx(114,48): error TS2339: Property 'message' does not exist on type 'unknown'.
+src/gateway-yookassa-payouts.tsx(120,14): error TS2339: Property 'id' does not exist on type 'unknown'.
+src/gateway-yookassa-payouts.tsx(121,18): error TS2339: Property 'status' does not exist on type 'unknown'.
+src/gateway-yookassa-payouts.tsx(122,18): error TS2339: Property 'amount' does not exist on type 'unknown'.
+src/gateway-yookassa-payouts.tsx(123,21): error TS2339: Property 'created_at' does not exist on type 'unknown'.
+src/gateway-yookassa-payouts.tsx(136,16): error TS2339: Property 'id' does not exist on type 'unknown'.
+src/gateway-yookassa-payouts.tsx(137,20): error TS2339: Property 'status' does not exist on type 'unknown'.
+src/gateway-yookassa-payouts.tsx(138,20): error TS2339: Property 'amount' does not exist on type 'unknown'.
+src/gateway-yookassa-payouts.tsx(139,23): error TS2339: Property 'created_at' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(139,28): error TS2339: Property 'description' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(139,48): error TS2339: Property 'message' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(143,23): error TS2339: Property 'id' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(144,29): error TS2339: Property 'confirmation' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(307,28): error TS2339: Property 'description' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(307,48): error TS2339: Property 'message' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(310,16): error TS2339: Property 'id' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(311,20): error TS2339: Property 'status' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(312,31): error TS2339: Property 'amount' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(347,28): error TS2339: Property 'description' does not exist on type 'unknown'.
+src/gateway-yookassa.tsx(351,23): error TS2339: Property 'id' does not exist on type 'unknown'.
+src/label-routes.tsx(1008,11): error TS2322: Type '"label_member_left"' is not assignable to type 'NotificationType'.
+src/label-routes.tsx(194,26): error TS2769: No overload matches this call.
+src/label-routes.tsx(195,24): error TS2769: No overload matches this call.
+src/label-routes.tsx(610,11): error TS2322: Type '"label_member_left"' is not assignable to type 'NotificationType'.
+src/label-routes.tsx(703,11): error TS2322: Type '"label_invitation"' is not assignable to type 'NotificationType'.
+src/label-routes.tsx(787,26): error TS2769: No overload matches this call.
+src/label-routes.tsx(814,26): error TS2769: No overload matches this call.
+src/label-routes.tsx(815,24): error TS2769: No overload matches this call.
+src/label-routes.tsx(898,11): error TS2322: Type '"label_invitation_response"' is not assignable to type 'NotificationType'.
+src/label-routes.tsx(918,26): error TS2769: No overload matches this call.
+src/label-routes.tsx(919,24): error TS2769: No overload matches this call.
+src/label-routes.tsx(950,11): error TS2322: Type '"label_invitation_response"' is not assignable to type 'NotificationType'.
+src/label-routes.tsx(970,26): error TS2769: No overload matches this call.
+src/label-routes.tsx(971,24): error TS2769: No overload matches this call.
+src/landing-data-routes.tsx(1133,20): error TS2554: Expected 0-1 arguments, but got 2.
+src/landing-data-routes.tsx(1319,26): error TS2769: No overload matches this call.
+src/landing-data-routes.tsx(1320,24): error TS2769: No overload matches this call.
+src/landing-data-routes.tsx(1347,26): error TS2769: No overload matches this call.
+src/landing-data-routes.tsx(1348,24): error TS2769: No overload matches this call.
+src/landing-data-routes.tsx(26,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/llm-router.tsx(133,21): error TS2339: Property 'choices' does not exist on type 'unknown'.
+src/llm-router.tsx(134,26): error TS2339: Property 'model' does not exist on type 'unknown'.
+src/llm-router.tsx(141,17): error TS2339: Property 'usage' does not exist on type 'unknown'.
+src/llm-router.tsx(142,26): error TS2339: Property 'usage' does not exist on type 'unknown'.
+src/llm-router.tsx(143,30): error TS2339: Property 'usage' does not exist on type 'unknown'.
+src/llm-router.tsx(144,25): error TS2339: Property 'usage' does not exist on type 'unknown'.
+src/llm-router.tsx(195,21): error TS2339: Property 'content' does not exist on type 'unknown'.
+src/llm-router.tsx(200,17): error TS2339: Property 'model' does not exist on type 'unknown'.
+src/llm-router.tsx(202,17): error TS2339: Property 'usage' does not exist on type 'unknown'.
+src/llm-router.tsx(203,26): error TS2339: Property 'usage' does not exist on type 'unknown'.
+src/llm-router.tsx(204,30): error TS2339: Property 'usage' does not exist on type 'unknown'.
+src/llm-router.tsx(205,26): error TS2339: Property 'usage' does not exist on type 'unknown'.
+src/llm-router.tsx(205,59): error TS2339: Property 'usage' does not exist on type 'unknown'.
+src/marketing-campaigns-routes.tsx(38,28): error TS2769: No overload matches this call.
+src/marketing-campaigns-routes.tsx(39,26): error TS2769: No overload matches this call.
+src/marketing-campaigns-routes.tsx(97,30): error TS2769: No overload matches this call.
+src/marketing-campaigns-routes.tsx(98,28): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(1187,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(126,47): error TS2345: Argument of type 'string' is not assignable to parameter of type 'Record<string, any>'.
+src/marketplace-routes.tsx(1428,27): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(1462,7): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/marketplace-routes.tsx(1574,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(1688,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(1689,29): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(1788,27): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(1919,13): error TS2339: Property 'items' does not exist on type '{ rows: PlatformRevenueRow[]; total: number; }'.
+src/marketplace-routes.tsx(278,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(281,44): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/marketplace-routes.tsx(294,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(332,26): error TS2345: Argument of type 'string' is not assignable to parameter of type 'Record<string, any>'.
+src/marketplace-routes.tsx(350,30): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(380,26): error TS2345: Argument of type 'string' is not assignable to parameter of type 'Record<string, any>'.
+src/marketplace-routes.tsx(407,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(426,26): error TS2345: Argument of type 'string' is not assignable to parameter of type 'Record<string, any>'.
+src/marketplace-routes.tsx(440,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(478,27): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(510,7): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/marketplace-routes.tsx(566,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(572,48): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/marketplace-routes.tsx(580,34): error TS2345: Argument of type 'string' is not assignable to parameter of type 'Record<string, any>'.
+src/marketplace-routes.tsx(584,62): error TS2304: Cannot find name 'favs'.
+src/marketplace-routes.tsx(635,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(665,63): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/marketplace-routes.tsx(699,30): error TS2345: Argument of type 'string' is not assignable to parameter of type 'Record<string, any>'.
+src/marketplace-routes.tsx(733,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(744,38): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/marketplace-routes.tsx(746,25): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/marketplace-routes.tsx(881,28): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(957,26): error TS2769: No overload matches this call.
+src/marketplace-routes.tsx(965,43): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/marketplace-routes.tsx(966,41): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/marketplace-routes.tsx(984,26): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(1000,37): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(261,28): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(320,30): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(455,28): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(522,30): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(535,34): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/messaging-routes.tsx(548,49): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/messaging-routes.tsx(679,28): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(716,28): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(741,28): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(765,28): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(784,28): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(828,33): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(906,26): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(907,28): error TS2769: No overload matches this call.
+src/messaging-routes.tsx(915,46): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/news-agent-routes.tsx(21,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/news-agent.tsx(150,36): error TS2367: This comparison appears to be unintentional because the types 'string' and 'boolean' have no overlap.
+src/news-agent.tsx(166,23): error TS2339: Property 'ok' does not exist on type 'unknown'.
+src/news-agent.tsx(171,103): error TS2339: Property 'description' does not exist on type 'unknown'.
+src/news-agent.tsx(624,25): error TS2339: Property 'candidates' does not exist on type 'unknown'.
+src/news-agent.tsx(650,25): error TS2339: Property 'choices' does not exist on type 'unknown'.
+src/news-agent.tsx(70,78): error TS2339: Property 'listeners' does not exist on type 'unknown'.
+src/news-broadcast.tsx(162,68): error TS2339: Property 'error' does not exist on type 'unknown'.
+src/news-broadcast.tsx(163,74): error TS2339: Property 'error' does not exist on type 'unknown'.
+src/news-broadcast.tsx(166,67): error TS2339: Property 'duration' does not exist on type 'unknown'.
+src/news-broadcast.tsx(168,64): error TS2339: Property 'duration' does not exist on type 'unknown'.
+src/news-broadcast.tsx(95,17): error TS2339: Property 'content' does not exist on type 'LLMResponse'.
+src/news-broadcast.tsx(95,40): error TS2339: Property 'content' does not exist on type 'LLMResponse'.
+src/news-routes.tsx(105,26): error TS2769: No overload matches this call.
+src/news-routes.tsx(108,25): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/notifications-messenger-routes.tsx(451,24): error TS2769: No overload matches this call.
+src/pageview-routes.tsx(13,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/payments-routes.tsx(176,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(185,48): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(196,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(197,28): error TS2769: No overload matches this call.
+src/payments-routes.tsx(209,51): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(223,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(224,42): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(234,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(235,38): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(245,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(249,42): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(263,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(264,49): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(275,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(278,43): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(292,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(294,48): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(305,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(310,51): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(325,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(328,59): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(339,26): error TS2769: No overload matches this call.
+src/payments-routes.tsx(342,63): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/payments-routes.tsx(40,12): error TS2339: Property 'userId' does not exist on type '{ available: number; pending: number; total: number; } | { userId: string; available: number; pending: number; total: number; }'.
+src/payments-routes.tsx(40,24): error TS2339: Property 'userId' does not exist on type '{ available: number; pending: number; total: number; } | { userId: string; available: number; pending: number; total: number; }'.
+src/pipeline-api-routes.tsx(11,22): error TS2307: Cannot find module 'npm:hono@4' or its corresponding type declarations.
+src/pipeline-api-routes.tsx(39,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/pitching-routes.tsx(1061,27): error TS2769: No overload matches this call.
+src/pitching-routes.tsx(200,26): error TS2769: No overload matches this call.
+src/pitching-routes.tsx(369,27): error TS2769: No overload matches this call.
+src/pitching-routes.tsx(433,27): error TS2769: No overload matches this call.
+src/pitching-routes.tsx(528,27): error TS2769: No overload matches this call.
+src/pitching-routes.tsx(591,26): error TS2769: No overload matches this call.
+src/pitching-routes.tsx(799,16): error TS2304: Cannot find name 'getGateway'.
+src/pitching-routes.tsx(815,20): error TS2304: Cannot find name 'PaymentSession'.
+src/pitching-routes.tsx(834,11): error TS2304: Cannot find name 'upsertPaymentSession'.
+src/pitching-routes.tsx(865,27): error TS2769: No overload matches this call.
+src/pitching-routes.tsx(949,27): error TS2769: No overload matches this call.
+src/pitching-routes.tsx(988,27): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1072,28): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1072,47): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1111,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1117,45): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/producer-studio-routes.tsx(1127,32): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/producer-studio-routes.tsx(1156,28): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1156,47): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1192,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1205,27): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/producer-studio-routes.tsx(1255,25): error TS2339: Property 'choices' does not exist on type 'unknown'.
+src/producer-studio-routes.tsx(1256,29): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/producer-studio-routes.tsx(1265,28): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1265,47): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(128,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(128,49): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1362,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1362,49): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1381,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1381,49): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1416,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1463,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(147,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1504,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1559,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(1575,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(280,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(329,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(500,28): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(500,47): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(516,28): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(516,47): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(601,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(629,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(668,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(692,28): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(692,47): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(725,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(747,30): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(778,26): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(816,26): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(874,26): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(922,26): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(985,28): error TS2769: No overload matches this call.
+src/producer-studio-routes.tsx(985,47): error TS2769: No overload matches this call.
+src/production-360-routes.tsx(240,29): error TS2339: Property 'servicePrice' does not exist on type '{ base: number; addonsTotal: number; subtotal: number; discount: number; discountAmount: number; total: number; currency: string; addonsBreakdown: { name: string; price: number; }[]; }'.
+src/production-360-routes.tsx(243,27): error TS2339: Property 'finalPrice' does not exist on type '{ base: number; addonsTotal: number; subtotal: number; discount: number; discountAmount: number; total: number; currency: string; addonsBreakdown: { name: string; price: number; }[]; }'.
+src/production-360-routes.tsx(273,22): error TS2339: Property 'finalPrice' does not exist on type '{ base: number; addonsTotal: number; subtotal: number; discount: number; discountAmount: number; total: number; currency: string; addonsBreakdown: { name: string; price: number; }[]; }'.
+src/production-360-routes.tsx(274,56): error TS2339: Property 'finalPrice' does not exist on type '{ base: number; addonsTotal: number; subtotal: number; discount: number; discountAmount: number; total: number; currency: string; addonsBreakdown: { name: string; price: number; }[]; }'.
+src/production-360-routes.tsx(277,103): error TS2339: Property 'finalPrice' does not exist on type '{ base: number; addonsTotal: number; subtotal: number; discount: number; discountAmount: number; total: number; currency: string; addonsBreakdown: { name: string; price: number; }[]; }'.
+src/production-360-routes.tsx(370,26): error TS2769: No overload matches this call.
+src/production-360-routes.tsx(400,7): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/profile-routes.tsx(13,26): error TS2769: No overload matches this call.
+src/profile-routes.tsx(14,41): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/profile-routes.tsx(153,26): error TS2769: No overload matches this call.
+src/profile-routes.tsx(207,62): error TS2339: Property 'slice' does not exist on type 'unknown'.
+src/profile-routes.tsx(33,26): error TS2769: No overload matches this call.
+src/profile-routes.tsx(35,42): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/profile-routes.tsx(42,28): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/profile-routes.tsx(54,26): error TS2769: No overload matches this call.
+src/promo-air-dj-routes.tsx(157,26): error TS2769: No overload matches this call.
+src/promo-air-dj-routes.tsx(296,26): error TS2769: No overload matches this call.
+src/promotion-routes-sql.tsx(161,26): error TS2769: No overload matches this call.
+src/promotion-routes-sql.tsx(317,20): error TS2554: Expected 0-1 arguments, but got 2.
+src/promotion-routes-sql.tsx(576,20): error TS2554: Expected 0-1 arguments, but got 2.
+src/publish-routes.tsx(1117,26): error TS2769: No overload matches this call.
+src/publish-routes.tsx(1133,26): error TS2769: No overload matches this call.
+src/publish-routes.tsx(1177,26): error TS2769: No overload matches this call.
+src/publish-routes.tsx(1294,26): error TS2769: No overload matches this call.
+src/publish-routes.tsx(1307,26): error TS2769: No overload matches this call.
+src/publish-routes.tsx(1372,26): error TS2769: No overload matches this call.
+src/publish-routes.tsx(343,26): error TS2769: No overload matches this call.
+src/publish-routes.tsx(344,57): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/publish-routes.tsx(345,66): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/publish-routes.tsx(369,26): error TS2769: No overload matches this call.
+src/publish-routes.tsx(370,28): error TS2769: No overload matches this call.
+src/publish-routes.tsx(420,43): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/publish-routes.tsx(425,50): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/publish-routes.tsx(433,7): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/publish-routes.tsx(487,26): error TS2769: No overload matches this call.
+src/publish-routes.tsx(493,50): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/publish-routes.tsx(510,54): error TS2345: Argument of type 'PublishOrderRow' is not assignable to parameter of type 'string'.
+src/publish-routes.tsx(522,30): error TS2769: No overload matches this call.
+src/publish-routes.tsx(523,28): error TS2769: No overload matches this call.
+src/publish-routes.tsx(658,44): error TS2345: Argument of type '{ orderId: string; userId: string; amount: number; currency: string; type: "purchase"; description: string; returnUrl: string; metadata: { type: string; orderId: string; title: string; }; }' is not assignable to parameter of type 'PaymentSessionRequest'.
+src/publish-routes.tsx(898,30): error TS2769: No overload matches this call.
+src/publish-routes.tsx(899,28): error TS2769: No overload matches this call.
+src/radio-profile-routes.tsx(109,37): error TS2352: Conversion of type 'RadioProfile' to type 'Record<string, unknown>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+src/radio-profile-routes.tsx(182,31): error TS2769: No overload matches this call.
+src/radio-profile-routes.tsx(186,9): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/radio-profile-routes.tsx(94,5): error TS1117: An object literal cannot have multiple properties with the same name.
+src/radio-routes.tsx(101,49): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(1049,69): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(1070,45): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(1089,49): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(1112,48): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(1113,47): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(1114,33): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(120,61): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(1304,26): error TS2769: No overload matches this call.
+src/radio-routes.tsx(1342,26): error TS2769: No overload matches this call.
+src/radio-routes.tsx(138,51): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(1380,26): error TS2769: No overload matches this call.
+src/radio-routes.tsx(1401,13): error TS2769: No overload matches this call.
+src/radio-routes.tsx(1423,13): error TS2769: No overload matches this call.
+src/radio-routes.tsx(1426,27): error TS2769: No overload matches this call.
+src/radio-routes.tsx(1460,13): error TS2769: No overload matches this call.
+src/radio-routes.tsx(1463,27): error TS2769: No overload matches this call.
+src/radio-routes.tsx(153,37): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(154,49): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(175,54): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(184,37): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(206,73): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(227,60): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(236,129): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(257,60): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(286,72): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(308,59): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(316,150): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(345,36): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(474,59): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(490,37): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(514,16): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(523,59): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(543,72): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(569,16): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(575,59): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(593,26): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(597,30): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(640,72): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(646,30): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(708,72): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(724,59): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(748,72): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(756,59): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(771,37): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(791,72): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(801,59): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(823,26): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(827,30): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/radio-routes.tsx(92,37): error TS2339: Property 'id' does not exist on type '{ name: any; city: any; country: any; frequency: any; description: any; founded: any; website: any; address: any; streamUrl: any; backupStreamUrl: any; bitrate: any; audioFormat: any; listeners: any; status: any; ... 10 more ...; verificationRejectionReason: any; }'.
+src/release-agent-routes.tsx(19,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/release-agent.tsx(144,26): error TS2339: Property 'choices' does not exist on type 'unknown'.
+src/sitemap-routes.tsx(12,31): error TS2322: Type 'Promise<JSONRespondReturn<{ success: false; error: string; }, 403>>' is not assignable to type 'Promise<void>'.
+src/sse-routes.tsx(159,28): error TS2769: No overload matches this call.
+src/sse-routes.tsx(160,26): error TS2769: No overload matches this call.
+src/stats-routes.tsx(10,26): error TS2769: No overload matches this call.
+src/stats-routes.tsx(13,45): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/stats-routes.tsx(14,53): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/stats-routes.tsx(15,50): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/storage-routes.tsx(165,24): error TS2769: No overload matches this call.
+src/storage-routes.tsx(166,75): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/storage-routes.tsx(205,30): error TS2339: Property 'fileTypeFromBuffer' does not exist on type '{ default: typeof import("/home/user/promofm-api/node_modules/file-type/index"); fromFile(path: string): Promise<FileTypeResult>; fromBuffer: (buffer: ArrayBuffer | Buffer<...> | Uint8Array<...>) => Promise<...>; ... 4 more ...; stream: (readableStream: Readable) => Promise<...>; }'.
+src/storage-routes.tsx(274,31): error TS2339: Property 'code' does not exist on type 'Error'.
+src/subscriptions-routes.tsx(226,28): error TS2769: No overload matches this call.
+src/subscriptions-routes.tsx(227,26): error TS2769: No overload matches this call.
+src/subscriptions-routes.tsx(295,27): error TS2769: No overload matches this call.
+src/subscriptions-routes.tsx(325,52): error TS2345: Argument of type '{ orderId: `${string}-${string}-${string}-${string}-${string}`; amount: number; currency: string; description: string; returnUrl: string; metadata: { type: string; planKey: any; interval: string; }; }' is not assignable to parameter of type 'PaymentSessionRequest'.
+src/subscriptions-routes.tsx(387,30): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/subscriptions-routes.tsx(405,29): error TS2345: Argument of type '{ id: string; userId: unknown; type: string; category: string; amount: number; description: string; metadata: { tier: any; interval: string; }; status: string; createdAt: string; }' is not assignable to parameter of type '{ id: string; userId: string; orderId?: string; type: string; category: string; amount: number; currency?: string; gateway?: string; description?: string; metadata?: any; status?: string; createdAt?: string; }'.
+src/subscriptions-routes.tsx(408,49): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/subscriptions-routes.tsx(412,34): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/subscriptions-routes.tsx(423,11): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/subscriptions-routes.tsx(424,11): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/subscriptions-routes.tsx(433,13): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/subscriptions-routes.tsx(448,35): error TS2339: Property 'startsWith' does not exist on type 'unknown'.
+src/subscriptions-routes.tsx(449,19): error TS2339: Property 'startsWith' does not exist on type 'unknown'.
+src/subscriptions-routes.tsx(450,19): error TS2339: Property 'startsWith' does not exist on type 'unknown'.
+src/subscriptions-routes.tsx(451,19): error TS2339: Property 'startsWith' does not exist on type 'unknown'.
+src/subscriptions-routes.tsx(455,9): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/subscriptions-routes.tsx(501,28): error TS2769: No overload matches this call.
+src/subscriptions-routes.tsx(502,26): error TS2769: No overload matches this call.
+src/subscriptions-routes.tsx(570,28): error TS2769: No overload matches this call.
+src/subscriptions-routes.tsx(571,26): error TS2769: No overload matches this call.
+src/subscriptions-routes.tsx(619,28): error TS2769: No overload matches this call.
+src/subscriptions-routes.tsx(663,28): error TS2769: No overload matches this call.
+src/subscriptions-routes.tsx(664,26): error TS2769: No overload matches this call.
+src/subscriptions-routes.tsx(709,28): error TS2769: No overload matches this call.
+src/tickets-system-routes.tsx(102,27): error TS2769: No overload matches this call.
+src/tickets-system-routes.tsx(29,28): error TS2769: No overload matches this call.
+src/tickets-system-routes.tsx(30,26): error TS2769: No overload matches this call.
+src/tickets-system-routes.tsx(367,29): error TS2769: No overload matches this call.
+src/tickets-system-routes.tsx(526,28): error TS2769: No overload matches this call.
+src/tickets-system-routes.tsx(527,26): error TS2769: No overload matches this call.
+src/track-moderation-routes.tsx(1116,11): error TS2322: Type '"track_published"' is not assignable to type 'NotificationType'.
+src/track-moderation-routes.tsx(1178,13): error TS2322: Type '"mix_published"' is not assignable to type 'NotificationType'.
+src/track-moderation-routes.tsx(146,24): error TS2339: Property 'ai_score' does not exist on type 'unknown'.
+src/track-moderation-routes.tsx(148,26): error TS2339: Property 'verdict' does not exist on type 'unknown'.
+src/track-moderation-routes.tsx(151,65): error TS2339: Property 'ai_score' does not exist on type 'unknown'.
+src/track-moderation-routes.tsx(151,93): error TS2339: Property 'verdict' does not exist on type 'unknown'.
+src/track-moderation-routes.tsx(161,26): error TS2769: No overload matches this call.
+src/track-moderation-routes.tsx(162,28): error TS2769: No overload matches this call.
+src/track-moderation-routes.tsx(260,32): error TS2769: No overload matches this call.
+src/track-moderation-routes.tsx(880,24): error TS2339: Property 'ai_score' does not exist on type 'unknown'.
+src/track-moderation-routes.tsx(882,26): error TS2339: Property 'verdict' does not exist on type 'unknown'.
+src/track-moderation-routes.tsx(886,36): error TS2698: Spread types may only be created from object types.
+src/track-moderation-routes.tsx(986,11): error TS2322: Type '"track_upcoming"' is not assignable to type 'NotificationType'.
+src/track-test-routes.tsx(311,48): error TS2345: Argument of type '{ orderId: `${string}-${string}-${string}-${string}-${string}`; amount: any; currency: string; description: string; returnUrl: string; metadata: { type: string; requestId: any; trackTitle: any; artistName: any; }; }' is not assignable to parameter of type 'PaymentSessionRequest'.
+src/track-test-routes.tsx(335,32): error TS2339: Property 'paymentId' does not exist on type 'PaymentSessionResult'.
+src/track-test-routes.tsx(402,9): error TS2304: Cannot find name 'payment_method'.
+src/tracks-routes.tsx(175,35): error TS2769: No overload matches this call.
+src/tracks-routes.tsx(176,11): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/tracks-routes.tsx(194,26): error TS2769: No overload matches this call.
+src/tracks-routes.tsx(236,26): error TS2769: No overload matches this call.
+src/tracks-routes.tsx(44,26): error TS2769: No overload matches this call.
+src/tracks-routes.tsx(45,48): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/tracks-routes.tsx(70,26): error TS2769: No overload matches this call.
+src/tracks-routes.tsx(71,28): error TS2769: No overload matches this call.
+src/venue-radio-routes.tsx(131,7): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/venue-radio-routes.tsx(137,9): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/venue-radio-routes.tsx(183,27): error TS2769: No overload matches this call.
+src/venue-radio-routes.tsx(207,27): error TS2769: No overload matches this call.
+src/venue-radio-routes.tsx(44,27): error TS2769: No overload matches this call.
+src/venue-radio-routes.tsx(84,27): error TS2769: No overload matches this call.
+src/venue-radio-routes.tsx(85,29): error TS2769: No overload matches this call.
+src/venue-routes.tsx(1048,26): error TS2304: Cannot find name 'expireTrialsOnce'.
+src/venue-routes.tsx(135,17): error TS2304: Cannot find name 'applyInitialTrial'.
+src/videos-routes.tsx(426,26): error TS2769: No overload matches this call.
+src/videos-routes.tsx(427,45): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/videos-routes.tsx(436,26): error TS2769: No overload matches this call.
+src/videos-routes.tsx(445,26): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string'.
+src/videos-routes.tsx(462,35): error TS2769: No overload matches this call.
+src/videos-routes.tsx(463,11): error TS2322: Type 'unknown' is not assignable to type 'string'.
+src/weekly-releases-routes.tsx(217,26): error TS2769: No overload matches this call.
+src/weekly-releases-routes.tsx(258,26): error TS2769: No overload matches this call.

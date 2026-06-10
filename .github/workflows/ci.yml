@@ -1,0 +1,41 @@
+name: CI
+
+# Гейт качества ДО мержа в main. Раньше единственной «проверкой»
+# был deploy.yml на push:main — сломанный код попадал в main и СРАЗУ
+# катился в прод (deploy триггерится после пуша, не до). Type-mismatch'и
+# на SQL уже вызывали production-реверты (см. CLAUDE.md «SQL writing
+# pitfalls»). Этот workflow гоняет TS-regression на каждый PR и
+# блокирует мерж, если появились НОВЫЕ tsc-ошибки сверх baseline.
+#
+# Подключить как required status check: Settings → Branches →
+# Branch protection rule на main → Require status checks → "type-check".
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # tsc даёт ~574 pre-existing ошибки — нельзя гонять голый `tsc`
+      # как gate (вечно красный). Regression-guard сравнивает с
+      # scripts/.ts-baseline.txt и падает ТОЛЬКО на новых ошибках.
+      - name: TypeScript regression check
+        run: npm run type-check:regression
