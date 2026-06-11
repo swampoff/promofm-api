@@ -924,6 +924,44 @@ toggle'ы — отдельный PR `feat/engineer-email-toggles` (добави�
 opt-out продолжает работать через `isUnsubscribed(email)` — гейт
 живёт внутри `sendEmail()`, новые функции его наследуют.
 
+### DM e-mail channel (since миграция 106, 2026-06-11)
+
+Получатель direct-message'а (`POST /api/messaging/messages/:conversationId`)
+получает помимо bell+SSE ещё и e-mail-нотификацию (`notifyDmReceived`
+в `email-helper.tsx`).
+
+Throttle: 1 письмо на (recipient, conversation) **в час** через
+таблицу `dm_email_throttle` — composite PK `(user_id, conversation_id)`,
+одно поле `last_sent_at TIMESTAMPTZ`. Атомарный UPSERT с
+WHERE-фильтром по возрасту:
+
+```sql
+INSERT INTO dm_email_throttle (user_id, conversation_id, last_sent_at)
+VALUES ($1, $2, NOW())
+ON CONFLICT (user_id, conversation_id) DO UPDATE
+   SET last_sent_at = NOW()
+ WHERE dm_email_throttle.last_sent_at < NOW() - INTERVAL '1 hour'
+RETURNING last_sent_at;
+```
+
+`RETURNING` пустой → throttle сработал, e-mail не шлём.
+`RETURNING` непустой → или новая беседа, или прошёл час с последнего —
+шлём.
+
+Гейт **инлайнится** на module-load через `ensureDmEmailThrottleSchema()`
+(messaging-routes.tsx) — миграция 106 file и `CREATE TABLE IF NOT EXISTS`
+дублируют друг друга. На свежей проде `ensureSchemaInline` создаёт
+таблицу автоматически при первом старте; миграция 106 файл лежит для
+аудита/idempotency.
+
+Шкипы:
+- админы/superadmin'ы (получают Telegram через `forwardToTelegramIfAdmin`)
+- юзеры без `users.email` (legacy / VK-only)
+- глобально отписанные через `email_unsubscribes` (гейтит `sendEmail` сам)
+
+Per-role toggle (например `engineer_profiles.notify_email_on_dm`) —
+follow-up PR. Сейчас все роли получают по умолчанию.
+
 ### SSE (real-time)
 
 `sse-routes.tsx` `connections` Map keyed by various identifiers:

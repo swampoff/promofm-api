@@ -856,4 +856,42 @@ export async function notifyClientOrderRefunded(
   return sendEmail({ to: email, subject: `Возврат: ${orderTitle}`, html });
 }
 
+// ─── DM (direct message) e-mail notification ───────────────────────
+//
+// Шлём получателю DM-сообщения с превью + ссылкой на беседу. Гейт
+// от спама — в messaging-routes.tsx через таблицу dm_email_throttle
+// (миграция 106): 1 письмо на (recipient, conversation) в час, не чаще.
+//
+// preview — уже truncated на стороне messaging-routes (≤120 chars
+// + '...'). senderName может быть пустым (legacy); подставляем
+// «пользователя».
 
+export async function notifyDmReceived(
+  recipientEmail: string,
+  recipientName: string,
+  senderName: string,
+  preview: string,
+  conversationLink: string,
+): Promise<boolean> {
+  const safeSender = (senderName || '').trim() || 'пользователя';
+  const safePreview = (preview || '').trim() || '(вложение или пустое сообщение)';
+  const safeLink = conversationLink.startsWith('/') ? `${SITE_URL}${conversationLink}` : conversationLink;
+  const html = emailWrapper(`
+    <h2 style="margin:0 0 16px;color:#FF577F;">Новое сообщение</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(recipientName || '')}</strong>!</p>
+    <p>Вам написал <strong>${escapeHtml(safeSender)}</strong>:</p>
+    <blockquote style="margin:16px 0;padding:14px 18px;background:#1a1a2e;border-left:3px solid #FF577F;border-radius:6px;color:#fff;">
+      ${escapeHtml(safePreview)}
+    </blockquote>
+    <p style="text-align:center;margin:28px 0;"><a href="${escapeHtml(safeLink)}" style="${buttonStyle}">Открыть беседу</a></p>
+    <p style="color:#888;font-size:12px;">
+      Чтобы не получать e-mail про каждое сообщение, отключите DM-уведомления
+      в настройках кабинета. Колокольчик в самом кабинете продолжит работать.
+    </p>
+  `);
+  return sendEmail({
+    to: recipientEmail,
+    subject: `Сообщение от ${safeSender}`.slice(0, 200),
+    html,
+  });
+}
