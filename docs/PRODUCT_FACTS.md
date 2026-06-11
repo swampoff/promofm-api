@@ -919,10 +919,35 @@ feat/engineer-email-pipeline дублируется e-mail'ом в 3 точка�
 | `engineer_order_refunded` (PR #230 admin endpoint) | wire-up в follow-up'е после merge'а #230 | клиент | `notifyClientOrderRefunded` (готова в `email-helper.tsx`) |
 
 Шлются ВСЕМ по умолчанию (mirror notifyArtistRequest). Per-user
-toggle'ы — отдельный PR `feat/engineer-email-toggles` (добавит
-`engineer_profiles.notify_email_*` колонки + gating). Глобальный
-opt-out продолжает работать через `isUnsubscribed(email)` — гейт
-живёт внутри `sendEmail()`, новые функции его наследуют.
+toggle'ы для engineer-side эмейлов добавлены миграцией 105
+(см. таблицу ниже). Глобальный opt-out продолжает работать через
+`isUnsubscribed(email)` — гейт живёт внутри `sendEmail()`, новые
+функции его наследуют.
+
+#### Per-user email toggles (миграция 105)
+
+Engineer-side эмейлы (`engineer_order_new`, `_paid`) гейтятся
+колонками на `engineer_profiles`:
+
+| Колонка | Default | Что гейтит |
+|---|---|---|
+| `notify_email_on_new_order` | `TRUE` | notifyEngineerNewOrder в `engineer-routes.tsx:686+` |
+| `notify_email_on_paid` | `TRUE` | notifyEngineerOrderPaid в `checkout-routes.tsx:1062+` |
+
+Engineer крутит toggle'ы в `/engineer/settings` → секция
+«Email-уведомления». SSE/bell всегда включён — отключить «новый
+заказ» в колокольчике смысла нет.
+
+Гейт работает через `LEFT JOIN engineer_profiles ON user_id` прямо
+в SQL emit-точки; если `engineer_profiles`-строки нет (legacy
+adapter) — COALESCE TRUE сохраняет старое поведение. Денорм-колонки
+(как `is_available`), не jsonb-распаковка — нужен fast-read в
+hot-path webhook'а.
+
+Клиент-side эмейлы (`engineer_order_delivered`, `_refunded`) — без
+per-user toggle: клиент может никогда не иметь
+`engineer_profiles`-строки. Если когда-то понадобится — это
+отдельный account-settings flow, не engineer-cabinet.
 
 ### SSE (real-time)
 
