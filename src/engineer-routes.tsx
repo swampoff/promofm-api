@@ -1060,4 +1060,85 @@ app.post('/admin/orders/:id/refund', requireAuth, requireAdmin, async (c) => {
   }
 });
 
+/**
+ * POST /orders/auto-complete — cron daily, переводит «висящие»
+ * delivered-заказы (клиент так и не нажал «Принять») в completed.
+ *
+ * Зачем: финальное состояние engineer_orders сейчас — completed,
+ * но переход delivered→completed требует click'а клиента. Если
+ * клиент пропал — заказ висит вечно. Деньги уже зачислены инженеру
+ * на webhook'е (см. checkout-routes.tsx:1051, recordRevenue
+ * channel='engineer_order' status='completed' пишется при оплате
+ * — независимо от lifecycle статуса заказа). Так что это lifecycle
+ * hygiene, не финансы.
+ *
+ * Threshold: 7 суток после последнего updated_at в статусе
+ * delivered. Если за неделю клиент молчит — считаем приём
+ * презумпцией. SSE/email уйдёт обоим сторонам.
+ *
+ * Idempotency: WHERE status='delivered' — повторный вызов не
+ * затрагивает уже completed/refunded заказы. Если cron уронился
+ * между UPDATE и SSE — на следующем запуске уже совершён UPDATE
+ * не пройдёт WHERE-фильтр; статус останется completed, SSE не
+ * повторится (acceptable degradation — клиент увидит у себя в
+ * списке заказов status='completed' без push'а, что не критично).
+ *
+ * Auth: только X-Internal-Key для VPS-cron (тот же паттерн что
+ * banner-routes.tsx:326+ /banners/expire). НЕ admin JWT — это
+ * чисто фоновая операция, никаких ручных вызовов из админки.
+ *
+ * Crontab (на VPS):
+ *   0 3 * * *  curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" \
+ *     http://127.0.0.1:3000/server/api/engineer/orders/auto-complete \
+ *     >> /var/log/promofm-engineer-autocomplete.log 2>&1
+ *
+ * Запуск раз в сутки в 03:00 — достаточно для 7-дневного окна.
+ */
+const AUTO_COMPLETE_DAYS = 7;
+app.post('/orders/auto-complete', async (c) => {
+  const internalKey = c.req.header('X-Internal-Key') || '';
+  const expectedKey = process.env.VPS_INTERNAL_KEY || '';
+  if (!expectedKey || internalKey !== expectedKey) {
+    return c.json({ success: false, error: 'X-Internal-Key required' }, 401);
+  }
+  try {
+    await ensureEngineerOrdersSchema();
+    // Берём snapshot id+участников ДО UPDATE'а — RETURNING вернёт
+    // финальные значения, а нам нужны прежние для SSE.
+    const { rows } = await pool.query(
+      `UPDATE engineer_orders
+          SET status='completed', updated_at=NOW()
+        WHERE status='delivered'
+          AND updated_at < NOW() - INTERVAL '${AUTO_COMPLETE_DAYS} days'
+        RETURNING id, engineer_id, client_id, title, price`,
+    );
+    let sseSent = 0;
+    if (rows.length > 0) {
+      try {
+        const { emitSSE } = await import('./sse-routes.tsx');
+        for (const r of rows) {
+          try {
+            emitSSE(r.engineer_id, {
+              type: 'engineer_order_auto_completed',
+              data: { orderId: r.id, title: r.title, amount: Number(r.price) || 0 },
+            });
+            emitSSE(r.client_id, {
+              type: 'engineer_order_auto_completed',
+              data: { orderId: r.id, title: r.title, days: AUTO_COMPLETE_DAYS },
+            });
+            sseSent++;
+          } catch (sseErr) {
+            log.warn({ err: sseErr, orderId: r.id }, 'auto_complete_sse_fail');
+          }
+        }
+      } catch {}
+    }
+    log.info({ completed: rows.length, sseSent, days: AUTO_COMPLETE_DAYS }, 'engineer_orders_auto_completed');
+    return c.json({ success: true, completed: rows.length, ids: rows.map(r => r.id) });
+  } catch (error) {
+    log.error({ error }, 'eng orders auto-complete');
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 export default app;

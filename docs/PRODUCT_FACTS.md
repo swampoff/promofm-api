@@ -806,6 +806,87 @@ cabinet looked fine (it rehydrates from the JSONB `data` column).
 
 ---
 
+## Engineer marketplace (sound engineer cabinet)
+
+**Source:** `src/engineer-routes.tsx` + миграции 023 (orders) и
+025 (profiles).
+
+### Order lifecycle
+
+```
+pending  →  accepted  →  (payment webhook)  →  in_progress
+                                                   ↓
+                                              delivered
+                                                ↓     ↘ (admin-only) refunded
+                                            completed  ↗
+                                              ↑
+                                  client click "Принять" ИЛИ
+                                  cron auto-complete (7 дней)
+```
+
+Переходы:
+
+| Action | Endpoint | Authorisation |
+|---|---|---|
+| client creates pending | POST `/engineer/orders` | client JWT |
+| engineer accepts | PUT `/orders/:id/accept` | engineer JWT |
+| engineer declines | PUT `/orders/:id/decline` | engineer JWT |
+| client cancels (pre-pay) | PUT `/orders/:id/cancel` | client JWT, status ∈ {pending, accepted} |
+| client pays | redirectToPayment → webhook | YooKassa, only accepted→in_progress |
+| engineer delivers | PUT `/orders/:id/deliver` | engineer JWT, only in_progress |
+| client confirms | PUT `/orders/:id/complete` | client JWT, only delivered |
+| **cron auto-complete** | POST `/orders/auto-complete` | **X-Internal-Key**, delivered + 7d |
+| admin refunds | POST `/admin/orders/:id/refund` | superadmin |
+
+### Revenue attribution
+
+Strings `platform_revenue_log` пишется ПРИ ОПЛАТЕ (`checkout-routes.tsx:1051`,
+`processPaymentSuccess` → `recordRevenue`), не при completion:
+
+- `channel='engineer_order'`
+- `payee_id=<engineer userId>`
+- `status='completed'` (платёжный статус, не lifecycle)
+- `metadata->>'orderId'` = `payment_session.orderId`
+
+Lifecycle статусы (`in_progress`/`delivered`/`completed`) — независимы
+от финансов. Поэтому **auto-complete cron не влияет на /engineer
+/earnings**: цифры одинаковы что при confirmed-completion, что при
+auto-completion.
+
+Refund (`POST /admin/orders/:id/refund`) парно обновляет:
+1. `engineer_orders.status='refunded'`
+2. `platform_revenue_log.status='refunded'` WHERE
+   `channel='engineer_order' AND metadata->>'orderId' = payment_order_id`
+
+`/engineer/earnings` filter'ит `status='completed'` — refund'нутые
+заказы из сводки автоматически уходят.
+
+### Auto-complete cron (since 2026-06-11)
+
+`POST /server/api/engineer/orders/auto-complete` — X-Internal-Key
+only (тот же паттерн что banner-routes `/expire`). Логика:
+
+```sql
+UPDATE engineer_orders
+   SET status='completed', updated_at=NOW()
+ WHERE status='delivered'
+   AND updated_at < NOW() - INTERVAL '7 days'
+RETURNING id, engineer_id, client_id, title, price;
+```
+
+Threshold константа `AUTO_COMPLETE_DAYS = 7` в файле. SSE
+`engineer_order_auto_completed` уходит обеим сторонам. Idempotent
+через WHERE-фильтр.
+
+Crontab (на VPS):
+```
+0 3 * * *  curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" \
+  http://127.0.0.1:3000/server/api/engineer/orders/auto-complete \
+  >> /var/log/promofm-engineer-autocomplete.log 2>&1
+```
+
+---
+
 ## Live chat (support)
 
 **Source:** `src/chat-support-routes.tsx` + `src/sse-routes.tsx`.
