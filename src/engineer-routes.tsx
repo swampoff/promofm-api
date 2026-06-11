@@ -697,6 +697,66 @@ app.get('/orders/incoming', requireAuth, async (c) => {
   } catch (error) { log.error({ error }, 'eng orders incoming'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
 
+// GET /earnings — сводка заработка инженера.
+// Источник истины: platform_revenue_log (channel='engineer_order',
+// payee_id = engineer userId). До PR #229 (engineer revenue
+// attribution) эти строки писались с channel='purchase' и
+// payee_id=null — поэтому исторические заказы до фикса в этот
+// результат не попадут, что корректно (старые суммы и в админ-
+// финансах висели в generic-bucket'е, переписывать их задним
+// числом — out of scope).
+//
+// Возвращает:
+//   total       — сумма всех payout_amount (заработано всего)
+//   month       — то же за последние 30 дней
+//   count       — число оплаченных заказов
+//   recent      — последние 10 строк {orderId,title,amount,paidAt}
+//   currency    — 'RUB' (одна валюта по платформе)
+//
+// Read-only. RLS не требуется — handler уже за requireEngineerRole.
+app.get('/earnings', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c); if (g instanceof Response) return g;
+  try {
+    const { rows: agg } = await pool.query(
+      `SELECT
+         COALESCE(SUM(payout_amount), 0)::numeric AS total,
+         COALESCE(SUM(CASE WHEN created_at > NOW() - INTERVAL '30 days'
+                           THEN payout_amount END), 0)::numeric AS month,
+         COUNT(*)::int AS count
+       FROM platform_revenue_log
+       WHERE payee_id = $1 AND channel = 'engineer_order' AND status = 'completed'`,
+      [g.userId],
+    );
+    const { rows: recent } = await pool.query(
+      `SELECT id, description, payout_amount, gross_amount, created_at, metadata
+       FROM platform_revenue_log
+       WHERE payee_id = $1 AND channel = 'engineer_order' AND status = 'completed'
+       ORDER BY created_at DESC LIMIT 10`,
+      [g.userId],
+    );
+    return c.json({
+      success: true,
+      earnings: {
+        total: Number(agg[0].total) || 0,
+        month: Number(agg[0].month) || 0,
+        count: Number(agg[0].count) || 0,
+        currency: 'RUB',
+        recent: recent.map((r: any) => ({
+          id: r.id,
+          orderId: r.metadata?.orderId || r.id,
+          title: r.description || 'Заказ',
+          amount: Number(r.payout_amount) || 0,
+          gross: Number(r.gross_amount) || 0,
+          paidAt: r.created_at?.toISOString?.() || r.created_at,
+        })),
+      },
+    });
+  } catch (error) {
+    log.error({ error }, 'eng earnings');
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 // GET /orders/my — заказы, которые разместил клиент (до /orders/:id)
 app.get('/orders/my', requireAuth, async (c) => {
   const userId = c.get('userId') as string | undefined;
