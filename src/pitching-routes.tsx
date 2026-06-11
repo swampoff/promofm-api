@@ -117,9 +117,23 @@ function generateId(prefix: string): string {
 // CATEGORY_TABLES — маппинг для catalog-lookup в /submit где мы
 // SELECT name, price_rub из соответствующей таблицы для проверки
 // что target существует + получения server-authoritative цены.
-type Category = 'playlist' | 'influencer' | 'media';
+//
+// 'radio' добавлен 2026-06-11 (миграция 108 + R1): артистские
+// pitch'и на радиостанции теперь идут через bundle с реальным
+// category='radio', а не маскированы под 'playlist' как было раньше
+// (FE submitRadioPitch hack-cast). Зеркальный INSERT в
+// radio_artist_requests делается в finalizePitchingBundle если
+// pitching_radio.user_id заполнен (claim'нутая станция).
+//
+// pitching_radio (legacy) НЕ имеет колонки price_rub — для catalog-
+// lookup тащим NULL и подставляем дефолтную цену 12000 ₽ (та же что
+// в paymentRequired:311 для single-submit radio). После claim'а
+// конкретный radio user сможет проставить свою цену через
+// PUT /admin/radio-stations/:id (price_rub колонка миграцией добавится
+// позже, если product захочет per-станционную цену).
+type Category = 'playlist' | 'influencer' | 'media' | 'radio';
 
-const CATEGORIES: Category[] = ['playlist', 'influencer', 'media'];
+const CATEGORIES: Category[] = ['playlist', 'influencer', 'media', 'radio'];
 
 function isCategory(v: any): v is Category {
   return typeof v === 'string' && (CATEGORIES as string[]).includes(v);
@@ -129,6 +143,14 @@ const CATEGORY_TABLES: Record<Category, string> = {
   playlist:   'pitching_playlists',
   influencer: 'pitching_influencers',
   media:      'pitching_media_outlets',
+  radio:      'pitching_radio_stations',
+};
+
+// Catalog-цена fallback для категорий без price_rub колонки в таблице.
+// pitching_radio (legacy 970 строк) не несёт price_rub — берём
+// серверную дефолтную цену 12000 ₽ (paymentRequired:311 same value).
+const CATEGORY_DEFAULT_PRICE: Partial<Record<Category, number>> = {
+  radio: 12000,
 };
 
 // ── Public catalog ────────────────────────────────────────────────────────────
@@ -679,22 +701,29 @@ app.post('/submit', requireAuth, async (c) => {
     }
 
     // Resolve catalog rows per category — server-authoritative pricing.
+    // pitching_radio (legacy) не имеет price_rub — для category='radio'
+    // подставляем CATEGORY_DEFAULT_PRICE['radio'] = 12000 ₽.
     type CatalogRow = { name: string; price_rub: number };
     const catalog: Record<Category, Map<string, CatalogRow>> = {
       playlist: new Map(),
       influencer: new Map(),
       media: new Map(),
+      radio: new Map(),
     };
-    for (const cat of ['playlist', 'influencer', 'media'] as Category[]) {
+    for (const cat of CATEGORIES) {
       const ids = Array.from(new Set(normalized.filter(n => n.category === cat).map(n => n.targetId)));
       if (ids.length === 0) continue;
       const table = CATEGORY_TABLES[cat];
+      const hasPriceCol = cat !== 'radio'; // pitching_radio_stations VIEW не пробрасывает price_rub
+      const selectCols = hasPriceCol ? 'id, name, price_rub' : 'id, name';
       const res = await pool.query(
-        `SELECT id, name, price_rub FROM ${table} WHERE id = ANY($1) AND status = 'active'`,
+        `SELECT ${selectCols} FROM ${table} WHERE id = ANY($1) AND status = 'active'`,
         [ids]
       );
+      const fallbackPrice = CATEGORY_DEFAULT_PRICE[cat] ?? 0;
       for (const row of res.rows) {
-        catalog[cat].set(row.id, { name: row.name, price_rub: Number(row.price_rub) });
+        const price = hasPriceCol ? Number(row.price_rub) : fallbackPrice;
+        catalog[cat].set(row.id, { name: row.name, price_rub: price });
       }
     }
 
@@ -1096,6 +1125,11 @@ app.put('/admin/submissions/:id', requireAuth, requireAdmin, async (c) => {
  * Flips all submissions for that order from pending_payment to pending and
  * fans out admin notifications. Exported so checkout-routes.tsx can wire it
  * in without going back through HTTP.
+ *
+ * 2026-06-11 (R1): для category='radio' ДОПОЛНИТЕЛЬНО зеркалим submission
+ * в radio_artist_requests если catalog row (pitching_radio.user_id)
+ * claim'нут реальным radio cabinet user'ом. Без claim'а — старое
+ * поведение: только admin moderation queue.
  */
 export async function finalizePitchingBundle(orderId: string, submissionIds: string[]): Promise<void> {
   await ensureSchema();
@@ -1105,7 +1139,7 @@ export async function finalizePitchingBundle(orderId: string, submissionIds: str
     `UPDATE pitching_submissions
        SET status = 'pending', updated_at = NOW()
      WHERE id = ANY($1) AND status = 'pending_payment' AND payment_session_id = $2
-     RETURNING id, user_id, target_name, category`,
+     RETURNING id, user_id, target_id, target_name, category, track_id`,
     [submissionIds, orderId]
   );
   if (r.rows.length === 0) return;
@@ -1123,7 +1157,183 @@ export async function finalizePitchingBundle(orderId: string, submissionIds: str
     } catch (e: any) {
       console.warn('[pitching] notifyAllAdmins (paid) failed:', e?.message);
     }
+
+    // Radio-category — попытка зеркалить в radio_artist_requests.
+    // Лукапаем pitching_radio.user_id (через VIEW pitching_radio_stations
+    // которая после migration 108 пробрасывает user_id наверх).
+    // Если NULL — станция не claim'нута, остаётся только admin moderation.
+    if (row.category === 'radio') {
+      try {
+        await mirrorRadioPitchToRadioCabinet({
+          submissionId: row.id,
+          radioStationCatalogId: row.target_id,
+          artistUserId: row.user_id,
+          trackId: row.track_id,
+          targetName: row.target_name,
+        });
+      } catch (e: any) {
+        console.warn('[pitching] radio cabinet mirror failed:', e?.message);
+      }
+    }
   }
 }
+
+/**
+ * Зеркалит artist→radio submission в radio_artist_requests кабинета радио.
+ * Срабатывает только если pitching_radio.user_id заполнен (claim'нутая станция).
+ *
+ * Доп.детали о треке (title, artist_name, audio_url) подтягиваются из
+ * tracks для богатого отображения в radio cabinet UI. На отсутствие
+ * track row или поля fall back на null — кабинет gracefully отрендерит
+ * заявку без обложки/preview.
+ */
+async function mirrorRadioPitchToRadioCabinet(opts: {
+  submissionId: string;
+  radioStationCatalogId: string;
+  artistUserId: string;
+  trackId: string | null;
+  targetName: string | null;
+}): Promise<void> {
+  const claim = await pool.query(
+    `SELECT user_id FROM pitching_radio WHERE id = $1 AND user_id IS NOT NULL LIMIT 1`,
+    [opts.radioStationCatalogId],
+  );
+  if (claim.rows.length === 0) {
+    // Catalog row не claim'нут — кабинет ничего не получает, только admin.
+    return;
+  }
+  const radioUserId = String(claim.rows[0].user_id);
+
+  // Track meta для красивого отображения. tracks.user_id у артиста,
+  // ищем title + audio_url + artist mapping через artist_profiles.
+  let trackTitle: string | null = null;
+  let trackUrl: string | null = null;
+  let artistName: string | null = null;
+  if (opts.trackId) {
+    try {
+      const t = await pool.query(
+        `SELECT t.title, t.audio_url, ap.full_name AS artist_name
+           FROM tracks t
+           LEFT JOIN artist_profiles ap ON ap.user_id = t.user_id
+          WHERE t.id::text = $1
+          LIMIT 1`,
+        [opts.trackId],
+      );
+      const row = t.rows[0];
+      if (row) {
+        trackTitle = row.title || null;
+        trackUrl = row.audio_url || null;
+        artistName = row.artist_name || null;
+      }
+    } catch {}
+  }
+
+  const { insertRadioArtistRequest } = await import('./db.tsx');
+  await insertRadioArtistRequest({
+    // id опционален — db helper сгенерит UUID; передаём submission id для
+    // 1-to-1 traceability artist pitch ↔ radio cabinet request.
+    id: opts.submissionId,
+    radioId: radioUserId,
+    artistId: opts.artistUserId,
+    artistName: artistName || opts.artistUserId,
+    trackId: opts.trackId,
+    trackTitle: trackTitle || opts.targetName || 'Без названия',
+    trackUrl,
+    status: 'pending',
+    extra: { source: 'pitching_bundle' },
+  });
+
+  // SSE+bell радио-кабинету: новая заявка приехала.
+  try {
+    const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
+    await notifyCrossCabinet({
+      targetUserId: radioUserId,
+      targetRole: 'radio',
+      sourceRole: 'artist',
+      type: 'pitching_update',
+      title: 'Новая заявка артиста',
+      message: artistName
+        ? `${artistName} — «${trackTitle || opts.targetName || 'трек'}»`
+        : 'Артист отправил заявку на ротацию',
+      link: '/radio?tab=artist-requests',
+      metadata: { submissionId: opts.submissionId, trackId: opts.trackId },
+    });
+  } catch {}
+}
+
+/**
+ * POST /admin/radio-stations/:id/claim — admin-инструмент связать catalog
+ * row pitching_radio с реальным radio cabinet user'ом. После claim'а
+ * артистские pitch'и на эту станцию начнут зеркалиться в её
+ * radio_artist_requests (см. mirrorRadioPitchToRadioCabinet выше).
+ *
+ * Body: { userId: string } — id пользователя с role='radio_station' (validate).
+ *
+ * Идемпотентно: повторный claim тем же userId — no-op (UPDATE same value).
+ * Перевод claim на другого user'а допускается (UPDATE; старый user
+ * перестаёт получать новые заявки, но уже-созданные radio_artist_requests
+ * у него остаются — это legit для смены владельца станции).
+ */
+app.post('/admin/radio-stations/:id/claim', requireAuth, requireAdmin, async (c) => {
+  try {
+    await ensureSchema();
+    const catalogId = c.req.param('id');
+    const body = await c.req.json().catch(() => ({}));
+    const userId = String(body?.userId || '').trim();
+    if (!userId) {
+      return c.json({ success: false, error: 'userId обязателен' }, 400);
+    }
+    // Проверка что user существует и имеет роль radio_station.
+    const u = await pool.query(
+      `SELECT id, role::text AS role FROM users WHERE id::text = $1 LIMIT 1`,
+      [userId],
+    );
+    if (u.rows.length === 0) {
+      return c.json({ success: false, error: 'Пользователь не найден' }, 404);
+    }
+    if (u.rows[0].role !== 'radio_station' && u.rows[0].role !== 'radio') {
+      return c.json({
+        success: false,
+        error: `Пользователь должен быть с ролью radio_station (текущая: ${u.rows[0].role})`,
+      }, 400);
+    }
+    const r = await pool.query(
+      `UPDATE pitching_radio SET user_id = $1, updated_at = NOW()
+        WHERE id = $2 RETURNING id, name, user_id`,
+      [userId, catalogId],
+    );
+    if (r.rows.length === 0) {
+      return c.json({ success: false, error: 'Catalog row не найден' }, 404);
+    }
+    return c.json({
+      success: true,
+      claim: { catalogId: r.rows[0].id, stationName: r.rows[0].name, userId: r.rows[0].user_id },
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+/**
+ * DELETE /admin/radio-stations/:id/claim — снять claim, станция возвращается
+ * в admin-only режим. Новые pitch'и снова летят только в moderation queue.
+ */
+app.delete('/admin/radio-stations/:id/claim', requireAuth, requireAdmin, async (c) => {
+  try {
+    await ensureSchema();
+    const catalogId = c.req.param('id');
+    const r = await pool.query(
+      `UPDATE pitching_radio SET user_id = NULL, updated_at = NOW()
+        WHERE id = $1 RETURNING id`,
+      [catalogId],
+    );
+    if (r.rows.length === 0) {
+      return c.json({ success: false, error: 'Catalog row не найден' }, 404);
+    }
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
 
 export default app;

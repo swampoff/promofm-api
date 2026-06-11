@@ -310,6 +310,38 @@ publication fee. Source: `tracks-page.tsx:775` (Promomusicfigma) +
   (агрегация по треку артиста); `:146-163` `GET /stations`
   (список мониторинга с `last_scanned_at`, `error_count`).
 
+### Artist → Radio pitch handoff (миграция 108, 2026-06-11)
+
+До этого PR'а артистский питчинг на радио был архитектурно оборван:
+артист платил, FE `submitRadioPitch` мажет `category='playlist'`
+(потому что бэкенд-bundle поддерживал только playlist/influencer/media),
+запись попадала в `pitching_submissions` под чужим лейблом, и кабинет
+радио (читающий `radio_artist_requests`) её НЕ видел. Заявка жила
+только в admin moderation queue.
+
+С миграцией 108:
+
+1. `pitching_radio.user_id TEXT NULL` — связь catalog row → radio cabinet user
+2. `pitching_radio_stations` VIEW пробрасывает `user_id` наверх
+3. Bundle `Category` enum получает `'radio'` (FE PR — отдельный, исправит cast'инг)
+4. `finalizePitchingBundle` после оплаты для `category='radio'`
+   делает зеркальный `insertRadioArtistRequest` если `pitching_radio.user_id`
+   заполнен (claim'нутая станция) + SSE+bell на radio cabinet
+5. Без claim'а (970 unclaimed legacy строк) — старое поведение, только
+   admin moderation queue
+
+Admin-инструменты:
+- `POST /pitching/admin/radio-stations/:catalogId/claim { userId }` —
+  связать catalog row с реальным radio cabinet user'ом (валидация
+  `users.role IN ('radio_station','radio')`)
+- `DELETE /pitching/admin/radio-stations/:catalogId/claim` — снять claim,
+  станция возвращается в admin-only режим
+
+Цена для radio: pitching_radio (legacy) НЕ имеет `price_rub` колонки —
+fallback 12000 ₽ из `CATEGORY_DEFAULT_PRICE['radio']` (та же что в
+`paymentRequired:311` для single-submit). Если product захочет
+per-станционную цену — добавится миграцией позже.
+
 ### Что НЕ работает / в активной разработке (по состоянию 2026-06-05)
 
 - **Кабинет «отчёты по эфирам» в radio-UI** — сама система-движок
