@@ -26,7 +26,7 @@
 
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import * as db from './db.tsx';
 import { saveUpload, IMAGE_EXTS, MAX_IMAGE_BYTES } from './cabinet-uploads.tsx';
@@ -880,6 +880,163 @@ app.put('/orders/:id/cancel', requireAuth, async (c) => {
     if (!rows.length) return c.json({ success: false, error: 'Заказ нельзя отменить (уже оплачен или завершён)' }, 409);
     return c.json({ success: true, order: mapEngOrder(rows[0]) });
   } catch (error) { log.error({ error }, 'eng order cancel'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
+});
+
+/**
+ * POST /admin/orders/:id/refund — admin-инициированный возврат денег
+ * клиенту за оплаченный engineer_order.
+ *
+ * Зачем: после оплаты (status='in_progress') у клиента нет
+ * self-cancel пути. Если инженер пропал — единственный выход через
+ * support-тикет → этот endpoint отрабатывает решение админа.
+ *
+ * Сценарий:
+ *   1. Клиент пишет в support → /ctrl-pm7k2f/inbox?tab=tickets
+ *   2. Админ принимает решение «вернуть» (engineer пропал /
+ *      результат не принят / claim легитимный)
+ *   3. Админ дёргает POST /server/api/engineer/admin/orders/:id/refund
+ *      { reason } из любого admin-tool'а (curl / cabinet / Postman)
+ *
+ * Что делает:
+ *   1. Loads engineer_orders by id (must be in_progress|delivered)
+ *   2. Loads payment_session by payment_order_id → gatewayPaymentId
+ *   3. yk.refund() с idempotenceKey = refund-eng-{orderId} — повторный
+ *      вызов не списывает второй раз
+ *   4. UPDATE engineer_orders SET status='refunded'
+ *   5. UPDATE platform_revenue_log SET status='refunded' WHERE
+ *      channel='engineer_order' AND metadata->>orderId = payment_order_id
+ *      — чтобы /engineer/earnings (status='completed' filter)
+ *      перестал считать эту сумму как заработанную
+ *   6. SSE engineer ('engineer_order_refunded') + client
+ *      ('engineer_order_refund_credited')
+ *
+ * Зеркало marketplace-routes.tsx:1782 (/admin/purchases/refund) — тот же
+ * паттерн: idempotenceKey + yookassa-only + UPDATE + SSE.
+ *
+ * Auth: requireAdmin (только superadmin email — см. roles.tsx).
+ *
+ * Body: { reason?: string } — для audit log'а и refund description.
+ *
+ * Errors:
+ *   - 404 если заказ не найден
+ *   - 409 если status не in_progress/delivered (refund невозможен)
+ *   - 422 если payment_order_id NULL (старый заказ до атрибуции)
+ *   - 501 если gateway не yookassa (Stripe/TBank refund — отдельно)
+ *   - 502 если YooKassa отказала
+ */
+app.post('/admin/orders/:id/refund', requireAuth, requireAdmin, async (c) => {
+  // `'userId' as never` — обход Hono TS-gap'а (c.get без context
+  // augmentation выводит ключ как never). Тот же pattern что в
+  // venue-routes.tsx:182. Существующие 6 хэндлеров файла этот gap
+  // не обходят (pre-existing TS2769'ы), но новые добавлять не плодим.
+  const adminId = c.get('userId' as never) as string;
+  const orderId = c.req.param('id');
+  try {
+    await ensureEngineerOrdersSchema();
+    const body = await c.req.json().catch(() => ({}));
+    const reason = String(body?.reason || '').slice(0, 250);
+
+    const ord = await pool.query(
+      `SELECT id, engineer_id, client_id, title, price, status, payment_order_id
+         FROM engineer_orders WHERE id=$1 LIMIT 1`,
+      [orderId],
+    );
+    if (!ord.rows.length) {
+      return c.json({ success: false, error: 'Заказ не найден' }, 404);
+    }
+    const o = ord.rows[0];
+    if (o.status === 'refunded') {
+      return c.json({ success: false, error: 'Заказ уже возвращён' }, 409);
+    }
+    if (!['in_progress', 'delivered'].includes(o.status)) {
+      return c.json({
+        success: false,
+        error: `Refund возможен только для оплаченных заказов (status=${o.status})`,
+      }, 409);
+    }
+    if (!o.payment_order_id) {
+      return c.json({
+        success: false,
+        error: 'payment_order_id NULL — refund через YooKassa-дашборд вручную',
+      }, 422);
+    }
+
+    const { getPaymentSession } = await import('./db.tsx');
+    const session = await getPaymentSession(o.payment_order_id) as any;
+    if (!session?.gatewayPaymentId) {
+      return c.json({ success: false, error: 'payment_session не найден' }, 404);
+    }
+    if (session.gateway !== 'yookassa') {
+      return c.json({
+        success: false,
+        error: `Gateway ${session.gateway} не поддерживается auto-refund'ом`,
+      }, 501);
+    }
+
+    const { YooKassaGateway } = await import('./gateway-yookassa.tsx');
+    const yk = new YooKassaGateway();
+    let refund: any;
+    try {
+      refund = await yk.refund(session.gatewayPaymentId, Number(o.price), {
+        description: `Возврат engineer_order #${orderId}${reason ? ': ' + reason : ''}`.slice(0, 250),
+        idempotenceKey: `refund-eng-${orderId}`,
+        metadata: { engineerOrderId: orderId, reason, refundedBy: adminId },
+        shopId: session.shopId,
+      });
+    } catch (refundErr: any) {
+      log.error({ err: refundErr, orderId }, 'eng admin refund yk fail');
+      return c.json({
+        success: false,
+        error: 'YooKassa отклонила refund: ' + (refundErr?.message || 'unknown'),
+      }, 502);
+    }
+
+    const refundedAt = new Date().toISOString();
+    await pool.query(
+      `UPDATE engineer_orders SET status='refunded', updated_at=now() WHERE id=$1`,
+      [orderId],
+    );
+    // Снимаем сумму с /engineer/earnings: тот фильтрует на
+    // status='completed', поэтому 'refunded' автоматически исключит её
+    // из total/month. UPDATE по metadata.orderId — JSONB-фильтр, без
+    // индекса; для admin-1-off refund приемлемо (объёмы ~единицы строк
+    // на адресный поиск, не hot path).
+    await pool.query(
+      `UPDATE platform_revenue_log SET status='refunded', updated_at=NOW()
+        WHERE channel='engineer_order' AND metadata->>'orderId' = $1`,
+      [o.payment_order_id],
+    );
+
+    try {
+      const { emitSSE } = await import('./sse-routes.tsx');
+      emitSSE(o.engineer_id, {
+        type: 'engineer_order_refunded',
+        data: { orderId, title: o.title, amount: Number(o.price), reason },
+      });
+      emitSSE(o.client_id, {
+        type: 'engineer_order_refund_credited',
+        data: { orderId, title: o.title, amount: Number(o.price), refundId: refund.id },
+      });
+    } catch {}
+
+    log.info({ orderId, engineerId: o.engineer_id, clientId: o.client_id,
+               amount: Number(o.price), refundId: refund.id, adminId, reason },
+             'engineer_order_refunded');
+
+    return c.json({
+      success: true,
+      refund: {
+        orderId,
+        refundId: refund.id,
+        amount: Number(o.price),
+        status: refund.status,
+        refundedAt,
+      },
+    });
+  } catch (error) {
+    log.error({ error, orderId }, 'eng admin refund');
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
 });
 
 export default app;
