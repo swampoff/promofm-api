@@ -1058,12 +1058,20 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         } catch {}
         // E-mail инженеру: «деньги пришли, можно приступать». SSE
         // покрывает кабинет, email — мобильник / offline. Per-user
-        // toggle добавится отдельным PR; пока шлём всем по умолчанию.
+        // toggle (миграция 105: notify_email_on_paid, default TRUE)
+        // тащим тем же JOIN'ом — лишний round-trip не нужен.
         try {
           const { pool: vpool2 } = await import('./db-client.tsx');
-          const u = await vpool2.query('SELECT email, full_name FROM users WHERE id=$1', [upd.rows[0].engineer_id]);
+          const u = await vpool2.query(
+            `SELECT u.email, u.full_name,
+                    COALESCE(ep.notify_email_on_paid, TRUE) AS notify
+               FROM users u
+               LEFT JOIN engineer_profiles ep ON ep.user_id = u.id
+              WHERE u.id = $1`,
+            [upd.rows[0].engineer_id],
+          );
           const eng = u.rows[0];
-          if (eng?.email) {
+          if (eng?.email && eng.notify) {
             const { notifyEngineerOrderPaid } = await import('./email-helper.tsx');
             void notifyEngineerOrderPaid(eng.email, eng.full_name || '', upd.rows[0].title, Number(session.amount));
           }

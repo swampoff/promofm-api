@@ -1468,6 +1468,11 @@ export async function upsertEngineerProfile(userId: string, profile: Record<stri
     is_available: inner.isAvailable !== undefined
       ? inner.isAvailable
       : (inner.openForOrders !== undefined ? inner.openForOrders : true),
+    // E-mail notification toggles (миграция 105). Денорм-колонки чтобы
+    // emit-точка читала фаст без jsonb-распаковки. JSON-bool→pg-bool
+    // через `!== false` — undefined даёт TRUE (default for new profiles).
+    notify_email_on_new_order: inner.notifyEmailOnNewOrder !== false,
+    notify_email_on_paid:      inner.notifyEmailOnPaid !== false,
     data: profile,
     updated_at: new Date().toISOString(),
   };
