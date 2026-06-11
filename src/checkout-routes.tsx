@@ -1049,6 +1049,16 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         [session.orderId, engOrderId],
       );
       if (upd.rows.length > 0) {
+        // Enrich session.metadata so the generic recordRevenue call
+        // below attributes the row to the engineer instead of dropping
+        // payee_id and bucketing as 'purchase'. Без этого
+        // platform_revenue_log не отвечает на вопрос «сколько мы
+        // должны инженеру X» — payee_id остаётся null, channel —
+        // generic 'purchase', и engineer-выручка теряется в общем
+        // marketplace-канале.
+        session.metadata.itemType = 'engineer_order';
+        session.metadata.artistId = upd.rows[0].engineer_id;
+        session.metadata.artistName = upd.rows[0].title;
         try {
           const { emitSSE } = await import('./sse-routes.tsx');
           emitSSE(upd.rows[0].engineer_id, {
