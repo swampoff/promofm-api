@@ -680,13 +680,22 @@ app.post('/orders', requireAuth, async (c) => {
       const { emitSSE } = await import('./sse-routes.tsx');
       emitSSE(s.user_id, { type: 'engineer_order_new', data: { title: s.title } });
     } catch {}
-    // E-mail инженеру (SSE — для онлайна, email — для всех остальных).
-    // Шлём по умолчанию всем, как notifyArtistRequest; per-user
-    // toggle добавится отдельным PR. sendEmail сам проверит unsubscribe.
+    // E-mail инженеру. JOIN'ом одновременно тащим email/имя получателя
+    // и per-user gate `notify_email_on_new_order` (миграция 105,
+    // default TRUE для existing профилей). LEFT JOIN — если у юзера
+    // ещё нет engineer_profiles-строки (например, заказ через legacy
+    // adapter), считаем флаг включённым (COALESCE TRUE).
     try {
-      const u = await pool.query('SELECT email, full_name FROM users WHERE id=$1', [s.user_id]);
+      const u = await pool.query(
+        `SELECT u.email, u.full_name,
+                COALESCE(ep.notify_email_on_new_order, TRUE) AS notify
+           FROM users u
+           LEFT JOIN engineer_profiles ep ON ep.user_id = u.id
+          WHERE u.id = $1`,
+        [s.user_id],
+      );
       const eng = u.rows[0];
-      if (eng?.email) {
+      if (eng?.email && eng.notify) {
         const { notifyEngineerNewOrder } = await import('./email-helper.tsx');
         void notifyEngineerNewOrder(eng.email, eng.full_name || '', s.title);
       }
