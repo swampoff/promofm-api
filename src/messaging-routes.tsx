@@ -103,6 +103,32 @@ async function forwardToTelegramIfAdmin(recipientRole: string, senderName: strin
 
 const app = new Hono();
 
+// ── Schema ensure for dm_email_throttle (миграция 106) ──
+//
+// Inlined из миграции 106 чтобы не требовать ручной psql-step после
+// деплоя (migration-runner.tsx — стаб, файлы в src/migrations/*.sql
+// не auto-run'ятся). На свежем процессе первый POST /messages/:id
+// триггерит CREATE TABLE IF NOT EXISTS — idempotent.
+// Файл 106_dm_email_throttle.sql остаётся для аудита и совместимости
+// с pre-existing prod-восстановлениями.
+let _dmEmailThrottleReady = false;
+async function ensureDmEmailThrottleSchema(): Promise<void> {
+  if (_dmEmailThrottleReady) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS dm_email_throttle (
+      user_id         TEXT        NOT NULL,
+      conversation_id TEXT        NOT NULL,
+      last_sent_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_id, conversation_id)
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_dm_email_throttle_last_sent
+      ON dm_email_throttle (last_sent_at);
+  `);
+  _dmEmailThrottleReady = true;
+}
+
 // ── Types ──
 
 type CabinetRole = 'artist' | 'producer' | 'dj' | 'admin' | 'radio' | 'venue' | 'engineer' | 'label';
@@ -654,6 +680,57 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
       }
     } catch (err) {
       log.warn({ err, conversationId }, 'dm_bell_or_telegram_failed');
+    }
+
+    // E-mail-канал DM. Шлём НЕ-админу с throttle'ом 1 письмо на
+    // (recipient, conversation) в час через dm_email_throttle
+    // (миграция 106). Атомарный UPSERT с WHERE-фильтром — если ряд
+    // обновился (новый или старше часа), RETURNING возвращает строку,
+    // шлём email. Если NULL — throttle сработал, skip.
+    //
+    // Защита от спама встроена в SQL: race-condition-free, не нужны
+    // дистрибутивные локи. Для каждого получателя — отдельный UPSERT.
+    //
+    // Админов пропускаем — они получают Telegram (см. forwardToTelegramIfAdmin).
+    //
+    // Schema ensure: миграция 106 файл — для аудита, но fact-of-life
+    // что миграции не auto-run'ятся. ensureDmEmailThrottleSchema()
+    // делает CREATE TABLE IF NOT EXISTS на первом вызове за процесс
+    // (мьютекс через `_dmEmailThrottleReady` flag).
+    try {
+      await ensureDmEmailThrottleSchema();
+      const otherIds = participantIds.filter(id => id !== senderId);
+      const preview = text.trim().length > 120 ? text.trim().slice(0, 117) + '...' : text.trim();
+      const link = `/profile?tab=messages&conversation=${conversationId}`;
+      for (const otherId of otherIds) {
+        try {
+          const u = await pool.query(
+            `SELECT email, full_name, role::text FROM users WHERE id::text = $1`,
+            [otherId],
+          );
+          const row = u.rows[0];
+          if (!row?.email) continue;
+          if (row.role === 'admin' || row.role === 'superadmin') continue;
+
+          const throttle = await pool.query(
+            `INSERT INTO dm_email_throttle (user_id, conversation_id, last_sent_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT (user_id, conversation_id) DO UPDATE
+                SET last_sent_at = NOW()
+              WHERE dm_email_throttle.last_sent_at < NOW() - INTERVAL '1 hour'
+             RETURNING last_sent_at`,
+            [otherId, conversationId],
+          );
+          if (throttle.rows.length === 0) continue; // в пределах часа уже слали
+
+          const { notifyDmReceived } = await import('./email-helper.tsx');
+          void notifyDmReceived(row.email, row.full_name || '', senderName || '', preview, link);
+        } catch (innerErr) {
+          log.warn({ err: innerErr, recipient: otherId, conversationId }, 'dm_email_per_recipient');
+        }
+      }
+    } catch (err) {
+      log.warn({ err, conversationId }, 'dm_email_dispatch_failed');
     }
 
     return c.json({
