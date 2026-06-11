@@ -263,7 +263,7 @@ app.post('/:sessionId/messages', async (c) => {
         type: 'live_chat_message',
         title: `Live-чат: ${session.guest_name || 'Гость'}`.slice(0, 200),
         message: preview,
-        link: `/ctrl-pm7k2f?tab=live-chat&session=${sessionId}`,
+        link: `/ctrl-pm7k2f/inbox?tab=live-chat&session=${sessionId}`,
         metadata: { sessionId, guestName: session.guest_name, guestEmail: session.guest_email },
       });
     } catch (bellErr) {

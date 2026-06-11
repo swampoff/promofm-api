@@ -204,7 +204,7 @@ app.post('/create', requireAuth, async (c) => {
         type: 'support_ticket_new',
         title: `Новый тикет: ${subject}`.slice(0, 200),
         message: `${userLabel} (${category}, ${priority || 'medium'}): ${description}`.slice(0, 400),
-        link: `/ctrl-pm7k2f?tab=tickets&id=${ticketId}`,
+        link: `/ctrl-pm7k2f/inbox?tab=tickets&id=${ticketId}`,
         metadata: { ticketId, category, priority: priority || 'medium', userId: user_id },
       });
     } catch (bellErr) {

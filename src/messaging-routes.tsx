@@ -631,7 +631,9 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
             type: 'new_direct_message',
             title: `Сообщение от ${senderName || 'пользователя'}`.slice(0, 200),
             message: preview,
-            link: `/profile?tab=messages&conversation=${conversationId}`,
+            // Каждый кабинет хостит мессенджер на /{role}/messages —
+            // top-level /profile роута не существует ни у одной роли.
+            link: `/${role}/messages?conversation=${conversationId}`,
             metadata: { conversationId, messageId: msgId, senderId },
           });
         } catch (bellErr) {
@@ -645,7 +647,7 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
             type: 'new_direct_message',
             title: `Сообщение от ${senderName || 'пользователя'}`.slice(0, 200),
             message: preview,
-            link: `/ctrl-pm7k2f?tab=messages&conversation=${conversationId}`,
+            link: `/ctrl-pm7k2f/inbox?tab=messages&conversation=${conversationId}`,
             metadata: { conversationId, messageId: msgId, senderId },
           });
         } catch (bellErr) {
