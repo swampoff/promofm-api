@@ -762,4 +762,98 @@ export async function sendVenueRadioChangesRequestedEmail(data: { toEmail: strin
   });
 }
 
+// ─── Engineer marketplace notifications ────────────────────────────
+//
+// Жизненный цикл engineer-order'а (см. engineer-routes.tsx):
+//   pending → accepted → in_progress → delivered → completed
+//                                            ↘ refunded (admin-only)
+//
+// SSE (колокольчик) уже летит в каждой точке. До этого PR'а e-mail
+// дублирования не было — этот блок его добавляет. Шлются ВСЕМ по
+// умолчанию (как notifyArtistRequest); per-user toggle'ы добавляются
+// отдельным PR ("feat/engineer-email-toggles") вместе с колонками
+// engineer_profiles.notify_email_* и Settings UI.
+//
+// sendEmail() уже умеет проверять unsubscribe-токен через
+// isUnsubscribed(email), так что глобальный opt-out продолжает
+// работать без знания contour'а.
+
+function engineerOrderCard(title: string, opts?: { amount?: number; deliveryUrl?: string; reason?: string }) {
+  const rows: string[] = [`<tr><td style="padding:8px 12px;color:#888;">Заказ:</td><td style="padding:8px 12px;color:#fff;">${escapeHtml(title)}</td></tr>`];
+  if (opts?.amount != null) {
+    rows.push(`<tr><td style="padding:8px 12px;color:#888;">Сумма:</td><td style="padding:8px 12px;color:#fff;">${escapeHtml(opts.amount.toLocaleString('ru-RU'))} ₽</td></tr>`);
+  }
+  if (opts?.deliveryUrl) {
+    rows.push(`<tr><td style="padding:8px 12px;color:#888;">Файл:</td><td style="padding:8px 12px;"><a href="${escapeHtml(opts.deliveryUrl)}" style="color:#FF577F;">${escapeHtml(opts.deliveryUrl.slice(0, 64))}${opts.deliveryUrl.length > 64 ? '…' : ''}</a></td></tr>`);
+  }
+  if (opts?.reason) {
+    rows.push(`<tr><td style="padding:8px 12px;color:#888;">Причина:</td><td style="padding:8px 12px;color:#fff;">${escapeHtml(opts.reason)}</td></tr>`);
+  }
+  return `<table style="width:100%;background:#1a1a2e;border-radius:8px;margin:16px 0;">${rows.join('')}</table>`;
+}
+
+export async function notifyEngineerNewOrder(
+  email: string,
+  name: string,
+  orderTitle: string,
+): Promise<boolean> {
+  const html = emailWrapper(`
+    <h2 style="margin:0 0 16px;color:#FF577F;">Новая заявка на услугу</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(name || 'инженер')}</strong>!</p>
+    <p>Клиент оставил заявку. Подтвердите готовность взять заказ — он перейдёт к оплате.</p>
+    ${engineerOrderCard(orderTitle)}
+    <p style="text-align:center;margin:28px 0;"><a href="${SITE_URL}/engineer/orders" style="${buttonStyle}">Открыть заявки</a></p>
+  `);
+  return sendEmail({ to: email, subject: `Заявка: ${orderTitle}`, html });
+}
+
+export async function notifyEngineerOrderPaid(
+  email: string,
+  name: string,
+  orderTitle: string,
+  amount: number,
+): Promise<boolean> {
+  const html = emailWrapper(`
+    <h2 style="margin:0 0 16px;color:#10B981;">Заказ оплачен</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(name || 'инженер')}</strong>!</p>
+    <p>Клиент оплатил заказ. Можно приступать к работе — после сдачи отправьте файл через кабинет.</p>
+    ${engineerOrderCard(orderTitle, { amount })}
+    <p style="text-align:center;margin:28px 0;"><a href="${SITE_URL}/engineer/orders" style="${buttonStyle}">К заказам</a></p>
+  `);
+  return sendEmail({ to: email, subject: `Оплачен: ${orderTitle}`, html });
+}
+
+export async function notifyClientOrderDelivered(
+  email: string,
+  name: string,
+  orderTitle: string,
+  deliveryUrl: string,
+): Promise<boolean> {
+  const html = emailWrapper(`
+    <h2 style="margin:0 0 16px;color:#FF577F;">Заказ готов</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(name || '')}</strong>!</p>
+    <p>Звукоинженер сдал работу. Проверьте файл и подтвердите приём — после этого заказ закроется.</p>
+    ${engineerOrderCard(orderTitle, { deliveryUrl })}
+    <p style="text-align:center;margin:28px 0;"><a href="${SITE_URL}/cabinet/orders" style="${buttonStyle}">Открыть заказ</a></p>
+  `);
+  return sendEmail({ to: email, subject: `Готов: ${orderTitle}`, html });
+}
+
+export async function notifyClientOrderRefunded(
+  email: string,
+  name: string,
+  orderTitle: string,
+  amount: number,
+  reason: string,
+): Promise<boolean> {
+  const html = emailWrapper(`
+    <h2 style="margin:0 0 16px;color:#7C3AED;">Возврат средств</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(name || '')}</strong>!</p>
+    <p>Деньги по заказу возвращены на ваш способ оплаты. Зачисление обычно занимает 3–7 рабочих дней (правила банка-эмитента).</p>
+    ${engineerOrderCard(orderTitle, { amount, reason: reason || undefined })}
+    <p style="color:#888;font-size:13px;">Если у вас есть вопросы — ответьте на это письмо или напишите в поддержку: <a href="mailto:info@promofm.ru" style="color:#FF577F;">info@promofm.ru</a></p>
+  `);
+  return sendEmail({ to: email, subject: `Возврат: ${orderTitle}`, html });
+}
+
 

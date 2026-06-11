@@ -680,6 +680,17 @@ app.post('/orders', requireAuth, async (c) => {
       const { emitSSE } = await import('./sse-routes.tsx');
       emitSSE(s.user_id, { type: 'engineer_order_new', data: { title: s.title } });
     } catch {}
+    // E-mail инженеру (SSE — для онлайна, email — для всех остальных).
+    // Шлём по умолчанию всем, как notifyArtistRequest; per-user
+    // toggle добавится отдельным PR. sendEmail сам проверит unsubscribe.
+    try {
+      const u = await pool.query('SELECT email, full_name FROM users WHERE id=$1', [s.user_id]);
+      const eng = u.rows[0];
+      if (eng?.email) {
+        const { notifyEngineerNewOrder } = await import('./email-helper.tsx');
+        void notifyEngineerNewOrder(eng.email, eng.full_name || '', s.title);
+      }
+    } catch (err) { log.warn({ err }, 'engineer_new_order_email'); }
     return c.json({ success: true, order: mapEngOrder(rows[0]) });
   } catch (error) { log.error({ error }, 'eng order create'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });
@@ -840,6 +851,16 @@ app.put('/orders/:id/deliver', requireAuth, async (c) => {
       const { emitSSE } = await import('./sse-routes.tsx');
       emitSSE(rows[0].client_id, { type: 'engineer_order_delivered', data: { title: rows[0].title } });
     } catch {}
+    // E-mail клиенту: ссылка на файл важна — без email клиент рискует
+    // пропустить delivery если SSE не дошёл (вкладка закрыта, мобайл).
+    try {
+      const u = await pool.query('SELECT email, full_name FROM users WHERE id=$1', [rows[0].client_id]);
+      const cli = u.rows[0];
+      if (cli?.email) {
+        const { notifyClientOrderDelivered } = await import('./email-helper.tsx');
+        void notifyClientOrderDelivered(cli.email, cli.full_name || '', rows[0].title, deliveryUrl);
+      }
+    } catch (err) { log.warn({ err }, 'engineer_order_delivered_email'); }
     return c.json({ success: true, order: mapEngOrder(rows[0]) });
   } catch (error) { log.error({ error }, 'eng order deliver'); return c.json({ success: false, error: safeErrorMessage(error) }, 500); }
 });

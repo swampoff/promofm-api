@@ -906,6 +906,24 @@ Used by: `notifyAdminTelegram()` in `email-helper.tsx` —
 - `FROM_EMAIL = '"ПРОМО.МУЗЫКА" <noreply@promo-music.ru>'`
 - `ADMIN_EMAIL = 'info@promofm.ru'`
 
+### Engineer marketplace e-mail pipeline (since 2026-06-11)
+
+Прежде engineer-события шли только в SSE (колокольчик). С PR
+feat/engineer-email-pipeline дублируется e-mail'ом в 3 точках:
+
+| Эвент | Файл:линия | Получатель | Функция |
+|---|---|---|---|
+| `engineer_order_new` (pending создан) | `engineer-routes.tsx:680+` | инженер | `notifyEngineerNewOrder` |
+| `engineer_order_paid` (webhook accepted→in_progress) | `checkout-routes.tsx:1051+` | инженер | `notifyEngineerOrderPaid` |
+| `engineer_order_delivered` (in_progress→delivered) | `engineer-routes.tsx:780+` | клиент | `notifyClientOrderDelivered` |
+| `engineer_order_refunded` (PR #230 admin endpoint) | wire-up в follow-up'е после merge'а #230 | клиент | `notifyClientOrderRefunded` (готова в `email-helper.tsx`) |
+
+Шлются ВСЕМ по умолчанию (mirror notifyArtistRequest). Per-user
+toggle'ы — отдельный PR `feat/engineer-email-toggles` (добавит
+`engineer_profiles.notify_email_*` колонки + gating). Глобальный
+opt-out продолжает работать через `isUnsubscribed(email)` — гейт
+живёт внутри `sendEmail()`, новые функции его наследуют.
+
 ### SSE (real-time)
 
 `sse-routes.tsx` `connections` Map keyed by various identifiers:
