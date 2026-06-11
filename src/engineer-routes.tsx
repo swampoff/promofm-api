@@ -1060,4 +1060,390 @@ app.post('/admin/orders/:id/refund', requireAuth, requireAdmin, async (c) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// PAYOUT PIPELINE — engineer_payout source в payment_withdrawals.
+//
+// Архитектура (PR E1, foundation):
+//
+//   1. /balance       — engineer видит earned − withdrawn = available
+//   2. /payouts/cron  — cron daily, X-Internal-Key. Сканирует engineer'ов
+//                       с available > MIN_PAYOUT, создаёт payment_withdrawals
+//                       строку status='pending' с idempotency-ключом
+//                       app_id='eng-payout-{userId}-{YYYYMMDD}'. NIET
+//                       реального трансфера — admin делает руками
+//                       (YooKassa-dashboard / banking app) и помечает 'paid'.
+//                       PR E2 (отдельным PR'ом) подключит YooKassa Payouts
+//                       API для авто-перевода когда ENGINEER_PAYOUTS_AUTO=true.
+//   3. /admin/payouts/:id/mark-paid — admin фиксирует завершение трансфера
+//   4. /admin/payouts/:id/cancel    — admin отменяет (например невалидные
+//                                     реквизиты); сумма вернётся в available
+//                                     на следующий cron-tick.
+//
+// Идемпотентность cron'а:
+//   UNIQUE(user_id, app_id) на payment_withdrawals (миграция 043) →
+//   повторный run в тот же день получает 23505 (unique_violation),
+//   обрабатываем как «уже создано, skip».
+//
+// Balance formula:
+//   available = earnings_completed − Σ withdrawals(status ∈ {pending, processing, paid})
+//
+// 'cancelled' / 'failed' НЕ вычитаются — деньги фактически вернулись
+// инженеру, следующий cron подберёт их снова.
+// ═══════════════════════════════════════════════════════════════════
+
+const MIN_PAYOUT_AMOUNT = 1000; // ₽ — ниже не создаём withdrawal, копится дальше
+const PAYOUT_SOURCE     = 'engineer_payout';
+
+async function computeEngineerBalance(userId: string): Promise<{
+  earned: number; withdrawn: number; available: number;
+}> {
+  const earnRes = await pool.query(
+    `SELECT COALESCE(SUM(payout_amount), 0)::numeric AS s
+       FROM platform_revenue_log
+      WHERE payee_id = $1 AND channel = 'engineer_order' AND status = 'completed'`,
+    [userId],
+  );
+  const wdRes = await pool.query(
+    `SELECT COALESCE(SUM(amount), 0)::numeric AS s
+       FROM payment_withdrawals
+      WHERE user_id = $1 AND source = $2
+        AND status IN ('pending', 'processing', 'paid')`,
+    [userId, PAYOUT_SOURCE],
+  );
+  const earned     = Number(earnRes.rows[0]?.s) || 0;
+  const withdrawn  = Number(wdRes.rows[0]?.s) || 0;
+  const available  = Math.max(0, earned - withdrawn);
+  return { earned, withdrawn, available };
+}
+
+// GET /balance — кабинетный read для виджета «Доступно к выводу».
+app.get('/balance', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c);
+  if (g instanceof Response) return g;
+  try {
+    const bal = await computeEngineerBalance(g.userId);
+    return c.json({
+      success: true,
+      balance: {
+        ...bal,
+        currency: 'RUB',
+        minPayout: MIN_PAYOUT_AMOUNT,
+        eligibleForPayout: bal.available >= MIN_PAYOUT_AMOUNT,
+      },
+    });
+  } catch (error) {
+    log.error({ error }, 'eng balance');
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// GET /payouts — engineer видит свою историю выплат.
+app.get('/payouts', requireAuth, async (c) => {
+  const g = await requireEngineerRole(c);
+  if (g instanceof Response) return g;
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, app_id, amount, status, payment_method, method_label,
+              created_at, updated_at, payment_details
+         FROM payment_withdrawals
+        WHERE user_id = $1 AND source = $2
+        ORDER BY created_at DESC
+        LIMIT 100`,
+      [g.userId, PAYOUT_SOURCE],
+    );
+    return c.json({
+      success: true,
+      payouts: rows.map((r: any) => ({
+        id: r.id,
+        appId: r.app_id,
+        amount: Number(r.amount) || 0,
+        status: r.status,
+        paymentMethod: r.payment_method,
+        methodLabel: r.method_label,
+        details: r.payment_details || {},
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      })),
+    });
+  } catch (error) {
+    log.error({ error }, 'eng payouts list');
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// POST /payouts/cron — daily VPS-cron, X-Internal-Key.
+// Сканирует engineer'ов с available >= MIN_PAYOUT_AMOUNT и создаёт
+// pending withdrawal каждому. Без реального трансфера в этом PR.
+app.post('/payouts/cron', async (c) => {
+  const internalKey = c.req.header('X-Internal-Key') || '';
+  const expectedKey = process.env.VPS_INTERNAL_KEY || '';
+  if (!expectedKey || internalKey !== expectedKey) {
+    return c.json({ success: false, error: 'X-Internal-Key required' }, 401);
+  }
+
+  try {
+    // Все юзеры с completed engineer_order выручкой. Отсев тех у кого
+    // available < threshold идёт в Node (а не в SQL) потому что
+    // withdrawals join'ить SUM-агрегации того же payee — лишняя
+    // сложность. Engineer'ов на платформе ~единицы-десятки, full-scan
+    // приемлем.
+    const candidates = await pool.query(
+      `SELECT DISTINCT payee_id
+         FROM platform_revenue_log
+        WHERE channel = 'engineer_order'
+          AND status = 'completed'
+          AND payee_id IS NOT NULL`,
+    );
+
+    const today = new Date().toISOString().slice(0, 10).replace(/-/g, ''); // YYYYMMDD
+    let created = 0;
+    let skippedBelowThreshold = 0;
+    let skippedNoPaymentMethod = 0;
+    let skippedDuplicate = 0;
+    const createdIds: string[] = [];
+
+    for (const row of candidates.rows) {
+      const userId = String(row.payee_id);
+      try {
+        const bal = await computeEngineerBalance(userId);
+        if (bal.available < MIN_PAYOUT_AMOUNT) {
+          skippedBelowThreshold++;
+          continue;
+        }
+
+        // Подтянуть primary payment_method (для SBP-трансфера будущим PR'ом E2).
+        // Если у engineer'а нет реквизитов — создаём pending всё равно,
+        // admin потом разберётся (либо отменит, либо позвонит уточнить).
+        const pmRes = await pool.query(
+          `SELECT id, data FROM payment_methods
+            WHERE user_id = $1
+            ORDER BY (data->>'isDefault')::boolean DESC NULLS LAST, created_at DESC
+            LIMIT 1`,
+          [userId],
+        );
+        const pm = pmRes.rows[0];
+        if (!pm) {
+          skippedNoPaymentMethod++;
+          // Всё равно SSE предупредим engineer'а что баланс >MIN но реквизитов нет
+          try {
+            const { emitSSE } = await import('./sse-routes.tsx');
+            emitSSE(userId, {
+              type: 'engineer_payout_needs_payment_method',
+              data: { available: bal.available, currency: 'RUB' },
+            });
+          } catch {}
+          continue;
+        }
+        const pmData = (typeof pm.data === 'string' ? JSON.parse(pm.data) : pm.data) || {};
+        const methodId = pm.id || pmData.id || null;
+        const methodLabel = pmData.type === 'sbp'
+          ? `СБП ${pmData.sbpPhone || ''}`.trim()
+          : pmData.type === 'bank_card'
+            ? `Карта •••• ${pmData.cardLast4 || ''}`.trim()
+            : 'Неизвестный метод';
+
+        const appId = `eng-payout-${userId}-${today}`;
+
+        try {
+          const ins = await pool.query(
+            `INSERT INTO payment_withdrawals
+               (user_id, app_id, source, amount, payment_method, method_label,
+                payment_details, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending')
+             RETURNING id`,
+            [
+              userId,
+              appId,
+              PAYOUT_SOURCE,
+              bal.available,
+              methodId,
+              methodLabel,
+              JSON.stringify({
+                pmType: pmData.type,
+                holder: pmData.holder,
+                sbpPhone: pmData.sbpPhone,
+                cardLast4: pmData.cardLast4,
+                inn: pmData.inn,
+                selfEmployed: pmData.selfEmployed,
+                earnedSnapshot: bal.earned,
+                withdrawnSnapshot: bal.withdrawn,
+              }),
+            ],
+          );
+          created++;
+          createdIds.push(ins.rows[0].id);
+
+          // SSE + email engineer'у. Best-effort, не блокирует cron.
+          try {
+            const { emitSSE } = await import('./sse-routes.tsx');
+            emitSSE(userId, {
+              type: 'engineer_payout_queued',
+              data: { amount: bal.available, methodLabel, withdrawalId: ins.rows[0].id },
+            });
+          } catch {}
+          try {
+            const u = await pool.query('SELECT email, full_name FROM users WHERE id=$1', [userId]);
+            const eng = u.rows[0];
+            if (eng?.email) {
+              const { notifyEngineerPayoutQueued } = await import('./email-helper.tsx');
+              void notifyEngineerPayoutQueued(eng.email, eng.full_name || '', bal.available, methodLabel);
+            }
+          } catch (mailErr) {
+            log.warn({ err: mailErr, userId }, 'payout_queued_email');
+          }
+        } catch (err: any) {
+          if (err?.code === '23505') {
+            // UNIQUE (user_id, app_id) — уже создали сегодня. Idempotent.
+            skippedDuplicate++;
+            continue;
+          }
+          throw err;
+        }
+      } catch (innerErr) {
+        log.error({ err: innerErr, userId }, 'payout_cron_per_engineer');
+      }
+    }
+
+    log.info(
+      { created, skippedBelowThreshold, skippedNoPaymentMethod, skippedDuplicate, today },
+      'engineer_payouts_cron_done',
+    );
+
+    // Admin-summary в Telegram (если есть очередь).
+    if (created > 0) {
+      try {
+        const { notifyAdminTelegram } = await import('./email-helper.tsx');
+        void notifyAdminTelegram(
+          `<b>Engineer payouts queued</b>\n` +
+            `Создано pending: ${created}\n` +
+            `Skip below threshold: ${skippedBelowThreshold}\n` +
+            `Skip no payment method: ${skippedNoPaymentMethod}\n` +
+            `Дата: ${today}\n` +
+            `Откройте /ctrl-pm7k2f → Финансы → Engineer payouts чтобы обработать.`,
+        );
+      } catch {}
+    }
+
+    return c.json({
+      success: true,
+      summary: {
+        created,
+        skippedBelowThreshold,
+        skippedNoPaymentMethod,
+        skippedDuplicate,
+        ids: createdIds,
+      },
+    });
+  } catch (error) {
+    log.error({ error }, 'eng payouts cron');
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// POST /admin/payouts/:id/mark-paid — admin отмечает что трансфер
+// фактически произошёл (через YooKassa-dashboard или банковский app).
+// Engineer SSE+email уведомление.
+app.post('/admin/payouts/:id/mark-paid', requireAuth, requireAdmin, async (c) => {
+  const adminId = c.get('userId' as never) as string;
+  const id = c.req.param('id');
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const transferRef = String(body?.transferRef || '').slice(0, 200); // optional, для аудита
+
+    const { rows } = await pool.query(
+      `UPDATE payment_withdrawals
+          SET status = 'paid',
+              updated_at = NOW(),
+              payment_details = COALESCE(payment_details, '{}'::jsonb)
+                              || jsonb_build_object(
+                                   'paidAt', NOW()::text,
+                                   'paidBy', $2::text,
+                                   'transferRef', $3::text
+                                 )
+        WHERE id = $1
+          AND source = $4
+          AND status IN ('pending', 'processing')
+        RETURNING user_id, amount, method_label`,
+      [id, adminId, transferRef, PAYOUT_SOURCE],
+    );
+
+    if (!rows.length) {
+      return c.json({ success: false, error: 'Выплата не найдена или не в pending/processing' }, 404);
+    }
+    const r = rows[0];
+
+    try {
+      const { emitSSE } = await import('./sse-routes.tsx');
+      emitSSE(r.user_id, {
+        type: 'engineer_payout_paid',
+        data: { withdrawalId: id, amount: Number(r.amount) || 0, methodLabel: r.method_label },
+      });
+    } catch {}
+    try {
+      const u = await pool.query('SELECT email, full_name FROM users WHERE id=$1', [r.user_id]);
+      const eng = u.rows[0];
+      if (eng?.email) {
+        const { notifyEngineerPayoutPaid } = await import('./email-helper.tsx');
+        void notifyEngineerPayoutPaid(eng.email, eng.full_name || '', Number(r.amount) || 0, r.method_label);
+      }
+    } catch (mailErr) {
+      log.warn({ err: mailErr, userId: r.user_id }, 'payout_paid_email');
+    }
+
+    log.info({ id, userId: r.user_id, amount: r.amount, adminId, transferRef }, 'engineer_payout_marked_paid');
+    return c.json({ success: true });
+  } catch (error) {
+    log.error({ error, id }, 'eng payouts mark-paid');
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// POST /admin/payouts/:id/cancel — admin отменяет pending (например
+// невалидные реквизиты). Сумма возвращается в available, следующий
+// cron-tick переcоздаст с новыми реквизитами.
+app.post('/admin/payouts/:id/cancel', requireAuth, requireAdmin, async (c) => {
+  const adminId = c.get('userId' as never) as string;
+  const id = c.req.param('id');
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const reason = String(body?.reason || '').slice(0, 250);
+
+    const { rows } = await pool.query(
+      `UPDATE payment_withdrawals
+          SET status = 'cancelled',
+              updated_at = NOW(),
+              payment_details = COALESCE(payment_details, '{}'::jsonb)
+                              || jsonb_build_object(
+                                   'cancelledAt', NOW()::text,
+                                   'cancelledBy', $2::text,
+                                   'cancelReason', $3::text
+                                 )
+        WHERE id = $1
+          AND source = $4
+          AND status IN ('pending', 'processing')
+        RETURNING user_id, amount`,
+      [id, adminId, reason, PAYOUT_SOURCE],
+    );
+
+    if (!rows.length) {
+      return c.json({ success: false, error: 'Выплата не найдена или уже paid/cancelled' }, 404);
+    }
+    const r = rows[0];
+
+    try {
+      const { emitSSE } = await import('./sse-routes.tsx');
+      emitSSE(r.user_id, {
+        type: 'engineer_payout_cancelled',
+        data: { withdrawalId: id, amount: Number(r.amount) || 0, reason },
+      });
+    } catch {}
+
+    log.info({ id, userId: r.user_id, amount: r.amount, adminId, reason }, 'engineer_payout_cancelled');
+    return c.json({ success: true });
+  } catch (error) {
+    log.error({ error, id }, 'eng payouts cancel');
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 export default app;
