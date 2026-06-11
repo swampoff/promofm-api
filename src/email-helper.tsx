@@ -856,4 +856,65 @@ export async function notifyClientOrderRefunded(
   return sendEmail({ to: email, subject: `Возврат: ${orderTitle}`, html });
 }
 
+// ─── Engineer payout pipeline notifications ────────────────────────
+//
+// Шлются из `/payouts/cron` (queued) и `/admin/payouts/:id/mark-paid`
+// (paid). Per-user toggle для payout-эмейлов не нужен — money-events
+// = критично, инженер ДОЛЖЕН узнать. Глобальный unsubscribe-gate в
+// sendEmail() даёт opt-out для тех кто совсем не хочет email'ы.
+
+function payoutAmountFormatted(rub: number): string {
+  return Math.round(rub).toLocaleString('ru-RU');
+}
+
+export async function notifyEngineerPayoutQueued(
+  email: string,
+  name: string,
+  amount: number,
+  methodLabel: string,
+): Promise<boolean> {
+  const html = emailWrapper(`
+    <h2 style="margin:0 0 16px;color:#FF577F;">Выплата в очереди</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(name || 'инженер')}</strong>!</p>
+    <p>Заработанные за период средства поставлены в очередь на выплату.</p>
+    <table style="width:100%;background:#1a1a2e;border-radius:8px;margin:16px 0;">
+      <tr><td style="padding:8px 12px;color:#888;">Сумма:</td><td style="padding:8px 12px;color:#fff;">${escapeHtml(payoutAmountFormatted(amount))} ₽</td></tr>
+      <tr><td style="padding:8px 12px;color:#888;">Метод:</td><td style="padding:8px 12px;color:#fff;">${escapeHtml(methodLabel || '—')}</td></tr>
+    </table>
+    <p>Платформа обработает выплату в течение 1–3 рабочих дней. По
+    завершении придёт письмо «Выплата отправлена».</p>
+    <p style="color:#888;font-size:13px;">Если реквизиты устарели — обновите их в
+    <a href="${SITE_URL}/engineer/settings" style="color:#FF577F;">настройках кабинета</a>
+    и напишите в поддержку, чтобы заменить запись в очереди.</p>
+  `);
+  return sendEmail({
+    to: email,
+    subject: `Выплата в очереди: ${payoutAmountFormatted(amount)} ₽`,
+    html,
+  });
+}
+
+export async function notifyEngineerPayoutPaid(
+  email: string,
+  name: string,
+  amount: number,
+  methodLabel: string,
+): Promise<boolean> {
+  const html = emailWrapper(`
+    <h2 style="margin:0 0 16px;color:#10B981;">Выплата отправлена</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(name || 'инженер')}</strong>!</p>
+    <p>Платформа перевела заработанное на указанные реквизиты. Поступление
+    обычно занимает несколько часов (СБП — мгновенно, карта — до суток).</p>
+    <table style="width:100%;background:#1a1a2e;border-radius:8px;margin:16px 0;">
+      <tr><td style="padding:8px 12px;color:#888;">Сумма:</td><td style="padding:8px 12px;color:#fff;">${escapeHtml(payoutAmountFormatted(amount))} ₽</td></tr>
+      <tr><td style="padding:8px 12px;color:#888;">Метод:</td><td style="padding:8px 12px;color:#fff;">${escapeHtml(methodLabel || '—')}</td></tr>
+    </table>
+    <p>Историю всех выплат смотрите в кабинете → Финансы.</p>
+  `);
+  return sendEmail({
+    to: email,
+    subject: `Выплата отправлена: ${payoutAmountFormatted(amount)} ₽`,
+    html,
+  });
+}
 

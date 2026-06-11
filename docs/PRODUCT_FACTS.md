@@ -806,6 +806,87 @@ cabinet looked fine (it rehydrates from the JSONB `data` column).
 
 ---
 
+## Engineer payout pipeline (since 2026-06-11)
+
+**Source:** `src/engineer-routes.tsx` `/balance`, `/payouts`,
+`/payouts/cron`, `/admin/payouts/:id/{mark-paid,cancel}`.
+
+### Balance formula
+
+```
+available = earnings_completed − Σ withdrawals(status ∈ {pending, processing, paid})
+```
+
+- `earnings_completed`: `SUM(payout_amount) FROM platform_revenue_log
+  WHERE payee_id=$1 AND channel='engineer_order' AND status='completed'`
+  (revenue пишется при ОПЛАТЕ, не при completion — см. PR #233 раздел
+  «Revenue attribution»)
+- `withdrawals`: `SUM(amount) FROM payment_withdrawals
+  WHERE user_id=$1 AND source='engineer_payout' AND status IN ('pending',
+  'processing', 'paid')`
+
+`status ∈ {cancelled, failed}` НЕ вычитаются — сумма возвращается в
+available, следующий cron-tick подберёт её снова.
+
+### Cron `/payouts/cron` (X-Internal-Key, daily)
+
+Сканирует всех engineer'ов с `available >= MIN_PAYOUT_AMOUNT` (1000 ₽
+по умолчанию, константа в `engineer-routes.tsx`). Для каждого:
+
+1. Подтягивает primary `payment_methods` row (isDefault=true или
+   последний созданный)
+2. `INSERT payment_withdrawals (source='engineer_payout', user_id,
+   amount=available, payment_method=pm-id, status='pending', app_id=
+   'eng-payout-{userId}-{YYYYMMDD}')`
+3. SSE `engineer_payout_queued` + e-mail `notifyEngineerPayoutQueued`
+4. Если у engineer'а **нет** payment_method'а: SSE
+   `engineer_payout_needs_payment_method`, withdrawal НЕ создаётся
+
+Идемпотентность: `UNIQUE (user_id, app_id)` на
+`payment_withdrawals` (миграция 043) → повторный run в тот же день
+получает 23505 unique_violation, обрабатывается как `skippedDuplicate`.
+
+Crontab (на VPS):
+```
+30 3 * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" \
+  http://127.0.0.1:3000/server/api/engineer/payouts/cron \
+  >> /var/log/promofm-engineer-payouts.log 2>&1
+```
+
+В 03:30 (после auto-complete cron'а в 03:00 — порядок важен: сначала
+закрываем delivered>7d → revenue стабилизируется → потом сканируем
+payouts).
+
+### Admin manual transfer flow (PR E1)
+
+В этом PR'е реального трансфера НЕТ — admin переводит деньги
+вручную (YooKassa-dashboard, банковский app), затем:
+
+- `POST /admin/payouts/:id/mark-paid` `{ transferRef }` — фиксирует
+  завершение, SSE+email engineer'у `engineer_payout_paid`
+- `POST /admin/payouts/:id/cancel` `{ reason }` — отменяет
+  pending (например невалидные реквизиты); сумма возвращается в
+  available, следующий cron создаст новую запись
+
+### Авто-трансфер через YooKassa Payouts API (PR E2 — TBD)
+
+Отдельным PR'ом подключим YooKassa Payouts API
+(`/v3/payouts`) — cron вместо просто `INSERT` будет делать API-call
+для СБП-трансфера. Условия:
+
+1. Отдельный YooKassa shop для Payouts (env `YOOKASSA_PAYOUTS_SHOP_ID`
+   + `YOOKASSA_PAYOUTS_SECRET_KEY`)
+2. KYC payee'ев (YooKassa требует подтверждённую identity)
+3. Feature flag `ENGINEER_PAYOUTS_AUTO=true` — без него cron создаёт
+   pending (как в PR E1)
+4. SBP-only first (карты требуют PCI compliance — не храним полный PAN)
+5. Webhook `/server/api/checkout/webhook/yookassa-payouts` для финального
+   `paid`/`failed` транзишена
+
+PR E2 решит вопрос автоматизации; PR E1 уже даёт безопасный manual flow.
+
+---
+
 ## Live chat (support)
 
 **Source:** `src/chat-support-routes.tsx` + `src/sse-routes.tsx`.
