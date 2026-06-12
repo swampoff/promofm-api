@@ -60,6 +60,8 @@ import venueBrandingRoutes from './venue-branding-routes.tsx';
 import streamPlayerRoutes from './stream-player-routes.tsx';
 import venueStationRoutes from './venue-station-routes.tsx';
 import venueApkRoutes from './venue-apk-routes.tsx';
+import venueScheduleRoutes from './venue-schedule-routes.tsx';
+import { venueApiTokensApp, venueApiPublicApp } from './venue-api-routes.tsx';
 import promoGuideRoutes from './promo-guide-routes.tsx';
 import aiAgent from './ai-agent.ts';
 import djMarketplaceRoutes from './dj-marketplace-routes.tsx';
@@ -384,6 +386,12 @@ app.route('/server/api/stream-player', streamPlayerRoutes);
 app.route('/server/api/venue-station', venueStationRoutes);
 app.route('/server/api/venue-apk', venueApkRoutes);
 app.route('/server/api/venue-billing', venueBillingRoutes);
+// Раньше не были смонтированы → playout-цепочка расписаний и API-токены
+// заведений отдавали 404. Префиксы сверены с фронтом (venue-schedule.ts,
+// venue-api-tokens.ts) и шапками самих модулей.
+app.route('/server/api/venue-schedule', venueScheduleRoutes);
+app.route('/server/api/venue-api/tokens', venueApiTokensApp);
+app.route('/server/api/venue-public', venueApiPublicApp);
 app.route('/server', promoGuideRoutes);
 app.route('/server/api/ai-agent', aiAgent);
 app.route('/server/api/dj-marketplace', djMarketplaceRoutes);

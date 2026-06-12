@@ -301,4 +301,49 @@ app.post('/upload', requireAuth, requireAdmin, async (c) => {
   }
 });
 
+// ── POST /content-upload — заведение грузит свой контент в библиотеку ──
+// Отдельный от admin POST /upload (тот фулфиллит ОПЛАЧЕННЫЙ заказ → требует
+// admin + multipart + orderId). Здесь venue грузит собственный аудио-итем:
+// requireAuth (БЕЗ admin), venueId из cookie-сессии (JWT), тело — JSON base64,
+// ровно как шлёт venue-кабинет (radio-brand.tsx UploadContentModal).
+app.post('/content-upload', requireAuth, async (c) => {
+  try {
+    const venueId = c.get('userId');
+    if (!venueId) return c.json({ success: false, error: 'unauthorized' }, 401);
+
+    const { audioBase64, fileName, contentType, title } = await c.req.json().catch(() => ({}));
+    if (!audioBase64 || !fileName) {
+      return c.json({ success: false, error: 'audioBase64 + fileName required' }, 400);
+    }
+
+    const ext = (String(fileName).split('.').pop() || 'mp3').toLowerCase();
+    if (!ALLOWED_CONTENT_EXT.has(ext)) {
+      return c.json({ success: false, error: `extension .${ext} not allowed` }, 400);
+    }
+
+    const buf = Buffer.from(String(audioBase64), 'base64');
+    if (buf.length === 0) return c.json({ success: false, error: 'file is empty' }, 400);
+    if (buf.length > MAX_CONTENT_BYTES) {
+      return c.json({ success: false, error: `file too large (max ${MAX_CONTENT_BYTES / 1024 / 1024}MB)` }, 413);
+    }
+
+    // venueId из JWT (доверенный) + санитизация + Date.now() → нет path traversal.
+    const safeVenue = String(venueId).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'venue';
+    const filename = `venue_${safeVenue}_${Date.now()}.${ext}`;
+    const dir = '/opt/promofm-api/uploads/content-orders';
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, filename), buf);
+
+    const audioUrl = `https://promo-music.ru/server/uploads/content-orders/${filename}`;
+    // Форма ответа = { file: {...} } — venue-кабинет читает data.file.duration.
+    // Длительность бэк не считает (0); фронт может посчитать из <audio> локально.
+    return c.json({
+      success: true,
+      file: { audioUrl, duration: 0, title: title || fileName, contentType: contentType || null },
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
 export default app;

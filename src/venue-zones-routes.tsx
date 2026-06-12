@@ -41,6 +41,33 @@ import {
 
 const app = new Hono();
 
+// Inline-бутстрап схемы (контракт migration-runner: каждый модуль создаёт свою
+// схему сам). 015_venue_zones.sql помечена MANUAL DEPLOY и на проде не накатана —
+// без этого GET/POST /venue-zones стабильно 500. Идемпотентно + мемоизировано.
+let _zonesSchemaReady: Promise<void> | null = null;
+function ensureSchema(): Promise<void> {
+  if (!_zonesSchemaReady) {
+    _zonesSchemaReady = (async () => {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS venue_zones (
+          id                  UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id             TEXT         NOT NULL,
+          venue_id            TEXT         NOT NULL,
+          name                TEXT         NOT NULL,
+          description         TEXT,
+          current_playlist_id TEXT,
+          is_active           BOOLEAN      NOT NULL DEFAULT TRUE,
+          sort_order          INTEGER      NOT NULL DEFAULT 0,
+          created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+          updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        )`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_venue_zones_user_id ON venue_zones (user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_venue_zones_venue_id ON venue_zones (venue_id, sort_order)`);
+    })().catch((e) => { _zonesSchemaReady = null; throw e; });
+  }
+  return _zonesSchemaReady;
+}
+
 const FALLBACK_VENUE_USER_ID = 'anonymous';
 
 async function getUserId(c: any): Promise<string> {
@@ -76,6 +103,7 @@ function rowToZone(r: any) {
 }
 
 async function listZones(userId: string): Promise<any[]> {
+  await ensureSchema();
   const r = await pool.query(
     `SELECT * FROM venue_zones
       WHERE user_id = $1
