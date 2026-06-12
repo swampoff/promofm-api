@@ -220,7 +220,9 @@ app.get('/stream-token', requireAuth, async (c) => {
     return c.json({
       success: true,
       data: {
-        streamUrl: 'https://promo-music.ru/api/air/stream',
+        // Живой Icecast-mount эфира (audio/mpeg 200). Раньше тут был мёртвый
+        // /api/air/stream — Hono такого роута не обслуживает, плеер молчал.
+        streamUrl: 'https://promo-music.ru/air/live/promo.fm',
         token: sub.id,
         expiresAt: sub.current_period_end,
       },
