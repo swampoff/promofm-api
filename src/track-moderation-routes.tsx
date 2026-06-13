@@ -24,7 +24,7 @@ const GENRES = [
   'Soul', 'Funk', 'Disco', 'Gospel', 'Latin', 'World'
 ];
 
-const PUBLICATION_PRICE = 5000; // 5000 RUB for track publication
+const PUBLICATION_PRICE = 7000; // 7000 RUB for track publication
 const AI_DETECTOR_URL = 'http://127.0.0.1:8085';
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/var/www/promofm/uploads';
 
