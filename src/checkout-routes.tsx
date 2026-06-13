@@ -35,7 +35,7 @@ const MAX_PAYMENT_AMOUNT_RUB = 1_000_000;
 
 // Fallback when track has no per-track price set.
 // Must match PUBLICATION_PRICE in track-moderation-routes.tsx.
-const DEFAULT_TRACK_PUBLICATION_PRICE_RUB = 5000;
+const DEFAULT_TRACK_PUBLICATION_PRICE_RUB = 7000;
 
 const log = createLogger("checkout");
 
