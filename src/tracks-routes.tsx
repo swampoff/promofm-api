@@ -188,7 +188,7 @@ tracksRoutes.post('/', requireAuth, async (c) => {
 });
 
 // PUT /:id — Update track (ownership check: only track owner can edit)
-tracksRoutes.put('/:id', requireAuth, async (c) => {
+tracksRoutes.put('/:id', requireAuth, profileLimiter, async (c) => {
   try {
     const trackId = c.req.param('id');
     const userId = c.get('userId');
