@@ -440,8 +440,14 @@ seoRoutes.get('/prerender/*', async (c) => {
           body += '</ol></section>';
         }
       }
+      // ItemList JSON-LD — ранжированный список треков как machine-readable
+      // chart. tophit.ru на чартах НЕ отдаёт structured data вообще, поэтому
+      // это прямой обгон в rich-результатах Яндекса/Google на их территории.
+      const chartLd = allTracks.length > 0
+        ? `<script type="application/ld+json">{"@context":"https://schema.org","@type":"ItemList","name":"${escJson(PAGE_META['/charts'].title)}","numberOfItems":${allTracks.length},"itemListElement":[${allTracks.slice(0, 50).map((t, i) => `{"@type":"ListItem","position":${i + 1},"item":{"@type":"MusicRecording","name":"${escJson(t.title)}","byArtist":{"@type":"MusicGroup","name":"${escJson(t.artist)}"}}}`).join(',')}]}</script>`
+        : '';
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(renderPage({ title: PAGE_META['/charts'].title, desc: PAGE_META['/charts'].desc, canonical: `${DOMAIN}/charts`, type: 'website', body }));
+      return c.body(renderPage({ title: PAGE_META['/charts'].title, desc: PAGE_META['/charts'].desc, canonical: `${DOMAIN}/charts`, type: 'website', jsonLd: chartLd, body }));
     }
 
     // ─── Concerts ───
@@ -533,8 +539,18 @@ seoRoutes.get('/prerender/*', async (c) => {
 <li><a href="${DOMAIN}/concerts">Афиша концертов</a></li>
 </ul></section>`;
 
+      // FAQPage на главной — копия 4 Q&A из фронт-реестра seo-pages.ts (синхрон).
+      // FAQ-schema нет ни у tophit, ни у конкурентов обоих кластеров → rich-сниппет.
+      const homeFaq = [
+        { q: 'Что такое ПРОМО.МУЗЫКА?', a: 'Российская платформа продвижения музыки для артистов, лейблов, DJ, продюсеров и звукорежиссёров. Объединяет питчинг на 742 радиостанции, попадание в плейлисты стримингов, чарты, дистрибуцию и маркетплейс битов и услуг.' },
+        { q: 'Как попасть на радио со своей песней?', a: 'Зарегистрируйтесь как артист, загрузите трек, отметьте радиостанции для питчинга. Заявка приходит в кабинет радио, редактор принимает решение о ротации напрямую.' },
+        { q: 'Сколько стоит продвижение трека?', a: 'Публикация трека — 5 000 ₽ с пожизненным доступом к питчингу, аналитике и попаданию в «Новинки недели». Подробнее на странице тарифов.' },
+        { q: 'Чем ПРОМО.МУЗЫКА отличается от обычного дистрибьютора?', a: 'Дистрибьютор только загружает треки в стриминги. ПРОМО.МУЗЫКА дополнительно даёт прямой канал на радиостанции (питчинг с реальным редактором), экспертную оценку перед релизом (ПРОМО.ЛАБ) и маркетплейс услуг для подготовки трека.' },
+      ];
+      body += `<section class="faq-block"><h2>Частые вопросы</h2><dl class="faq">${homeFaq.map(({ q, a }) => `<dt>${esc(q)}</dt><dd>${esc(a)}</dd>`).join('')}</dl></section>`;
+
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(renderPage({ title: PAGE_META['/'].title, desc: PAGE_META['/'].desc, canonical: `${DOMAIN}/`, type: 'website', body }));
+      return c.body(renderPage({ title: PAGE_META['/'].title, desc: PAGE_META['/'].desc, canonical: `${DOMAIN}/`, type: 'website', jsonLd: buildFaqLd(homeFaq), body }));
     }
 
     // ─── Pillar pages (rich SEO landing pages with FAQ schema) ───
