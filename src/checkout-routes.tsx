@@ -1088,14 +1088,19 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // ─── Fulfill donation ───
   if (session.type === 'donation' && session.metadata?.donationId) {
     try {
-      const { getDonation, createDonation } = await import('./db.tsx');
+      // 2026-06-14: ранее тут был импорт `getDonation` которого в db.tsx
+      // не существует (есть только getDonationsByArtist). Любая попытка
+      // довести donation_pending webhook до этого блока крашила процесс
+      // с ReferenceError. Реально нужный API — getDonationsByArtist, что
+      // и подтверждает логика ниже (Array.isArray → find by id).
+      const { getDonationsByArtist, createDonation } = await import('./db.tsx');
       const donationId = session.metadata.donationId;
       const artistId = session.metadata.artistId;
       if (artistId && donationId) {
         // Try to load existing donation record
         let donation: any = null;
         try {
-          const allDonations = await getDonation(artistId) as any;
+          const allDonations = await getDonationsByArtist(artistId) as any;
           if (Array.isArray(allDonations)) {
             donation = allDonations.find((d: any) => d.id === donationId);
           }
