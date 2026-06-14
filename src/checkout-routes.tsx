@@ -924,7 +924,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
 
         beat.purchases = (beat.purchases || 0) + 1;
         if (licenseType === 'exclusive') beat.status = 'sold';
-        await upsertBeat(beatId, JSON.stringify(beat));
+        await upsertBeat(beatId, beat);
 
         await recordPlatformCommission('beat', beat.title, price, commission, producerPayout, {
           producerId: beat.producerId, producerName: beat.producer, buyerId, buyerName,

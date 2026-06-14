@@ -254,7 +254,7 @@ app.get('/voices', requireAdminOrKey, async (c) => {
       },
     });
 
-    const data = await response.json();
+    const data: any = await response.json();
     
     return c.json({
       success: true,

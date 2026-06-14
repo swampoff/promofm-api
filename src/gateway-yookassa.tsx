@@ -335,7 +335,7 @@ export class YooKassaGateway implements PaymentGateway {
     }
     return {
       id: data.id,
-      status: data.status,
+      status: (data.status || 'pending') as 'pending' | 'succeeded' | 'canceled',
       amount: parseFloat(data.amount?.value || '0'),
       raw: data,
     };

@@ -36,8 +36,12 @@ async function createTransaction(userId: string, type: string, category: string,
   await insertPaymentTx({ id, userId, type, category, amount, description, metadata, status: 'completed', createdAt: new Date().toISOString() });
   // Update balance
   const balRaw = await getPaymentBalance(userId);
-  const bal = balRaw || { userId, available: 0, pending: 0, total: 0 };
-  if (!bal.userId) bal.userId = userId;
+  // getPaymentBalance union: { available, pending, total } | { userId, available, pending, total }.
+  // Нормализуем сразу до второго варианта (с userId), убираем TS2339.
+  const bal: { userId: string; available: number; pending: number; total: number } =
+    balRaw
+      ? { userId, ...balRaw }
+      : { userId, available: 0, pending: 0, total: 0 };
   bal.available = Number(bal.available) || 0;
   bal.pending = Number(bal.pending) || 0;
   if (type === 'income' || type === 'donation') bal.available += Number(amount);

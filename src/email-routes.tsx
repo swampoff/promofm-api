@@ -189,9 +189,12 @@ app.post('/send', requireAuth, requireAdmin, async (c) => {
         subject,
         html: content,
       });
-      emailData.status = sendResult.ok ? 'sent' : 'failed';
-      if (!sendResult.ok) {
-        emailData.metadata = { ...emailData.metadata, sendError: sendResult.error };
+      // smtpSendEmail возвращает boolean (sendEmail в email-helper.tsx:96
+      // → Promise<boolean>). Раньше код проверял .ok/.error — рефактор
+      // упростил API в boolean, callers не были обновлены.
+      emailData.status = sendResult ? 'sent' : 'failed';
+      if (!sendResult) {
+        emailData.metadata = { ...emailData.metadata, sendError: 'SMTP send failed' };
       }
     } catch (sendErr) {
       console.error('[Email] SMTP send error:', sendErr);

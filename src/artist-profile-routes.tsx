@@ -148,7 +148,8 @@ function makeProfile(overrides: Partial<ArtistProfile> & { id: string; email: st
     totalTracks: 0,
     coinsBalance: 0,
     isVerified: false,
-    socials: { ...EMPTY_SOCIALS },
+    // socials определяется ниже после spread overrides — последний выигрывает.
+    // Дубликат тут вызывал TS1117 в новых версиях TypeScript.
     careerStart: '',
     label: '',
     manager: '',
@@ -187,7 +188,7 @@ async function loadFromKv(artistId: string): Promise<ArtistProfile | null> {
 
 /** Сохранить профиль на VPS (152-ФЗ) */
 async function saveToKv(artistId: string, profile: ArtistProfile): Promise<void> {
-  await vpsSaveProfile(artistId, profile as Record<string, unknown>);
+  await vpsSaveProfile(artistId, profile as unknown as Record<string, unknown>);
 }
 
 /** Фильтрация обновлений по белому списку полей */
