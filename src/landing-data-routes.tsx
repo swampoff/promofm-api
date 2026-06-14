@@ -1363,7 +1363,7 @@ landing.get('/producer-wallet/:producerId', requireAuth, async (c) => {
 // ADMIN: RESEED
 // ============================================
 
-landing.post('/reseed', async (c) => {
+landing.post('/reseed', requireAdminOrKey, async (c) => {
   try {
     const result = await reseedDemoData();
     return c.json({ success: true, ...result });
