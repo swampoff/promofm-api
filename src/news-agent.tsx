@@ -66,7 +66,7 @@ async function broadcastNewsLive(newsId: string) {
       method: "POST",
       headers: { "X-Internal-Key": key },
     });
-    const data = await resp.json();
+    const data: any = await resp.json();
     console.log(`[news-agent] Broadcast queued: ${newsId}, listeners: ${data.listeners || 0}`);
   } catch (e: any) {
     console.warn(`[news-agent] Broadcast failed: ${e.message}`);
@@ -147,7 +147,7 @@ async function postToTelegram(article: { id: string; title: string; excerpt: str
     linkLine,
     '',
     tags,
-  ].filter(x => x !== undefined && x !== false).join('\n');
+  ].filter((x): x is string => x !== undefined).join('\n');
 
   try {
     // If we have an image, send as photo with caption
@@ -162,7 +162,7 @@ async function postToTelegram(article: { id: string; title: string; excerpt: str
           parse_mode: 'HTML',
         }),
       });
-      const photoResult = await photoResp.json();
+      const photoResult: any = await photoResp.json();
       if (photoResult.ok) {
         console.log(`[news-agent] Posted photo to Telegram: ${article.title.slice(0, 50)}...`);
         return;
@@ -620,7 +620,7 @@ SEO-ПРАВИЛА:
         console.log(`[news-agent] Gemini API error for ${source.id}: ${await resp.text()}`);
         return [];
       }
-      const data = await resp.json();
+      const data: any = await resp.json();
       llmContent = data.candidates?.[0]?.content?.parts?.[0]?.text;
     } else {
       // OpenRouter fallback
@@ -646,7 +646,7 @@ SEO-ПРАВИЛА:
         console.log(`[news-agent] LLM error for ${source.id}: ${await resp.text()}`);
         return [];
       }
-      const data = await resp.json();
+      const data: any = await resp.json();
       llmContent = data.choices?.[0]?.message?.content;
     }
 
