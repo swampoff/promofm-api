@@ -92,7 +92,11 @@ async function makeScript(title: string, text: string, author: string): Promise<
       maxTokens: 300,
       tag: 'news-broadcast',
     });
-    if (result?.content) return result.content.trim();
+    // LLMResponse.text — field согласно llm-router.tsx:38; ранее тут
+    // читалось result.content которое не существует в типе → каждый
+    // OpenRouter fallback тихо возвращал undefined и проваливался в
+    // catch. broadcast выходил без news-bridge. Fix: result.text.
+    if (result?.text) return result.text.trim();
   } catch (llmErr: any) {
     console.warn(`[broadcast] OpenRouter fallback failed: ${llmErr.message?.slice(0, 100)}`);
   }
@@ -156,7 +160,7 @@ async function ttsAndInject(text: string, author: string): Promise<{ok: boolean;
       },
       body: combined,
     });
-    const injectData = await injectResp.json();
+    const injectData = await injectResp.json() as { error?: string; duration?: number };
 
     if (!injectResp.ok) {
       console.error(`[broadcast] AutoDJ inject error:`, injectData.error);
