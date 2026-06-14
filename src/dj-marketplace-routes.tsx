@@ -16,6 +16,10 @@ const app = new Hono();
 
 // ── Helpers ──
 
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
 function formatExperience(years: number): string {
   if (!years || years <= 0) return '';
   const last = years % 10;
@@ -442,7 +446,7 @@ app.post('/djs/:id/book', async (c) => {
         eventType,
         message,
         status: 'pending',
-        createdAt: dataJsonb.createdAt,
+        createdAt: nowIso(),
       },
     });
   } catch (err: any) {
