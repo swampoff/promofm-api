@@ -1272,6 +1272,13 @@ export async function getRadioProfile(userId: string) {
   const inner = (data.data || {}) as Record<string, any>;
   return {
     ...inner,
+    // Identity — обязательно для callers, которые используют
+    // profile.id как entityId в KV-функциях ad-slots/rotations/etc.
+    // Раньше id терялся в spread → station.id === undefined → KV
+    // писал на ключ 'undefined' (LIVE BUG, найден TS-аудитом 2026-06-14:
+    // 42 одинаковых TS2339 'Property "id" does not exist' в radio-routes).
+    id:               data.id,
+    user_id:          data.user_id,
     name:             data.name              ?? inner.name,
     city:             data.city              ?? inner.city,
     country:          data.country           ?? inner.country,
