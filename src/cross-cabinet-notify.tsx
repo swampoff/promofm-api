@@ -51,7 +51,13 @@ export type NotificationType =
   // этих 3 значений TS2322 на каждом sendCrossCabinetNotification вызове.
   | 'track_upcoming'
   | 'track_published'
-  | 'mix_published';
+  | 'mix_published'
+  // Label lifecycle (используются в label-routes.tsx: artist принимает/
+  // отклоняет приглашение в лейбл, артист уходит из лейбла, лейбл
+  // отправляет приглашение артисту).
+  | 'label_invitation'
+  | 'label_invitation_response'
+  | 'label_member_left';
 
 // 'system' — нечеловеческий источник (донат от слушателя, авто-события).
 export type CabinetRole = 'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer' | 'label' | 'system';

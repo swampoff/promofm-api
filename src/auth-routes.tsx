@@ -78,7 +78,11 @@ function validatePassword(password: string): string | null {
 }
 
 // Safe JSON body parser — returns 400 instead of crashing with 500
-async function safeJsonParse(c: any): Promise<{ ok: true; body: any } | { ok: false; response: any }> {
+// Narrowing-friendly shape: `response?: any` присутствует на обоих
+// вариантах, чтобы TS не падал на parsed.response внутри
+// `if (!parsed.ok)` (TS не сужает union {ok:true} | {ok:false} с
+// разными ключами на 'parsed.response' без explicit type guard).
+async function safeJsonParse(c: any): Promise<{ ok: boolean; body?: any; response?: any }> {
   try {
     const body = await c.req.json();
     return { ok: true, body };

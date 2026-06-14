@@ -131,6 +131,11 @@ export function calculateProduction360Price(
     total,
     currency: 'RUB',
     addonsBreakdown: addons.map(a => ({ name: a, price: PRODUCTION_360_ADDON_PRICES[a] || 0 })),
+    // Legacy aliases — production-360-routes.tsx использует servicePrice
+    // и finalPrice (предшествующие имена этих полей). Чтобы не править
+    // 5 мест в callers, держим алиасы. Удалить после полного rename.
+    servicePrice: base,
+    finalPrice: total,
   };
 }
 

@@ -93,6 +93,12 @@ async function getStats() {
 // ── News collection (real pipeline only) ──
 
 async function collectNews(sourceId?: string) {
+  // Реальный сбор новостей идёт через news-cron.sh + OpenRouter AI pipeline
+  // (см. news-cron.sh + src/news-agent.tsx). Этот эндпоинт когда-то
+  // делал свой собственный fetch + persist, но рефактор оставил dead
+  // refs к newArticles/pending которые нигде не определены — каждый
+  // POST /agent/collect-news падал ReferenceError. Сейчас bump'аем
+  // только lastFetchAt чтобы admin UI видел "трогнут".
   const sources = await ensureSources();
   const targetSources = sourceId
     ? sources.filter((s: any) => s.id === sourceId && s.enabled)
@@ -102,22 +108,17 @@ async function collectNews(sourceId?: string) {
     return { collected: 0, message: 'Нет активных источников' };
   }
 
-  // Real news collection happens via news-cron.sh + OpenRouter AI pipeline
-  // This endpoint only updates source fetch timestamps
-    // Update source statuses
   for (const src of targetSources) {
     src.status.lastFetchAt = new Date().toISOString();
     src.status.lastFetchStatus = 'success';
-    src.status.articlesCollected += newArticles.filter((a: any) => a.source === src.name).length;
   }
   await setNewsPipelineKey('news:sources', sources);
-
-  // Add to pending
-  const updated = [...newArticles, ...pending];
-  await setNewsPipelineKey('news:articles:pending', updated);
   await setNewsPipelineKey('news:last_run', new Date().toISOString());
 
-  return { collected: newArticles.length, articles: newArticles };
+  return {
+    collected: 0,
+    message: 'Сбор новостей идёт через news-cron.sh — этот эндпоинт только обновляет lastFetchAt у источников',
+  };
 }
 
 // ── Routes ──
