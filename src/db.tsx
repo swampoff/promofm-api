@@ -86,7 +86,8 @@ export async function upsertVideo(userId: string, videoId: string, video: Record
   } catch (e: any) {
     console.error('[db] upsertVideo exception:', e.message);
   }
-  if (error) console.error('[db] upsertVideo:', error);
+  // Duplicate console.error выше — вне catch, error из внешнего scope не
+  // существует. Это был copy-paste дубль; удалён 2026-06-14.
 }
 
 // ─── News ───

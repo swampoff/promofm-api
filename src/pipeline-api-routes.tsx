@@ -8,7 +8,8 @@
  * 4. Состояние пайплайна — GET /pipeline/transitions, /pipeline/map/:pipelineType
  */
 
-import { Hono } from 'npm:hono@4';
+// 'npm:hono@4' — Deno-specific import. Под Node-22 + tsx — обычный 'hono'.
+import { Hono } from 'hono';
 import {
   getAuditLog,
   getAuditForItem,

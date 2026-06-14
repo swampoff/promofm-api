@@ -7,7 +7,9 @@ const apiDocs = new Hono();
 // Serve OpenAPI spec as JSON
 apiDocs.get('/openapi.json', (c) => {
   try {
-    const dir = typeof import.meta.dir === 'string' ? import.meta.dir : dirname(new URL(import.meta.url).pathname);
+    // import.meta.dir — Bun-specific (мы под Node-22 + tsx). Используем
+    // только стандартный путь через URL → pathname → dirname.
+    const dir = dirname(new URL(import.meta.url).pathname);
     const spec = readFileSync(join(dir, 'openapi-spec.json'), 'utf-8');
     c.header('Content-Type', 'application/json');
     return c.body(spec);

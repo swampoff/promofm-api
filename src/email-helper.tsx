@@ -134,7 +134,7 @@ export async function sendEmail(opts: EmailOptions): Promise<boolean> {
           html: opts.html,
         }),
       });
-      const result = await resp.json();
+      const result = await resp.json() as { id?: string };
       if (!resp.ok) {
         console.error('[Email] Resend API error:', resp.status, JSON.stringify(result));
         return false;

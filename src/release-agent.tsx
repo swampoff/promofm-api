@@ -140,7 +140,7 @@ RULES:
       return [];
     }
 
-    const data = await resp.json();
+    const data: any = await resp.json();
     const content = data.choices?.[0]?.message?.content;
     if (!content) return [];
 

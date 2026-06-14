@@ -314,6 +314,9 @@ donationsRoutes.post('/', optionalAuth, async (c) => {
         currency: 'RUB',
         description: `Donation for artist from ${donorLabel}`,
         returnUrl,
+        gateway,
+        userId,
+        type: 'donation',
         metadata: {
           type: 'donation',
           donationId,
@@ -328,7 +331,7 @@ donationsRoutes.post('/', optionalAuth, async (c) => {
         orderId,
         userId,
         gateway,
-        gatewayPaymentId: result.paymentId || result.sessionId,
+        gatewayPaymentId: result.sessionId,
         amount: body.amount,
         currency: 'RUB',
         status: 'pending',
