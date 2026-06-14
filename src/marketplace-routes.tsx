@@ -100,7 +100,7 @@ async function sendSSE(userId: string, event: string, data: any) {
   try {
     // 1. Сохранить в KV для истории уведомлений
     const notifId = genId('notif');
-    await upsertNotification(userId, notifId, JSON.stringify({
+    await upsertNotification(userId, notifId, {
       id: notifId,
       userId,
       type: event,
@@ -109,7 +109,7 @@ async function sendSSE(userId: string, event: string, data: any) {
       data,
       read: false,
       createdAt: nowIso(),
-    }));
+    });
     // 2. Real-time доставка через SSE stream
     emitSSE(userId, { type: event, data });
   } catch (e) {
@@ -306,7 +306,7 @@ app.get('/beats/:id', async (c) => {
 
     // Увеличить просмотры
     beat.plays = (beat.plays || 0) + 1;
-    await upsertBeat(id, JSON.stringify(beat));
+    await upsertBeat(id, beat);
 
     return c.json({ success: true, data: beat });
   } catch (error) {
@@ -354,7 +354,7 @@ app.post('/beats', requireAuth, async (c) => {
       createdAt: nowIso(),
     };
 
-    await upsertBeat(id, JSON.stringify(beat));
+    await upsertBeat(id, beat);
 
     // Обновить статистику
     try {
@@ -400,7 +400,7 @@ app.put('/beats/:id', requireAuth, async (c) => {
     }
     beat.updatedAt = nowIso();
 
-    await upsertBeat(id, JSON.stringify(beat));
+    await upsertBeat(id, beat);
     return c.json({ success: true, data: beat });
   } catch (error) {
     console.log('PUT /beats/:id error:', error);
@@ -554,11 +554,17 @@ app.post('/beats/:id/favorite', requireAuth, async (c) => {
       if (beatRaw) {
         const beat = typeof beatRaw === 'string' ? JSON.parse(beatRaw) : beatRaw;
         beat.likes = Math.max(0, (beat.likes || 0) + (added ? 1 : -1));
-        await upsertBeat(beatId, JSON.stringify(beat));
+        await upsertBeat(beatId, beat);
       }
     } catch {}
 
-    return c.json({ success: true, data: { added, favorites: favs } });
+    // 2026-06-14: 'favs' переменная никогда не была определена в этом
+    // scope — рантайм-ошибка 'favs is not defined' на каждый
+    // POST /beats/:id/favorite. Раньше API вернул бы 500, теперь
+    // отдаём только added-флаг и beatId — клиент сам пересчитает
+    // если нужно. Восстановление массива favorites — отдельный PR
+    // если фронт реально использует это поле.
+    return c.json({ success: true, data: { added, beatId } });
   } catch (error) {
     console.log('POST /beats/:id/favorite error:', error);
     return c.json({ success: false, error: 'Internal server error' }, 500);
@@ -673,7 +679,7 @@ app.post('/beats/:id/review', requireAuth, async (c) => {
     const stats = await getBeatReviewsAggregateStats(beatId);
     beat.rating = stats.avgRating;
     beat.reviewsCount = stats.total;
-    await upsertBeat(beatId, JSON.stringify(beat));
+    await upsertBeat(beatId, beat);
 
     // SSE уведомление продюсеру
     await sendSSE(beat.producerId, 'beat_review_new', {
@@ -1893,12 +1899,12 @@ app.get('/admin/transactions', requireAuth, requireAdmin, async (c) => {
     const limit = Math.min(Number(c.req.query('limit') || 100), 500);
     const offset = Number(c.req.query('offset') || 0);
     // Native cols since migration 084 — SQL filter+pagination вместо JS filter+slice
-    const { items, total } = await listPlatformRevenue({
+    const { rows, total } = await listPlatformRevenue({
       channel: channelFilter || undefined,
       limit,
       offset,
     });
-    const paged = items;
+    const paged = rows;
 
     // Маппинг в формат, совместимый с фронтом
     const mapped = paged.map((t: any) => ({
