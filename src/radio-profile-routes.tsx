@@ -82,7 +82,8 @@ function makeRadioProfile(overrides: Partial<RadioProfile> & { id: string; name:
     backupStreamUrl: '',
     bitrate: '320 kbps',
     audioFormat: 'MP3',
-    socials: { ...EMPTY_SOCIALS },
+    // socials определяется ниже после spread overrides; дубликат тут
+    // вызывал TS1117 в новых версиях TypeScript.
     tracksInRotation: 0,
     partners: 0,
     monthlyReach: '0',
@@ -106,7 +107,7 @@ async function loadFromKv(radioId: string): Promise<RadioProfile | null> {
 }
 
 async function saveToKv(radioId: string, profile: RadioProfile): Promise<void> {
-  await upsertRadioProfile(radioId, profile as Record<string, unknown>);
+  await upsertRadioProfile(radioId, profile as unknown as Record<string, unknown>);
 }
 
 function sanitizeUpdates(updates: Record<string, unknown>): Partial<RadioProfile> {

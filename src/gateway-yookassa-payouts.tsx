@@ -131,7 +131,7 @@ export async function createYooKassaPayout(params: CreatePayoutParams): Promise<
 
   return {
     id: data.id,
-    status: data.status,
+    status: (data.status || 'pending') as 'pending' | 'succeeded' | 'canceled',
     amount: data.amount,
     createdAt: data.created_at,
     raw: data,
@@ -147,7 +147,7 @@ export async function fetchYooKassaPayout(payoutId: string): Promise<PayoutResul
     const data = await resp.json() as YooKassaPayoutResponse;
     return {
       id: data.id,
-      status: data.status,
+      status: (data.status || 'pending') as 'pending' | 'succeeded' | 'canceled',
       amount: data.amount,
       createdAt: data.created_at,
       raw: data,

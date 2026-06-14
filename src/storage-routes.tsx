@@ -201,7 +201,7 @@ storage.post('/upload', requireAuth, async (c) => {
     // from the whitelist. Still blocks real mismatches (e.g. a PNG
     // renamed to .wav — file-type would detect ext=png, no match).
     const fileData = Buffer.from(await file.arrayBuffer());
-    const fileType = await import("file-type");
+    const fileType: any = await import("file-type");
     const fromBuf = fileType.fileTypeFromBuffer || fileType.fromBuffer || fileType.default?.fromBuffer;
     const detectedType = fromBuf ? await fromBuf(fileData) : null;
     if (detectedType && bucketConfig.allowedMimeTypes.length > 0 && !bucketConfig.allowedMimeTypes.includes('*')) {
@@ -271,7 +271,7 @@ storage.post('/upload', requireAuth, async (c) => {
           console.error('[storage] VIRUS DETECTED:', { filename, output: scanResult.stdout?.trim() });
           return c.json({ success: false, error: 'File rejected by security scan' }, 400);
         }
-        if (scanResult.error?.code === 'ETIMEDOUT' || (scanResult as any).signal === 'SIGTERM') {
+        if ((scanResult.error as any)?.code === 'ETIMEDOUT' || (scanResult as any).signal === 'SIGTERM') {
           // clamscan ran past the timeout — log loudly but DON'T block the
           // upload. Otherwise a slow disk locks artists out of publishing.
           console.warn('[storage] ClamAV timed out after', scanTimeoutMs, 'ms — accepting upload anyway:', filename);

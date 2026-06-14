@@ -1182,6 +1182,12 @@ export async function getVenueProfile(userId: string) {
   const inner = (data.data || {}) as Record<string, any>;
   return {
     ...inner,
+    // Identity — обязательно для callers (booking-routes:266 и др.)
+    // Раньше id терялся в spread → venue.id === undefined → KV-функции
+    // (upsertVenueAdSlot etc) писали в ключ 'undefined' (LIVE BUG,
+    // тот же паттерн что в getRadioProfile, фикс 2026-06-14).
+    id:             data.id,
+    user_id:        data.user_id,
     venueName:      data.venue_name      ?? inner.venueName      ?? inner.name,
     description:    data.description     ?? inner.description,
     venueType:      data.venue_type      ?? inner.venueType      ?? inner.type,

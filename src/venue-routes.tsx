@@ -39,6 +39,7 @@ import {
   featureBlocked,
   quotaExceeded,
 } from './venue-plan-limits.tsx';
+import { applyInitialTrial, expireTrialsOnce } from './venue-trial.tsx';
 
 const app = new Hono();
 

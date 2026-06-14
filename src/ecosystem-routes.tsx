@@ -29,7 +29,7 @@ async function requireAdminOrKey(c: any, next: any) {
     c.set('userId', 'system'); c.set('userEmail', 'system@promo-music.ru'); c.set('userRole', 'admin');
     return next();
   }
-  return requireAuth(c, async () => requireAdmin(c, next));
+  return requireAuth(c, async () => { await requireAdmin(c, next); });
 }
 
 const app = new Hono();

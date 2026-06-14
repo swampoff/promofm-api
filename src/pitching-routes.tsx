@@ -29,6 +29,11 @@ import { pool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { notifyAllAdmins, notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { applySubscriptionDiscount } from './subscription-pricing.tsx';
+// Восстановлено 2026-06-14 — TS-аудит нашёл TS2304 на 3 names:
+// getGateway, PaymentSession, upsertPaymentSession — handler payment
+// сборника питчинга падал ReferenceError. Импорты должны были быть.
+import { getGateway, type PaymentSession } from './payment-gateway.tsx';
+import { upsertPaymentSession } from './db.tsx';
 
 const app = new Hono();
 

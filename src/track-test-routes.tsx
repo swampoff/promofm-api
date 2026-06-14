@@ -335,7 +335,7 @@ app.post('/payment', requireAuth, async (c) => {
       description: `Тест трека: ${request.track_title}`,
       status: 'pending',
       gateway: 'yookassa',
-      gatewayPaymentId: result.paymentId,
+      gatewayPaymentId: result.sessionId,
       metadata: {
         type: 'track_test',
         requestId: request_id,

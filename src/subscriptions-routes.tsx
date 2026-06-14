@@ -329,7 +329,7 @@ subscriptions.post('/subscribe', requireAuth, async (c) => {
           description: desc,
           returnUrl,
           gateway: 'yookassa',
-          userId,
+          userId: user_id,
           type: 'subscription',
           metadata: { type: 'subscription', planKey: tier, interval },
         });

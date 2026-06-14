@@ -122,7 +122,12 @@ class QueryBuilder {
     this.table = table;
   }
 
-  select(cols: string = '*') {
+  // opts — PostgREST-совместимый параметр (count/head). count не поддерживается
+  // локальной реализацией, но опускать сигнатуру нельзя — landing-data и
+  // promotion-routes-sql пишут .select('*', { count: 'exact' }) (legacy
+  // Supabase-style). Принимаем но игнорируем — count рассчитывается через
+  // отдельный SELECT COUNT(*) запрос.
+  select(cols: string = '*', _opts?: { count?: 'exact'; head?: boolean }) {
     if (this._mode === 'insert' || this._mode === 'update' || this._mode === 'upsert' || this._mode === 'delete') {
       // PostgREST-style: .select() after mutation means "return the inserted/updated rows"
       this._select = cols;
