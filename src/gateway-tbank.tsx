@@ -16,6 +16,27 @@ import { sha256hex } from './payment-gateway.tsx';
 
 const API_BASE = 'https://securepay.tinkoff.ru/v2';
 
+// T-Bank Payments API response shape (для всех endpoint'ов /Init,
+// /Charge, /Confirm, /Cancel etc — Tinkoff возвращает одинаковую
+// envelope-структуру). TS-strict 4.7+ типизирует await response.json()
+// как unknown — этот тип нужен для cast'а в коде ниже.
+//
+// Док: https://www.tbank.ru/kassa/develop/api/payments/
+interface TBankResponse {
+  Success: boolean;
+  ErrorCode?: string;
+  Message?: string;
+  Details?: string;
+  PaymentId?: string | number;
+  PaymentURL?: string;
+  Status?: string;
+  Amount?: number;
+  OrderId?: string;
+  TerminalKey?: string;
+  RebillId?: string;
+  CardId?: string;
+}
+
 function getCredentials() {
   const terminalKey = process.env.TBANK_TERMINAL_KEY || '';
   const secretKey = process.env.TBANK_SECRET_KEY || '';
@@ -83,7 +104,7 @@ export class TBankGateway implements PaymentGateway {
       body: JSON.stringify(body),
     });
 
-    const data = await response.json();
+    const data = await response.json() as TBankResponse;
 
     if (!data.Success) {
       console.error('TBank Init error:', data);
@@ -169,7 +190,7 @@ export class TBankGateway implements PaymentGateway {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(initBody),
     });
-    const initData = await initResp.json();
+    const initData = await initResp.json() as TBankResponse;
 
     if (!initData.Success) {
       throw new Error(initData.Message || `T-Bank recurring init error: ${initData.ErrorCode}`);
@@ -187,7 +208,7 @@ export class TBankGateway implements PaymentGateway {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(chargeBody),
     });
-    const chargeData = await chargeResp.json();
+    const chargeData = await chargeResp.json() as TBankResponse;
 
     if (!chargeData.Success) {
       throw new Error(chargeData.Message || `T-Bank recurring charge error: ${chargeData.ErrorCode}`);

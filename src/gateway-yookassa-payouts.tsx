@@ -17,6 +17,19 @@
 
 const API_BASE = 'https://api.yookassa.ru/v3';
 
+// YooKassa Payouts API response shape — те же envelope-поля что у
+// /payments. TS-strict 4.7+ типизирует await response.json() как unknown.
+interface YooKassaPayoutResponse {
+  id?: string;
+  status?: string;
+  amount?: { value: string; currency: string };
+  description?: string;
+  message?: string;
+  created_at?: string;
+  payout_destination?: { type?: string };
+  cancellation_details?: { party?: string; reason?: string };
+}
+
 function getPayoutCredentials() {
   const agentId = process.env.YOOKASSA_PAYOUT_AGENT_ID || process.env.YOOKASSA_SHOP_ID || '';
   const secretKey = process.env.YOOKASSA_PAYOUT_SECRET_KEY || process.env.YOOKASSA_SECRET_KEY || '';
@@ -109,7 +122,7 @@ export async function createYooKassaPayout(params: CreatePayoutParams): Promise<
     body: JSON.stringify(body),
   });
 
-  const data = await resp.json();
+  const data = await resp.json() as YooKassaPayoutResponse;
   if (!resp.ok) {
     const message = data?.description || data?.message || `YooKassa payout error ${resp.status}`;
     console.error('YooKassa createPayout failed:', { status: resp.status, data });
@@ -131,7 +144,7 @@ export async function fetchYooKassaPayout(payoutId: string): Promise<PayoutResul
       headers: { 'Authorization': getAuthHeader() },
     });
     if (!resp.ok) return null;
-    const data = await resp.json();
+    const data = await resp.json() as YooKassaPayoutResponse;
     return {
       id: data.id,
       status: data.status,

@@ -16,6 +16,33 @@ import type {
 
 const API_BASE = 'https://api.yookassa.ru/v3';
 
+// YooKassa API response shape (для всех endpoint'ов /payments, /refunds,
+// /payouts — у каждого есть error envelope {description, message} и
+// resource envelope {id, status, amount, ...}). TS-strict 4.7+ типизирует
+// await response.json() как unknown — этот тип нужен для cast'а ниже.
+//
+// Док: https://yookassa.ru/developers/api
+interface YooKassaResponse {
+  id?: string;
+  status?: string;
+  paid?: boolean;
+  amount?: { value: string; currency: string };
+  description?: string;
+  message?: string;
+  recipient?: { account_id?: string; gateway_id?: string };
+  payment_method?: { id?: string; type?: string; saved?: boolean };
+  confirmation?: { type?: string; confirmation_url?: string };
+  created_at?: string;
+  captured_at?: string;
+  metadata?: Record<string, any>;
+  cancellation_details?: { party?: string; reason?: string };
+  refundable?: boolean;
+  test?: boolean;
+  type?: string;
+  code?: string;
+  parameter?: string;
+}
+
 /**
  * Per-payment shop credentials resolver (migration window safety).
  *
@@ -132,7 +159,7 @@ export class YooKassaGateway implements PaymentGateway {
       body: JSON.stringify(body),
     });
 
-    const data = await response.json();
+    const data = await response.json() as YooKassaResponse;
 
     if (!response.ok) {
       console.error('YooKassa createPayment error:', data);
@@ -301,7 +328,7 @@ export class YooKassaGateway implements PaymentGateway {
       }
     }
 
-    const data = await response.json();
+    const data = await response.json() as YooKassaResponse;
     if (!response.ok) {
       console.error('YooKassa refund error:', data);
       throw new Error(data.description || data.message || `YooKassa refund error ${response.status}`);
@@ -340,7 +367,7 @@ export class YooKassaGateway implements PaymentGateway {
       body: JSON.stringify(body),
     });
 
-    const data = await response.json();
+    const data = await response.json() as YooKassaResponse;
 
     if (!response.ok) {
       console.error('YooKassa chargeRecurring error:', data);
