@@ -16,6 +16,22 @@ import type {
 
 const API_BASE = 'https://api.stripe.com/v1';
 
+// Stripe API response shape — envelope для checkout sessions / errors.
+// TS-strict 4.7+ типизирует await response.json() как unknown.
+interface StripeResponse {
+  id?: string;
+  object?: string;
+  url?: string;
+  status?: string;
+  amount_total?: number;
+  customer?: string;
+  payment_intent?: string;
+  payment_status?: string;
+  client_reference_id?: string;
+  metadata?: Record<string, any>;
+  error?: { type?: string; code?: string; message?: string; param?: string };
+}
+
 function getCredentials() {
   const secretKey = process.env.STRIPE_SECRET_KEY || '';
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || '';
@@ -133,7 +149,7 @@ export class StripeGateway implements PaymentGateway {
       body,
     });
 
-    const data = await response.json();
+    const data = await response.json() as StripeResponse;
 
     if (!response.ok) {
       console.error('Stripe createPayment error:', data);
@@ -238,7 +254,7 @@ export class StripeGateway implements PaymentGateway {
       body,
     });
 
-    const data = await response.json();
+    const data = await response.json() as StripeResponse;
 
     if (!response.ok) {
       console.error('Stripe chargeRecurring error:', data);

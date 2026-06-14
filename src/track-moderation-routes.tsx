@@ -141,7 +141,7 @@ async function triggerAiAnalysis(trackId: string, audioUrl: string) {
       return;
     }
 
-    const result = await resp.json();
+    const result = await resp.json() as any;
     await typed.updateTrack(trackId, {
       ai_score: result.ai_score,
       ai_analysis: result,
@@ -875,7 +875,7 @@ app.post('/reanalyze', requireAuth, requireAdmin, async (c) => {
       return c.json({ error: `AI detector returned ${resp.status}` }, 502);
     }
 
-    const result = await resp.json();
+    const result = await resp.json() as any;
     await typed.updateTrack(trackId, {
       ai_score: result.ai_score,
       ai_analysis: result,
