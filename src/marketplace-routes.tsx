@@ -73,7 +73,7 @@ import {
   getServiceOrder, upsertServiceOrder, listServiceOrdersByClient, listServiceOrdersByProducer,
 } from './db.tsx';
 import { emitSSE } from './sse-routes.tsx';
-import { getRevenueStats, recordRevenue } from './platform-revenue.tsx';
+import { getRevenueStats, recordRevenue, recordPlatformCommission } from './platform-revenue.tsx';
 
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
@@ -91,32 +91,9 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-/**
- * Записать комиссию маркетплейса через единую систему platform-revenue.tsx
- * Делегирует в recordRevenue(), которая пишет в ledger, баланс и revenue log.
- */
-async function recordPlatformCommission(
-  type: 'beat' | 'digital_good' | 'service',
-  itemTitle: string,
-  totalPrice: number,
-  commission: number,
-  producerPayout: number,
-  meta: Record<string, any>,
-) {
-  await recordRevenue({
-    channel: `marketplace_${type}`,
-    description: itemTitle,
-    grossAmount: totalPrice,
-    platformRevenue: commission,
-    payoutAmount: producerPayout,
-    commissionRate: 0.10,
-    payerId: meta.buyerId || '',
-    payerName: meta.buyerName || 'Покупатель',
-    payeeId: meta.producerId,
-    payeeName: meta.producerName,
-    metadata: meta,
-  });
-}
+// recordPlatformCommission поднята в platform-revenue.tsx как export (2026-06-14):
+// раньше она жила только тут, а checkout-routes.tsx пытался импортировать
+// её из platform-revenue.tsx → ReferenceError на оплате beat/digital_good.
 
 /** SSE уведомление: KV-персистенция + real-time доставка (fire-and-forget) */
 async function sendSSE(userId: string, event: string, data: any) {

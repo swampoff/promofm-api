@@ -224,3 +224,36 @@ export async function getRevenueStats(): Promise<{
     recentTransactions: recent as unknown as RevenueEntry[],
   };
 }
+
+/**
+ * Записать комиссию маркетплейса через единую систему platform-revenue.
+ * Тонкая обёртка над recordRevenue() для callers (marketplace + checkout
+ * webhooks). Раньше эта функция жила локально в marketplace-routes.tsx:98,
+ * а checkout-routes.tsx делал `await import('./platform-revenue.tsx').
+ * recordPlatformCommission` который выкидывал ReferenceError на любой
+ * оплате beat / digital_good (LIVE BUG, найден TS-аудитом 2026-06-14).
+ * Теперь экспорт здесь — marketplace-routes импортирует отсюда же,
+ * единый источник истины.
+ */
+export async function recordPlatformCommission(
+  type: 'beat' | 'digital_good' | 'service',
+  itemTitle: string,
+  totalPrice: number,
+  commission: number,
+  producerPayout: number,
+  meta: Record<string, any>,
+) {
+  await recordRevenue({
+    channel: `marketplace_${type}`,
+    description: itemTitle,
+    grossAmount: totalPrice,
+    platformRevenue: commission,
+    payoutAmount: producerPayout,
+    commissionRate: 0.10,
+    payerId: meta.buyerId || '',
+    payerName: meta.buyerName || 'Покупатель',
+    payeeId: meta.producerId,
+    payeeName: meta.producerName,
+    metadata: meta,
+  });
+}
