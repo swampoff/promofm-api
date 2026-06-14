@@ -1138,6 +1138,19 @@ landing.get('/stats', async (c) => {
     const realUsers = userCount ?? 0;
     const totalArtists = Math.max(ARTIST_BASE, ARTIST_BASE + (realUsers - 22));
 
+    // Stations count — реальный COUNT из VIEW pitching_radio_stations.
+    // На сбое БД падаем на 742 (legacy fallback, без регрессии фронта).
+    let stationsCount = 742;
+    try {
+      const { rows } = await pool.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM pitching_radio_stations`,
+      );
+      const n = Number(rows[0]?.count || 0);
+      if (n > 0) stationsCount = n;
+    } catch (err) {
+      console.warn('[landing/stats] stationsCount query failed, using fallback 742:', err);
+    }
+
     return c.json({
       success: true,
       data: {
@@ -1147,6 +1160,7 @@ landing.get('/stats', async (c) => {
         pendingTracks: trackStats.pending || 0,
         totalArtists,
         totalUsers: realUsers,
+        stationsCount,
       },
     });
   } catch (error) {
