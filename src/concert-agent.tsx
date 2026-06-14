@@ -107,7 +107,7 @@ async function fetchKudaGoConcerts(): Promise<ParsedConcert[]> {
         continue;
       }
 
-      const data = await resp.json();
+      const data: any = await resp.json();
       const events = data.results || [];
 
       for (const ev of events) {
@@ -273,7 +273,7 @@ async function extractConcertsWithMistral(
       return [];
     }
 
-    const data = await resp.json();
+    const data: any = await resp.json();
     const content = data.choices?.[0]?.message?.content;
     if (!content) return [];
 

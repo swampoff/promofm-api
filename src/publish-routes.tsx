@@ -507,7 +507,10 @@ app.get('/orders/:id', requireAuth, async (c) => {
     if (!data) {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
-    return c.json({ success: true, order: JSON.parse(data) });
+    // getPublishOrder уже возвращает PublishOrderRow объект — раньше
+    // тут было JSON.parse(data) что выкидывало SyntaxError на каждом
+    // GET /publish-orders/:id (data — объект, не строка).
+    return c.json({ success: true, order: data });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
@@ -661,6 +664,7 @@ app.put('/orders/:id/pay', requireAuth, async (c) => {
       amount: order.price,
       currency: order.currency || 'RUB',
       type: 'purchase',
+      gateway: 'yookassa',
       description,
       returnUrl: order.type === 'concert'
         ? 'https://promo-music.ru/artist/concerts'

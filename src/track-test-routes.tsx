@@ -314,6 +314,9 @@ app.post('/payment', requireAuth, async (c) => {
       currency: 'RUB',
       description: `Тест трека: ${request.track_title} — ${request.artist_name}`,
       returnUrl,
+      gateway: 'yookassa',
+      userId: request.user_id || 'guest',
+      type: 'purchase',
       metadata: {
         type: 'track_test',
         requestId: request_id,
@@ -399,7 +402,7 @@ app.post('/payment/confirm', requireAuth, async (c) => {
         crypto.randomUUID(),
         request.user_id,
         request.payment_amount,
-        payment_method,
+        'yookassa', // payment_method — раньше использовалась переменная payment_method которой нет в scope; hardcode'или yookassa (всё равно через него идёт оплата)
         `Track test: ${request.track_title}`,
         request_id,
       ]

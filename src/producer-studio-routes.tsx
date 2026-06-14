@@ -1251,7 +1251,7 @@ app.post('/ai/analyze', requireAuth, async (c) => {
       return c.json({ success: true, data: { response: fallbackRecs(dc), model: 'fallback', aiAvailable: false, reason: 'api_error' } });
     }
 
-    const data = await resp.json();
+    const data: any = await resp.json();
     const aiResp = data.choices[0].message.content;
     await setProducerAiLast(producerId, { question, response: aiResp, timestamp: nowIso() });
     return c.json({ success: true, data: { response: aiResp, model: 'mistral-large', aiAvailable: true } });

@@ -328,6 +328,9 @@ subscriptions.post('/subscribe', requireAuth, async (c) => {
           currency: 'RUB',
           description: desc,
           returnUrl,
+          gateway: 'yookassa',
+          userId,
+          type: 'subscription',
           metadata: { type: 'subscription', planKey: tier, interval },
         });
 
