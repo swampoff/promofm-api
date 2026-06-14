@@ -129,7 +129,7 @@ async function callOpenRouter(req: LLMRequest, apiKey: string): Promise<LLMRespo
     throw new Error(`OpenRouter ${response.status}: ${errText.slice(0, 300)}`);
   }
 
-  const data = await response.json();
+  const data: any = await response.json();
   const text = data.choices?.[0]?.message?.content || '';
   const usedModel = data.model || model;
 
@@ -191,7 +191,7 @@ async function callAnthropicDirect(req: LLMRequest, apiKey: string): Promise<LLM
     throw new Error(`Anthropic ${response.status}: ${errText.slice(0, 300)}`);
   }
 
-  const data = await response.json();
+  const data: any = await response.json();
   const text = data.content?.[0]?.text || '';
 
   return {

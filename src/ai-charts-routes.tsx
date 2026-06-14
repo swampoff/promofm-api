@@ -29,7 +29,7 @@ const requireAdminOrKey = async (c: any, next: () => Promise<void>) => {
     await next();
     return;
   }
-  return requireAuth(c, () => requireAdmin(c, next));
+  return requireAuth(c, async () => { await requireAdmin(c, next); });
 };
 
 

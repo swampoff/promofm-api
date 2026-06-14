@@ -23,7 +23,7 @@ async function requireAdminOrKey(c: any, next: any) {
   if (internalKey && ADMIN_INTERNAL_KEY && internalKey === ADMIN_INTERNAL_KEY) {
     return next();
   }
-  return requireAuth(c, () => requireAdmin(c, next));
+  return requireAuth(c, async () => { await requireAdmin(c, next); });
 }
 
 

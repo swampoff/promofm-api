@@ -28,7 +28,7 @@ async function requireAdminOrKey(c: any, next: any) {
   }
   // Fall back to requireAuth + requireAdmin
   const { requireAuth, requireAdmin } = await import('./auth-middleware.tsx');
-  return requireAuth(c, () => requireAdmin(c, next));
+  return requireAuth(c, async () => { await requireAdmin(c, next); });
 }
 
 
