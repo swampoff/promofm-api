@@ -45,7 +45,13 @@ export type NotificationType =
   | 'support_ticket_new'
   | 'live_chat_message'
   | 'donation_received'
-  | 'venue_request_approved';
+  | 'venue_request_approved'
+  // Track / mix lifecycle (используются в track-moderation-routes.tsx
+  // для уведомлений артиста и DJ о публикации/планируемом эфире). Без
+  // этих 3 значений TS2322 на каждом sendCrossCabinetNotification вызове.
+  | 'track_upcoming'
+  | 'track_published'
+  | 'mix_published';
 
 // 'system' — нечеловеческий источник (донат от слушателя, авто-события).
 export type CabinetRole = 'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer' | 'label' | 'system';
