@@ -46,6 +46,17 @@ async function getUserId(c: any): Promise<string> {
   return c.get('userId') || FALLBACK_DJ_USER_ID;
 }
 
+// Helper: prefix-based UUID id (same pattern as marketplace-routes.tsx:86,
+// collaboration-routes.tsx:74, producer-studio-routes.tsx:88, и т.д.).
+// Восстановлено 2026-06-14 — раньше код вызывал имя 'generateId(prefix)'
+// в 5 местах (events, collaborations, withdrawals, pitches, campaigns),
+// но такая функция нигде не была экспортирована/определена → LIVE BUG:
+// любой POST /events, /collaborations, /withdrawals, /pitches, /campaigns
+// падал с ReferenceError: generateId is not defined.
+function genId(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
 // dj_withdrawals row-per-withdrawal (migration 044). API contract:
 // {id, djId, amount, method, destinationLabel, status, yooPayoutId,
 //  error?, requestedAt, paidAt?, canceledAt?, createdAt, updatedAt?}.
@@ -381,7 +392,7 @@ app.post('/events', requireAuth, requireDjRole, async (c) => {
       }
     }
 
-    const appId = generateId('ev');
+    const appId = genId('ev');
     const title    = String(body.title).slice(0, 200).trim();
     const venue    = String(body.venue || '').slice(0, 200);
     const city     = String(body.city || '').slice(0, 100);
@@ -633,7 +644,7 @@ app.post('/collaborations', requireAuth, requireDjRole, async (c) => {
       return c.json({ success: false, error: 'Активный инвайт этому DJ уже есть' }, 409);
     }
 
-    const id = generateId('collab');
+    const id = genId('collab');
     await pool.query(
       `INSERT INTO dj_collab_invites (id, from_dj_id, to_dj_id, type, message, status)
        VALUES ($1, $2, $3, $4, $5, 'pending')`,
@@ -1384,7 +1395,7 @@ app.post('/finances/withdrawals', requireAuth, requireDjRole, profileLimiter, as
       return c.json({ success: false, error: `Недостаточно средств. Доступно: ${available} ₽` }, 400);
     }
 
-    const id = generateId('wd');
+    const id = genId('wd');
     const now = new Date().toISOString();
 
     // Сначала пробуем создать выплату — только при успехе записываем в БД
@@ -1571,7 +1582,7 @@ app.post('/promotion/pitches', requireAuth, requireDjRole, async (c) => {
       return c.json({ success: false, error: 'Заявка уже отправлена и ждёт модерации' }, 409);
     }
 
-    const id = generateId('pitch');
+    const id = genId('pitch');
     await pool.query(
       `INSERT INTO pitching_submissions
          (id, user_id, submission_type, target_id, target_name, mix_id, message, status, actor_role)
@@ -1667,7 +1678,7 @@ app.post('/promotion/campaigns', requireAuth, requireDjRole, async (c) => {
     const allowedTypes = new Set(['banner', 'social', 'email']);
     const type = allowedTypes.has(body.type) ? body.type : 'banner';
 
-    const appId = generateId('camp');
+    const appId = genId('camp');
     const title = String(body.title || 'Без названия').slice(0, 200);
     const budget = Math.max(0, Number(body.budget || 0));
 
