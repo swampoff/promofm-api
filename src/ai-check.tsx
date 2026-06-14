@@ -21,8 +21,21 @@
 
 import { pool } from './db-client.tsx';
 
+// AI_DETECTOR_URL должен быть задан в /opt/promofm-api/.env.
+// Если env пуст — фолбэк на локальный 127.0.0.1:8085 (тот же VPS, где
+// крутится promofm-ai-detector.service). На dev-машине без detector'а
+// fetch упадёт ECONNREFUSED → catch (line ~124) → ai_check_status='error'.
+// Треки НЕ виснут pending бесконечно, но если detector реально нужен,
+// эта warn-нота помогает devops'у заметить пропущенную env.
 const AI_DETECTOR_URL = process.env.AI_DETECTOR_URL || 'http://127.0.0.1:8085';
 const AI_DETECTOR_TIMEOUT_MS = 90_000;
+
+if (!process.env.AI_DETECTOR_URL) {
+  console.warn(
+    `[ai-check] AI_DETECTOR_URL не задан в .env — fallback на ${AI_DETECTOR_URL}. ` +
+    `Если detector не запущен на этом host'е, все треки получат ai_check_status='error'.`,
+  );
+}
 
 /**
  * Resolve a public audio_url (https://promo-music.ru/uploads/...) into
@@ -134,7 +147,9 @@ export async function runAiCheck(trackId: string, filePath: string): Promise<Ana
           WHERE id = $1`,
         [`ai_${trackId}`, errMsg],
       );
-    } catch {}
+    } catch (persistErr: any) {
+      console.warn(`[ai-check] failed to persist error status for ${trackId}:`, persistErr?.message || persistErr);
+    }
     return null;
   }
 
