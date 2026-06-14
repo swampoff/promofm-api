@@ -358,7 +358,7 @@ contentHealth.post('/telegram', requireAuth, requireAdmin, async (c) => {
       return c.json({ success: false, error: `Telegram API: ${resp.status}` }, 500);
     }
 
-    const result = await resp.json();
+    const result: any = await resp.json();
     console.log(`[Telegram Alert] Sent successfully, message_id: ${result.result?.message_id}`);
 
     return c.json({ success: true, messageId: result.result?.message_id });
@@ -440,7 +440,7 @@ contentHealth.post('/telegram-report', requireAuth, requireAdmin, async (c) => {
       return c.json({ success: false, error: `Telegram API: ${resp.status} ${errText}` }, 500);
     }
 
-    const result = await resp.json();
+    const result: any = await resp.json();
     console.log(`[Telegram Report] Sent, message_id: ${result.result?.message_id}`);
     return c.json({ success: true, messageId: result.result?.message_id });
   } catch (error) {
