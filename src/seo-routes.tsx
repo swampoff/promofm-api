@@ -44,22 +44,70 @@ function fmtDate(d: string | undefined): string {
   try { return new Date(d).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }); } catch { return ''; }
 }
 
+// ─── Stations count (real COUNT from pitching_radio_stations VIEW) ───
+//
+// Was hardcoded literal "742" in 13 places (this file + seo-aliases.tsx).
+// Now it comes from SELECT COUNT(*) FROM pitching_radio_stations (created
+// in migration 009 as a VIEW over pitching_radio). Cached 5 min to avoid
+// DB round-trip per SSR request. На сбое — последнее известное или 742
+// (legacy fallback) — раньше юзер видел именно 742, не регрессия.
+let stationsCountCache: { value: number; fetchedAt: number } | null = null;
+const STATIONS_COUNT_TTL_MS = 5 * 60_000;
+const STATIONS_COUNT_FALLBACK = 742;
+
+async function getStationsCount(): Promise<number> {
+  const now = Date.now();
+  if (stationsCountCache && now - stationsCountCache.fetchedAt < STATIONS_COUNT_TTL_MS) {
+    return stationsCountCache.value;
+  }
+  try {
+    const { rows } = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM pitching_radio_stations`,
+    );
+    const count = Number(rows[0]?.count || 0);
+    if (count > 0) {
+      stationsCountCache = { value: count, fetchedAt: now };
+      return count;
+    }
+  } catch (err) {
+    console.warn('[seo] getStationsCount query failed, falling back:', err);
+  }
+  return stationsCountCache?.value ?? STATIONS_COUNT_FALLBACK;
+}
+
+function replaceTokens(html: string, ctx: { stationsCount: number }): string {
+  return html.replace(/\{\{STATIONS_COUNT\}\}/g, String(ctx.stationsCount));
+}
+
+// Async wrappers: подставляют реальный COUNT(*) из pitching_radio_stations
+// в HTML перед отдачей боту. Sync renderPage/renderPillar оставлены для
+// единичных мест где токены не нужны (если такие появятся).
+async function renderPageWithTokens(opts: Parameters<typeof renderPage>[0]): Promise<string> {
+  const stationsCount = await getStationsCount();
+  return replaceTokens(renderPage(opts), { stationsCount });
+}
+
+async function renderPillarWithTokens(p: PillarMeta): Promise<string> {
+  const stationsCount = await getStationsCount();
+  return replaceTokens(renderPillar(p), { stationsCount });
+}
+
 // ─── Page meta configs ───
 const PAGE_META: Record<string, { title: string; desc: string; type: string; image?: string }> = {
   '/': { title: `${SITE_NAME} — музыкальная платформа для артистов`, desc: SITE_DESC, type: 'website' },
   '/news': { title: `Новости музыки — ${SITE_NAME}`, desc: 'Свежие новости музыкальной индустрии: релизы, фестивали, интервью, аналитика', type: 'website' },
   '/charts': { title: `Музыкальные чарты TOP 50 — ${SITE_NAME}`, desc: 'Еженедельный чарт из Spotify, Apple Music, Яндекс Музыки, радиостанций и ВКонтакте', type: 'website' },
   '/concerts': { title: `Концерты и фестивали — ${SITE_NAME}`, desc: 'Афиша концертов и музыкальных событий', type: 'website' },
-  '/airplay-monitoring': { title: `Мониторинг эфира радиостанций: когда ваша песня звучит на радио — ${SITE_NAME}`, desc: 'Автоматический мониторинг 742 радиостанций России. Точное время эфира песни на радио, отчёт по дням и станциям, подсчёт фактических ротаций трека.', type: 'website' },
-  '/promo-air': { title: `ПРОМО.ЭИР: песня на радио и музыка для заведения от одного оператора — ${SITE_NAME}`, desc: 'ПРОМО.ЭИР доводит песню до плейлист-комитетов 742 радиостанций и поставляет лицензированную музыку для кафе, ресторанов, баров, фитнес-клубов и магазинов. Радиоротации артистам и фоновое аудио бизнесу из одной системы.', type: 'website' },
-  '/pesnya-na-radio': { title: 'Песня на радио: как попасть в ротацию радиостанций | ПРОМО.МУЗЫКА', desc: 'Подробное руководство, как разместить песню на радио, попасть в ротацию 742 российских радиостанций и получить отчёт о реальных эфирах. ПРОМО.ЭИР доводит трек до плейлист-комитета без посредников.', type: 'article' },
+  '/airplay-monitoring': { title: `Мониторинг эфира радиостанций: когда ваша песня звучит на радио — ${SITE_NAME}`, desc: 'Автоматический мониторинг {{STATIONS_COUNT}} радиостанций России. Точное время эфира песни на радио, отчёт по дням и станциям, подсчёт фактических ротаций трека.', type: 'website' },
+  '/promo-air': { title: `ПРОМО.ЭИР: песня на радио и музыка для заведения от одного оператора — ${SITE_NAME}`, desc: 'ПРОМО.ЭИР доводит песню до плейлист-комитетов {{STATIONS_COUNT}} радиостанций и поставляет лицензированную музыку для кафе, ресторанов, баров, фитнес-клубов и магазинов. Радиоротации артистам и фоновое аудио бизнесу из одной системы.', type: 'website' },
+  '/pesnya-na-radio': { title: 'Песня на радио: как попасть в ротацию радиостанций | ПРОМО.МУЗЫКА', desc: 'Подробное руководство, как разместить песню на радио, попасть в ротацию {{STATIONS_COUNT}} российских радиостанций и получить отчёт о реальных эфирах. ПРОМО.ЭИР доводит трек до плейлист-комитета без посредников.', type: 'article' },
   '/muzyka-dlya-zavedeniya': { title: 'Музыка для заведения: лицензионное аудио для кафе, ресторанов и магазинов | ПРОМО.МУЗЫКА', desc: 'Лицензионная музыка для заведений: кафе, рестораны, бары, фитнес-клубы, магазины и салоны. Готовые плейлисты под формат места, отчётность для РАО и ВОИС, брендированные джинглы и звуковая идентичность от ПРОМО.ЭИР.', type: 'article' },
   '/for-venues': { title: `Музыка для заведений: подключение фонового аудио для бизнеса — ${SITE_NAME}`, desc: 'Лицензионная музыка для заведений общепита, ритейла и услуг. Подбор плейлистов под аудиторию, отчётность для РАО и ВОИС, фирменные джинглы и звуковое оформление зала от ПРОМО.ЭИР.', type: 'website' },
   '/music-for-restaurants': { title: `Музыка для ресторанов и кафе: фоновое аудио и плейлисты под формат заведения — ${SITE_NAME}`, desc: 'Готовые плейлисты для ресторана, кафе, кофейни и бара под целевую аудиторию и время суток. Лицензионная музыка с отчётностью для РАО и ВОИС, обновление треков без участия персонала.', type: 'website' },
   '/audio-branding': { title: `Звуковой брендинг: джинглы, аудиоидентичность и звук бренда — ${SITE_NAME}`, desc: 'Создание звукового бренда: фирменные джинглы, музыкальная тема, аудио-логотип и звуковая идентичность для бизнеса. Внедряется в плейлисты заведений, рекламу и точки контакта.', type: 'website' },
   '/audiobranding': { title: `Звуковой брендинг для бизнеса: джинглы и музыкальная идентичность — ${SITE_NAME}`, desc: 'Звуковой брендинг для заведений и компаний: фирменные джинглы, аудио-логотип, музыкальная тема. ПРОМО.ЭИР собирает плейлист и звуковые элементы под бренд.', type: 'website' },
-  '/radio-advertising': { title: `Реклама на радио: размещение роликов на 742 радиостанциях России — ${SITE_NAME}`, desc: 'Размещение рекламы на радио: подбор станций под аудиторию, расчёт охвата, производство ролика и эфирная сетка. Работаем по всей России через операторскую систему ПРОМО.ЭИР.', type: 'website' },
-  '/airplay-monitoring-': { title: `Мониторинг ротаций песни на радио — ${SITE_NAME}`, desc: 'Сервис мониторинга 742 радиостанций. Узнайте, когда и сколько раз песня прозвучала на радио.', type: 'website' },
+  '/radio-advertising': { title: `Реклама на радио: размещение роликов на {{STATIONS_COUNT}} радиостанциях России — ${SITE_NAME}`, desc: 'Размещение рекламы на радио: подбор станций под аудиторию, расчёт охвата, производство ролика и эфирная сетка. Работаем по всей России через операторскую систему ПРОМО.ЭИР.', type: 'website' },
+  '/airplay-monitoring-': { title: `Мониторинг ротаций песни на радио — ${SITE_NAME}`, desc: 'Сервис мониторинга {{STATIONS_COUNT}} радиостанций. Узнайте, когда и сколько раз песня прозвучала на радио.', type: 'website' },
   '/promo-lab': { title: `ПРОМО.ЛАБ — оценка треков — ${SITE_NAME}`, desc: 'Профессиональная оценка треков от экспертов индустрии', type: 'website' },
   '/promo-guide': { title: `ПРОМО.ГИД — руководства — ${SITE_NAME}`, desc: 'Гайды по продвижению музыки и развитию карьеры артиста', type: 'website' },
   '/marketplace': { title: `Маркетплейс — ${SITE_NAME}`, desc: 'Маркетплейс музыкальных услуг: биты, мастеринг, дизайн, продвижение', type: 'website' },
@@ -196,7 +244,7 @@ const PRODUCT_PAGES: Record<string, { meta: { title: string; desc: string; type:
 
 <section id="artists">
 <h2>Для артистов: попасть в ротацию радиостанций</h2>
-<p>Внутри ПРОМО.ЭИР сидит сеть из 742 российских радиостанций: от федеральных Европа Плюс, Русское Радио, DFM и Авторадио до региональных FM по областным центрам и нишевых форматов вроде джаза, рока, шансона и танцевальных каналов. Мы доставляем мастер песни и питч-карточку напрямую в плейлист-комитет станции, а не через анонимную почту, которую никто не открывает.</p>
+<p>Внутри ПРОМО.ЭИР сидит сеть из {{STATIONS_COUNT}} российских радиостанций: от федеральных Европа Плюс, Русское Радио, DFM и Авторадио до региональных FM по областным центрам и нишевых форматов вроде джаза, рока, шансона и танцевальных каналов. Мы доставляем мастер песни и питч-карточку напрямую в плейлист-комитет станции, а не через анонимную почту, которую никто не открывает.</p>
 <p>Артист видит в личном кабинете, какие станции взяли трек в light, medium или heavy rotation, и сколько раз песня уже прозвучала в эфире. Цифры подтверждаются сервисом <a href="${DOMAIN}/airplay-monitoring">мониторинга эфира</a>: система слушает живой поток FM-станций и распознаёт трек по аудиоотпечатку.</p>
 <p>Подробное руководство по подаче и форматам ротаций мы собрали в отдельной статье: <a href="${DOMAIN}/pesnya-na-radio">как попасть с песней на радио</a>.</p>
 </section>
@@ -221,7 +269,7 @@ const PRODUCT_PAGES: Record<string, { meta: { title: string; desc: string; type:
 <section id="related">
 <h2>Связанные сервисы</h2>
 <ul>
-<li><a href="${DOMAIN}/airplay-monitoring">Мониторинг эфира 742 радиостанций</a></li>
+<li><a href="${DOMAIN}/airplay-monitoring">Мониторинг эфира {{STATIONS_COUNT}} радиостанций</a></li>
 <li><a href="${DOMAIN}/radio-advertising">Реклама на радио: размещение роликов</a></li>
 <li><a href="${DOMAIN}/audio-branding">Звуковой брендинг и фирменные джинглы</a></li>
 <li><a href="${DOMAIN}/promo-lab">ПРОМО.ЛАБ: профессиональная оценка трека</a></li>
@@ -236,8 +284,8 @@ const PRODUCT_PAGES: Record<string, { meta: { title: string; desc: string; type:
     keywords: 'мониторинг эфира, мониторинг радио, ротация на радио, отчёт по эфиру, песня на радио, аналитика радиоэфира',
     body: `
 <article class="product">
-<h1>Мониторинг эфира 742 радиостанций России</h1>
-<p class="lead">Раньше артист узнавал об эфире своей песни случайно: позвонила тётка из соседнего города и сказала, что слышала трек в маршрутке. Сейчас работает автоматический мониторинг радио: система слушает прямой поток радиостанции и распознаёт каждый трек по аудиоотпечатку. ПРОМО.МУЗЫКА покрывает 742 станции по всей России и отдаёт отчёт в личный кабинет в день выхода эфира.</p>
+<h1>Мониторинг эфира {{STATIONS_COUNT}} радиостанций России</h1>
+<p class="lead">Раньше артист узнавал об эфире своей песни случайно: позвонила тётка из соседнего города и сказала, что слышала трек в маршрутке. Сейчас работает автоматический мониторинг радио: система слушает прямой поток радиостанции и распознаёт каждый трек по аудиоотпечатку. ПРОМО.МУЗЫКА покрывает {{STATIONS_COUNT}} станции по всей России и отдаёт отчёт в личный кабинет в день выхода эфира.</p>
 
 <section>
 <h2>Что вы получаете</h2>
@@ -379,7 +427,7 @@ seoRoutes.get('/prerender/*', async (c) => {
         const jsonLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"NewsArticle","headline":"${escJson(title)}","description":"${escJson(desc)}","image":"${escJson(img.startsWith('/') ? DOMAIN + img : img)}","datePublished":"${pubDate}","author":{"@type":"Person","name":"${escJson(author)}"},"publisher":{"@type":"Organization","name":"${SITE_NAME}","logo":{"@type":"ImageObject","url":"${LOGO}"}},"mainEntityOfPage":{"@type":"WebPage","@id":"${DOMAIN}/news/${escJson(newsId)}"}}</script>`;
 
         c.header('Content-Type', 'text/html; charset=utf-8');
-        return c.body(renderPage({
+        return c.body(await renderPageWithTokens({
           title: `${title} — ${SITE_NAME}`, desc, canonical: `${DOMAIN}/news/${newsId}`,
           type: 'article', image: img.startsWith('/') ? `${DOMAIN}${img}` : img, jsonLd,
           body: `<article><h1>${esc(title)}</h1><p><time datetime="${pubDate}">${fmtDate(pubDate)}</time> · ${esc(author)}</p>${content}</article>`,
@@ -401,7 +449,7 @@ seoRoutes.get('/prerender/*', async (c) => {
         body += '</ul>';
       }
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(renderPage({ title: PAGE_META['/news'].title, desc: PAGE_META['/news'].desc, canonical: `${DOMAIN}/news`, type: 'website', body }));
+      return c.body(await renderPageWithTokens({ title: PAGE_META['/news'].title, desc: PAGE_META['/news'].desc, canonical: `${DOMAIN}/news`, type: 'website', body }));
     }
 
     // ─── Charts ───
@@ -448,7 +496,7 @@ seoRoutes.get('/prerender/*', async (c) => {
         ? `<script type="application/ld+json">{"@context":"https://schema.org","@type":"ItemList","name":"${escJson(PAGE_META['/charts'].title)}","numberOfItems":${chartItems.length},"itemListElement":[${chartItems.map((t, i) => `{"@type":"ListItem","position":${i + 1},"item":{"@type":"MusicRecording","name":"${escJson(t.title)}","byArtist":{"@type":"MusicGroup","name":"${escJson(t.artist)}"}}}`).join(',')}]}</script>`
         : '';
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(renderPage({ title: PAGE_META['/charts'].title, desc: PAGE_META['/charts'].desc, canonical: `${DOMAIN}/charts`, type: 'website', jsonLd: chartLd, body }));
+      return c.body(await renderPageWithTokens({ title: PAGE_META['/charts'].title, desc: PAGE_META['/charts'].desc, canonical: `${DOMAIN}/charts`, type: 'website', jsonLd: chartLd, body }));
     }
 
     // ─── Concerts ───
@@ -465,7 +513,7 @@ seoRoutes.get('/prerender/*', async (c) => {
         body += '</ul>';
       }
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(renderPage({ title: PAGE_META['/concerts'].title, desc: PAGE_META['/concerts'].desc, canonical: `${DOMAIN}/concerts`, type: 'website', body }));
+      return c.body(await renderPageWithTokens({ title: PAGE_META['/concerts'].title, desc: PAGE_META['/concerts'].desc, canonical: `${DOMAIN}/concerts`, type: 'website', body }));
     }
 
     // ─── Tracks listing ───
@@ -482,7 +530,7 @@ seoRoutes.get('/prerender/*', async (c) => {
         body += '</ul>';
       }
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(renderPage({ title: PAGE_META['/tracks'].title, desc: PAGE_META['/tracks'].desc, canonical: `${DOMAIN}/tracks`, type: 'website', body }));
+      return c.body(await renderPageWithTokens({ title: PAGE_META['/tracks'].title, desc: PAGE_META['/tracks'].desc, canonical: `${DOMAIN}/tracks`, type: 'website', body }));
     }
 
     // ─── Individual track ───
@@ -502,7 +550,7 @@ seoRoutes.get('/prerender/*', async (c) => {
         const jsonLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"MusicRecording","name":"${escJson(title)}","byArtist":{"@type":"MusicGroup","name":"${escJson(artist)}"}${t.genre ? `,"genre":"${escJson(t.genre)}"` : ''}${duration ? `,"duration":"${duration}"` : ''},"url":"${DOMAIN}/tracks/${escJson(trackId)}","image":"${escJson(img)}"}</script>`;
 
         c.header('Content-Type', 'text/html; charset=utf-8');
-        return c.body(renderPage({
+        return c.body(await renderPageWithTokens({
           title: `${title} — ${artist} — ${SITE_NAME}`, desc, canonical: `${DOMAIN}/tracks/${trackId}`,
           type: 'music.song', image: img, jsonLd,
           body: `<article><h1>${esc(title)}</h1><p>${esc(artist)}${t.genre ? ` · ${esc(t.genre)}` : ''}</p>${desc ? `<p>${esc(desc)}</p>` : ''}</article>`,
@@ -543,7 +591,7 @@ seoRoutes.get('/prerender/*', async (c) => {
       // FAQPage на главной — копия 4 Q&A из фронт-реестра seo-pages.ts (синхрон).
       // FAQ-schema нет ни у tophit, ни у конкурентов обоих кластеров → rich-сниппет.
       const homeFaq = [
-        { q: 'Что такое ПРОМО.МУЗЫКА?', a: 'Российская платформа продвижения музыки для артистов, лейблов, DJ, продюсеров и звукорежиссёров. Объединяет питчинг на 742 радиостанции, попадание в плейлисты стримингов, чарты, дистрибуцию и маркетплейс битов и услуг.' },
+        { q: 'Что такое ПРОМО.МУЗЫКА?', a: 'Российская платформа продвижения музыки для артистов, лейблов, DJ, продюсеров и звукорежиссёров. Объединяет питчинг на {{STATIONS_COUNT}} радиостанции, попадание в плейлисты стримингов, чарты, дистрибуцию и маркетплейс битов и услуг.' },
         { q: 'Как попасть на радио со своей песней?', a: 'Зарегистрируйтесь как артист, загрузите трек, отметьте радиостанции для питчинга. Заявка приходит в кабинет радио, редактор принимает решение о ротации напрямую.' },
         { q: 'Сколько стоит продвижение трека?', a: 'Публикация трека — 7 000 ₽ с пожизненным доступом к питчингу, аналитике и попаданию в «Новинки недели». Подробнее на странице тарифов.' },
         { q: 'Чем ПРОМО.МУЗЫКА отличается от обычного дистрибьютора?', a: 'Дистрибьютор только загружает треки в стриминги. ПРОМО.МУЗЫКА дополнительно даёт прямой канал на радиостанции (питчинг с реальным редактором), экспертную оценку перед релизом (ПРОМО.ЛАБ) и маркетплейс услуг для подготовки трека.' },
@@ -551,20 +599,20 @@ seoRoutes.get('/prerender/*', async (c) => {
       body += `<section class="faq-block"><h2>Частые вопросы</h2><dl class="faq">${homeFaq.map(({ q, a }) => `<dt>${esc(q)}</dt><dd>${esc(a)}</dd>`).join('')}</dl></section>`;
 
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(renderPage({ title: PAGE_META['/'].title, desc: PAGE_META['/'].desc, canonical: `${DOMAIN}/`, type: 'website', jsonLd: buildFaqLd(homeFaq), body }));
+      return c.body(await renderPageWithTokens({ title: PAGE_META['/'].title, desc: PAGE_META['/'].desc, canonical: `${DOMAIN}/`, type: 'website', jsonLd: buildFaqLd(homeFaq), body }));
     }
 
     // ─── Pillar pages (rich SEO landing pages with FAQ schema) ───
     if (PILLAR_PAGES[path]) {
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(renderPillar(PILLAR_PAGES[path]));
+      return c.body(await renderPillarWithTokens(PILLAR_PAGES[path]));
     }
 
     // ─── Product pages with rich body content ───
     if (PRODUCT_PAGES[path]) {
       const p = PRODUCT_PAGES[path];
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(renderPage({
+      return c.body(await renderPageWithTokens({
         title: p.meta.title, desc: p.meta.desc, canonical: `${DOMAIN}${path}`, type: p.meta.type,
         keywords: p.keywords, body: p.body,
       }));
@@ -581,7 +629,7 @@ seoRoutes.get('/prerender/*', async (c) => {
         : '';
       const bodyHtml = a.body.includes('class="faq"') ? a.body : `${a.body}\n${faqHtml}`;
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(renderPage({
+      return c.body(await renderPageWithTokens({
         title: a.title,
         desc: a.desc,
         canonical: `${DOMAIN}${path}`,
@@ -595,7 +643,7 @@ seoRoutes.get('/prerender/*', async (c) => {
     // ─── Generic static pages ───
     const meta = PAGE_META[path] || PAGE_META['/']!;
     c.header('Content-Type', 'text/html; charset=utf-8');
-    return c.body(renderPage({
+    return c.body(await renderPageWithTokens({
       title: meta.title, desc: meta.desc, canonical: `${DOMAIN}${path}`, type: meta.type,
       body: `<h1>${esc(meta.title)}</h1><p>${esc(meta.desc)}</p>`,
     }));
@@ -603,7 +651,7 @@ seoRoutes.get('/prerender/*', async (c) => {
     console.error('[seo] prerender error:', err);
     const meta = PAGE_META[path] || PAGE_META['/']!;
     c.header('Content-Type', 'text/html; charset=utf-8');
-    return c.body(renderPage({
+    return c.body(await renderPageWithTokens({
       title: meta.title, desc: meta.desc, canonical: `${DOMAIN}${path}`, type: meta.type,
       body: `<h1>${esc(meta.title)}</h1><p>${esc(meta.desc)}</p>`,
     }));
