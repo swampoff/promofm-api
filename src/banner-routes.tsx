@@ -333,7 +333,7 @@ app.post('/expire', async (c, next) => {
     return next();
   }
   // Иначе — admin JWT через middleware.
-  return requireAuth(c, () => requireAdmin(c, next));
+  return requireAuth(c, async () => { await requireAdmin(c, next); });
 }, async (c) => {
   try {
     const r = await pool.query(

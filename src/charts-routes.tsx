@@ -8,6 +8,7 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { getChartAggregationStatus, upsertChartAggregationStatus, getChartSource, upsertChartSource, listChartSources, getPlatformStats, setPlatformStats, getTracksByUser } from './db.tsx';
 import { getPublishedTracks } from './db-typed.tsx';
+import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { isUrlSafe } from './security.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -16,7 +17,7 @@ const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 async function requireAdminOrKey(c: any, next: any) {
   const internalKey = c.req.header('X-Internal-Key');
   if (internalKey && ADMIN_INTERNAL_KEY && internalKey === ADMIN_INTERNAL_KEY) return next();
-  return requireAuth(c, () => requireAdmin(c, next));
+  return requireAuth(c, async () => { await requireAdmin(c, next); });
 }
 
 const charts = new Hono();
@@ -355,7 +356,7 @@ ${sourceConfig.parsingHint}
         console.log(`Claude chart extraction error for ${sourceConfig.id}: ${await resp.text()}`);
         return null;
       }
-      const data = await resp.json();
+      const data: any = await resp.json();
       content = data.content?.[0]?.text;
     } else {
       // Fallback: Gemini (если задан только GEMINI_API_KEY)
@@ -380,7 +381,7 @@ ${sourceConfig.parsingHint}
         console.log(`Gemini chart extraction error for ${sourceConfig.id}: ${await resp.text()}`);
         return null;
       }
-      const data = await resp.json();
+      const data: any = await resp.json();
       content = data.candidates?.[0]?.content?.parts?.[0]?.text || data.choices?.[0]?.message?.content;
     }
 
@@ -658,7 +659,7 @@ async function aggregateYandexChart(): Promise<ExternalChartData> {
       return emptyChart(cfg, 'Не удалось загрузить чарт Яндекс Музыки');
     }
 
-    const json = await resp.json();
+    const json: any = await resp.json();
 
     // Парсим структуру Яндекс API
     // handlers/chart.jsx возвращает: { trackIds: string[], tracksById: Record<string, Track>, tracks: Track[] }
@@ -1027,8 +1028,8 @@ charts.get('/all', async (c) => {
         const batch = unmatchedTracks.slice(0, 50);
         const lookups = batch.map(({ track, key }) =>
           fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(track.title + ' ' + track.artist)}&media=music&limit=1`)
-            .then(r => r.json())
-            .then(data => {
+            .then((r) => r.json())
+            .then((data: any) => {
               if (data.results?.[0]?.previewUrl) {
                 (track as any).previewUrl = data.results[0].previewUrl;
                 itunesMap.set(key, data.results[0].previewUrl);
