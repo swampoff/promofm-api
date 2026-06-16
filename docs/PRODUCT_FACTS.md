@@ -187,7 +187,9 @@ Public:
 
 **Source:** `src/track-moderation-routes.tsx`.
 
-- `PUBLICATION_PRICE = 5000` ₽ (line 26)
+- `PUBLICATION_PRICE = 7000` ₽ (line 27, обновлено 2026-06-16 —
+  до этого таблица говорила «5000» но в коде уже было 7000, drift
+  не отслеживался)
 - **«Первый трек бесплатно» — ОТКЛЮЧЕНО** (URGENT business
   decision 2026-05-31, commits `7d0a5ea` + `aedec9e`). Акция
   отменена немедленно после инцидента с артистом «Deafness»
@@ -215,7 +217,7 @@ pending → approved → paid → upcoming → published
 ```
 
 - `pending` — sat in moderation queue
-- `approved` — awaits payment (5000 ₽ pending in
+- `approved` — awaits payment (7000 ₽ pending in
   data.payment_amount; data.requires_payment=true; is_hidden=true)
 - `paid` — payment confirmed via YooKassa webhook
 - `upcoming` — admin published manually, lives in "Скоро" section
