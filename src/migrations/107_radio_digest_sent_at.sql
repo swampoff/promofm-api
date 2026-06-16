@@ -1,0 +1,25 @@
+-- Migration 107: tracks.radio_digest_sent_at — курсор рассылки новинок партнёрам
+--
+-- Контекст: cron radio-digest-cron.sh раз в день (10:00 Europe/Berlin) шлёт
+-- на info@promofm.ru письмо с новинками недели (треки ротации,
+-- user_id='system-friday') для РУЧНОЙ пересылки радио-партнёрам — не всем
+-- сразу, а по 2 трека в день. Чтобы за неделю покрыть батч и не отправить
+-- один трек дважды, нужен персистентный курсор «этот трек уже разослан».
+--
+-- Дизайн (не KV-store): одна нативная nullable-колонка на существующей
+-- строке tracks. NULL = ещё в очереди, timestamptz = когда ушёл в digest.
+-- Никакого jsonb, никакой новой таблицы.
+--
+-- Выборка крона: moderation_status='published' AND user_id='system-friday'
+-- AND radio_digest_sent_at IS NULL, ORDER BY created_at ASC LIMIT 2.
+-- Платные самозагрузы и Толстобров отсекаются естественно — у них реальный
+-- user_id, а не служебный 'system-friday'.
+--
+-- Apply (см. CLAUDE.md «Migration files: NO BEGIN/COMMIT inside»):
+--   sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+--   BEGIN;
+--   \i /opt/promofm-api/src/migrations/107_radio_digest_sent_at.sql
+--   COMMIT;
+--   EOF
+
+ALTER TABLE tracks ADD COLUMN IF NOT EXISTS radio_digest_sent_at TIMESTAMPTZ;
