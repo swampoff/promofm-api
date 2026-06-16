@@ -11,7 +11,7 @@
  */
 
 import { Hono } from 'hono';
-import { claimPaymentSessionForProcessing, createCoinTransactionKv, creditAvailableAtomic, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, incrementCoinBalanceAtomic, revertPaymentSessionToPending, setCoinBalance, setPaymentSessionShopId, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx } from './db.tsx';
+import { claimPaymentSessionForProcessing, createCoinTransactionKv, creditAvailableAtomic, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, incrementCoinBalanceAtomic, reserveCreditOnce, revertPaymentSessionToPending, setCoinBalance, setPaymentSessionShopId, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx } from './db.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import {
@@ -89,24 +89,42 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     const targetUserId = session.type === 'donation'
       ? (session.metadata.artistId || session.userId)
       : session.userId;
-    await creditAvailableAtomic(targetUserId, session.amount);
+    // Idempotency guard: webhook retry'и от YooKassa могут попасть
+    // сюда повторно если первый раз упал ПОСЛЕ credit'а но ДО return.
+    // claimPaymentSessionForProcessing откатывается → второй webhook
+    // снова входит сюда. creditAvailableAtomic — атомарный, но
+    // unconditional add. Без ledger-guard'а это double-credit на каждом
+    // retry. reserveCreditOnce инсертит в payment_credit_ledger,
+    // вторая попытка получает false → skip.
+    const kind = session.type === 'donation' ? 'donation_credit' : 'topup_balance';
+    if (await reserveCreditOnce(session.orderId, kind)) {
+      await creditAvailableAtomic(targetUserId, session.amount);
+    } else {
+      log.info({ orderId: session.orderId, kind, targetUserId, amount: session.amount }, 'credit_skipped_already_reserved');
+    }
   }
 
   // Topup coins — same race-safety treatment.
   if (session.type === 'topup' && session.metadata.coinAmount) {
     const coinAmount = parseInt(session.metadata.coinAmount);
     if (coinAmount > 0) {
-      await incrementCoinBalanceAtomic(session.userId, coinAmount);
+      // Отдельный kind 'topup_coins' — топап balance уже зарезервирован
+      // выше, а coins это отдельный credit (one orderId → два credit'а).
+      if (await reserveCreditOnce(session.orderId, 'topup_coins')) {
+        await incrementCoinBalanceAtomic(session.userId, coinAmount);
 
-      const coinTx = {
-        id: `cointx-${session.orderId}`,
-        userId: session.userId,
-        amount: coinAmount,
-        type: 'purchase',
-        description: `Пополнение: ${coinAmount} монет`,
-        createdAt: now,
-      };
-      await createCoinTransactionKv(session.userId, coinTx.id, coinTx);
+        const coinTx = {
+          id: `cointx-${session.orderId}`,
+          userId: session.userId,
+          amount: coinAmount,
+          type: 'purchase',
+          description: `Пополнение: ${coinAmount} монет`,
+          createdAt: now,
+        };
+        await createCoinTransactionKv(session.userId, coinTx.id, coinTx);
+      } else {
+        log.info({ orderId: session.orderId, userId: session.userId, coinAmount }, 'topup_coins_skipped_already_reserved');
+      }
     }
   }
 
