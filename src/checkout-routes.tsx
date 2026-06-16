@@ -188,7 +188,21 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       if (plan) {
         const interval = session.metadata.interval === 'year' ? 'year' : 'month';
         const daysToAdd = interval === 'year' ? 365 : 30;
-        const userId = session.userId || session.metadata.userId;
+        // Webhook target = JWT'у создававшего сессию (session.userId), а
+        // НЕ metadata.userId (тот мог быть подменён). create-session уже
+        // проверяет совпадение, но webhook второй защитной линией не
+        // принимает metadata.userId как override. Если кто-то пробил
+        // create-session — webhook апгрейдит ИМЕННО плательщика, не его
+        // жертву.
+        const userId = session.userId;
+        if (session.metadata.userId && String(session.metadata.userId) !== String(userId)) {
+          log.warn({ sessionUserId: userId, claimedUserId: session.metadata.userId, orderId: session.orderId }, 'venue_subscription_impersonation_blocked_webhook');
+          // Не throw — webhook должен идемпотентно вернуть 200, чтобы
+          // YooKassa не ретраила. Просто фиксируем атаку и не апгрейдим
+          // никого. Платеж уже на счету платформы — обработается
+          // вручную через admin-refund (см. промо-сейф).
+          return;
+        }
 
         // Read current profile; extend the existing expiry if any,
         // else start from now. This keeps mid-cycle upgrades fair
@@ -276,6 +290,13 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       const plan = DJ_PLANS_LOCAL[planId];
       if (plan) {
         const interval = session.metadata.interval === 'year' ? 'year' : 'month';
+        // Webhook second line of defence: даже если кто-то обошёл
+        // create-session, метаджDjId должен совпадать с плательщиком.
+        // Без metadata.djId fall back на session.userId — безопасно.
+        if (session.metadata.djId && String(session.metadata.djId) !== String(session.userId)) {
+          log.warn({ sessionUserId: session.userId, claimedDjId: session.metadata.djId, orderId: session.orderId }, 'dj_subscription_impersonation_blocked_webhook');
+          return;
+        }
         const djId = String(session.metadata.djId || session.userId);
         const start = new Date(now);
         const end = new Date(start);
@@ -1295,7 +1316,17 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
     }
     // For subscriptions the price MUST match the canonical plan price — the client cannot
     // dictate the amount. This blocks the "open DevTools, lower the price" attack.
-    if (type === 'subscription') {
+    //
+    // ВАЖНО: до 2026-06-16 этот гард валидировал ТОЛЬКО artist plans
+    // (SUBSCRIPTION_PLANS). DJ flow приходит как
+    // `type='subscription' + metadata.role='dj' + metadata.planId`, venue
+    // — как `type='venue_subscription' + metadata.planKey`. Оба ранее
+    // НЕ проходили amount-check вообще + webhook доверял
+    // metadata.djId/metadata.userId без сверки с JWT — позволяло А
+    // оплатить 1 ₽ и апгрейднуть B на Pro/Network. Теперь обе ветки
+    // проходят amount-gate + ownership-check (metadata.djId === userId).
+    if (type === 'subscription' && metadata?.role !== 'dj') {
+      // Artist subscription (роль не выставлена ИЛИ явно не 'dj').
       const planKey = metadata?.planKey;
       const interval = metadata?.interval === 'year' ? 'year' : 'month';
       const plan = planKey ? (SUBSCRIPTION_PLANS as Record<string, any>)[planKey] : null;
@@ -1306,6 +1337,62 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       if (Math.abs(amount - expected) > 0.01) {
         log.warn({ userId, planKey, interval, expected, received: amount }, 'subscription_amount_tampering_blocked');
         return c.json({ success: false, error: 'Сумма не соответствует тарифу' }, 400);
+      }
+    }
+
+    // DJ subscription. Defensive copy of pricing inline — minimal coupling
+    // to dj-studio-routes (which holds the canonical DJ_PLANS array). На
+    // момент 2026-06-16: starter=0 (бесплатно — через checkout не идёт),
+    // pro=990/9900, agency=2990/29900. Если pricing меняется на проде —
+    // обновить и здесь, и в DJ_PLANS, и в DJ_PLANS_LOCAL в webhook'е
+    // (см. строки ~270 этого файла). Long-term — общий source-of-truth.
+    if (type === 'subscription' && metadata?.role === 'dj') {
+      const DJ_PRICES: Record<string, { month: number; year: number }> = {
+        pro:    { month: 990,  year: 9900  },
+        agency: { month: 2990, year: 29900 },
+      };
+      const planId = String(metadata?.planId || '');
+      const interval = metadata?.interval === 'year' ? 'year' : 'month';
+      const prices = DJ_PRICES[planId];
+      if (!prices) {
+        return c.json({ success: false, error: 'Invalid metadata.planId for dj subscription' }, 400);
+      }
+      const expected = interval === 'year' ? prices.year : prices.month;
+      if (Math.abs(amount - expected) > 0.01) {
+        log.warn({ userId, planId, interval, expected, received: amount }, 'dj_subscription_amount_tampering_blocked');
+        return c.json({ success: false, error: 'Сумма не соответствует тарифу DJ' }, 400);
+      }
+      // Ownership: если клиент передал metadata.djId, он ДОЛЖЕН совпадать
+      // с userId из JWT. Иначе webhook раньше доверчиво апгрейдил чужой
+      // djId. Без metadata.djId webhook fall back на session.userId (JWT)
+      // — это корректно.
+      if (metadata?.djId && String(metadata.djId) !== String(userId)) {
+        log.warn({ userId, claimedDjId: metadata.djId }, 'dj_subscription_impersonation_blocked');
+        return c.json({ success: false, error: 'Нельзя оплатить чужую подписку' }, 403);
+      }
+    }
+
+    // Venue subscription. Price source-of-truth — venue-plans-constants.tsx.
+    if (type === 'venue_subscription') {
+      const { VENUE_PLANS_CORE } = await import('./venue-plans-constants.tsx');
+      const planKey = String(metadata?.planKey || '') as keyof typeof VENUE_PLANS_CORE;
+      const interval = metadata?.interval === 'year' ? 'year' : 'month';
+      const plan = VENUE_PLANS_CORE[planKey];
+      if (!plan) {
+        return c.json({ success: false, error: 'Invalid metadata.planKey for venue subscription' }, 400);
+      }
+      const expected = interval === 'year' ? plan.price_year : plan.price_month;
+      if (Math.abs(amount - expected) > 0.01) {
+        log.warn({ userId, planKey, interval, expected, received: amount }, 'venue_subscription_amount_tampering_blocked');
+        return c.json({ success: false, error: 'Сумма не соответствует тарифу заведения' }, 400);
+      }
+      // Ownership: те же требования что у DJ. Webhook раньше брал
+      // session.metadata.userId как target — фактически любой мог
+      // апгрейднуть любого. Теперь metadata.userId, если передан,
+      // обязан совпадать с JWT.
+      if (metadata?.userId && String(metadata.userId) !== String(userId)) {
+        log.warn({ userId, claimedUserId: metadata.userId }, 'venue_subscription_impersonation_blocked');
+        return c.json({ success: false, error: 'Нельзя оплатить чужую подписку' }, 403);
       }
     }
     // dj_mix_publish: те же три защиты что у трека артиста.
