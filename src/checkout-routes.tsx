@@ -1366,7 +1366,17 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         if (track.moderation_status !== 'approved') {
           return c.json({ success: false, error: `Трек должен быть одобрен модератором (текущий статус: ${track.moderation_status})` }, 400);
         }
-        const expected = Number((track as any)?.data?.payment_amount) || DEFAULT_TRACK_PUBLICATION_PRICE_RUB;
+        // Native column since migration 062 (resync'd by 088). Webhook handler
+        // выше (строки 645-657) тоже пишет в native — читать должны оттуда.
+        // Legacy data->>'payment_amount' fallback оставлен только для
+        // pre-062 rows которые могли пропустить backfill (никогда не должно
+        // встречаться, но не уроним по NaN если встретится).
+        const nativeAmount = (track as any)?.payment_amount;
+        const legacyAmount = (track as any)?.data?.payment_amount;
+        const expected =
+          Number(nativeAmount) ||
+          Number(legacyAmount) ||
+          DEFAULT_TRACK_PUBLICATION_PRICE_RUB;
         if (Math.abs(amount - expected) > 0.01) {
           log.warn({ userId, trackId, expected, received: amount }, 'track_publish_amount_tampering_blocked');
           return c.json({ success: false, error: 'Сумма не соответствует цене публикации' }, 400);
