@@ -1386,6 +1386,65 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         return c.json({ success: false, error: 'Не удалось проверить трек' }, 500);
       }
     }
+
+    // collab_accept — артист принимает collab-оффер от продюсера с
+    // price > 0. Деньги фризятся в escrow (см. webhook fulfilment в
+    // companion PR'е B; здесь только gate на /create-session).
+    //
+    // Guard'ы (паттерн как у track_publish):
+    //   - metadata.offerId обязателен
+    //   - оффер существует
+    //   - принимающий == offer.artistId (IDOR-safe: артист принимает
+    //     только свои офферы)
+    //   - оффер в принимаемом статусе ('pending' | 'discussion')
+    //   - payment_status === 'unpaid' (одна сессия на один escrow;
+    //     повторное «Принять» в полёте → 409)
+    //   - amount === offer.price (anti-tampering)
+    if (type === 'purchase' && metadata?.type === 'collab_accept') {
+      const offerId = metadata?.offerId;
+      if (!offerId) {
+        return c.json({ success: false, error: 'metadata.offerId обязателен для collab_accept' }, 400);
+      }
+      try {
+        const { pool: cpool } = await import('./db-client.tsx');
+        const { rows } = await cpool.query(
+          `SELECT id, artist_id, status, price, payment_status
+             FROM collab_offers
+            WHERE id = $1
+            LIMIT 1`,
+          [String(offerId)]
+        );
+        if (rows.length === 0) {
+          return c.json({ success: false, error: 'Оффер не найден' }, 404);
+        }
+        const offer = rows[0];
+        if (offer.artist_id !== userId) {
+          log.warn({ userId, offerId, ownerArtistId: offer.artist_id }, 'collab_accept_unauthorized');
+          return c.json({ success: false, error: 'Нельзя принять чужой оффер' }, 403);
+        }
+        if (offer.status !== 'pending' && offer.status !== 'discussion') {
+          return c.json({ success: false, error: `Оффер в статусе ${offer.status} — принять нельзя` }, 400);
+        }
+        if (offer.payment_status !== 'unpaid') {
+          return c.json({ success: false, error: `Платёжная сессия уже создана (payment_status=${offer.payment_status})` }, 409);
+        }
+        const expected = Number(offer.price);
+        if (!(expected > 0)) {
+          // price=0 offers — не идут через checkout (бесплатная коллаборация
+          // принимается напрямую через PUT /collaboration/offers/:id/respond
+          // без escrow).
+          return c.json({ success: false, error: 'У оффера нет цены — escrow не требуется' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, offerId, expected, received: amount }, 'collab_accept_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене оффера' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, offerId }, 'collab_accept_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить оффер' }, 500);
+      }
+    }
+
     // banner_publish — оплата активации рекламной кампании. Сервер
     // пересчитывает цену через calculateBannerPrice (см. banner-pricing.tsx)
     // против тарифа подписки юзера на момент создания (сохранён в
