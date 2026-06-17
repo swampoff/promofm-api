@@ -2279,5 +2279,105 @@ app.get('/promotion/targets', requireAuth, requireDjRole, async (c) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════════
+// AVAILABILITY BLOCKS — DJ блокирует / освобождает день в календаре
+// ════════════════════════════════════════════════════════════════
+//
+// Использует таблицу dj_availability_blocks (migration 112). До этой PR'ы
+// календарь в DJ-кабинете умел только показывать bookings, а кнопок block/
+// unblock не было (даже onClick на ячейках отсутствовал).
+//
+// Authn: requireDjRole + WHERE dj_id = c.get('userId').
+//   GET    /availability/blocks?from=YYYY-MM-DD&to=YYYY-MM-DD
+//   POST   /availability/:date/block      body: { reason? }
+//   DELETE /availability/:date/block
+//
+// Idempotency: UNIQUE (dj_id, date) — POST с тем же днём вернёт already
+// blocked (409). DELETE возвращает 404 если ничего не удалили.
+//
+// Дата принимается как строка YYYY-MM-DD; backend кастует к DATE. Любой
+// другой формат отбрасывается 400.
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+app.get('/availability/blocks', requireAuth, requireDjRole, async (c) => {
+  try {
+    const djId = c.get('userId' as never) as string;
+    const from = c.req.query('from');
+    const to = c.req.query('to');
+    const conds: string[] = ['dj_id = $1'];
+    const vals: any[] = [djId];
+    if (from && ISO_DATE_RE.test(from)) {
+      vals.push(from);
+      conds.push(`date >= $${vals.length}::date`);
+    }
+    if (to && ISO_DATE_RE.test(to)) {
+      vals.push(to);
+      conds.push(`date <= $${vals.length}::date`);
+    }
+    const r = await pool.query(
+      `SELECT id::text AS id, to_char(date, 'YYYY-MM-DD') AS date, reason,
+              created_at, updated_at
+         FROM dj_availability_blocks
+        WHERE ${conds.join(' AND ')}
+        ORDER BY date ASC`,
+      vals,
+    );
+    return c.json({ success: true, data: r.rows });
+  } catch (error: any) {
+    console.error('availability blocks GET error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.post('/availability/:date/block', requireAuth, requireDjRole, async (c) => {
+  try {
+    const djId = c.get('userId' as never) as string;
+    const date = c.req.param('date');
+    if (!ISO_DATE_RE.test(date)) {
+      return c.json({ success: false, error: 'date должен быть в формате YYYY-MM-DD' }, 400);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const reason = typeof body?.reason === 'string' ? body.reason.slice(0, 250) : null;
+
+    const r = await pool.query(
+      `INSERT INTO dj_availability_blocks (dj_id, date, reason)
+       VALUES ($1, $2::date, $3)
+       ON CONFLICT (dj_id, date) DO NOTHING
+       RETURNING id::text AS id, to_char(date, 'YYYY-MM-DD') AS date, reason, created_at, updated_at`,
+      [djId, date, reason],
+    );
+    if (!r.rowCount) {
+      return c.json({ success: false, error: 'Дата уже заблокирована' }, 409);
+    }
+    return c.json({ success: true, data: r.rows[0] }, 201);
+  } catch (error: any) {
+    console.error('availability block POST error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.delete('/availability/:date/block', requireAuth, requireDjRole, async (c) => {
+  try {
+    const djId = c.get('userId' as never) as string;
+    const date = c.req.param('date');
+    if (!ISO_DATE_RE.test(date)) {
+      return c.json({ success: false, error: 'date должен быть в формате YYYY-MM-DD' }, 400);
+    }
+    const r = await pool.query(
+      `DELETE FROM dj_availability_blocks
+        WHERE dj_id = $1 AND date = $2::date`,
+      [djId, date],
+    );
+    if (!r.rowCount) {
+      return c.json({ success: false, error: 'Блокировка на эту дату не найдена' }, 404);
+    }
+    return c.json({ success: true });
+  } catch (error: any) {
+    console.error('availability block DELETE error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 export default app;
 
