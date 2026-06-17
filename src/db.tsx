@@ -6920,3 +6920,18 @@ export async function markRadioNotificationsAllRead(radioId: string): Promise<nu
   );
   return r.rowCount || 0;
 }
+
+/**
+ * Delete one notification scoped by station. Composite WHERE prevents IDOR:
+ * a radio user can't pass another station's notification id and silently
+ * remove it. Returns rowCount so the handler can 404 on stale ids without an
+ * extra SELECT.
+ */
+export async function deleteRadioNotification(radioId: string, id: string): Promise<number> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `DELETE FROM radio_notifications WHERE radio_id = $1 AND id = $2`,
+    [radioId, id]
+  );
+  return r.rowCount || 0;
+}

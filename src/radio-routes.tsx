@@ -1126,6 +1126,30 @@ app.put('/notifications/:id/read', requireAuth, async (c) => {
   }
 });
 
+// DELETE /notifications/:id
+// До 2026-06-17 ручки не было — фронт ловил 404, удалял локально и тостил
+// «удалено», но на reload запись возвращалась. Теперь реально удаляет
+// строку (composite WHERE radio_id + id — closes IDOR).
+app.delete('/notifications/:id', requireAuth, async (c) => {
+  try {
+    const userId = await getRadioUserId(c);
+    const station = await getStation(userId);
+    if (!station) {
+      return c.json({ error: 'Radio station not found' }, 404);
+    }
+    const notifId = c.req.param('id');
+    const { deleteRadioNotification } = await import('./db.tsx');
+    const removed = await deleteRadioNotification(station.id, notifId);
+    if (!removed) {
+      return c.json({ success: false, error: 'Notification not found' }, 404);
+    }
+    return c.json({ success: true });
+  } catch (error: any) {
+    console.error('Error deleting notification:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 // PUT /notifications/read-all
 app.put('/notifications/read-all', requireAuth, async (c) => {
   try {
