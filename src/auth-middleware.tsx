@@ -90,7 +90,19 @@ export async function optionalAuth(c: Context, next: Next) {
   await next();
 }
 
-export async function requireAdmin(c: Context, next: Next) {  const role = c.get("userRole");  const email = c.get("userEmail");  const { SUPERADMIN_EMAIL } = await import("./roles.tsx");  if ((role !== "admin" && role !== "superadmin") || email !== SUPERADMIN_EMAIL) {    return c.json({ success: false, error: "Admin access required" }, 403);  }  await next();}
+export async function requireAdmin(c: Context, next: Next) {
+  const role = c.get("userRole");
+  const email = c.get("userEmail");
+  const { isAdminEmail } = await import("./roles.tsx");
+  // Admin-доступ: email ∈ ADMIN_EMAILS allowlist (n.moiseev@gmx.de +
+  // info@promofm.ru) И роль admin/superadmin. Раньше gate был привязан
+  // к одному SUPERADMIN_EMAIL — info@promofm.ru получал 403 на всех
+  // /admin/* (live-chat list/reply/notifications не работали).
+  if ((role !== "admin" && role !== "superadmin") || !isAdminEmail(email)) {
+    return c.json({ success: false, error: "Admin access required" }, 403);
+  }
+  await next();
+}
 
 export function requireOwner(paramName: string) {
   return async (c: Context, next: Next) => {

@@ -17,8 +17,26 @@ export const ROLES = [
 
 export type Role = typeof ROLES[number];
 
-// Superadmin is ONLY this email — hardcoded, cannot be changed
+// Superadmin is ONLY this email — hardcoded, cannot be changed.
+// Used by requireSuperadmin для самых чувствительных операций.
 export const SUPERADMIN_EMAIL = 'n.moiseev@gmx.de';
+
+// Admin-доступ к /admin/* endpoint'ам (admin-кабинет, live-chat,
+// модерация и т.д.). Явный allowlist email'ов — оба полноценные админы.
+// requireAdmin требует email ∈ ADMIN_EMAILS. Email берётся из подписанного
+// JWT/cookie (подделать нельзя), а сами email'ы уникальны в users —
+// поэтому allowlist по email безопасен.
+export const ADMIN_EMAILS = [
+  'n.moiseev@gmx.de',
+  'info@promofm.ru',
+] as const;
+
+// Регистронезависимая, trimmed проверка членства в admin-allowlist.
+export function isAdminEmail(email: string | null | undefined): boolean {
+  if (!email) return false;
+  const norm = email.toLowerCase().trim();
+  return (ADMIN_EMAILS as readonly string[]).some((e) => e.toLowerCase() === norm);
+}
 
 // Role hierarchy levels (higher = more privileges)
 const ROLE_LEVEL: Record<Role, number> = {
