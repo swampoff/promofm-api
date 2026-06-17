@@ -2018,6 +2018,70 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       }
     }
 
+    // beat purchase — server recomputes price from the beat's license tiers;
+    // client `amount` must match. Covers the marketplace flow
+    // (metadata.type='beat_purchase') AND the legacy simple path
+    // (itemType='beat') — both reach beat-fulfilling webhook handlers and both
+    // were ungated, so a crafted create-session with amount=1 minted a beat
+    // purchase / producer commission for 1 ₽. Uses getBeat (same helper +
+    // price expression as marketplace-routes) — no column guessing.
+    if (type === 'purchase' && (metadata?.type === 'beat_purchase' || metadata?.itemType === 'beat')) {
+      const beatId = metadata?.beatId;
+      if (!beatId) {
+        return c.json({ success: false, error: 'metadata.beatId обязателен для покупки бита' }, 400);
+      }
+      try {
+        const { getBeat } = await import('./db.tsx');
+        const raw = await getBeat(String(beatId));
+        if (!raw) return c.json({ success: false, error: 'Бит не найден' }, 404);
+        const beat = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (beat.status !== 'active') {
+          return c.json({ success: false, error: 'Бит недоступен для покупки' }, 400);
+        }
+        const licenseType = metadata?.licenseType || 'basic';
+        const expected = Number(beat.licenseTypes?.[licenseType] ?? beat.price) || 0;
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: 'Цена бита не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, beatId, licenseType, expected, received: amount }, 'beat_purchase_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене бита' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, beatId }, 'beat_purchase_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить бит' }, 500);
+      }
+    }
+
+    // digital_good legacy simple path (itemType='digital_good') — same price
+    // source as digital_purchase (digital_goods.price), keyed on metadata.goodId.
+    // The full digital_purchase gate above doesn't fire for the itemType variant,
+    // leaving it ungated.
+    if (type === 'purchase' && metadata?.itemType === 'digital_good') {
+      const goodId = metadata?.goodId;
+      if (!goodId) {
+        return c.json({ success: false, error: 'metadata.goodId обязателен для digital_good' }, 400);
+      }
+      try {
+        const { pool: dgPool } = await import('./db-client.tsx');
+        const { rows } = await dgPool.query(
+          `SELECT id, price, status FROM digital_goods WHERE id = $1 LIMIT 1`,
+          [String(goodId)],
+        );
+        if (rows.length === 0) return c.json({ success: false, error: 'Товар не найден' }, 404);
+        if (rows[0].status !== 'active') return c.json({ success: false, error: 'Товар не доступен для покупки' }, 400);
+        const expected = Number(rows[0].price) || 0;
+        if (!(expected > 0)) return c.json({ success: false, error: 'Цена товара не определена' }, 400);
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, goodId, expected, received: amount }, 'digital_good_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене товара' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, goodId }, 'digital_good_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить товар' }, 500);
+      }
+    }
+
     // production_360_payment — Production 360 заказ.
     if (type === 'purchase' && metadata?.type === 'production_360_payment') {
       const orderId = metadata?.orderId;
