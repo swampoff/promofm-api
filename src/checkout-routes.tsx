@@ -603,6 +603,24 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         }
       }
 
+      // ─── Fulfill pitching_bundle ───
+      // The session is created in pitching-routes.tsx (POST /pitching/submit)
+      // with submissions left in status='pending_payment'. finalizePitchingBundle
+      // flips them to 'pending' and fans out admin notifications. This wiring was
+      // missing — paid pitches rotted in pending_payment forever (money taken,
+      // pitch never reached moderation). Idempotent: the UPDATE is guarded by
+      // status='pending_payment' AND payment_session_id=orderId, so a webhook
+      // retry flips 0 rows.
+      if (itemType === 'pitching_bundle' && session.metadata.submission_ids) {
+        const { finalizePitchingBundle } = await import('./pitching-routes.tsx');
+        const submissionIds = String(session.metadata.submission_ids)
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        await finalizePitchingBundle(session.orderId, submissionIds);
+        log.info({ orderId: session.orderId, count: submissionIds.length }, 'pitching_bundle_fulfilled');
+      }
+
 } catch (err) {
       // Surface to the caller so the webhook handler can revert the session
       // back to 'pending' and let the gateway retry. Previously this catch
