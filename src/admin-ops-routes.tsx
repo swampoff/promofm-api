@@ -180,4 +180,206 @@ app.post('/db-integrity-check', requireAuth, requireAdmin, async (c) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════════
+// PARTNERS — admin-managed CRUD (migration 113)
+// ════════════════════════════════════════════════════════════════
+
+const PARTNER_CATEGORIES = new Set(['radio', 'venue', 'media', 'streaming', 'blogger', 'other']);
+const PARTNER_STATUSES = new Set(['active', 'inactive', 'pending']);
+
+function mapPartnerRow(r: any) {
+  return {
+    id: r.id,
+    name: r.name,
+    category: r.category,
+    status: r.status,
+    email: r.email,
+    phone: r.phone,
+    website: r.website,
+    address: r.address,
+    description: r.description,
+    logoUrl: r.logo_url,
+    contactPerson: r.contact_person,
+    commission: Number(r.commission),
+    extra: typeof r.extra === 'string' ? JSON.parse(r.extra) : (r.extra || {}),
+    createdBy: r.created_by,
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+    updatedAt: r.updated_at instanceof Date ? r.updated_at.toISOString() : String(r.updated_at),
+  };
+}
+
+app.get('/partners', requireAuth, requireAdmin, async (c) => {
+  try {
+    const category = c.req.query('category');
+    const status = c.req.query('status');
+    const conds: string[] = [];
+    const vals: any[] = [];
+    if (category && PARTNER_CATEGORIES.has(category)) {
+      vals.push(category);
+      conds.push(`category = $${vals.length}`);
+    }
+    if (status && PARTNER_STATUSES.has(status)) {
+      vals.push(status);
+      conds.push(`status = $${vals.length}`);
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const r = await pool.query(
+      `SELECT id::text AS id, name, category, status, email, phone, website,
+              address, description, logo_url, contact_person, commission,
+              extra, created_by, created_at, updated_at
+         FROM admin_partners
+         ${where}
+        ORDER BY created_at DESC`,
+      vals,
+    );
+    return c.json({ success: true, data: r.rows.map(mapPartnerRow) });
+  } catch (error: any) {
+    console.error('partners GET error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.post('/partners', requireAuth, requireAdmin, async (c) => {
+  try {
+    const adminId = c.get('userId' as never) as string;
+    const body = await c.req.json();
+    const name = String(body?.name || '').trim();
+    const category = String(body?.category || '').trim();
+    const status = String(body?.status || 'pending').trim();
+
+    if (!name) return c.json({ success: false, error: 'name обязателен' }, 400);
+    if (!PARTNER_CATEGORIES.has(category)) {
+      return c.json({ success: false, error: `category должен быть одним из: ${[...PARTNER_CATEGORIES].join(', ')}` }, 400);
+    }
+    if (!PARTNER_STATUSES.has(status)) {
+      return c.json({ success: false, error: `status должен быть одним из: ${[...PARTNER_STATUSES].join(', ')}` }, 400);
+    }
+
+    const commissionRaw = body?.commission;
+    const commission = commissionRaw === undefined || commissionRaw === null || commissionRaw === ''
+      ? 15
+      : Number(commissionRaw);
+    if (!Number.isFinite(commission) || commission < 0 || commission > 100) {
+      return c.json({ success: false, error: 'commission должна быть числом 0…100' }, 400);
+    }
+
+    try {
+      const r = await pool.query(
+        `INSERT INTO admin_partners
+           (name, category, status, email, phone, website, address, description,
+            logo_url, contact_person, commission, extra, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
+         RETURNING id::text AS id, name, category, status, email, phone, website,
+                   address, description, logo_url, contact_person, commission,
+                   extra, created_by, created_at, updated_at`,
+        [
+          name, category, status,
+          body?.email || null, body?.phone || null, body?.website || null,
+          body?.address || null, body?.description || null, body?.logoUrl || null,
+          body?.contactPerson || null, commission,
+          JSON.stringify(body?.extra && typeof body.extra === 'object' ? body.extra : {}),
+          adminId,
+        ],
+      );
+      return c.json({ success: true, data: mapPartnerRow(r.rows[0]) }, 201);
+    } catch (err: any) {
+      if (err?.code === '23505') {
+        return c.json({ success: false, error: 'Партнёр с таким названием и категорией уже существует' }, 409);
+      }
+      throw err;
+    }
+  } catch (error: any) {
+    console.error('partners POST error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.patch('/partners/:id', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const updates: string[] = [];
+    const vals: any[] = [];
+
+    const stringFields: Array<{ key: string; col: string }> = [
+      { key: 'name', col: 'name' },
+      { key: 'email', col: 'email' },
+      { key: 'phone', col: 'phone' },
+      { key: 'website', col: 'website' },
+      { key: 'address', col: 'address' },
+      { key: 'description', col: 'description' },
+      { key: 'logoUrl', col: 'logo_url' },
+      { key: 'contactPerson', col: 'contact_person' },
+    ];
+    for (const f of stringFields) {
+      if (typeof body?.[f.key] === 'string') {
+        vals.push(body[f.key]);
+        updates.push(`${f.col} = $${vals.length}`);
+      }
+    }
+    if (typeof body?.category === 'string') {
+      if (!PARTNER_CATEGORIES.has(body.category)) {
+        return c.json({ success: false, error: 'Неподдерживаемая category' }, 400);
+      }
+      vals.push(body.category);
+      updates.push(`category = $${vals.length}`);
+    }
+    if (typeof body?.status === 'string') {
+      if (!PARTNER_STATUSES.has(body.status)) {
+        return c.json({ success: false, error: 'Неподдерживаемый status' }, 400);
+      }
+      vals.push(body.status);
+      updates.push(`status = $${vals.length}`);
+    }
+    if (body?.commission !== undefined) {
+      const c2 = Number(body.commission);
+      if (!Number.isFinite(c2) || c2 < 0 || c2 > 100) {
+        return c.json({ success: false, error: 'commission должна быть числом 0…100' }, 400);
+      }
+      vals.push(c2);
+      updates.push(`commission = $${vals.length}`);
+    }
+    if (body?.extra && typeof body.extra === 'object') {
+      vals.push(JSON.stringify(body.extra));
+      updates.push(`extra = $${vals.length}::jsonb`);
+    }
+    if (!updates.length) return c.json({ success: false, error: 'Нет полей для обновления' }, 400);
+    updates.push(`updated_at = NOW()`);
+    vals.push(id);
+
+    try {
+      const r = await pool.query(
+        `UPDATE admin_partners SET ${updates.join(', ')}
+          WHERE id::text = $${vals.length}
+          RETURNING id::text AS id, name, category, status, email, phone, website,
+                    address, description, logo_url, contact_person, commission,
+                    extra, created_by, created_at, updated_at`,
+        vals,
+      );
+      if (!r.rowCount) return c.json({ success: false, error: 'Не найдено' }, 404);
+      return c.json({ success: true, data: mapPartnerRow(r.rows[0]) });
+    } catch (err: any) {
+      if (err?.code === '23505') {
+        return c.json({ success: false, error: 'Партнёр с таким названием и категорией уже существует' }, 409);
+      }
+      throw err;
+    }
+  } catch (error: any) {
+    console.error('partners PATCH error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.delete('/partners/:id', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const r = await pool.query(`DELETE FROM admin_partners WHERE id::text = $1`, [id]);
+    if (!r.rowCount) return c.json({ success: false, error: 'Не найдено' }, 404);
+    return c.json({ success: true });
+  } catch (error: any) {
+    console.error('partners DELETE error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 export default app;
