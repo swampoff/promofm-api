@@ -1665,6 +1665,292 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         return c.json({ success: false, error: 'Не удалось проверить заказ' }, 500);
       }
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Add-only amount-gates: серия покрытий итемов которые раньше шли
+    // через webhook БЕЗ amount-проверки и БЕЗ ownership-проверки. Раньше
+    // юзер мог оплатить 1₽ и получить любой digital good / production-360
+    // / track-test и т.д. Все 6 типов теперь: 1) проверяют что плательщик
+    // владеет тем что покупает (или для marketplace — что покупка
+    // авторизована), 2) сверяют amount с server-side ценой, 3) при
+    // tampering'е возвращают 400 *_amount_tampering_blocked.
+    //
+    // ВАЖНО: гарды НЕ меняют поведение webhook'а. Webhook остаётся как
+    // был — он fulfilled, как только покинули create-session с
+    // confirmationUrl. Эти гарды — анти-DevTools заслон НА ЭТАПЕ
+    // выпуска сессии: если amount не совпадает, юзер вообще не уйдёт
+    // на ЮКассу.
+    // ────────────────────────────────────────────────────────────────────
+
+    // booking_payment — оплата депозита (30%) или final (70%) букинга.
+    // Только requester может платить за свой booking, в правильном статусе.
+    if (type === 'purchase' && metadata?.itemType === 'booking_payment') {
+      const bookingId = metadata?.bookingId;
+      const paymentType = metadata?.paymentType === 'final' ? 'final' : 'deposit';
+      if (!bookingId) {
+        return c.json({ success: false, error: 'metadata.bookingId обязателен' }, 400);
+      }
+      try {
+        const { getBooking } = await import('./db.tsx');
+        const booking = await getBooking(String(bookingId));
+        if (!booking) {
+          return c.json({ success: false, error: 'Букинг не найден' }, 404);
+        }
+        if (booking.requesterId !== userId) {
+          log.warn({ userId, bookingId, ownerId: booking.requesterId }, 'booking_payment_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужой букинг' }, 403);
+        }
+        // depositAmount = 30%, finalAmount = 70% (см. booking-routes.tsx:245-246).
+        // Booking сохранён в jsonb-store, depositAmount/finalAmount — native
+        // на объекте.
+        const expected = paymentType === 'deposit'
+          ? Number(booking.depositAmount) || 0
+          : Number(booking.finalAmount) || 0;
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: `Сумма ${paymentType} не определена в букинге` }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, bookingId, paymentType, expected, received: amount }, 'booking_payment_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене букинга' }, 400);
+        }
+        // Статусная защита: deposit можно платить только из 'accepted',
+        // final — только из 'deposit_paid'. Без этого можно «оплатить»
+        // второй раз и снова списать.
+        const allowedStatus = paymentType === 'deposit' ? 'accepted' : 'deposit_paid';
+        if (booking.status !== allowedStatus) {
+          return c.json({ success: false, error: `Букинг должен быть в статусе ${allowedStatus} (текущий: ${booking.status})` }, 400);
+        }
+      } catch (err) {
+        log.error({ err, bookingId }, 'booking_payment_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить букинг' }, 500);
+      }
+    }
+
+    // content_order — продюсер заказывает контент. Owner+price check.
+    if (type === 'purchase' && metadata?.itemType === 'content_order') {
+      const contentOrderId = metadata?.contentOrderId;
+      if (!contentOrderId) {
+        return c.json({ success: false, error: 'metadata.contentOrderId обязателен' }, 400);
+      }
+      try {
+        const { pool: cpool } = await import('./db-client.tsx');
+        const { rows } = await cpool.query(
+          `SELECT venue_id, status, price FROM content_orders WHERE id = $1 LIMIT 1`,
+          [String(contentOrderId)],
+        );
+        if (rows.length === 0) {
+          return c.json({ success: false, error: 'Заказ контента не найден' }, 404);
+        }
+        const ord = rows[0];
+        if (ord.venue_id !== userId) {
+          log.warn({ userId, contentOrderId, ownerId: ord.venue_id }, 'content_order_pay_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужой заказ' }, 403);
+        }
+        if (ord.status !== 'pending_payment' && ord.status !== 'draft') {
+          return c.json({ success: false, error: `Заказ в статусе ${ord.status} — оплата невозможна` }, 400);
+        }
+        const expected = Number(ord.price) || 0;
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: 'Цена заказа не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, contentOrderId, expected, received: amount }, 'content_order_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене заказа' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, contentOrderId }, 'content_order_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить заказ' }, 500);
+      }
+    }
+
+    // distribution — оплата релиза в DSP'и. price_rub — native колонка.
+    if (type === 'purchase' && metadata?.itemType === 'distribution') {
+      const distOrderId = metadata?.orderId;
+      if (!distOrderId) {
+        return c.json({ success: false, error: 'metadata.orderId обязателен для distribution' }, 400);
+      }
+      try {
+        const { pool: dpool } = await import('./db-client.tsx');
+        const { rows } = await dpool.query(
+          `SELECT user_id, status, price_rub FROM distribution_orders WHERE id = $1 LIMIT 1`,
+          [String(distOrderId)],
+        );
+        if (rows.length === 0) {
+          return c.json({ success: false, error: 'Заказ дистрибуции не найден' }, 404);
+        }
+        const ord = rows[0];
+        if (ord.user_id !== userId) {
+          log.warn({ userId, distOrderId, ownerId: ord.user_id }, 'distribution_pay_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужой заказ дистрибуции' }, 403);
+        }
+        if (ord.status !== 'pending') {
+          return c.json({ success: false, error: `Заказ в статусе ${ord.status} — оплата невозможна` }, 400);
+        }
+        const expected = Number(ord.price_rub) || 0;
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: 'Цена дистрибуции не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, distOrderId, expected, received: amount }, 'distribution_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене дистрибуции' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, distOrderId }, 'distribution_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить заказ дистрибуции' }, 500);
+      }
+    }
+
+    // venue_radio_subscription — venue оплачивает подписку у radio_station
+    // через venue_radio_subscriptions. Ownership: только venue-юзер,
+    // указанный в подписке как customer, может её продлевать.
+    if (type === 'purchase' && metadata?.itemType === 'venue_radio_subscription') {
+      const subId = metadata?.subscriptionId;
+      if (!subId) {
+        return c.json({ success: false, error: 'metadata.subscriptionId обязателен' }, 400);
+      }
+      try {
+        const { pool: vrpool } = await import('./db-client.tsx');
+        const { rows } = await vrpool.query(
+          `SELECT venue_id, plan_id, status FROM venue_radio_subscriptions WHERE id = $1 LIMIT 1`,
+          [String(subId)],
+        );
+        if (rows.length === 0) {
+          return c.json({ success: false, error: 'Подписка не найдена' }, 404);
+        }
+        const sub = rows[0];
+        if (sub.venue_id !== userId) {
+          log.warn({ userId, subId, ownerId: sub.venue_id }, 'venue_radio_subscription_pay_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужую подписку' }, 403);
+        }
+        // Цена тарифа — из venue_radio_plans.price_month по plan_id
+        // (на самой подписке колонки цены нет). Источник тот же, что у
+        // venue-radio плана: venue_radio_plans (basic/pro/business).
+        const planRes = await vrpool.query(
+          `SELECT price_month FROM venue_radio_plans WHERE id = $1 AND is_active = true LIMIT 1`,
+          [String(sub.plan_id)],
+        );
+        if (planRes.rows.length === 0) {
+          return c.json({ success: false, error: 'Тариф подписки не найден или неактивен' }, 400);
+        }
+        const expected = Number(planRes.rows[0].price_month) || 0;
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: 'Цена подписки не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, subId, expected, received: amount }, 'venue_radio_subscription_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует тарифу' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, subId }, 'venue_radio_subscription_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить подписку' }, 500);
+      }
+    }
+
+    // digital_purchase — покупка digital good. server-side price из
+    // digital_goods.price_rub. Покупатель не обязан быть owner — это
+    // marketplace покупка; но amount должен совпадать.
+    if (type === 'purchase' && metadata?.type === 'digital_purchase') {
+      const goodId = metadata?.goodId;
+      if (!goodId) {
+        return c.json({ success: false, error: 'metadata.goodId обязателен для digital_purchase' }, 400);
+      }
+      try {
+        const { pool: gpool } = await import('./db-client.tsx');
+        const { rows } = await gpool.query(
+          `SELECT id, price, status FROM digital_goods WHERE id = $1 LIMIT 1`,
+          [String(goodId)],
+        );
+        if (rows.length === 0) {
+          return c.json({ success: false, error: 'Товар не найден' }, 404);
+        }
+        const good = rows[0];
+        if (good.status !== 'active') {
+          return c.json({ success: false, error: 'Товар не доступен для покупки' }, 400);
+        }
+        const expected = Number(good.price) || 0;
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: 'Цена товара не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, goodId, expected, received: amount }, 'digital_purchase_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене товара' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, goodId }, 'digital_purchase_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить товар' }, 500);
+      }
+    }
+
+    // production_360_payment — Production 360 заказ.
+    if (type === 'purchase' && metadata?.type === 'production_360_payment') {
+      const orderId = metadata?.orderId;
+      if (!orderId) {
+        return c.json({ success: false, error: 'metadata.orderId обязателен' }, 400);
+      }
+      try {
+        const { pool: ppool } = await import('./db-client.tsx');
+        const { rows } = await ppool.query(
+          `SELECT client_id, price, status FROM production_360_orders WHERE id = $1 LIMIT 1`,
+          [String(orderId)],
+        );
+        if (rows.length === 0) {
+          return c.json({ success: false, error: 'Заказ Production 360 не найден' }, 404);
+        }
+        const ord = rows[0];
+        if (ord.client_id !== userId) {
+          log.warn({ userId, orderId, ownerId: ord.client_id }, 'production_360_pay_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужой заказ' }, 403);
+        }
+        if (ord.status !== 'pending_payment') {
+          return c.json({ success: false, error: `Заказ в статусе ${ord.status} — оплата невозможна` }, 400);
+        }
+        const expected = Number(ord.price) || 0;
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: 'Цена заказа не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, orderId, expected, received: amount }, 'production_360_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене заказа' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, orderId }, 'production_360_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить заказ' }, 500);
+      }
+    }
+
+    // track_test — экспертный тест. KV-store (track_test_requests).
+    if (type === 'purchase' && metadata?.type === 'track_test') {
+      const reqId = metadata?.requestId;
+      if (!reqId) {
+        return c.json({ success: false, error: 'metadata.requestId обязателен' }, 400);
+      }
+      try {
+        const { trackTestRequestsStore } = await import('./db.tsx');
+        const req = await trackTestRequestsStore.get(String(reqId));
+        if (!req) {
+          return c.json({ success: false, error: 'Заявка на тест не найдена' }, 404);
+        }
+        if (req.user_id !== userId) {
+          log.warn({ userId, reqId, ownerId: req.user_id }, 'track_test_pay_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужую заявку' }, 403);
+        }
+        if (req.payment_status === 'completed') {
+          return c.json({ success: false, error: 'Заявка уже оплачена' }, 409);
+        }
+        const expected = Number(req.payment_amount) || 0;
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: 'Цена тестирования не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, reqId, expected, received: amount }, 'track_test_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене тестирования' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, reqId }, 'track_test_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить заявку' }, 500);
+      }
+    }
+
     if (!returnUrl) {
       return c.json({ success: false, error: 'returnUrl обязателен' }, 400);
     }
