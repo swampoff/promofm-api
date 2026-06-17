@@ -1107,6 +1107,64 @@ EventSource doesn't carry Authorization header).
 
 ---
 
+## Checkout / payment webhook — idempotency & amount-gate posture
+
+Audited end-to-end 2026-06-17 (all three gateways: YooKassa / T-Bank /
+Stripe). This is the single source of truth so the next session does NOT
+re-audit the whole `checkout-routes.tsx` fulfilment switch from scratch.
+
+### Two-layer defence
+
+1. **Outer atomic claim** — every webhook entrypoint calls
+   `claimPaymentSessionForProcessing(orderId)` (`db.tsx:398`) BEFORE
+   `processPaymentSuccess`. It flips `payment_sessions.status`
+   `'pending' → 'processing'` in one UPDATE and returns the session only to
+   the winner. A naive re-delivery of an already-succeeded/processing order
+   gets `null` → `webhook_already_processed` → no fulfilment re-run. On a
+   handler throw, `revertPaymentSessionToPending` (`db.tsx:418`) puts it back
+   to `'pending'` so the gateway retry can re-claim. **The only path to
+   double-execution is therefore: side-effect commits → later throw → revert
+   → retry.** That is the window each per-handler guard below closes.
+
+2. **Per-handler idempotency guard** — every money/value-moving handler is
+   self-idempotent so it survives a revert→retry re-entry:
+
+| Flow (`metadata.type` / `itemType`) | Idempotency mechanism | Amount source-of-truth |
+|---|---|---|
+| topup / donation (balance) | `reserveCreditOnce` ledger (`db.tsx:275`) | n/a (user-set) |
+| topup coins | `reserveCreditOnce` (separate `kind`) | n/a |
+| subscription (artist / dj / venue) | claim + canonical plan price | `SUBSCRIPTION_PLANS` server-side |
+| track_publish / dj_mix_publish / banner_publish | `WHERE moderation_status='approved'` | server gate in create-session |
+| distribution / engineer_order / production_360 / collab_accept (escrow) | `WHERE status = <expected>` | server gate |
+| track_test / publish_order / content_order | status/flag guard | server gate |
+| beat / beat_purchase / digital_good / digital_purchase | deterministic id `bp-/dgp-${orderId}` + `ON CONFLICT (id) DO NOTHING`, side-effects gated on `rowCount>0` | `getBeat().licenseTypes[lt] ?? price` / `digital_goods.price` |
+| radio_campaign | deterministic id `rc-${orderId}` + `ON CONFLICT` | **none — by-agreement, see Venue cabinet section** |
+| venue_radio_subscription | `WHERE COALESCE(payment_order_id,'') <> $1` (the `+ INTERVAL '30 days'` is an increment — without this guard a replay = a free month) | n/a (fixed 30d) |
+| pitching_bundle | `finalizePitchingBundle` UPDATE `WHERE status='pending_payment' AND payment_session_id=orderId` | server gate |
+
+### Known-residual (accepted, not bugs)
+
+- **radio_campaign has NO amount-gate** — deliberate, by-agreement. Full
+  rationale in `## Venue cabinet → Radio ad campaigns` above.
+- **`itemType:'beat'` / `'digital_good'` legacy simple paths** — NOT dead
+  code; create-session still accepts them and they ARE now amount-gated.
+  Kept on purpose (orphaning would strand legacy `pending` sessions).
+
+### Provenance (which commit each guarantee landed in)
+
+- Deterministic-id idempotency for beat/digital/radio + create-session
+  amount-gates for beat/digital_good → branch
+  `fix/webhook-idempotency-marketplace`.
+- venue_radio_subscription orderId-guard → same branch, commit `a626d1e`.
+- pitching_bundle wiring → branch `fix/pitching-bundle-fulfilment-wiring`.
+
+⚠️ As of 2026-06-17 those branches are pushed but **await laptop pre-flight
++ merge** — the rows above describe the posture once they land. Until merged,
+`main` still has the random-id beat/digital/radio handlers and the
+unguarded venue_radio_subscription `+30d`. Update this line when they merge.
+
+---
+
 ## Critical column-type cheat sheet (echoed from CLAUDE.md)
 
 Verified columns / types — DO NOT INVENT:
