@@ -1586,4 +1586,182 @@ app.post('/profile/cover', requireAuth, async (c) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════════
+// PAYOUT METHODS — row-per-method CRUD (migration 111)
+// ════════════════════════════════════════════════════════════════
+// Producer cabinet → Настройки → Способы оплаты. До этой PR'ы UI
+// показывал хардкод ЮMoney+Sberbank, кнопка «+ Добавить» вообще не имела
+// onClick. Теперь реальная таблица producer_payout_methods + 4 ручки.
+//
+// Authn: requireAuth + WHERE producer_id = c.get('userId') — produc-id'ы
+// текстовые (CLAUDE.md cheat-sheet: producer_profiles.user_id = TEXT).
+// На каждом UPDATE/DELETE WHERE producer_id предотвращает IDOR.
+//
+// Default flag: только один method.is_default = TRUE per producer
+// (partial UNIQUE index uq_producer_payout_methods_default). В POST/PATCH:
+// при is_default=true сначала клирим default у других строк этого
+// продюсера, потом ставим новый — без явной транзакции (один statement
+// каждый — race на двух одновременных «set default» приведёт к серилизации
+// через partial UNIQUE: вторая упадёт с conflict, frontend retry'нёт).
+
+interface PayoutMethodRow {
+  id: string;
+  method_type: string;
+  label: string;
+  details: any;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapPayoutRow(r: any): PayoutMethodRow {
+  return {
+    id: r.id,
+    method_type: r.method_type,
+    label: r.label,
+    details: typeof r.details === 'string' ? JSON.parse(r.details) : (r.details || {}),
+    is_default: !!r.is_default,
+    created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+    updated_at: r.updated_at instanceof Date ? r.updated_at.toISOString() : String(r.updated_at),
+  };
+}
+
+const PAYOUT_METHOD_TYPES = new Set(['card', 'yoomoney', 'sbp', 'bank_transfer']);
+const PAYOUT_LABEL_MAX = 80;
+
+app.get('/payout-methods', requireAuth, async (c) => {
+  try {
+    const producerId = c.get('userId') as string;
+    if (!producerId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+    const r = await pool.query(
+      `SELECT id::text AS id, method_type, label, details, is_default, created_at, updated_at
+         FROM producer_payout_methods
+        WHERE producer_id = $1
+        ORDER BY is_default DESC, created_at DESC`,
+      [producerId],
+    );
+    return c.json({ success: true, data: r.rows.map(mapPayoutRow) });
+  } catch (error: any) {
+    console.error('payout-methods GET error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.post('/payout-methods', requireAuth, async (c) => {
+  try {
+    const producerId = c.get('userId') as string;
+    if (!producerId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+    const body = await c.req.json();
+    const methodType = String(body?.method_type || '').trim();
+    const label = String(body?.label || '').trim().slice(0, PAYOUT_LABEL_MAX);
+    const details = body?.details && typeof body.details === 'object' ? body.details : {};
+    const isDefault = Boolean(body?.is_default);
+
+    if (!PAYOUT_METHOD_TYPES.has(methodType)) {
+      return c.json({
+        success: false,
+        error: `Неподдерживаемый тип — выберите один из: ${[...PAYOUT_METHOD_TYPES].join(', ')}`,
+      }, 400);
+    }
+    if (!label) {
+      return c.json({ success: false, error: 'Укажите название способа' }, 400);
+    }
+
+    // Если ставим новый method как default — снимаем флаг у других; partial
+    // UNIQUE иначе откажет на INSERT.
+    if (isDefault) {
+      await pool.query(
+        `UPDATE producer_payout_methods SET is_default = FALSE, updated_at = NOW()
+          WHERE producer_id = $1 AND is_default = TRUE`,
+        [producerId],
+      );
+    }
+
+    const r = await pool.query(
+      `INSERT INTO producer_payout_methods (producer_id, method_type, label, details, is_default)
+       VALUES ($1, $2, $3, $4::jsonb, $5)
+       RETURNING id::text AS id, method_type, label, details, is_default, created_at, updated_at`,
+      [producerId, methodType, label, JSON.stringify(details), isDefault],
+    );
+    return c.json({ success: true, data: mapPayoutRow(r.rows[0]) }, 201);
+  } catch (error: any) {
+    console.error('payout-methods POST error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.patch('/payout-methods/:id', requireAuth, async (c) => {
+  try {
+    const producerId = c.get('userId') as string;
+    if (!producerId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+    const id = c.req.param('id');
+    const body = await c.req.json();
+
+    const updates: string[] = [];
+    const vals: any[] = [];
+    if (typeof body?.label === 'string') {
+      vals.push(body.label.trim().slice(0, PAYOUT_LABEL_MAX));
+      updates.push(`label = $${vals.length}`);
+    }
+    if (body?.details && typeof body.details === 'object') {
+      vals.push(JSON.stringify(body.details));
+      updates.push(`details = $${vals.length}::jsonb`);
+    }
+    if (typeof body?.method_type === 'string') {
+      if (!PAYOUT_METHOD_TYPES.has(body.method_type)) {
+        return c.json({ success: false, error: 'Неподдерживаемый тип' }, 400);
+      }
+      vals.push(body.method_type);
+      updates.push(`method_type = $${vals.length}`);
+    }
+    if (typeof body?.is_default === 'boolean') {
+      if (body.is_default) {
+        await pool.query(
+          `UPDATE producer_payout_methods SET is_default = FALSE, updated_at = NOW()
+            WHERE producer_id = $1 AND is_default = TRUE AND id::text <> $2`,
+          [producerId, id],
+        );
+      }
+      vals.push(body.is_default);
+      updates.push(`is_default = $${vals.length}`);
+    }
+    if (!updates.length) {
+      return c.json({ success: false, error: 'Нет полей для обновления' }, 400);
+    }
+    updates.push(`updated_at = NOW()`);
+    vals.push(producerId);
+    vals.push(id);
+
+    const r = await pool.query(
+      `UPDATE producer_payout_methods SET ${updates.join(', ')}
+        WHERE producer_id = $${vals.length - 1} AND id::text = $${vals.length}
+        RETURNING id::text AS id, method_type, label, details, is_default, created_at, updated_at`,
+      vals,
+    );
+    if (!r.rowCount) return c.json({ success: false, error: 'Не найдено' }, 404);
+    return c.json({ success: true, data: mapPayoutRow(r.rows[0]) });
+  } catch (error: any) {
+    console.error('payout-methods PATCH error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+app.delete('/payout-methods/:id', requireAuth, async (c) => {
+  try {
+    const producerId = c.get('userId') as string;
+    if (!producerId) return c.json({ success: false, error: 'Unauthorized' }, 401);
+    const id = c.req.param('id');
+    const r = await pool.query(
+      `DELETE FROM producer_payout_methods
+        WHERE producer_id = $1 AND id::text = $2`,
+      [producerId, id],
+    );
+    if (!r.rowCount) return c.json({ success: false, error: 'Не найдено' }, 404);
+    return c.json({ success: true });
+  } catch (error: any) {
+    console.error('payout-methods DELETE error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 export default app;
