@@ -86,7 +86,11 @@ app.post('/ad-slots/create', requireAuth, async (c) => {
     }
 
     const body = await c.req.json();
-    const { slotType, timeSlot, price, duration, maxPerHour, description } = body;
+    const {
+      slotType, timeSlot, price, duration, maxPerHour, description,
+      // Package fields (migration 111).
+      title, pricingType, rotationsPerDay, maxSlots, isFeatured, pricingConfig,
+    } = body;
 
     const slotId = `slot-${crypto.randomUUID()}`;
     // Single INSERT — раньше делали 2 write'а (slot + index), без транзакции.
@@ -98,6 +102,12 @@ app.post('/ad-slots/create', requireAuth, async (c) => {
       maxPerHour: maxPerHour || 4,
       description: description || '',
       status: 'available',
+      title: title ?? '',
+      pricingType: pricingType || 'fixed',
+      rotationsPerDay: rotationsPerDay ?? 0,
+      maxSlots: maxSlots ?? 0,
+      isFeatured: isFeatured ?? false,
+      pricingConfig: pricingConfig ?? {},
     });
     const adSlot = await getRadioAdSlot(station.id, slotId);
     return c.json({ success: true, adSlot, message: 'Ad slot created successfully' });
@@ -143,13 +153,20 @@ app.put('/ad-slots/:id', requireAuth, async (c) => {
 
     const body = await c.req.json();
     const merged = {
-      slotType:    body.slotType    !== undefined ? body.slotType    : existing.slotType,
-      timeSlot:    body.timeSlot    !== undefined ? body.timeSlot    : existing.timeSlot,
-      price:       body.price       !== undefined ? body.price       : existing.price,
-      duration:    body.duration    !== undefined ? body.duration    : existing.duration,
-      maxPerHour:  body.maxPerHour  !== undefined ? body.maxPerHour  : existing.maxPerHour,
-      description: body.description !== undefined ? body.description : existing.description,
-      status:      body.status      !== undefined ? body.status      : existing.status,
+      slotType:        body.slotType        !== undefined ? body.slotType        : existing.slotType,
+      timeSlot:        body.timeSlot        !== undefined ? body.timeSlot        : existing.timeSlot,
+      price:           body.price           !== undefined ? body.price           : existing.price,
+      duration:        body.duration        !== undefined ? body.duration        : existing.duration,
+      maxPerHour:      body.maxPerHour      !== undefined ? body.maxPerHour      : existing.maxPerHour,
+      description:     body.description     !== undefined ? body.description     : existing.description,
+      status:          body.status          !== undefined ? body.status          : existing.status,
+      // Package fields (migration 111) — preserve existing on partial update.
+      title:           body.title           !== undefined ? body.title           : existing.title,
+      pricingType:     body.pricingType     !== undefined ? body.pricingType     : existing.pricingType,
+      rotationsPerDay: body.rotationsPerDay !== undefined ? body.rotationsPerDay : existing.rotationsPerDay,
+      maxSlots:        body.maxSlots        !== undefined ? body.maxSlots        : existing.maxSlots,
+      isFeatured:      body.isFeatured      !== undefined ? body.isFeatured      : existing.isFeatured,
+      pricingConfig:   body.pricingConfig   !== undefined ? body.pricingConfig   : existing.pricingConfig,
     };
     await upsertRadioAdSlot(station.id, slotId, merged);
     const adSlot = await getRadioAdSlot(station.id, slotId);

@@ -5314,11 +5314,15 @@ export async function createCoinTransactionKv(userId: string, txId: string, tx: 
 // ─── Radio Ad Slots (row-per-slot, native cols since migration 050) ───
 
 const RADIO_AD_SLOT_COLS = `id, radio_id, slot_type, time_slot, price, duration,
-  max_per_hour, description, status, created_at, updated_at`;
+  max_per_hour, description, status, created_at, updated_at,
+  title, pricing_type, rotations_per_day, max_slots, is_featured, pricing_config`;
 
 function mapRadioAdSlotRow(r: any): any {
   if (!r) return null;
   const iso = (d: any) => d instanceof Date ? d.toISOString() : (d ? String(d) : null);
+  const cfg = typeof r.pricing_config === 'string'
+    ? (() => { try { return JSON.parse(r.pricing_config); } catch { return {}; } })()
+    : (r.pricing_config || {});
   // Preserve historical camelCase API contract (frontend reads slotType/timeSlot/etc).
   return {
     id: r.id,
@@ -5332,6 +5336,14 @@ function mapRadioAdSlotRow(r: any): any {
     status: r.status || 'available',
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
+    // Package fields (migration 111). title falls back to '' so pre-111
+    // rows (NULL) don't render "null" in the cabinet.
+    title: r.title || '',
+    pricingType: r.pricing_type || 'fixed',
+    rotationsPerDay: Number(r.rotations_per_day || 0),
+    maxSlots: Number(r.max_slots || 0),
+    isFeatured: Boolean(r.is_featured),
+    pricingConfig: cfg,
   };
 }
 
@@ -5372,19 +5384,27 @@ export async function upsertRadioAdSlot(radioId: string, slotId: string, slot: R
   await pool.query(
     `INSERT INTO radio_ad_slots (
        id, radio_id, slot_type, time_slot, price, duration,
-       max_per_hour, description, status, updated_at
+       max_per_hour, description, status, updated_at,
+       title, pricing_type, rotations_per_day, max_slots, is_featured, pricing_config
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(),
+       $10, $11, $12, $13, $14, $15::jsonb)
      ON CONFLICT (id) DO UPDATE SET
-       radio_id     = COALESCE(EXCLUDED.radio_id, radio_ad_slots.radio_id),
-       slot_type    = EXCLUDED.slot_type,
-       time_slot    = EXCLUDED.time_slot,
-       price        = EXCLUDED.price,
-       duration     = EXCLUDED.duration,
-       max_per_hour = EXCLUDED.max_per_hour,
-       description  = EXCLUDED.description,
-       status       = EXCLUDED.status,
-       updated_at   = NOW()`,
+       radio_id          = COALESCE(EXCLUDED.radio_id, radio_ad_slots.radio_id),
+       slot_type         = EXCLUDED.slot_type,
+       time_slot         = EXCLUDED.time_slot,
+       price             = EXCLUDED.price,
+       duration          = EXCLUDED.duration,
+       max_per_hour      = EXCLUDED.max_per_hour,
+       description       = EXCLUDED.description,
+       status            = EXCLUDED.status,
+       title             = EXCLUDED.title,
+       pricing_type      = EXCLUDED.pricing_type,
+       rotations_per_day = EXCLUDED.rotations_per_day,
+       max_slots         = EXCLUDED.max_slots,
+       is_featured       = EXCLUDED.is_featured,
+       pricing_config    = EXCLUDED.pricing_config,
+       updated_at        = NOW()`,
     [
       slotId,
       radioId,
@@ -5395,6 +5415,12 @@ export async function upsertRadioAdSlot(radioId: string, slotId: string, slot: R
       Number(slot.maxPerHour ?? slot.max_per_hour ?? 4),
       slot.description || '',
       slot.status || 'available',
+      slot.title ?? null,
+      slot.pricingType || slot.pricing_type || 'fixed',
+      Number(slot.rotationsPerDay ?? slot.rotations_per_day ?? 0),
+      Number(slot.maxSlots ?? slot.max_slots ?? 0),
+      Boolean(slot.isFeatured ?? slot.is_featured ?? false),
+      JSON.stringify(slot.pricingConfig ?? slot.pricing_config ?? {}),
     ]
   );
 }
