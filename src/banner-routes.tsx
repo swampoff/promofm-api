@@ -23,12 +23,15 @@ import { safeErrorMessage } from './security.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { upsertNotification } from './db.tsx';
+import { createLogger } from './logger.tsx';
 import {
   BANNER_PLACEMENTS,
   BANNER_DURATIONS,
   BANNER_SUBSCRIPTION_DISCOUNTS,
   calculateBannerPrice,
 } from './banner-pricing.tsx';
+
+const log = createLogger('banner');
 import { pool } from './db-client.tsx';
 import crypto from 'crypto';
 
@@ -313,6 +316,152 @@ app.post('/:id/manual-activate', requireAuth, requireAdmin, async (c) => {
       end_date: endDate.toISOString(),
     });
   } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// =====================================================================
+// POST /:id/admin/refund — admin-инициированный возврат за оплаченный баннер
+// =====================================================================
+// Зеркало engineer-routes.tsx /admin/orders/:id/refund (тот же money-handler
+// шаблон): YooKassa refund по сохранённому gatewayPaymentId, UPDATE
+// banner_ads.moderation_status='refunded' + status='cancelled', снятие из
+// platform_revenue_log, SSE юзеру.
+//
+// До 2026-06-17 banner-refund'а не было — фронт analytics-banners.tsx
+// тостил «X ₽ будут возвращены», но никакого API-вызова не делал.
+// Теперь endpoint реальный.
+//
+// Pre-conditions:
+//   * banner.moderation_status === 'paid' (баннер был оплачен).
+//   * banner.payment_order_id NOT NULL (migration 107 даёт колонку).
+//   * payment_sessions row найден и gateway === 'yookassa' (Stripe/T-Bank
+//     auto-refund — отдельная фича).
+//
+// Idempotency: idempotenceKey=`refund-banner-${id}` на стороне YooKassa
+// + WHERE moderation_status='paid' на UPDATE banner_ads — повторный вызов
+// после успеха вернёт «уже возвращён» (409) без дублирующего refund'а.
+app.post('/:id/admin/refund', requireAuth, requireAdmin, async (c) => {
+  const adminId = c.get('userId' as never) as string;
+  const bannerId = c.req.param('id');
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const reason = String(body?.reason || '').slice(0, 250);
+
+    const banner: any = await typed.getBannerById(bannerId);
+    if (!banner) return c.json({ success: false, error: 'Баннер не найден' }, 404);
+
+    if (banner.moderation_status === 'refunded') {
+      return c.json({ success: false, error: 'Баннер уже возвращён' }, 409);
+    }
+    if (banner.moderation_status !== 'paid') {
+      return c.json({
+        success: false,
+        error: `Refund возможен только для оплаченных баннеров (status=${banner.moderation_status})`,
+      }, 409);
+    }
+    if (!banner.payment_order_id) {
+      return c.json({
+        success: false,
+        error: 'payment_order_id NULL — refund через YooKassa-дашборд вручную',
+      }, 422);
+    }
+
+    const { getPaymentSession } = await import('./db.tsx');
+    const session: any = await getPaymentSession(banner.payment_order_id);
+    if (!session?.gatewayPaymentId) {
+      return c.json({ success: false, error: 'payment_session не найден' }, 404);
+    }
+    if (session.gateway !== 'yookassa') {
+      return c.json({
+        success: false,
+        error: `Gateway ${session.gateway} не поддерживается auto-refund'ом`,
+      }, 501);
+    }
+
+    const amount = Number(banner.price || banner.data?.final_price || 0);
+    if (!amount || amount <= 0) {
+      return c.json({ success: false, error: 'Сумма к возврату равна 0 — refund невозможен' }, 422);
+    }
+
+    const { YooKassaGateway } = await import('./gateway-yookassa.tsx');
+    const yk = new YooKassaGateway();
+    let refund: any;
+    try {
+      refund = await yk.refund(session.gatewayPaymentId, amount, {
+        description: `Возврат banner #${bannerId}${reason ? ': ' + reason : ''}`.slice(0, 250),
+        idempotenceKey: `refund-banner-${bannerId}`,
+        metadata: { bannerId, reason, refundedBy: adminId },
+        shopId: session.shopId,
+      });
+    } catch (refundErr: any) {
+      log.error({ err: refundErr, bannerId }, 'banner_admin_refund_yk_fail');
+      return c.json({
+        success: false,
+        error: 'YooKassa отклонила refund: ' + (refundErr?.message || 'unknown'),
+      }, 502);
+    }
+
+    const refundedAt = new Date().toISOString();
+    await typed.updateBanner(bannerId, {
+      status: 'cancelled',
+      moderation_status: 'refunded',
+      data: {
+        ...(banner.data || {}),
+        refunded_at: refundedAt,
+        refunded_by: adminId,
+        refund_reason: reason,
+        yk_refund_id: refund?.id,
+      },
+    });
+
+    // Снимаем сумму из платформенного отчёта (banner_publish channel
+    // фигурирует в platform_revenue_log с metadata.orderId).
+    try {
+      const { pool } = await import('./db-client.tsx');
+      await pool.query(
+        `UPDATE platform_revenue_log SET status='refunded', updated_at=NOW()
+          WHERE channel='banner_publish' AND metadata->>'orderId' = $1`,
+        [banner.payment_order_id],
+      );
+    } catch (revLogErr: any) {
+      log.warn({ err: revLogErr, bannerId }, 'banner_refund_revenue_log_update_failed');
+    }
+
+    // SSE юзеру: его кабинет «Реклама» подтянет refunded-state.
+    try {
+      const { emitSSE } = await import('./sse-routes.tsx');
+      emitSSE(banner.user_id, {
+        type: 'banner_refunded',
+        data: { bannerId, title: banner.title, amount, reason },
+      });
+    } catch {}
+
+    // Persistent inbox notification.
+    try {
+      await notifyCrossCabinet({
+        targetUserId: banner.user_id,
+        targetRole: 'artist',
+        sourceRole: 'admin',
+        type: 'banner_refunded',
+        title: 'Возврат за баннер',
+        message: `Кампания «${banner.title}» отменена администратором. На ваш счёт возвращено ${amount.toLocaleString('ru-RU')} ₽${reason ? ` (причина: ${reason})` : ''}.`,
+        metadata: { bannerId, amount, refundId: refund?.id },
+      });
+    } catch (notifyErr: any) {
+      log.warn({ err: notifyErr, bannerId }, 'banner_refund_notify_failed');
+    }
+
+    log.info({ bannerId, amount, adminId, refundId: refund?.id }, 'banner_admin_refunded');
+    return c.json({
+      success: true,
+      bannerId,
+      amount,
+      refundId: refund?.id,
+      refundedAt,
+    });
+  } catch (error: any) {
+    log.error({ err: error, bannerId }, 'banner_admin_refund_error');
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });

@@ -57,7 +57,11 @@ export type NotificationType =
   // отправляет приглашение артисту).
   | 'label_invitation'
   | 'label_invitation_response'
-  | 'label_member_left';
+  | 'label_member_left'
+  // Banner-кампания возвращена администратором (banner-routes.tsx
+  // /:id/admin/refund). Срабатывает после успешного YooKassa refund'а
+  // — кабинет «Реклама» подтягивает refunded-state.
+  | 'banner_refunded';
 
 // 'system' — нечеловеческий источник (донат от слушателя, авто-события).
 export type CabinetRole = 'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer' | 'label' | 'system';
