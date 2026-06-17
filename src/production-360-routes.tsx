@@ -553,6 +553,75 @@ app.post('/orders/:id/progress', requireAuth, async (c) => {
 });
 
 // =====================================================
+// ESTIMATE (admin сохраняет финальную оценку полного цикла)
+// =====================================================
+// До 2026-06-17 поле estimatedFullPrice присутствовало в Production360Order,
+// но никакой endpoint его не writе'ил — admin EstimateModal на фронте имела
+// disabled-кнопку с пояснением «нет endpoint'а». Теперь pусть admin реально
+// фиксирует оценку: client видит её в DetailModal проекта и понимает, во
+// сколько обойдётся полный цикл.
+//
+// Body: { estimatedFullPrice: number, notes?: string, actorId: string }
+// Returns: { success, order }
+// Audit-логируется как estimate_set.
+app.post('/orders/:id/estimate', requireAuth, async (c) => {
+  try {
+    const orderId = c.req.param('id');
+    const body = await c.req.json();
+    const { estimatedFullPrice, notes, actorId } = body;
+
+    if (!actorId) {
+      return c.json({ success: false, error: 'actorId required' }, 400);
+    }
+    const value = Number(estimatedFullPrice);
+    if (!Number.isFinite(value) || value < 0 || value > 100_000_000) {
+      return c.json({
+        success: false,
+        error: 'estimatedFullPrice должен быть числом в диапазоне 0…100 000 000 ₽',
+      }, 400);
+    }
+
+    const order = await getProduction360Order(orderId) as Production360Order | null;
+    if (!order) return c.json({ success: false, error: 'Project not found' }, 404);
+
+    const previous = order.estimatedFullPrice;
+    order.estimatedFullPrice = value;
+    if (typeof notes === 'string' && notes.trim()) {
+      // notes хранятся в свободной форме как часть order.estimateNotes
+      // (добавится в jsonb без ALTER — поля не строго типизированы).
+      (order as any).estimateNotes = notes.trim().slice(0, 500);
+    }
+    order.updatedAt = new Date().toISOString();
+
+    await upsertProduction360Order(orderId, order);
+
+    logAudit({
+      pipeline_type: 'production_360',
+      content_type: 'production_360',
+      item_id: orderId,
+      item_title: order.projectTitle,
+      action: 'estimate_set',
+      from_status: order.status,
+      to_status: order.status,
+      actor_id: actorId,
+      actor_role: 'admin',
+      details: `${previous || 0} → ${value} ₽${notes ? ' — ' + String(notes).slice(0, 100) : ''}`,
+    });
+
+    notifyClient(
+      order,
+      'Оценка полного цикла обновлена',
+      `Менеджер указал: ${value.toLocaleString('ru-RU')} ₽${notes ? '. ' + String(notes).slice(0, 150) : ''}`,
+    );
+
+    return c.json({ success: true, order });
+  } catch (error) {
+    console.error('[production-360] estimate error:', error);
+    return c.json({ success: false, error: 'Estimate save failed' }, 500);
+  }
+});
+
+// =====================================================
 // REVISION (клиент запрашивает доработку)
 // =====================================================
 
