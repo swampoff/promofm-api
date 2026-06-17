@@ -367,7 +367,11 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         const beat = await getBeat(session.metadata.beatId);
         if (beat) {
           const purchase = {
-            id: `bp-${crypto.randomUUID()}`,
+            // Deterministic id keyed on orderId → ON CONFLICT (id) below makes a
+            // YooKassa retry a 0-row no-op instead of a duplicate purchase
+            // (random uuid never collided, so retries duplicated). Same id-space
+            // as the full beat_purchase block → one order = at most one row.
+            id: `bp-${session.orderId}`,
             beatId: session.metadata.beatId,
             beatTitle: beat.title || session.metadata.beatTitle || 'Beat',
             buyerId: session.userId,
@@ -379,7 +383,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             status: 'completed',
             createdAt: now,
           };
-          await cPool1.query(
+          const ins = await cPool1.query(
             `INSERT INTO beat_purchases (id, beat_id, buyer_id, producer_id, amount, license_type, status, data, created_at)
              VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7::jsonb, NOW())
              ON CONFLICT (id) DO NOTHING`,
@@ -391,14 +395,17 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
              purchase.licenseType || null,
              JSON.stringify({ ...purchase, paymentOrderId: session.orderId })]
           );
-          log.info({ purchaseId: purchase.id, beatTitle: beat.title }, 'beat_purchase_fulfilled');
-          
-          // Notify seller via SSE
-          if (beat.producerId) {
-            try {
-              const { emitSSE } = await import('./sse-routes.tsx');
-              emitSSE(beat.producerId, { type: 'beat_sold', data: { beatTitle: beat.title, price: session.amount, buyerName: purchase.buyerName } });
-            } catch {}
+          if (ins.rowCount && ins.rowCount > 0) {
+            log.info({ purchaseId: purchase.id, beatTitle: beat.title }, 'beat_purchase_fulfilled');
+            // Notify seller via SSE — only on first fulfillment, not retries.
+            if (beat.producerId) {
+              try {
+                const { emitSSE } = await import('./sse-routes.tsx');
+                emitSSE(beat.producerId, { type: 'beat_sold', data: { beatTitle: beat.title, price: session.amount, buyerName: purchase.buyerName } });
+              } catch {}
+            }
+          } else {
+            log.info({ purchaseId: purchase.id, orderId: session.orderId }, 'beat_purchase_already_fulfilled_skip');
           }
         }
       }
@@ -407,7 +414,11 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         // Fulfill digital good purchase
         const { pool: cPool2 } = await import('./db-client.tsx');
         const purchase = {
-          id: `bp-${crypto.randomUUID()}`,
+          // Deterministic id keyed on orderId → ON CONFLICT (id) makes retries
+          // idempotent. Same dgp- id-space as the full digital_purchase block →
+          // one order = at most one digital_purchases row. (Was `bp-`+random,
+          // which both mis-prefixed and duplicated on retry.)
+          id: `dgp-${session.orderId}`,
           goodId: session.metadata.goodId,
           goodTitle: session.metadata.goodTitle || 'Digital Good',
           buyerId: session.userId,
@@ -417,7 +428,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           status: 'completed',
           createdAt: now,
         };
-        await cPool2.query(
+        const insDg = await cPool2.query(
           `INSERT INTO digital_purchases (id, good_id, buyer_id, amount, data, created_at)
            VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
            ON CONFLICT (id) DO NOTHING`,
@@ -427,7 +438,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
            purchase.price || session.amount,
            JSON.stringify({ ...purchase, paymentOrderId: session.orderId })]
         );
-        log.info({ purchaseId: purchase.id }, 'digital_good_fulfilled');
+        log.info({ purchaseId: purchase.id, inserted: (insDg.rowCount ?? 0) > 0 }, 'digital_good_fulfilled');
       }
       
       if (itemType === 'radio_campaign' && session.metadata.stationId) {
@@ -436,7 +447,10 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         // на per-venue таблице, кампания была невидима в venue cabinet.
         const { insertVenueAdCampaign } = await import('./db.tsx');
         const campaign = {
-          id: `bp-${crypto.randomUUID()}`,
+          // Deterministic id keyed on orderId → insertVenueAdCampaign now does
+          // ON CONFLICT (id) DO NOTHING, so a webhook retry creates 0 extra
+          // campaigns instead of a duplicate paid campaign per retry.
+          id: `rc-${session.orderId}`,
           venueId: session.userId,
           stationId: session.metadata.stationId,
           stationName: session.metadata.stationName || '',
@@ -457,7 +471,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           createdAt: now,
           updatedAt: now,
         };
-        await insertVenueAdCampaign(campaign);
+        const campaignInserted = await insertVenueAdCampaign(campaign);
         // BLOCKER B (migration 101): записываем payment-метаданные сразу
         // после INSERT, чтобы refund-helper в radio-routes мог найти
         // session.gatewayPaymentId по campaign.payment_order_id. До этого
@@ -477,14 +491,18 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         } catch (paymentMetaErr: any) {
           log.warn({ campaignId: campaign.id, err: paymentMetaErr?.message }, 'radio_campaign_payment_meta_write_failed');
         }
-        log.info({ campaignId: campaign.id }, 'radio_campaign_created');
-        
-        // Notify station owner
-        if (session.metadata.stationOwnerId) {
-          try {
-            const { emitSSE } = await import('./sse-routes.tsx');
-            emitSSE(session.metadata.stationOwnerId, { type: 'new_radio_campaign', data: { budget: session.amount, packageType: campaign.packageType } });
-          } catch {}
+
+        if (campaignInserted > 0) {
+          log.info({ campaignId: campaign.id }, 'radio_campaign_created');
+          // Notify station owner — only on first fulfillment, not retries.
+          if (session.metadata.stationOwnerId) {
+            try {
+              const { emitSSE } = await import('./sse-routes.tsx');
+              emitSSE(session.metadata.stationOwnerId, { type: 'new_radio_campaign', data: { budget: session.amount, packageType: campaign.packageType } });
+            } catch {}
+          }
+        } else {
+          log.info({ campaignId: campaign.id, orderId: session.orderId }, 'radio_campaign_already_created_skip');
         }
       }
     
@@ -1041,7 +1059,11 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         const price = session.amount;
         const commission = Math.round(price * 0.1);
         const producerPayout = price - commission;
-        const purchaseId = 'bp_' + Math.random().toString(36).substring(2, 12);
+        // Deterministic id keyed on orderId. Critical: the INSERT's rowCount
+        // now gates recordPlatformCommission + sales-increment + SSE below.
+        // Previously a random id meant ON CONFLICT never fired AND the producer
+        // payout was recorded again on every YooKassa retry → double-credit.
+        const purchaseId = `bp-${session.orderId}`;
 
         const purchase = {
           id: purchaseId, beatId, beatTitle: beat.title,
@@ -1051,7 +1073,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           createdAt: now,
         };
 
-        await cPool3.query(
+        const insBp = await cPool3.query(
           `INSERT INTO beat_purchases (id, beat_id, buyer_id, producer_id, amount, license_type, status, data, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7::jsonb, NOW())
            ON CONFLICT (id) DO NOTHING`,
@@ -1059,23 +1081,27 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
            JSON.stringify(purchase)]
         );
 
-        beat.purchases = (beat.purchases || 0) + 1;
-        if (licenseType === 'exclusive') beat.status = 'sold';
-        await upsertBeat(beatId, beat);
+        if (insBp.rowCount && insBp.rowCount > 0) {
+          beat.purchases = (beat.purchases || 0) + 1;
+          if (licenseType === 'exclusive') beat.status = 'sold';
+          await upsertBeat(beatId, beat);
 
-        await recordPlatformCommission('beat', beat.title, price, commission, producerPayout, {
-          producerId: beat.producerId, producerName: beat.producer, buyerId, buyerName,
-        });
-
-        try {
-          const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(beat.producerId, {
-            type: 'beat_purchased',
-            data: { title: 'Продажа бита', purchaseId, beatId, licenseType, price, producerPayout },
+          await recordPlatformCommission('beat', beat.title, price, commission, producerPayout, {
+            producerId: beat.producerId, producerName: beat.producer, buyerId, buyerName,
           });
-        } catch {}
 
-        log.info({ beatId, purchaseId, price, orderId: session.orderId }, 'beat_purchase_fulfilled');
+          try {
+            const { emitSSE } = await import('./sse-routes.tsx');
+            emitSSE(beat.producerId, {
+              type: 'beat_purchased',
+              data: { title: 'Продажа бита', purchaseId, beatId, licenseType, price, producerPayout },
+            });
+          } catch {}
+
+          log.info({ beatId, purchaseId, price, orderId: session.orderId }, 'beat_purchase_fulfilled');
+        } else {
+          log.info({ beatId, purchaseId, orderId: session.orderId }, 'beat_purchase_already_fulfilled_skip');
+        }
       }
     } catch (err) {
       log.error({ err, beatId: session.metadata.beatId }, 'beat_purchase_fulfillment_error');
@@ -1097,7 +1123,13 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         const price = session.amount;
         const commission = Math.round(price * 0.1);
         const producerPayout = price - commission;
-        const purchaseId = 'dgp_' + Math.random().toString(36).substring(2, 12);
+        // Deterministic id keyed on orderId. The INSERT rowCount now gates
+        // recordPlatformCommission + sales-increment + SSE. Previously the
+        // random id + unconditional side-effects double-credited the producer
+        // and double-incremented sales on every YooKassa retry. (The inline
+        // "race-free на retry" comment was wrong — the INSERT was guarded by a
+        // never-colliding id, so retries always re-ran the payout.)
+        const purchaseId = `dgp-${session.orderId}`;
 
         const purchase = {
           id: purchaseId, digitalGoodId: goodId, title: good.title, category: good.category,
@@ -1107,29 +1139,32 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           createdAt: now,
         };
 
-        await cPool4.query(
+        const insDgp = await cPool4.query(
           `INSERT INTO digital_purchases (id, good_id, buyer_id, amount, data, created_at)
            VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
            ON CONFLICT (id) DO NOTHING`,
           [purchaseId, goodId, buyerId, price, JSON.stringify(purchase)]
         );
 
-        // Atomic UPDATE sales = sales + 1 (race-free на YooKassa retry).
-        await incrementDigitalGoodSales(goodId);
+        if (insDgp.rowCount && insDgp.rowCount > 0) {
+          await incrementDigitalGoodSales(goodId);
 
-        await recordPlatformCommission('digital_good', good.title, price, commission, producerPayout, {
-          producerId: good.producerId, producerName: good.producer, buyerId, buyerName,
-        });
-
-        try {
-          const { emitSSE } = await import('./sse-routes.tsx');
-          emitSSE(good.producerId, {
-            type: 'digital_purchased',
-            data: { title: 'Продажа цифрового товара', purchaseId, digitalGoodId: goodId, price, producerPayout },
+          await recordPlatformCommission('digital_good', good.title, price, commission, producerPayout, {
+            producerId: good.producerId, producerName: good.producer, buyerId, buyerName,
           });
-        } catch {}
 
-        log.info({ goodId, purchaseId, price, orderId: session.orderId }, 'digital_purchase_fulfilled');
+          try {
+            const { emitSSE } = await import('./sse-routes.tsx');
+            emitSSE(good.producerId, {
+              type: 'digital_purchased',
+              data: { title: 'Продажа цифрового товара', purchaseId, digitalGoodId: goodId, price, producerPayout },
+            });
+          } catch {}
+
+          log.info({ goodId, purchaseId, price, orderId: session.orderId }, 'digital_purchase_fulfilled');
+        } else {
+          log.info({ goodId, purchaseId, orderId: session.orderId }, 'digital_purchase_already_fulfilled_skip');
+        }
       }
     } catch (err) {
       log.error({ err, goodId: session.metadata.digitalGoodId }, 'digital_purchase_fulfillment_error');
