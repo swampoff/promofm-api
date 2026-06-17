@@ -1,4 +1,4 @@
--- Migration 109: tracks.radio_digest_sent_at — курсор рассылки новинок партнёрам
+-- Migration 110: tracks.radio_digest_sent_at — курсор рассылки новинок партнёрам
 --
 -- Контекст: cron radio-digest-cron.sh раз в день (10:00 Europe/Berlin) шлёт
 -- на info@promofm.ru письмо с новинками недели (треки ротации,
@@ -18,7 +18,7 @@
 -- Apply (см. CLAUDE.md «Migration files: NO BEGIN/COMMIT inside»):
 --   sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
 --   BEGIN;
---   \i /opt/promofm-api/src/migrations/109_radio_digest_sent_at.sql
+--   \i /opt/promofm-api/src/migrations/110_radio_digest_sent_at.sql
 --   COMMIT;
 --   EOF
 
