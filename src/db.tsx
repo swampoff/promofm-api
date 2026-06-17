@@ -3314,7 +3314,8 @@ const COLLAB_OFFER_COLS = `id, producer_id, producer_name, producer_avatar,
   artist_id, artist_name, offer_type, title, description, price, currency,
   audio_preview_url, bpm, music_key, genre, tags, status, deadline,
   responded_at, completed_at, artist_comment, extra,
-  created_at, updated_at`;
+  created_at, updated_at,
+  payment_status, payment_order_id, paid_at, released_at, refunded_at, accept_deadline`;
 
 function mapCollabOfferRow(r: any): any {
   if (!r) return null;
@@ -3343,6 +3344,12 @@ function mapCollabOfferRow(r: any): any {
     artistComment: r.artist_comment || undefined,
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
+    paymentStatus: r.payment_status || 'unpaid',
+    paymentOrderId: r.payment_order_id || undefined,
+    paidAt: iso(r.paid_at),
+    releasedAt: iso(r.released_at),
+    refundedAt: iso(r.refunded_at),
+    acceptDeadline: iso(r.accept_deadline),
     ...(r.extra || {}),
   };
 }
