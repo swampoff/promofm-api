@@ -522,7 +522,17 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       if (itemType === 'venue_radio_subscription' && session.metadata.subscriptionId) {
         const { pool: vrPool } = await import('./db-client.tsx');
         const subId = session.metadata.subscriptionId;
-        // Activate for 30 days; extend if already active
+        // Activate for 30 days; extend if already active.
+        //
+        // Idempotency guard: `COALESCE(payment_order_id,'') <> $1`. The outer
+        // claimPaymentSessionForProcessing already dedups naive re-delivery,
+        // but the partial-failure → revertPaymentSessionToPending → gateway
+        // retry path can re-enter this block. Without the guard, every
+        // re-entry would add ANOTHER 30 days (the `+ INTERVAL '30 days'` is an
+        // increment, not an absolute set) — a free month per replay. With it,
+        // a retry carrying the SAME orderId UPDATEs 0 rows; a genuine renewal
+        // (new orderId) still extends. Mirrors the orderId-keyed idempotency
+        // used by the beat/digital/radio handlers above.
         const r = await vrPool.query(
           `UPDATE venue_radio_subscriptions
            SET status = 'active',
@@ -531,6 +541,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
                payment_order_id = $1, payment_gateway = $2,
                auto_renew = true, updated_at = NOW()
            WHERE id = $3
+             AND COALESCE(payment_order_id, '') <> $1
            RETURNING venue_id, plan_id, current_period_end`,
           [session.orderId, session.gateway, subId]
         );
