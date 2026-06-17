@@ -6503,9 +6503,9 @@ export async function listVenueAdCampaigns(venueId: string): Promise<VenueAdCamp
   return r.rows.map(mapVenueAdCampaignRow).filter((x): x is VenueAdCampaignRow => x !== null);
 }
 
-export async function insertVenueAdCampaign(c: VenueAdCampaignRow): Promise<void> {
+export async function insertVenueAdCampaign(c: VenueAdCampaignRow): Promise<number> {
   const { pool } = await import('./db-client.tsx');
-  await pool.query(
+  const res = await pool.query(
     `INSERT INTO venue_ad_campaigns
        (id, venue_id, station_id, station_name, advertiser_id, package_type,
         status, audio_url, start_date, end_date,
@@ -6515,7 +6515,8 @@ export async function insertVenueAdCampaign(c: VenueAdCampaignRow): Promise<void
              $11,$12,$13,$14,$15,$16,
              $17::jsonb,$18::jsonb,
              COALESCE($19::timestamptz, NOW()),
-             COALESCE($20::timestamptz, NOW()))`,
+             COALESCE($20::timestamptz, NOW()))
+     ON CONFLICT (id) DO NOTHING`,
     [
       c.id, c.venueId, c.stationId ?? null, c.stationName ?? null,
       c.advertiserId ?? null, c.packageType ?? null, c.status || 'pending',
@@ -6527,6 +6528,9 @@ export async function insertVenueAdCampaign(c: VenueAdCampaignRow): Promise<void
       c.createdAt ?? null, c.updatedAt ?? null,
     ]
   );
+  // rowCount = 0 → campaign with this id already exists (webhook retry).
+  // Caller skips duplicate notify / commission side-effects.
+  return res.rowCount ?? 0;
 }
 
 /**
