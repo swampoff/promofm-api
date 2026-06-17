@@ -1151,6 +1151,96 @@ auth.post("/admin/approve-user", requireAuth, requireAdmin, async (c) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────
+// POST /auth/admin/create-user
+// ──────────────────────────────────────────────────────────────────────
+//
+// Admin-инициированное создание учётки (например по результатам устного
+// заявления партнёра). До 2026-06-17 этой ручки не было — фронтовая
+// UsersManagement.tsx «создавала» юзера только в локальном state, никакая
+// запись в users не происходила; форма выбрасывала пароль.
+//
+// Отличия от /auth/signup:
+//   * нет CAPTCHA (admin-only).
+//   * нет consentPersonalData gate (admin создаёт от своего имени).
+//   * status сразу 'active' + is_email_verified = true; никакого email-
+//     verification round-trip — admin создаёт уже верифицированный аккаунт.
+//   * role любая разрешённая (включая admin/superadmin для chain-of-trust;
+//     но фронт UI обычно ограничит выбор до базовых ролей).
+//
+// Audit-логируется как user_create_by_admin.
+//
+// Body: { email, password, name?, role?, sendWelcomeEmail? }
+// Returns: { success, userId, email } | { success:false, error }
+auth.post("/admin/create-user", requireAuth, requireAdmin, async (c) => {
+  try {
+    const parsed = await safeJsonParse(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+    const { email, password, name, role, sendWelcomeEmail } = body;
+
+    if (!email || !password) return c.json({ success: false, error: "Email и пароль обязательны" }, 400);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ success: false, error: "Некорректный формат email" }, 400);
+    const pwErr = validatePassword(password);
+    if (pwErr) return c.json({ success: false, error: pwErr }, 400);
+
+    // Whitelist валидных ролей. Admin может создать пользователя с ролью
+    // admin/superadmin (chain-of-trust) — но это явное решение, не неявное.
+    const userRole = role && isValidRole(role) ? role : "artist";
+
+    const userName = name || email.split("@")[0];
+    const passwordHash = await bcrypt.hash(password, 12);
+    const username = makeUsername(email, userName);
+
+    let userId: string;
+    try {
+      const result = await sql(
+        `INSERT INTO users (email, password_hash, username, full_name, role, status, is_email_verified, email_verified_at, consent_personal_data, consent_at)
+         VALUES ($1, $2, $3, $4, $5::user_role, 'active'::user_status, true, NOW(), true, now())
+         RETURNING id`,
+        [email, passwordHash, username, userName, userRole],
+      );
+      userId = result.rows[0].id;
+    } catch (err: any) {
+      if (err?.code === "23505") {
+        return c.json({ success: false, error: "Пользователь с таким email уже существует" }, 409);
+      }
+      console.error("admin create-user error:", err);
+      return c.json({ success: false, error: "Не удалось создать пользователя" }, 500);
+    }
+
+    logAdminAction(c, {
+      action: 'user_create_by_admin',
+      resourceType: 'user',
+      targetId: String(userId),
+      details: { email, role: userRole, name: userName },
+    });
+
+    // Inbox notification — admin-созданный аккаунт сразу получает приветственное.
+    const notifId = `notif_admin_created_${Date.now()}`;
+    await upsertNotification(userId, notifId, {
+      id: notifId,
+      userId,
+      type: 'info',
+      title: 'Аккаунт создан администратором',
+      message: 'Ваш аккаунт создан администратором ПРОМО.МУЗЫКА. Войдите, используя email и пароль, переданные администратором.',
+      read: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    if (sendWelcomeEmail) {
+      // Optional — admin может выбрать «не отправлять welcome» если он сам
+      // передаст пароль вживую.
+      sendAccountApprovedEmail(email, userName).catch(() => {});
+    }
+
+    return c.json({ success: true, userId, email });
+  } catch (error: any) {
+    console.error("admin create-user exception:", error);
+    return c.json({ success: false, error: "Internal server error" }, 500);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────
 // POST /auth/admin/reject-user
 // ──────────────────────────────────────────────────────────────────────
 auth.post("/admin/reject-user", requireAuth, requireAdmin, async (c) => {
