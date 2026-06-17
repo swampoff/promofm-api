@@ -1532,15 +1532,15 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       try {
         const { pool: cpool } = await import('./db-client.tsx');
         const { rows } = await cpool.query(
-          `SELECT user_id, status, price FROM content_orders WHERE id = $1 LIMIT 1`,
+          `SELECT venue_id, status, price FROM content_orders WHERE id = $1 LIMIT 1`,
           [String(contentOrderId)],
         );
         if (rows.length === 0) {
           return c.json({ success: false, error: 'Заказ контента не найден' }, 404);
         }
         const ord = rows[0];
-        if (ord.user_id !== userId) {
-          log.warn({ userId, contentOrderId, ownerId: ord.user_id }, 'content_order_pay_unauthorized');
+        if (ord.venue_id !== userId) {
+          log.warn({ userId, contentOrderId, ownerId: ord.venue_id }, 'content_order_pay_unauthorized');
           return c.json({ success: false, error: 'Нельзя оплатить чужой заказ' }, 403);
         }
         if (ord.status !== 'pending_payment' && ord.status !== 'draft') {
@@ -1608,18 +1608,28 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       try {
         const { pool: vrpool } = await import('./db-client.tsx');
         const { rows } = await vrpool.query(
-          `SELECT venue_user_id, price_rub, status FROM venue_radio_subscriptions WHERE id = $1 LIMIT 1`,
+          `SELECT venue_id, plan_id, status FROM venue_radio_subscriptions WHERE id = $1 LIMIT 1`,
           [String(subId)],
         );
         if (rows.length === 0) {
           return c.json({ success: false, error: 'Подписка не найдена' }, 404);
         }
         const sub = rows[0];
-        if (sub.venue_user_id !== userId) {
-          log.warn({ userId, subId, ownerId: sub.venue_user_id }, 'venue_radio_subscription_pay_unauthorized');
+        if (sub.venue_id !== userId) {
+          log.warn({ userId, subId, ownerId: sub.venue_id }, 'venue_radio_subscription_pay_unauthorized');
           return c.json({ success: false, error: 'Нельзя оплатить чужую подписку' }, 403);
         }
-        const expected = Number(sub.price_rub) || 0;
+        // Цена тарифа — из venue_radio_plans.price_month по plan_id
+        // (на самой подписке колонки цены нет). Источник тот же, что у
+        // venue-radio плана: venue_radio_plans (basic/pro/business).
+        const planRes = await vrpool.query(
+          `SELECT price_month FROM venue_radio_plans WHERE id = $1 AND is_active = true LIMIT 1`,
+          [String(sub.plan_id)],
+        );
+        if (planRes.rows.length === 0) {
+          return c.json({ success: false, error: 'Тариф подписки не найден или неактивен' }, 400);
+        }
+        const expected = Number(planRes.rows[0].price_month) || 0;
         if (!(expected > 0)) {
           return c.json({ success: false, error: 'Цена подписки не определена' }, 400);
         }
@@ -1644,7 +1654,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       try {
         const { pool: gpool } = await import('./db-client.tsx');
         const { rows } = await gpool.query(
-          `SELECT id, price_rub, status FROM digital_goods WHERE id = $1 LIMIT 1`,
+          `SELECT id, price, status FROM digital_goods WHERE id = $1 LIMIT 1`,
           [String(goodId)],
         );
         if (rows.length === 0) {
@@ -1654,7 +1664,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         if (good.status !== 'active') {
           return c.json({ success: false, error: 'Товар не доступен для покупки' }, 400);
         }
-        const expected = Number(good.price_rub) || 0;
+        const expected = Number(good.price) || 0;
         if (!(expected > 0)) {
           return c.json({ success: false, error: 'Цена товара не определена' }, 400);
         }
@@ -1677,15 +1687,15 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       try {
         const { pool: ppool } = await import('./db-client.tsx');
         const { rows } = await ppool.query(
-          `SELECT user_id, price, status FROM production_360_orders WHERE id = $1 LIMIT 1`,
+          `SELECT client_id, price, status FROM production_360_orders WHERE id = $1 LIMIT 1`,
           [String(orderId)],
         );
         if (rows.length === 0) {
           return c.json({ success: false, error: 'Заказ Production 360 не найден' }, 404);
         }
         const ord = rows[0];
-        if (ord.user_id !== userId) {
-          log.warn({ userId, orderId, ownerId: ord.user_id }, 'production_360_pay_unauthorized');
+        if (ord.client_id !== userId) {
+          log.warn({ userId, orderId, ownerId: ord.client_id }, 'production_360_pay_unauthorized');
           return c.json({ success: false, error: 'Нельзя оплатить чужой заказ' }, 403);
         }
         if (ord.status !== 'pending_payment') {
