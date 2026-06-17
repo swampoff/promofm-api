@@ -351,6 +351,33 @@ keep both in sync when prices change).
 Trial: 14 days at `effectivePlan='business'`. Stamped on first
 GET /venue/profile (`venue-trial.tsx:applyInitialTrial`).
 
+### Radio ad campaigns — pricing is by-agreement (NO server amount-gate)
+
+**Status:** by-agreement, **deliberately ungated**. Confirmed 2026-06-17.
+
+`venue/components/radio-section.tsx:180` creates a checkout session with
+`itemType: 'radio_campaign'` and `amount = selectedPackage.price`. The
+backend has NO server-side radio ad package price table —
+`createRadioCampaign` (`src/venue-routes.tsx:790`) stores
+`budget: body.budget` straight from the client. Package definitions live
+only in the frontend.
+
+That means `create-session` has NO amount-gate for `itemType:'radio_campaign'`
+(unlike `beat_purchase` / `digital_purchase` / `track_publish` etc which
+recompute server-side and compare). Any non-circular gate would need either
+(a) a canonical `radio_ad_packages` table, or (b) matching `amount` against
+`campaign.budget` — which the client also set, so it's circular.
+
+**Risk accepted:** a venue can technically run a session with a lower
+amount than the displayed package price. Mitigated socially — radio ad
+deals are negotiated with each station/owner.
+
+**If this changes** (we add a canonical price list): the gate template
+sits next to `digital_purchase` gate in `src/checkout-routes.tsx` —
+mirror it, recompute `expected` from a server source keyed on
+`metadata.packageType + stationId`, `Math.abs(amount - expected) > 0.01`
+→ 400.
+
 ### Subscribe / save-card / recurring (venue billing)
 
 **Source:** `src/venue-billing-routes.tsx` + `src/venue-billing-helpers.tsx` + webhook branch in `src/checkout-routes.tsx`.
