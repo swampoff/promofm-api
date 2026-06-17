@@ -696,16 +696,16 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
 
 
 
-  // ─── Fulfill track_publish payment (moderation → paid, awaits admin gate) ───
-  // Prior behaviour: webhook flipped moderation_status straight to 'published',
-  // dumping the track into Новинки недели the moment money cleared. That
-  // bypassed two stages the rest of the codebase was built around:
-  //   • 'paid'      — money received, admin gate not yet passed
-  //   • 'upcoming'  — admin approved, sitting in «Скоро» for UPCOMING_DAYS
-  // (see track-moderation-routes.tsx /approve-paid + /promote-upcoming).
-  // Webhook now lands on 'paid' only; admin clicks «Опубликовать» which calls
-  // /approve-paid → 'upcoming', then a VPS cron hitting /promote-upcoming
-  // promotes expired upcoming → 'published'.
+  // ─── Fulfill track_publish payment (approved → upcoming → published) ───
+  // History: webhook once flipped straight to 'published' (instant Новинки,
+  // skipping «Скоро»); then it landed on 'paid' + a manual admin gate
+  // (/approve-paid → 'upcoming'). Owner decision 2026-06-17: remove the manual
+  // gate — a paid track auto-promotes to 'upcoming' on payment, symmetric with
+  // dj_mix_publish (below) and free-track publishing. The track already passed
+  // moderation ('approved') BEFORE it could be paid, so payment is a sufficient
+  // signal. Lands on 'upcoming' for UPCOMING_DAYS in «Скоро»; then VPS cron
+  // /promote-upcoming flips expired upcoming → 'published'. /approve-paid kept
+  // as a manual fallback (no-op in the normal flow).
   if (session.metadata?.type === 'track_publish' && session.metadata?.trackId) {
     try {
       const trackId = session.metadata.trackId;
@@ -724,24 +724,30 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       // state — already paid (duplicate webhook), pending (skipped
       // moderation somehow), upcoming/published (already advanced) — we
       // skip the write and log loudly. RETURNING tells us which case hit.
+      // Auto-promote to 'upcoming' on payment (mirror dj_mix_publish below).
+      const UPCOMING_DAYS = 3;
+      const upcomingUntilIso = new Date(Date.now() + UPCOMING_DAYS * 86400000).toISOString();
       const result = await tpPool.query(
         // Native cols после migration 062 — payment_amount/payment_completed/
         // payment_order_id/payment_gateway/paid_at промоутнуты из data jsonb.
-        // SET native + dual-write в data для legacy readers (удалим в follow-up).
+        // WHERE moderation_status='approved' keeps this idempotent: a duplicate
+        // webhook finds the row already 'upcoming' (!= approved) -> 0 rows -> no-op.
         `UPDATE tracks
-            SET moderation_status = 'paid',
-                is_paid           = true,
-                is_hidden         = false,
-                payment_completed = TRUE,
-                payment_amount    = $2::numeric,
-                payment_order_id  = $3::text,
-                payment_gateway   = $4::text,
-                paid_at           = $5::timestamptz,
-                updated_at        = $6::timestamptz
+            SET moderation_status        = 'upcoming',
+                is_paid                  = true,
+                is_hidden                = false,
+                payment_completed        = TRUE,
+                payment_amount           = $2::numeric,
+                payment_order_id         = $3::text,
+                payment_gateway          = $4::text,
+                paid_at                  = $5::timestamptz,
+                upcoming_until           = $7::timestamptz,
+                approved_for_release_at  = $5::timestamptz,
+                updated_at               = $6::timestamptz
           WHERE id = $1
             AND moderation_status = 'approved'
           RETURNING payment_amount AS amount, moderation_status`,
-        [trackId, session.amount, session.orderId, session.gateway, now, now]
+        [trackId, session.amount, session.orderId, session.gateway, now, now, upcomingUntilIso]
       );
 
       if (result.rowCount === 0) {

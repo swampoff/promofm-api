@@ -218,7 +218,7 @@ pending → approved → paid → upcoming → published
 - `approved` — awaits payment (5000 ₽ pending in
   data.payment_amount; data.requires_payment=true; is_hidden=true)
 - `paid` — payment confirmed via YooKassa webhook
-- `upcoming` — admin published manually, lives in "Скоро" section
+- `upcoming` — **auto-set by the payment webhook** on a confirmed payment (symmetric with DJ mixes & free-track publishing); lives in "Скоро" ~3 days (`upcoming_until = paid_at + 3d`), then cron `/promote-upcoming` -> `published`. Manual `/approve-paid` gate removed by owner decision 2026-06-17.
 - `published` — лежит в "Новинки", visible in каталоге 500+ radio
 - `rejected` — terminal
 - `revision` — artist must resubmit
