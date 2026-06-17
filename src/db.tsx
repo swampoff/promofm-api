@@ -245,6 +245,45 @@ export async function incrementCoinBalanceAtomic(userId: string, delta: number):
   return Number(res.rows[0]?.balance ?? 0);
 }
 
+/**
+ * Webhook-retry idempotency guard: returns true ровно ОДИН раз для
+ * данной пары (orderId, kind). На последующие вызовы возвращает false.
+ *
+ * Используется как первый шаг в credit-flow внутри webhook'ов, которые
+ * на retry могли бы дважды добавить деньги:
+ *
+ *   if (await reserveCreditOnce(orderId, 'donation_credit')) {
+ *     await creditAvailableAtomic(...)
+ *   } else {
+ *     log.info('skipped: already credited')
+ *   }
+ *
+ * Реализация: INSERT в payment_credit_ledger с PK (order_id, kind).
+ * При повторе ON CONFLICT даёт rowCount=0 → false. Это unconditional
+ * commit без транзакции (autocommit) — если процесс упадёт сразу после
+ * INSERT и до credit-call'а, повторный webhook увидит ledger-row и НЕ
+ * сделает credit. Это безопаснее чем «дважды дать деньги», и ops
+ * восстановят руками через admin-refund при таком инциденте.
+ *
+ * `kind` — это короткий тег ('donation_credit', 'topup_coins', etc.)
+ * чтобы один orderId мог reservировать несколько разных credit'ов
+ * (например topup кредитит И коины И баланс — два отдельных
+ * reserveCreditOnce вызова с разными kind).
+ *
+ * Миграция 108 создаёт payment_credit_ledger.
+ */
+export async function reserveCreditOnce(orderId: string, kind: string): Promise<boolean> {
+  const { pool } = await import('./db-client.tsx');
+  const res = await pool.query(
+    `INSERT INTO payment_credit_ledger (order_id, kind, created_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (order_id, kind) DO NOTHING
+     RETURNING order_id`,
+    [orderId, kind],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
 export async function getCoinTransactions(userId: string) {
   const { data, error } = await db()
     .from('coin_transactions')
