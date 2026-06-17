@@ -30,7 +30,8 @@ import {
 import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
-import { requireAuth, requireOwner } from './auth-middleware.tsx';
+import { requireAuth, requireOwner, requireAdmin } from './auth-middleware.tsx';
+import { creditAvailableAtomic } from './db.tsx';
 
 const app = new Hono();
 
@@ -231,6 +232,12 @@ app.put('/offers/:id/respond', requireAuth, async (c) => {
 });
 
 // ── PUT /offers/:id/complete — артист подтверждает завершение коллабы ──
+//
+// Для escrow-офферов (payment_status='escrow_held'): atomically
+// credit producer + mark payment_status='released' in one transaction,
+// then set status='completed'. Zero commission (0%).
+// Для price=0-офферов (payment_status='unpaid'): просто status='completed',
+// никаких денег.
 
 app.put('/offers/:id/complete', requireAuth, async (c) => {
   const offerId = c.req.param('id');
@@ -247,6 +254,50 @@ app.put('/offers/:id/complete', requireAuth, async (c) => {
         { success: false, error: `Can complete only accepted offers (current: ${original.status})` },
         409,
       );
+    }
+
+    // Release escrow atomically: credit producer and mark released in
+    // one transaction so a crash between the two doesn't create a state
+    // where the producer is credited but the offer is still 'escrow_held'
+    // (or vice-versa).
+    if (original.paymentStatus === 'escrow_held') {
+      const price = Number(original.price);
+      if (!(price > 0)) {
+        return c.json({ success: false, error: 'Offer price is zero but payment_status is escrow_held' }, 500);
+      }
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `INSERT INTO payment_balances (user_id, available, pending, total, updated_at)
+           VALUES ($1, $2::numeric, 0, $2::numeric, NOW())
+           ON CONFLICT (user_id) DO UPDATE
+             SET available  = payment_balances.available + EXCLUDED.available,
+                 total      = payment_balances.total     + EXCLUDED.available,
+                 updated_at = NOW()`,
+          [original.producerId, price]
+        );
+        const rel = await client.query(
+          `UPDATE collab_offers
+              SET payment_status = 'released',
+                  released_at    = NOW(),
+                  updated_at     = NOW()
+            WHERE id = $1
+              AND payment_status = 'escrow_held'
+            RETURNING id`,
+          [offerId]
+        );
+        if (!rel.rowCount) {
+          await client.query('ROLLBACK');
+          return c.json({ success: false, error: 'Escrow already released or wrong state' }, 409);
+        }
+        await client.query('COMMIT');
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
     }
 
     const now = new Date().toISOString();
@@ -371,6 +422,157 @@ app.post('/chat/:offerId', requireAuth, async (c) => {
     });
 
     return c.json({ success: true, message });
+  } catch (err) {
+    return c.json({ success: false, error: String(err) }, 500);
+  }
+});
+
+// ── POST /offers/auto-complete — cron daily (X-Internal-Key) ──
+//
+// Releases escrow for offers where the artist hasn't confirmed completion
+// within the deadline. Pattern: credit-first-then-mark-released in a
+// per-offer transaction so a crash mid-loop leaves the offer in
+// escrow_held and it is retried on the next cron run.
+//
+// Crontab (VPS):
+//   0 4 * * *  curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" \
+//     http://127.0.0.1:3000/server/api/collaboration/offers/auto-complete \
+//     >> /var/log/promofm-collab-autocomplete.log 2>&1
+
+app.post('/offers/auto-complete', async (c) => {
+  const internalKey = c.req.header('X-Internal-Key') || '';
+  const expectedKey = process.env.VPS_INTERNAL_KEY || '';
+  if (!expectedKey || internalKey !== expectedKey) {
+    return c.json({ success: false, error: 'X-Internal-Key required' }, 401);
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, artist_id, producer_id, title, price
+         FROM collab_offers
+        WHERE payment_status = 'escrow_held'
+          AND accept_deadline < NOW()`
+    );
+
+    let released = 0;
+    for (const row of rows) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `INSERT INTO payment_balances (user_id, available, pending, total, updated_at)
+           VALUES ($1, $2::numeric, 0, $2::numeric, NOW())
+           ON CONFLICT (user_id) DO UPDATE
+             SET available  = payment_balances.available + EXCLUDED.available,
+                 total      = payment_balances.total     + EXCLUDED.available,
+                 updated_at = NOW()`,
+          [row.producer_id, Number(row.price)]
+        );
+        await client.query(
+          `UPDATE collab_offers
+              SET payment_status = 'released',
+                  released_at    = NOW(),
+                  status         = 'completed',
+                  completed_at   = NOW(),
+                  updated_at     = NOW()
+            WHERE id = $1
+              AND payment_status = 'escrow_held'`,
+          [row.id]
+        );
+        await client.query('COMMIT');
+        released++;
+        try {
+          emitSSE(row.artist_id, {
+            type: 'collab_auto_completed',
+            data: { offerId: row.id, title: row.title },
+          });
+          emitSSE(row.producer_id, {
+            type: 'collab_auto_completed',
+            data: { offerId: row.id, title: row.title, amount: Number(row.price) },
+          });
+        } catch {}
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        console.error('[collab auto-complete] tx error', row.id, txErr);
+      } finally {
+        client.release();
+      }
+    }
+    return c.json({ success: true, released });
+  } catch (err) {
+    return c.json({ success: false, error: String(err) }, 500);
+  }
+});
+
+// ── POST /admin/offers/:id/resolve — admin arbitrage ──
+//
+// resolution='release_to_producer': credit producer payment_balance (0% commission).
+// resolution='refund_to_artist':    credit artist payment_balance (platform credit,
+//   not gateway refund — for actual card refund use YooKassa dashboard manually).
+
+app.post('/admin/offers/:id/resolve', requireAuth, requireAdmin, async (c) => {
+  const offerId = c.req.param('id');
+  try {
+    const { resolution, reason } = await c.req.json() as { resolution: string; reason?: string };
+    if (resolution !== 'release_to_producer' && resolution !== 'refund_to_artist') {
+      return c.json({ success: false, error: 'resolution must be release_to_producer or refund_to_artist' }, 400);
+    }
+
+    const offer = await getCollabOffer(offerId);
+    if (!offer) return c.json({ success: false, error: 'Offer not found' }, 404);
+    if (offer.paymentStatus !== 'escrow_held') {
+      return c.json(
+        { success: false, error: `Arbitrage only for escrow_held offers (current: ${offer.paymentStatus})` },
+        409
+      );
+    }
+
+    const price = Number(offer.price);
+    const recipientId = resolution === 'release_to_producer' ? offer.producerId : offer.artistId;
+    const newPaymentStatus = resolution === 'release_to_producer' ? 'released' : 'refunded';
+    const timestampCol = resolution === 'release_to_producer' ? 'released_at' : 'refunded_at';
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO payment_balances (user_id, available, pending, total, updated_at)
+         VALUES ($1, $2::numeric, 0, $2::numeric, NOW())
+         ON CONFLICT (user_id) DO UPDATE
+           SET available  = payment_balances.available + EXCLUDED.available,
+               total      = payment_balances.total     + EXCLUDED.available,
+               updated_at = NOW()`,
+        [recipientId, price]
+      );
+      await client.query(
+        `UPDATE collab_offers
+            SET payment_status = $2,
+                ${timestampCol} = NOW(),
+                status         = $3,
+                updated_at     = NOW()
+          WHERE id = $1
+            AND payment_status = 'escrow_held'`,
+        [offerId, newPaymentStatus, resolution === 'release_to_producer' ? 'completed' : 'cancelled']
+      );
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    try {
+      emitSSE(offer.artistId, {
+        type: 'collab_arbitrage_resolved',
+        data: { offerId, resolution, reason: reason || '' },
+      });
+      emitSSE(offer.producerId, {
+        type: 'collab_arbitrage_resolved',
+        data: { offerId, resolution, reason: reason || '' },
+      });
+    } catch {}
+
+    return c.json({ success: true, offerId, resolution });
   } catch (err) {
     return c.json({ success: false, error: String(err) }, 500);
   }
