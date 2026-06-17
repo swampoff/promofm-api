@@ -762,6 +762,104 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill banner_publish ───
+  //
+  // До 2026-06-16 ЭТО ОТСУТСТВОВАЛО ПОЛНОСТЬЮ. /checkout/create-session
+  // валидировал banner_publish (строки ~1394-1428 этого файла), webhook
+  // приходил, но НИКАКОЙ блок не апдейтил banner_ads — деньги шли на
+  // счёт платформы, а кампания оставалась в moderation_status='approved'
+  // без status='active', start_date, end_date. Юзер платил, баннер не
+  // крутился. Silent gold-bug.
+  //
+  // Логика активации зеркалит admin-only POST /banner/:id/manual-activate
+  // (banner-routes.tsx:280-340): status='active', moderation_status='paid',
+  // start_date=now, end_date=now+duration_days.
+  //
+  // Idempotency: WHERE moderation_status='approved' (или 'paid' — пишем
+  // payment_order_id и start_date/end_date только при первой обработке;
+  // повторный webhook на ту же сессию UPDATE'нёт 0 строк и выйдет).
+  if (session.metadata?.type === 'banner_publish' && session.metadata?.bannerId) {
+    const bannerId = String(session.metadata.bannerId);
+    try {
+      const { pool: bpPool } = await import('./db-client.tsx');
+
+      // Сначала читаем duration_days, чтобы посчитать end_date. SELECT
+      // выполняется до UPDATE, потому что нужен duration ИЗ строки —
+      // нельзя считать в одном UPDATE без подзапроса с COALESCE.
+      const dur = await bpPool.query(
+        `SELECT duration_days FROM banner_ads WHERE id = $1 LIMIT 1`,
+        [bannerId]
+      );
+      if (dur.rows.length === 0) {
+        log.warn({ bannerId, orderId: session.orderId }, 'banner_publish_webhook_banner_missing');
+      } else {
+        const days = Number(dur.rows[0]?.duration_days) || 7;
+        const startDate = new Date(now);
+        const endDate = new Date(startDate.getTime() + days * 86400000);
+
+        const result = await bpPool.query(
+          `UPDATE banner_ads
+              SET status            = 'active',
+                  moderation_status = 'paid',
+                  start_date        = $2::timestamptz,
+                  end_date          = $3::timestamptz,
+                  payment_order_id  = $4::text,
+                  payment_gateway   = $5::text,
+                  paid_at           = $6::timestamptz,
+                  updated_at        = $7::timestamptz
+            WHERE id = $1
+              AND moderation_status = 'approved'
+              AND (payment_order_id IS NULL OR payment_order_id = $4)
+            RETURNING id, end_date`,
+          [bannerId, startDate.toISOString(), endDate.toISOString(),
+           session.orderId, session.gateway, now, now]
+        );
+
+        if (result.rowCount === 0) {
+          // Либо банер уже paid (повторный webhook — идемпотентно ОК),
+          // либо в нежданном статусе. Читаем чтобы залогировать.
+          const { getBannerById } = await import('./db-typed.tsx');
+          const cur = await getBannerById(bannerId).catch(() => null);
+          log.warn(
+            { bannerId, currentStatus: cur?.moderation_status, currentBannerStatus: cur?.status, orderId: session.orderId },
+            'banner_payment_received_but_state_mismatch'
+          );
+        } else {
+          log.info(
+            { bannerId, amount: session.amount, orderId: session.orderId, endDate: result.rows[0]?.end_date, days },
+            'banner_payment_received'
+          );
+
+          // SSE → артист, чтобы кабинет «Реклама» подтянул активный баннер.
+          try {
+            const { emitSSE } = await import('./sse-routes.tsx');
+            emitSSE(session.userId, {
+              type: 'banner_paid',
+              data: {
+                bannerId,
+                title: session.metadata?.bannerTitle || '',
+                amount: session.amount,
+                endDate: result.rows[0]?.end_date,
+              },
+            });
+          } catch {}
+        }
+      }
+    } catch (err) {
+      // Money already taken, banner activation failed — нужно ручное
+      // вмешательство. Не throw, чтобы YooKassa не ретраила.
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.error({ err: errMsg, bannerId, orderId: session.orderId }, 'banner_payment_fulfilment_error');
+      try {
+        const { emitSSE } = await import('./sse-routes.tsx');
+        emitSSE('admin', {
+          type: 'banner_payment_fulfilment_error',
+          data: { bannerId, orderId: session.orderId, error: errMsg },
+        });
+      } catch {}
+    }
+  }
+
   // ─── Fulfill dj_mix_publish (approved → upcoming → published через cron) ───
   // Симметрично track_publish: оплаченный микс уходит в 'upcoming' на
   // UPCOMING_DAYS (3 дня), показывается в «Скоро» наряду с треками
