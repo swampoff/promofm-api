@@ -14,11 +14,30 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 15m
           script: |
             set -e
             cd /opt/promofm-api
+            BEFORE=$(git rev-parse HEAD)
             git pull origin main
-            npm ci --omit=dev
+            AFTER=$(git rev-parse HEAD)
+            # Reinstall deps ONLY when package-lock/package.json changed.
+            # `npm ci` is destructive (rm -rf node_modules first); running it on
+            # every deploy + a single interrupted install left node_modules
+            # half-built -> ERR_MODULE_NOT_FOUND crash-loop (incident 2026-06-17).
+            # Skip when deps untouched; retry-clean on failure.
+            if git diff --name-only "$BEFORE" "$AFTER" | grep -qE 'package-lock\.json|(^|/)package\.json'; then
+              echo "deps changed -> npm ci"
+              npm ci --omit=dev || { echo "npm ci failed -> clean retry"; rm -rf node_modules && npm ci --omit=dev; }
+            else
+              echo "deps unchanged -> skip reinstall"
+            fi
+            # Integrity gate: never restart on a broken node_modules. If a core
+            # runtime dependency can't be resolved, repair before restart.
+            if ! node --input-type=module -e "await import('dotenv'); await import('hono'); await import('pg')" 2>/dev/null; then
+              echo "node_modules incomplete -> repairing via npm ci"
+              rm -rf node_modules && npm ci --omit=dev
+            fi
             sudo systemctl restart promofm-api
             ok=0
             for i in $(seq 1 10); do
