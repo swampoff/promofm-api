@@ -288,7 +288,10 @@ landing.get('/charts/weekly', async (c) => {
       Promise.allSettled(raw.entries.slice(0, 20).map((e: any) => 
         ensureArtistProfile(e.artist, e.coverUrl || e.cover, { chart_position: e.position, source: 'chart:promofm' })
       )).catch(() => {});
-      return c.json({ success: true, data: { entries: raw.entries.slice(0, 20), updatedAt: raw.updatedAt } });
+      // RULE: чарт отдаёт ТОЛЬКО проигрываемые записи (есть previewUrl),
+      // чтобы в плеере на главной трек всегда играл.
+      const playable = raw.entries.filter((e: any) => e.previewUrl);
+      return c.json({ success: true, data: { entries: playable.slice(0, 20), updatedAt: raw.updatedAt } });
     }
     // Fallback to chart:weekly:top20
     const fallback = await getPlatformStats('chart:weekly:top20');
