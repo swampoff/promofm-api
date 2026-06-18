@@ -658,6 +658,17 @@ app.post('/submit-review', requireAuth, async (c) => {
       return c.json({ error: 'Review not found' }, 404);
     }
 
+    // SECURITY (2026-06-17): owner-check. Без него атакующий с любым
+    // review_id мог закрыть чужой отзыв с собственными оценками и
+    // снять чужие coins (reward_points). expert identity берётся из JWT.
+    const jwtExpert = String(c.get('userEmail') || c.get('userId') || '');
+    if (jwtExpert && review.expert_email && review.expert_email !== jwtExpert) {
+      return c.json({ error: 'Этот ревью не ваш' }, 403);
+    }
+    if (review.status === 'completed') {
+      return c.json({ error: 'Ревью уже закрыт' }, 409);
+    }
+
     // Обновить оценку + reward в одном typed UPSERT.
     review.status = 'completed';
     review.mixing_mastering_score = mixing_mastering_score;
@@ -1192,7 +1203,11 @@ app.get('/expert/reviews', requireAuth, async (c) => {
 app.get('/available-for-review', requireAuth, async (c) => {
   try {
     const allIds = (await trackTestAllRequestsStore.get('singleton') || []) as string[];
-    const expertId = c.req.query('expert_id') || '';
+    // SECURITY (2026-06-17): expert_id берётся из JWT, не из query. Любой
+    // авторизованный юзер мог раньше передать чужой ID и подсмотреть
+    // его пул доступных тестов. Backward-compat: legacy query-param всё
+    // ещё принимается, но игнорируется когда из JWT доступен идентификатор.
+    const expertId = String(c.get('userEmail') || c.get('userId') || c.req.query('expert_id') || '');
     const available: any[] = [];
 
     for (const id of allIds) {
@@ -1223,10 +1238,21 @@ app.get('/available-for-review', requireAuth, async (c) => {
 
 app.post('/claim-review', requireAuth, async (c) => {
   try {
-    const { request_id, expert_id, expert_name, expert_role } = await c.req.json();
+    const body = await c.req.json();
+    const { request_id } = body;
+    // SECURITY (2026-06-17): expert identity берётся из JWT, body больше
+    // не определяет кто будет owner'ом review-строки. Раньше любой
+    // авторизованный юзер мог передать чужой expert_id и/или expert_name
+    // — система создавала review на чужое имя + чужие будущие coins.
+    // Body-поля expert_name/expert_role игнорируются если JWT отдаёт их.
+    const jwtEmail = String(c.get('userEmail') || '');
+    const jwtUserId = String(c.get('userId') || '');
+    const expert_id = jwtEmail || jwtUserId || String(body?.expert_id || '');
+    const expert_name = String(c.get('userName' as never) || body?.expert_name || expert_id.split('@')[0] || expert_id);
+    const expert_role = String(body?.expert_role || 'expert');
 
     if (!request_id || !expert_id) {
-      return c.json({ error: 'request_id and expert_id are required' }, 400);
+      return c.json({ error: 'request_id required, identity не определён в JWT' }, 400);
     }
 
     const req: any = await trackTestRequestsStore.get(request_id);
@@ -1323,8 +1349,9 @@ app.post('/claim-review', requireAuth, async (c) => {
 
 app.get('/expert/stats', requireAuth, async (c) => {
   try {
-    const expertId = c.req.query('expert_id');
-    if (!expertId) return c.json({ error: 'expert_id required' }, 400);
+    // SECURITY (2026-06-17): expert_id из JWT, не query.
+    const expertId = String(c.get('userEmail') || c.get('userId') || c.req.query('expert_id') || '');
+    if (!expertId) return c.json({ error: 'expert identity не определён в JWT' }, 400);
 
     const statsRow = await getExpertStats(expertId);
     const stats: any = statsRow ? {
@@ -1380,8 +1407,9 @@ app.get('/expert/stats', requireAuth, async (c) => {
 
 app.get('/expert/my-reviews', requireAuth, async (c) => {
   try {
-    const expertId = c.req.query('expert_id');
-    if (!expertId) return c.json({ error: 'expert_id required' }, 400);
+    // SECURITY (2026-06-17): expert_id из JWT, не query.
+    const expertId = String(c.get('userEmail') || c.get('userId') || c.req.query('expert_id') || '');
+    if (!expertId) return c.json({ error: 'expert identity не определён в JWT' }, 400);
 
     // Indexed SELECT через idx_track_test_reviews_expert — single query.
     const { pool: ttMyPool } = await import('./db-client.tsx');
