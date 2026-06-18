@@ -1576,6 +1576,36 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   try {
     const { recordRevenue } = await import('./platform-revenue.tsx');
     const commissionRate = session.type === 'donation' ? 0 : 0.1; // 10% commission except donations
+
+    // 2026-06-18: payee resolution для не-artist'овых платежей.
+    // До этого PR'а `payeeId: session.metadata.artistId` хардкодилось —
+    // для engineer_order (FE передаёт только engineerOrderId, не artistId)
+    // payeeId писался NULL → /engineer/earnings WHERE payee_id = $1 не
+    // находил ни одной строки → инженер видел «доход 0 ₽» даже после
+    // оплаченных заказов. Тот же класс silent data-loss что и
+    // _getRadioBalance=0 (radio #285).
+    //
+    // Canonical engineer_id берём из engineer_orders, не из metadata:
+    // (а) IDOR-safe — клиент не влияет на payee
+    // (б) идемпотентно для webhook retry
+    let payeeId: string | undefined = session.metadata.artistId;
+    let payeeName: string | undefined = session.metadata.artistName;
+    if (session.metadata?.itemType === 'engineer_order' && session.metadata?.engineerOrderId) {
+      try {
+        const { pool: rrPool } = await import('./db-client.tsx');
+        const r = await rrPool.query(
+          'SELECT engineer_id FROM engineer_orders WHERE id = $1',
+          [String(session.metadata.engineerOrderId)],
+        );
+        if (r.rows[0]?.engineer_id) {
+          payeeId = r.rows[0].engineer_id;
+          payeeName = payeeName || 'engineer';
+        }
+      } catch (e: any) {
+        log.warn({ err: e?.message, orderId: session.metadata.engineerOrderId }, 'engineer_payee_lookup_failed');
+      }
+    }
+
     await recordRevenue({
       channel: session.type === 'purchase' ? (session.metadata.itemType || 'purchase') : session.type,
       description: session.description,
@@ -1585,8 +1615,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       commissionRate,
       payerId: session.userId,
       payerName: session.metadata.payerName || session.userId,
-      payeeId: session.metadata.artistId,
-      payeeName: session.metadata.artistName,
+      payeeId,
+      payeeName,
       metadata: { orderId: session.orderId, gateway: session.gateway },
     });
   } catch (err) {
