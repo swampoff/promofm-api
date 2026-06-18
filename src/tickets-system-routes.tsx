@@ -79,6 +79,15 @@ app.get('/:ticketId', requireAuth, async (c) => {
       }, 404);
     }
 
+    // 2026-06-18 IDOR-closure (mirror PUT /:ticketId block ниже): только
+    // владелец тикета или admin может читать; раньше любой auth'd user
+    // мог прочитать чужой тикет по угаданному UUID.
+    const authUserId = c.get('userId');
+    const authRole = c.get('userRole');
+    if (authRole !== 'admin' && ticket.user_id !== authUserId) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+
     return c.json({
       success: true,
       data: ticket
@@ -251,6 +260,17 @@ app.put('/:ticketId', requireAuth, async (c) => {
       }, 404);
     }
 
+    // 2026-06-18: owner-check добавлен. Раньше любой authenticated юзер
+    // мог обновить/закрыть/изменить priority/category/status чужого
+    // тикета по угаданному UUID — IDOR-вектор. Admin сохраняет полный
+    // доступ (поддержка работает с тикетами всех юзеров).
+    const userId = c.get('userId');
+    const role = c.get('userRole');
+    if (role !== 'admin' && ticket.user_id !== userId) {
+      console.warn(`[tickets-system] PUT IDOR: userId=${userId} tried to update ticketId=${ticketId} owned by ${ticket.user_id}`);
+      return c.json({ success: false, error: 'Нельзя редактировать чужой тикет' }, 403);
+    }
+
     const updatedTicket = {
       ...ticket,
       ...body,
@@ -293,15 +313,20 @@ app.delete('/:ticketId', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
-    // Atomic existence-check + delete: single DELETE returns rowCount.
+    // 2026-06-18 IDOR-closure: WHERE id AND (user_id = jwt OR admin).
+    // Раньше DELETE WHERE id = $1 — любой auth'd user мог удалить
+    // чужой тикет по угаданному UUID. Atomic: одной query + owner-check
+    // + 404 неразличим от 403 (это minor; main goal — не пускать).
+    const authUserId = c.get('userId');
+    const authRole = c.get('userRole');
     const del = await pool.query(
-      `DELETE FROM support_tickets WHERE id = $1`,
-      [ticketId]
+      `DELETE FROM support_tickets WHERE id = $1 AND ($3::text = 'admin' OR user_id = $2)`,
+      [ticketId, authUserId, authRole],
     );
     if (del.rowCount === 0) {
       return c.json({
         success: false,
-        error: 'Ticket not found'
+        error: 'Ticket not found or access denied'
       }, 404);
     }
 
@@ -331,12 +356,22 @@ app.get('/:ticketId/messages', requireAuth, async (c) => {
   const ticketId = c.req.param('ticketId');
 
   try {
-    // Native cols (migration 048) — select only the messages jsonb column.
+    // 2026-06-18 IDOR-closure: SELECT user_id + messages atomically;
+    // если ticket существует но не свой — 403. Раньше любой auth'd user
+    // мог читать чужие сообщения support-чата (включая PII).
     const _q = await pool.query(
-      `SELECT messages FROM support_tickets WHERE id = $1 LIMIT 1`,
+      `SELECT user_id, messages FROM support_tickets WHERE id = $1 LIMIT 1`,
       [ticketId]
     );
-    const raw = _q.rowCount ? (_q.rows[0].messages || []) : [];
+    if (!_q.rowCount) {
+      return c.json({ success: false, error: 'Ticket not found' }, 404);
+    }
+    const authUserId = c.get('userId');
+    const authRole = c.get('userRole');
+    if (authRole !== 'admin' && _q.rows[0].user_id !== authUserId) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+    const raw = _q.rows[0].messages || [];
     const messages = (Array.isArray(raw) ? raw : [])
       .sort((a: any, b: any) =>
         new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
@@ -365,6 +400,7 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
     const sender_id = c.get('userId'); // IDOR fix: from JWT
+    const authRole = c.get('userRole');
     const {
       sender_type, // 'user' | 'support' | 'admin'
       message,
@@ -377,6 +413,25 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
         success: false,
         error: 'Missing required fields'
       }, 400);
+    }
+
+    // 2026-06-18 IDOR-closure: sender_type='admin'|'support' доступен
+    // только admin'у; обычный user может писать только как 'user' и
+    // только в свой тикет.
+    if ((sender_type === 'admin' || sender_type === 'support') && authRole !== 'admin') {
+      return c.json({ success: false, error: 'Только admin может писать как support/admin' }, 403);
+    }
+    if (sender_type === 'user' && authRole !== 'admin') {
+      const own = await pool.query(
+        `SELECT user_id FROM support_tickets WHERE id = $1 LIMIT 1`,
+        [ticketId]
+      );
+      if (!own.rowCount) {
+        return c.json({ success: false, error: 'Ticket not found' }, 404);
+      }
+      if (own.rows[0].user_id !== sender_id) {
+        return c.json({ success: false, error: 'Нельзя писать в чужой тикет' }, 403);
+      }
     }
 
     const messageId = `msg-${crypto.randomUUID()}`;
@@ -481,17 +536,23 @@ app.post('/:ticketId/rate', requireAuth, async (c) => {
       }, 400);
     }
 
-    // Atomic rating write — single UPDATE, then re-SELECT for response.
+    // 2026-06-18 IDOR-closure: владелец тикета или admin. Ratings — это
+    // user-feedback после resolution, чужой человек не должен ставить
+    // оценку чужому тикету.
+    const authUserId = c.get('userId');
+    const authRole = c.get('userRole');
+
+    // Atomic rating write — single UPDATE, owner-check встроен в WHERE.
     const upd = await pool.query(
       `UPDATE support_tickets SET
          rating     = $2,
          feedback   = $3,
          updated_at = NOW()
-       WHERE id = $1
+       WHERE id = $1 AND ($5::text = 'admin' OR user_id = $4)
        RETURNING id, user_id, subject, description, category, priority, status,
                  assigned_to, attachments, tags, messages, rating, feedback,
                  sla_due_date, resolved_at, closed_at, created_at, updated_at`,
-      [ticketId, rating, feedback || null]
+      [ticketId, rating, feedback || null, authUserId, authRole]
     );
     if (upd.rowCount === 0) {
       return c.json({
