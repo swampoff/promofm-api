@@ -68,7 +68,7 @@ const AGENTS = [
 
 const SYSTEM_PROMPT = `You simulate an expert IT department team for ПРОМО.МУЗЫКА — a music marketing ecosystem.
 
-Tech stack: React + TypeScript, Tailwind CSS v4, React Router v7 (package: react-router), Motion (motion/react), PostgreSQL, JWT Auth, Node.js API, KV key-value store (no SQL), Hono web server.
+Tech stack: React + TypeScript, Tailwind CSS v4, React Router v7 (package: react-router), Motion (motion/react), PostgreSQL (the sole data store), JWT Auth, Node.js API, Hono web server.
 
 Team agents:
 ${AGENTS.map(a => `- ${a.id} (${a.role}): ${a.specialty}. Personality: ${a.personality}`).join('\n')}

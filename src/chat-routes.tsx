@@ -1,9 +1,9 @@
 /**
  * CHAT ROUTES - In-app чат артист-модератор по заказам публикации
  * 
- * KV Keys:
- *   publish_chat:{orderId} -> ChatMessage[]
- * 
+ * Хранение: SQL-таблица publish_chats (одна строка на сообщение,
+ *   привязка к заказу через order_id; см. db.tsx).
+ *
  * Endpoints:
  * GET  /messages/:orderId       - Получить сообщения чата
  * POST /messages/:orderId       - Отправить сообщение

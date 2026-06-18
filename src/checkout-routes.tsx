@@ -2154,7 +2154,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       }
     }
 
-    // track_test — экспертный тест. KV-store (track_test_requests).
+    // track_test — экспертный тест. SQL-таблица track_test_requests.
     if (type === 'purchase' && metadata?.type === 'track_test') {
       const reqId = metadata?.requestId;
       if (!reqId) {
@@ -2217,7 +2217,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       type: type as PaymentType,
     });
 
-    // Save session to KV
+    // Save session to SQL (payment_sessions via upsertPaymentSession)
     const session: PaymentSession = {
       orderId,
       userId,

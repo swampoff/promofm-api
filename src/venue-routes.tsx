@@ -2,13 +2,13 @@
  * VENUE ROUTES - API для кабинета заведений
  * Авторизация через requireAuth middleware (JWT)
  * 
- * KV ключи:
- * - venue_profile:{userId} - профиль заведения
- * - venue_analytics:{venueId} - аналитика
- * - venue_campaigns:{venueId} - рекламные кампании
- * - venue_settings:{venueId} - настройки
- * - venue_notifications:{venueId} - уведомления (JSON массив)
- * - venue_bookings:{venueId} - список букингов (JSON массив ID)
+ * Хранение: SQL-таблицы (см. db.tsx):
+ * - venue_profiles - профиль заведения
+ * - аналитика - агрегируется из venue_ad_campaigns (отдельного стора нет)
+ * - рекламные кампании - venue_ad_campaigns
+ * - настройки - в составе venue_profiles
+ * - notifications - уведомления
+ * - bookings - список букингов
  * 
  * Endpoints:
  * - GET /profile - Профиль заведения
@@ -51,7 +51,7 @@ async function getUserId(c: any): Promise<string> {
   return c.get('userId') || FALLBACK_VENUE_USER_ID;
 }
 
-// Helper: safely parse kv.get result (may be string or object)
+// Helper: safely parse a SQL row/value (may be a JSON string or already an object)
 function parse(data: any): any {
   if (!data) return null;
   if (typeof data === 'string') {
@@ -60,7 +60,7 @@ function parse(data: any): any {
   return data;
 }
 
-// Helper: Get or create venue profile from KV
+// Helper: load venue profile from the venue_profiles SQL table
 async function getVenueProfile(userId: string) {
   const data = await dbGetVenueProfile(userId);
   return parse(data);
@@ -484,7 +484,7 @@ app.get('/notifications', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
 
-    // Получить уведомления из KV по prefix
+    // Получить уведомления пользователя из таблицы notifications
     const notificationsData = await getNotificationsByUser(userId);
     const notifications = (notificationsData || [])
       .map((n: any) => {

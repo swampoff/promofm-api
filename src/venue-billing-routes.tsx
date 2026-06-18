@@ -6,7 +6,7 @@
  * /server/subscriptions/* which are for ARTIST tiers (spark / start /
  * pro / elite). Venues have a different plan ladder (Старт / Бизнес /
  * Сеть / Enterprise) and their state lives in venue_profiles.data
- * jsonb rather than the artist `subscriptions` KV store — so they
+ * jsonb rather than the artist `subscriptions` SQL table — so they
  * get their own surface.
  *
  * Scope: VENUE only. The legacy /server/api/venue-radio (existing
@@ -21,8 +21,8 @@
  *   subscriptionPriceRub     last paid price (audit)
  *   subscriptionUpdatedAt    ISO date
  *
- * Saved payment method: stored in the existing `payment_methods` KV
- * store (the same one artist subscriptions use). One method per
+ * Saved payment method: stored in the existing `payment_methods` SQL
+ * table (the same one artist subscriptions use). One method per
  * user is the working model; multiple methods is a future feature.
  *
  * Endpoints:

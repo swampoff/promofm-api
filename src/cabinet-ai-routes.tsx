@@ -11,7 +11,7 @@ import { quickLLM, getLLMStatus } from './llm-router.tsx';
 
 const app = new Hono();
 
-// ─── KV store for last AI response per user+cabinet ──────────────────────────
+// ─── In-memory map of last AI response per user+cabinet ──────────────────────
 
 const aiHistoryMap = new Map<string, { question: string; response: string; timestamp: string }>();
 

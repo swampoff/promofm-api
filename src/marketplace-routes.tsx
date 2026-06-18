@@ -1,22 +1,17 @@
 /**
  * MARKETPLACE ROUTES - API для маркетплейса битов и услуг
  *
- * KV ключи:
- * - beat:public:{id}              - данные бита (seeded в demo-seed)
- * - producer_service:public:{id}  - данные услуги (seeded в demo-seed)
- * - beat_purchase:{purchaseId}    - запись о покупке
- * - beat_purchases_by_user:{uid}  - JSON-массив purchaseId для покупателя
- * - beat_purchases_by_prod:{uid}  - JSON-массив purchaseId для продюсера
- * - beat_favorites:{uid}          - JSON-массив beatId
- * - beat_review:{beatId}:{revId}  - отзыв на бит
- * - service_order:{orderId}       - заказ услуги
- * - service_orders_by_client:{uid}  - JSON-массив orderId
- * - service_orders_by_producer:{uid} - JSON-массив orderId
- * - stats:platform                - общая статистика (обновляется)
- * - contract:{orderId}             - контракт с этапами (milestones)
- * - digital_good:public:{id}       - цифровой товар
- * - digital_purchase:{purchaseId}  - покупка цифрового товара
- * - digital_purchases_by_user:{uid} - JSON-массив purchaseId
+ * Хранение: нативные SQL-таблицы (см. db.tsx), сущности:
+ * - beats                         - данные бита (seeded в demo-seed)
+ * - producer_services            - данные услуги (seeded в demo-seed)
+ * - beat_purchases               - записи о покупках битов (по buyer_id / producer_id)
+ * - beat_favorites               - избранные биты пользователя (row-per-favorite)
+ * - beat_reviews                 - отзывы на бит
+ * - service_orders               - заказы услуг (по client_id / producer_id)
+ * - общая статистика платформы   - обновляется (getPlatformStats/setPlatformStats)
+ * - contracts                    - контракт с этапами (milestones)
+ * - digital_goods                - цифровые товары
+ * - покупки цифровых товаров      - записи о покупках (по buyer_id)
  *
  * Endpoints - Beats:
  * - GET    /beats              - Публичный каталог с фильтрами
@@ -95,10 +90,10 @@ function nowIso(): string {
 // раньше она жила только тут, а checkout-routes.tsx пытался импортировать
 // её из platform-revenue.tsx → ReferenceError на оплате beat/digital_good.
 
-/** SSE уведомление: KV-персистенция + real-time доставка (fire-and-forget) */
+/** SSE уведомление: запись в notifications (SQL) + real-time доставка (fire-and-forget) */
 async function sendSSE(userId: string, event: string, data: any) {
   try {
-    // 1. Сохранить в KV для истории уведомлений
+    // 1. Сохранить в notifications (SQL) для истории уведомлений
     const notifId = genId('notif');
     await upsertNotification(userId, notifId, {
       id: notifId,
@@ -117,7 +112,7 @@ async function sendSSE(userId: string, event: string, data: any) {
   }
 }
 
-/** Собрать все биты из KV по префиксу */
+/** Собрать все биты из таблицы beats (SQL, через getBeats) */
 async function getAllBeats(): Promise<any[]> {
   try {
     const entries = await getBeats();

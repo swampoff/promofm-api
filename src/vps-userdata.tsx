@@ -317,20 +317,3 @@ export async function vpsUseToken(token: string): Promise<boolean> {
     return false;
   }
 }
-
-// ── Auth Logs (write to local PG) ──
-
-export async function vpsLogAuth(action: string, userId?: string, ip?: string, ua?: string): Promise<void> {
-  try {
-    await pool.query(
-      `INSERT INTO kv_store (key, value) VALUES ($1, $2)
-       ON CONFLICT (key) DO UPDATE SET value = kv_store.value || $2::jsonb, updated_at = NOW()`,
-      [
-        `auth_log:${userId || 'anon'}`,
-        JSON.stringify({
-          logs: [{ action, ip, ua, ts: new Date().toISOString() }]
-        })
-      ]
-    );
-  } catch { /* fire and forget */ }
-}

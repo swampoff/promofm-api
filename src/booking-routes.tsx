@@ -1,14 +1,13 @@
 /**
  * BOOKING ROUTES - API для системы букинга артистов
- * Маршруты бронирования (JSON stores)
- * 
- * KV ключи:
- * - booking:{id} - данные букинга
- * - bookings_by_user:{userId} - JSON массив booking ID для пользователя (обе роли)
- * - booking_payment:{id} - данные платежа
- * - booking_calendar:{performerId}:{date} - заблокированные даты
- * - notification:{userId}:{id} - уведомления
- * 
+ * Маршруты бронирования
+ *
+ * Хранение (SQL-таблицы, см. db.tsx):
+ * - bookings - данные букинга (одна строка на букинг)
+ * - bookings - запрашивается по performer_id / user_id для списка пользователя (обе роли)
+ * - booking_payments - данные платежа
+ * - notifications - уведомления
+ *
  * Endpoints:
  * - POST /create - Создание заявки на букинг
  * - GET /list - Список букингов пользователя
@@ -59,7 +58,7 @@ async function addBookingToUserIndex(_userId: string, _bookingId: string) {
 }
 
 // =====================================================
-// HELPER: Отправить уведомление через KV
+// HELPER: Отправить уведомление (SQL: таблица notifications через upsertNotification)
 // =====================================================
 async function sendNotification(params: {
   userId: string;
@@ -95,15 +94,15 @@ async function sendNotification(params: {
       },
     });
   } catch (error) {
-    console.error('Failed to send notification via KV:', error);
+    console.error('Failed to send notification via SQL:', error);
   }
 }
 
 // =====================================================
-// HELPER: Получить профиль исполнителя из KV
+// HELPER: Получить профиль исполнителя из SQL (artist_profiles / dj_profiles / users)
 // =====================================================
 async function getPerformerProfile(performerId: string, performerType: string) {
-  // Try artist KV data first
+  // Try artist_profiles row first
   const artistData = await getArtistProfile(performerId);
   if (artistData) {
     const artist = artistData;
@@ -186,10 +185,10 @@ app.post('/create', requireAuth, async (c) => {
       return apiError(c, 'VALIDATION_REQUIRED_FIELDS');
     }
 
-    // Получить профиль performer'а из KV
+    // Получить профиль performer'а из SQL
     const performer = await getPerformerProfile(performerId, performerType);
     if (!performer) {
-      console.error('Performer not found in KV:', performerId);
+      console.error('Performer not found in SQL:', performerId);
       return apiError(c, 'NOT_FOUND', 'Исполнитель не найден');
     }
 
@@ -245,7 +244,7 @@ app.post('/create', requireAuth, async (c) => {
     const depositAmount = offeredPrice * 0.30;
     const finalAmount = offeredPrice * 0.70;
 
-    // Получить venue profile из KV
+    // Получить venue profile из SQL (таблица venue_profiles)
     const venueProfileData = await getVenueProfile(user.id);
     const venueProfile = venueProfileData || null;
 
@@ -294,7 +293,7 @@ app.post('/create', requireAuth, async (c) => {
       },
     };
 
-    // Сохранить в KV
+    // Сохранить в SQL (таблица bookings)
     await upsertBooking(bookingId, booking);
 
     // Email notification to admin
@@ -318,7 +317,7 @@ app.post('/create', requireAuth, async (c) => {
       data: { bookingId },
     });
 
-    console.log('Booking created via KV:', bookingId);
+    console.log('Booking created via SQL:', bookingId);
     return c.json({ 
       success: true,
       booking,
@@ -442,7 +441,7 @@ app.put('/:id/accept', requireAuth, async (c) => {
       data: { bookingId },
     });
 
-    console.log('Booking accepted via KV:', bookingId);
+    console.log('Booking accepted via SQL:', bookingId);
     return c.json({ success: true, booking, message: 'Booking accepted successfully' });
 
   } catch (error: any) {
@@ -492,7 +491,7 @@ app.put('/:id/reject', requireAuth, async (c) => {
       data: { bookingId, reason: rejectionReason },
     });
 
-    console.log('Booking rejected via KV:', bookingId);
+    console.log('Booking rejected via SQL:', bookingId);
     return c.json({ success: true, booking, message: 'Booking rejected' });
 
   } catch (error: any) {
@@ -573,7 +572,7 @@ app.put('/:id/cancel', requireAuth, async (c) => {
       data: { bookingId, reason: cancellationReason },
     });
 
-    console.log('Booking cancelled via KV:', bookingId);
+    console.log('Booking cancelled via SQL:', bookingId);
     return c.json({ success: true, booking, message: 'Booking cancelled successfully' });
 
   } catch (error: any) {

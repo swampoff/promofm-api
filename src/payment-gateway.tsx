@@ -67,7 +67,7 @@ export interface PaymentGateway {
   chargeRecurring(params: RecurringChargeRequest): Promise<PaymentSessionResult>;
 }
 
-// ── Payment Session (stored in KV) ──
+// ── Payment Session (stored in the payment_sessions SQL table; see db.tsx) ──
 
 export interface PaymentSession {
   orderId: string;

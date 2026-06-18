@@ -111,8 +111,9 @@ export async function recordRevenue(params: {
       ]
     );
 
-    // 2. Баланс платформы — payment_balances остаётся singleton-style KV
-    // (один user → один баланс), это валидный паттерн.
+    // 2. Баланс платформы — SQL-таблица payment_balances (native cols
+    // available/pending/total, см. paymentBalancesStore в db.tsx),
+    // одна строка на user_id (здесь user_id='platform').
     const balRaw = await paymentBalancesStore.get('platform');
     const bal = (balRaw && typeof balRaw === 'object' && !Array.isArray(balRaw)) ? balRaw as any : { available: 0, pending: 0, total: 0 };
     bal.available += params.platformRevenue;

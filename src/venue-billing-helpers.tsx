@@ -46,7 +46,7 @@ export async function tryAutoChargeAtTrialEnd(userId: string, profileData: any):
   if (!profileData) return false;
 
   // Look up saved payment method. The artist cron uses the same
-  // `payment_methods` KV store — we read the first available method.
+  // `payment_methods` SQL table — we read the first available method.
   const methods = await getPaymentMethods(userId).catch(() => null) as any;
   const card = Array.isArray(methods?.data) ? methods.data[0]
               : Array.isArray(methods)        ? methods[0]

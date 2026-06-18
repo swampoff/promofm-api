@@ -2,8 +2,9 @@
  * RADIO ROUTES - API для кабинета радиостанций
  *
  * radio_ad_slots — row-per-slot, native cols (migration 050).
- * Остальные stores ещё на kv (radio_artist_requests, radio_venue_requests,
- * radio_finance, radio_transactions, radio_notifications, radio_analytics).
+ * Остальные данные (radio_artist_requests, radio_venue_requests,
+ * radio_finance, radio_transactions, radio_notifications, radio_analytics)
+ * — нативные SQL-таблицы (Phase D closeout, 2026-05-31).
  *
  * Endpoints:
  * - POST /ad-slots/create - Создать рекламный слот
@@ -52,8 +53,8 @@ const app = new Hono();
 
 // Helper: получить userId через единый хелпер авторизации.
 // Audit B-R2 (2026-05-31): раньше при отсутствии userId возвращался хак
-// FALLBACK_RADIO_USER_ID = 'anonymous' → ВСЕ writes падали в KV под
-// одним ключом 'anonymous' (cross-station contamination — заявки/
+// FALLBACK_RADIO_USER_ID = 'anonymous' → ВСЕ writes уходили под
+// одним entityId 'anonymous' (cross-station contamination — заявки/
 // уведомления radioA смешивались с radioB). Все callers идут под
 // requireAuth, так что null-userId это middleware-bug; fail-safe: throw
 // 401-friendly Error который handler catch'нет (вместо silent write

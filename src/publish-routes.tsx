@@ -746,7 +746,7 @@ app.put('/orders/:id/status', requireAuth, requireAdmin, async (c) => {
       // 'approved' is split inside the handler: price=0 → 'paid' (skips payment),
       // price>0 → 'pending_payment'. Explicit 'published' override kept for admin.
       approved: ['pending_payment', 'paid', 'published'],
-      // Webhook writes 'paid' directly to KV bypassing this validator;
+      // Webhook writes 'paid' directly to the publish_orders row bypassing this validator;
       // listed here for documentation and for any future admin manual transition.
       pending_payment: ['paid'],
       // Admin manually publishes after verifying payment — no auto-publish on payment.
@@ -1221,7 +1221,7 @@ async function getEmailPrefs(userId: string) {
 
 /**
  * Создает email-уведомление для критических статусов.
- * Сохраняет запись в KV, логирует вызов.
+ * Сохраняет запись в SQL-таблицу publish_email_prefs (лог в data), логирует вызов.
  * В production подключается к email-провайдеру (Sendgrid/Mailgun/SES).
  */
 async function sendCriticalEmailNotification(

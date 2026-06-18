@@ -604,7 +604,7 @@ auth.post("/set-role", requireAuth, requireAdmin, async (c) => {
     await sql('UPDATE users SET token_version = COALESCE(token_version, 0) + 1 WHERE id = $1', [userId]);
 
     // Update profile. The role change in `users` is the source of truth — if the
-    // KV/PG profile sync fails, log it and continue rather than 500'ing the whole
+    // profile sync fails, log it and continue rather than 500'ing the whole
     // request, since the user already has the new role in the auth table.
     try {
       let profile = await vpsGetProfile(userId);
