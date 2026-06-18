@@ -160,6 +160,16 @@ app.get('/beats', async (c) => {
     // Только активные
     beats = beats.filter(b => b.status === 'active');
 
+    // 2026-06-17: скрываем demo-seed данные (demo-seed.tsx) на публичном
+    // лендинге. Demo-producerId всегда имеет префикс 'producer-' (см.
+    // demo-seed.tsx getProducerId), реальные продюсеры идентифицируются
+    // через UUID users.id. Параметр ?include_demo=true оставлен для
+    // admin-страниц / SystemTestSuite.
+    const includeDemo = c.req.query('include_demo') === 'true';
+    if (!includeDemo) {
+      beats = beats.filter(b => !String(b.producerId || '').startsWith('producer-'));
+    }
+
     const search = c.req.query('search')?.toLowerCase();
     const genre = c.req.query('genre');
     const keyFilter = c.req.query('key');
@@ -221,7 +231,13 @@ app.get('/beats', async (c) => {
 app.get('/beats/stats', async (c) => {
   try {
     const beats = await getAllBeats();
-    const active = beats.filter(b => b.status === 'active');
+    let active = beats.filter(b => b.status === 'active');
+    // 2026-06-17: те же demo-фильтры что у GET /beats. Без них stats
+    // показывал бы «1М прослушиваний» от seed-данных.
+    const includeDemo = c.req.query('include_demo') === 'true';
+    if (!includeDemo) {
+      active = active.filter(b => !String(b.producerId || '').startsWith('producer-'));
+    }
     const totalPlays = active.reduce((s, b) => s + (b.plays || 0), 0);
     const totalSold = active.reduce((s, b) => s + (b.purchases || 0), 0);
     const producers = new Set(active.map(b => b.producerId)).size;
@@ -761,6 +777,13 @@ app.get('/services', async (c) => {
     // Только активные
     services = services.filter(s => s.status === 'active');
 
+    // 2026-06-17: фильтр demo-seed (см. /beats). Параметр include_demo=true
+    // для admin.
+    const includeDemo = c.req.query('include_demo') === 'true';
+    if (!includeDemo) {
+      services = services.filter(s => !String(s.producerId || '').startsWith('producer-'));
+    }
+
     const search = c.req.query('search')?.toLowerCase();
     const typeFilter = c.req.query('type');
     const priceMin = c.req.query('price_min') ? Number(c.req.query('price_min')) : null;
@@ -814,7 +837,12 @@ app.get('/services', async (c) => {
 app.get('/services/stats', async (c) => {
   try {
     const services = await getAllServices();
-    const active = services.filter(s => s.status === 'active');
+    let active = services.filter(s => s.status === 'active');
+    // 2026-06-17: те же demo-фильтры что у GET /services.
+    const includeDemo = c.req.query('include_demo') === 'true';
+    if (!includeDemo) {
+      active = active.filter(s => !String(s.producerId || '').startsWith('producer-'));
+    }
     const totalOrders = active.reduce((s, svc) => s + (svc.orders || 0), 0);
     const producers = new Set(active.map(s => s.producerId)).size;
     const avgRating = active.length > 0
@@ -1323,7 +1351,7 @@ app.get('/digital-goods', async (c) => {
     const allowedSort = ['new', 'popular', 'rating', 'price_asc', 'price_desc'];
     const sort = (allowedSort.includes(sortRaw) ? sortRaw : 'popular') as ListDigitalGoodsOpts['sort'];
 
-    const { items, total } = await listDigitalGoods({
+    let { items, total } = await listDigitalGoods({
       search:     c.req.query('search') || undefined,
       category:   c.req.query('category') || undefined,
       producerId: c.req.query('producerId') || undefined,
@@ -1331,6 +1359,16 @@ app.get('/digital-goods', async (c) => {
       priceMax:   c.req.query('price_max') ? Number(c.req.query('price_max')) : undefined,
       sort, limit, offset,
     });
+
+    // 2026-06-17: фильтр demo-seed (см. /beats). Post-filter в JS чтобы не
+    // тащить дополнительный SQL — таблицы небольшие, цена приемлема.
+    const includeDemo = c.req.query('include_demo') === 'true';
+    if (!includeDemo) {
+      const beforeCount = items.length;
+      items = items.filter((g: any) => !String(g.producerId || g.producer_id || '').startsWith('producer-'));
+      // total корректируем приближённо — для лендинга точность hasMore не критична.
+      total = total - (beforeCount - items.length);
+    }
 
     return c.json({
       success: true,
