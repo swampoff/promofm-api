@@ -1401,10 +1401,18 @@ app.get('/digital-goods/:id', async (c) => {
 app.post('/digital-goods', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { producerId, producer, title, category, description, price, tags, fileSize, format } = body;
+    const { producer, title, category, description, price, tags, fileSize, format } = body;
+    // 2026-06-18 IDOR-closure (mirror POST /beats:332-338): owner из JWT,
+    // body.producerId игнорируется. Раньше любой авторизованный юзер мог
+    // создать товар с чужим producerId → выручка от продаж шла бы на
+    // payout-адрес «жертвы», плюс мой собственный фильтр demo-seed
+    // (PR #279, `producerId.startsWith('producer-')`) скрывал бы такие
+    // подделки с лендинга — что усугубляло attack-path (товар существует
+    // и покупаем, но скрыт от глаз модерации).
+    const producerId = c.get('userId');
 
     if (!producerId || !title || !category || !price) {
-      return c.json({ success: false, error: 'producerId, title, category, price required' }, 400);
+      return c.json({ success: false, error: 'title, category, price required (producerId — из JWT)' }, 400);
     }
 
     const good: DigitalGood = {
