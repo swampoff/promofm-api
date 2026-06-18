@@ -201,8 +201,8 @@ function makeProfile(overrides: Partial<ArtistProfile> & { id: string; email: st
   };
 }
 
-/** Безопасный парсинг KV-значения */
-function parseKvProfile(raw: unknown): ArtistProfile | null {
+/** Безопасный парсинг строки профиля (users+profiles, 152-ФЗ) */
+function parseProfileRow(raw: unknown): ArtistProfile | null {
   if (!raw) return null;
   if (typeof raw === 'string') {
     try {
@@ -218,13 +218,13 @@ function parseKvProfile(raw: unknown): ArtistProfile | null {
 }
 
 /** Загрузить профиль из VPS (152-ФЗ) */
-async function loadFromKv(artistId: string): Promise<ArtistProfile | null> {
+async function loadProfileRow(artistId: string): Promise<ArtistProfile | null> {
   const raw = await vpsGetProfile(artistId);
-  return parseKvProfile(raw);
+  return parseProfileRow(raw);
 }
 
 /** Сохранить профиль на VPS (152-ФЗ) */
-async function saveToKv(artistId: string, profile: ArtistProfile): Promise<void> {
+async function saveProfileRow(artistId: string, profile: ArtistProfile): Promise<void> {
   await vpsSaveProfile(artistId, profile as unknown as Record<string, unknown>);
 }
 
@@ -243,7 +243,7 @@ function sanitizeUpdates(updates: Record<string, unknown>): Partial<ArtistProfil
 
 /**
  * GET /profile/:artistId
- * Загрузка: KV → auth-profile → 404
+ * Загрузка: profiles-строка (users+profiles) → auth-profile → artist_profiles SQL → 404
  */
 app.get('/profile/:artistId', async (c) => {
   const artistId = c.req.param('artistId');
@@ -251,20 +251,21 @@ app.get('/profile/:artistId', async (c) => {
   const isUuidParam = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artistId);
 
   try {
-    // 1. KV/VPS cache (only for UUIDs — slug keys are not stored in KV)
+    // 1. profiles-строка из users+profiles (152-ФЗ; только для UUID —
+    //    slug'и резолвятся ниже, в шаге 3 по artist_profiles).
     if (isUuidParam) {
-      const kvProfile = await loadFromKv(artistId);
-      if (kvProfile) {
-        // Normalize legacy KV rows that predate certain fields.
+      const profileRow = await loadProfileRow(artistId);
+      if (profileRow) {
+        // Normalize legacy rows that predate certain fields.
         const normalized = makeProfile({
           id: artistId,
-          email: kvProfile.email || '',
-          fullName: kvProfile.fullName || '',
-          ...kvProfile,
+          email: profileRow.email || '',
+          fullName: profileRow.fullName || '',
+          ...profileRow,
         });
 
-        // Overlay canonical fields from artist_profiles. KV was caching
-        // stats that haven't been recomputed since the row was written —
+        // Overlay canonical fields from artist_profiles. The users/profiles
+        // row was caching stats not recomputed since it was written —
         // real artists with 30+ tracks saw "0 прослушиваний / 0 треков"
         // on their public profile because cached totalPlays was 0.
         // Pull live values + live published-track count.
@@ -313,9 +314,9 @@ app.get('/profile/:artistId', async (c) => {
               [apRow.id],
             );
             normalized.totalTracks = Number(rows[0]?.cnt ?? 0);
-          } catch { /* keep whatever KV had */ }
+          } catch { /* keep whatever the row had */ }
 
-          // Real cover (the canonical column, not the stale KV/jsonb copy)
+          // Real cover (the canonical column, not the stale jsonb copy)
           // and the live radio-airplay footprint — both feed the public
           // profile hero. Missing/zero → the page hides them, never fakes.
           if (apRow.cover_url) normalized.coverUrl = apRow.cover_url as string;
@@ -324,7 +325,7 @@ app.get('/profile/:artistId', async (c) => {
           normalized.radioCities   = reach.radioCities;
         }
 
-        return c.json({ success: true, source: 'kv', data: normalized });
+        return c.json({ success: true, source: 'profile', data: normalized });
       }
     }
 
@@ -345,7 +346,7 @@ app.get('/profile/:artistId', async (c) => {
           avatarUrl: (ap.avatar as string) || '',
           city: (ap.city as string) || '',
         });
-        await saveToKv(artistId, newProfile);
+        await saveProfileRow(artistId, newProfile);
         return c.json({ success: true, source: 'auth-profile', data: newProfile });
       }
     } catch { /* continue to 404 */ }
@@ -504,7 +505,7 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileLimi
     }
 
     // Получаем текущий профиль или создаём новый
-    let currentProfile = await loadFromKv(artistId);
+    let currentProfile = await loadProfileRow(artistId);
     if (!currentProfile) {
       const userEmail = c.get('userEmail') || '';
       currentProfile = makeProfile({
@@ -528,7 +529,7 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileLimi
     // Сохраняем в PostgreSQL (users + profiles + artist_profiles).
     // vpsSaveProfile теперь пробрасывает ошибки наверх, чтобы PUT возвращал 500
     // вместо "тихого успеха", если запись не прошла.
-    await saveToKv(artistId, updatedProfile);
+    await saveProfileRow(artistId, updatedProfile);
 
     console.log(`[ArtistProfile] Updated: ${artistId}`);
     logUserAction(c, {
@@ -694,9 +695,9 @@ app.get('/popular', async (c) => {
     //   - и иногда timeout'ит / OOM.
     // Делаем сортировку и лимит на стороне SQL — LEFT JOIN tracks с
     // COUNT FILTER (moderation_status='published'). Заменили dead
-    // legacy ORDER BY data->>'track_count' (key не существует после
-    // KV→native sweep, всегда 0 → реально сортировалось только по
-    // total_followers).
+    // legacy ORDER BY data->>'track_count' (этот key больше не пишется
+    // после миграции на нативные колонки, всегда 0 → реально
+    // сортировалось только по total_followers).
     const { pool } = await import('./db-client.tsx');
     const { rows } = await pool.query(
       `SELECT ap.user_id, ap.slug, ap.artist_name, ap.genre, ap.sub_genres, ap.city,
@@ -825,7 +826,7 @@ app.get('/profile/:artistId/similar', async (c) => {
   console.log(`[ArtistProfile] GET /profile/${artistId}/similar`);
 
   try {
-    const profile = await loadFromKv(artistId);
+    const profile = await loadProfileRow(artistId);
     if (!profile) {
       return c.json({ success: false, error: `Artist not found: ${artistId}` }, 404);
     }
@@ -835,9 +836,9 @@ app.get('/profile/:artistId/similar', async (c) => {
     // Collect all real profiles from VPS
     const allProfiles = new Map<string, ArtistProfile>();
     try {
-      const kvValues = await vpsListProfiles();
-      for (const rawValue of kvValues) {
-        const parsed = parseKvProfile(rawValue);
+      const profileRows = await vpsListProfiles();
+      for (const rawValue of profileRows) {
+        const parsed = parseProfileRow(rawValue);
         if (parsed && parsed.id && parsed.id !== artistId) {
           allProfiles.set(parsed.id, parsed);
         }

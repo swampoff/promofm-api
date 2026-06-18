@@ -18,12 +18,12 @@ import { signRedirectUrl, isRedirectAllowed } from './track-url-token.tsx';
 
 const app = new Hono();
 
-// ── KV store for unsubscribes ──
-// Key: email address, Value: { unsubscribed_at, campaign_id? }
+// ── Unsubscribes — publish_email_prefs SQL table (см. db.tsx get/setPublishEmailPrefs) ──
+// Stored as user_id = 'unsub:<email>', data jsonb = { email, unsubscribed_at, campaign_id? }
 const UNSUB_PREFIX = 'unsub:';
 
-// ── Store for campaigns (using jsonb KV) ──
-// We use the existing email_campaigns table via db.tsx helpers
+// ── Campaigns — email_campaigns SQL table ──
+// We use the existing email_campaigns table via db.tsx helpers (upsertEmailCampaign/getEmailCampaigns)
 
 interface Campaign {
   id: string;

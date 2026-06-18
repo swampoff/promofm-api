@@ -1205,8 +1205,8 @@ export async function getVenueProfile(userId: string) {
   return {
     ...inner,
     // Identity — обязательно для callers (booking-routes:266 и др.)
-    // Раньше id терялся в spread → venue.id === undefined → KV-функции
-    // (upsertVenueAdSlot etc) писали в ключ 'undefined' (LIVE BUG,
+    // Раньше id терялся в spread → venue.id === undefined → helpers
+    // (upsertVenueAdSlot etc) писали строку под entityId 'undefined' (LIVE BUG,
     // тот же паттерн что в getRadioProfile, фикс 2026-06-14).
     id:             data.id,
     user_id:        data.user_id,
@@ -1302,9 +1302,9 @@ export async function getRadioProfile(userId: string) {
   return {
     ...inner,
     // Identity — обязательно для callers, которые используют
-    // profile.id как entityId в KV-функциях ad-slots/rotations/etc.
-    // Раньше id терялся в spread → station.id === undefined → KV
-    // писал на ключ 'undefined' (LIVE BUG, найден TS-аудитом 2026-06-14:
+    // profile.id как entityId в helpers ad-slots/rotations/etc.
+    // Раньше id терялся в spread → station.id === undefined → запись
+    // уходила под entityId 'undefined' (LIVE BUG, найден TS-аудитом 2026-06-14:
     // 42 одинаковых TS2339 'Property "id" does not exist' в radio-routes).
     id:               data.id,
     user_id:          data.user_id,
@@ -1350,7 +1350,7 @@ export async function upsertRadioProfile(userId: string, profile: Record<string,
   // stats writers and editor-rehydration flow.
   //
   // Accept both camelCase (frontend payload) and snake_case (legacy
-  // KV-roundtrip via getRadioProfile) for stream URLs / audio format.
+  // round-trip via getRadioProfile) for stream URLs / audio format.
   // broadcast_cities is snake_case on the wire already.
   const row = {
     user_id:           userId,
@@ -4294,7 +4294,7 @@ export const trackTestAllRequestsStore = makeTrackTestAllRequestsView();
 // trackTestRequestReviewsStore wrapper REMOVED (#116). track_test_request_reviews
 // table DROPPED migration 053. Derived через listTrackTestReviewsByRequest
 // (SELECT FROM track_test_reviews WHERE request_id = $1).
-// ─── news_pipeline (typed KV access since #120) ───
+// ─── news_pipeline (typed key/jsonb access since #120) ───
 // News CMS pipeline state (sources config, articles:pending/published/rejected
 // buckets, last_run, per-source status). Schema unchanged (key TEXT PK, data
 // jsonb). Killed makeJsonbKeyStore wrapper; reads/writes теперь through typed

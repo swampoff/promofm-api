@@ -96,17 +96,17 @@ function makeRadioProfile(overrides: Partial<RadioProfile> & { id: string; name:
   };
 }
 
-function parseKvProfile(raw: unknown): RadioProfile | null {
+function parseProfileRow(raw: unknown): RadioProfile | null {
   if (!raw) return null;
   return raw as RadioProfile;
 }
 
-async function loadFromKv(radioId: string): Promise<RadioProfile | null> {
+async function loadProfileRow(radioId: string): Promise<RadioProfile | null> {
   const raw = await getRadioProfile(radioId);
-  return parseKvProfile(raw);
+  return parseProfileRow(raw);
 }
 
-async function saveToKv(radioId: string, profile: RadioProfile): Promise<void> {
+async function saveProfileRow(radioId: string, profile: RadioProfile): Promise<void> {
   await upsertRadioProfile(radioId, profile as unknown as Record<string, unknown>);
 }
 
@@ -124,7 +124,7 @@ function sanitizeUpdates(updates: Record<string, unknown>): Partial<RadioProfile
 
 /**
  * GET /profile/:radioId
- * Загрузка из KV → 404
+ * Загрузка из radio_profiles (jsonb data + native cols) → 404
  *
  * Audit INC-R2 (2026-05-31): requireAuth + ownsRadioProfile check.
  * Раньше любой мог читать чужой profile через guess radioId — потенциально
@@ -141,9 +141,9 @@ app.get('/profile/:radioId', requireAuth, async (c) => {
   }
 
   try {
-    const kvProfile = await loadFromKv(radioId);
-    if (kvProfile) {
-      return c.json({ success: true, source: 'kv', data: kvProfile });
+    const profileRow = await loadProfileRow(radioId);
+    if (profileRow) {
+      return c.json({ success: true, source: 'profile', data: profileRow });
     }
 
     return c.json({ success: false, error: 'Radio profile not found' }, 404);
@@ -178,7 +178,7 @@ app.put('/profile/:radioId', requireAuth, async (c) => {
     }
 
     // Load existing or create new
-    let currentProfile = await loadFromKv(radioId);
+    let currentProfile = await loadProfileRow(radioId);
     if (!currentProfile) {
       const userEmail = c.get('userEmail') || '';
       currentProfile = makeRadioProfile({
@@ -198,7 +198,7 @@ app.put('/profile/:radioId', requireAuth, async (c) => {
       },
     };
 
-    await saveToKv(radioId, updatedProfile);
+    await saveProfileRow(radioId, updatedProfile);
 
     console.log(`[RadioProfile] Updated: ${radioId} → ${updatedProfile.name}`);
     return c.json({ success: true, data: updatedProfile });
@@ -272,7 +272,7 @@ app.get('/profile/:radioId/stats', requireAuth, async (c) => {
   }
 
   try {
-    const profile = await loadFromKv(radioId);
+    const profile = await loadProfileRow(radioId);
     if (profile) {
       return c.json({
         success: true,
@@ -321,7 +321,7 @@ async function ownsRadioProfile(c: any, radioId: string): Promise<boolean> {
 // Атомарно обновить и native колонку (для маркетплейса / cross-cabinet),
 // и jsonb data (для editor-rehydration через `getRadioProfile`).
 // Без второго update GET /profile вернёт jsonb без logoUrl потому
-// что parseKvProfile читает только из data.
+// что parseProfileRow отдаёт ровно то, что лежит в data.
 async function persistRadioImage(radioId: string, field: 'logoUrl' | 'coverUrl', url: string) {
   const column = field === 'logoUrl' ? 'logo_url' : 'cover_url';
   await pool.query(

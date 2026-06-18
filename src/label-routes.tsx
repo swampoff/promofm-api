@@ -1034,9 +1034,9 @@ app.get('/releases', requireAuth, async (c) => {
     if (gate instanceof Response) return gate;
     if (!gate.labelId) return c.json({ success: true, releases: [] });
 
-    // Pull orders that the label owns. publish-orders are stored in KV
-    // (publish_orders table) — `data` is the JSON blob from
-    // publishOrdersStore. The fast path uses the `user_id` column.
+    // Pull orders that the label owns. publish-orders live in the
+    // publish_orders SQL table — `data` is the JSON blob payload column.
+    // The fast path uses the `user_id` column.
     const r = await pool.query(
       `SELECT id AS order_id, data, created_at, updated_at
        FROM publish_orders

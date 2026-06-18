@@ -625,7 +625,7 @@ async function aggregateSource(source: ChartSourceConfig): Promise<ExternalChart
     parsedBy: 'mistral',
   };
 
-  // Step 4: Save to KV
+  // Step 4: Upsert into chart_sources (Postgres)
   await upsertChartSource({ id: source.id, ...result } as any);
   console.log(`Chart saved for ${source.id}: ${tracks.length} tracks`);
 
@@ -956,7 +956,7 @@ charts.get('/sources', async (c) => {
 
 /**
  * GET /all
- * Возвращает данные всех чартов из KV (кэшированные)
+ * Возвращает данные всех чартов из таблицы chart_sources (кэшированные)
  */
 charts.get('/all', async (c) => {
   try {
@@ -992,9 +992,9 @@ charts.get('/all', async (c) => {
       allCharts.push(emptyChart(SHAZAM_CHART_CONFIG, 'No data'));
     }
 
-    // ── Enrich tracks with iTunes preview URLs (with KV cache) ──
+    // ── Enrich tracks with iTunes preview URLs (with platform_stats cache) ──
     try {
-      // 1. Load cached iTunes preview map from KV
+      // 1. Load cached iTunes preview map from platform_stats
       const cachedMap: any = await getPlatformStats('itunes:preview_cache') || {};
       const itunesMap = new Map<string, string>(Object.entries(cachedMap.urls || {}));
 
@@ -1046,7 +1046,7 @@ charts.get('/all', async (c) => {
         }
       }
 
-      // 5. Save updated cache back to KV (if new URLs found)
+      // 5. Save updated cache back to platform_stats (if new URLs found)
       if (newFound > 0) {
         const urlsObj: Record<string, string> = {};
         for (const [k, v] of itunesMap) urlsObj[k] = v;
@@ -1065,7 +1065,7 @@ charts.get('/all', async (c) => {
 
 /**
  * GET /source/:id
- * Возвращает данные конкретного чарта из KV
+ * Возвращает данные конкретного чарта из таблицы chart_sources
  */
 charts.get('/source/:id', async (c) => {
   try {
@@ -1956,7 +1956,7 @@ async function fetchLastFmChart(limit = 50): Promise<IntlChartEntry[]> {
   } catch (e) { console.error('[charts] Last.fm error:', e); return []; }
 }
 
-// ─── KV helpers ─────────────────────────────────
+// ─── International chart helpers (chart_sources table) ─────────────────────────────────
 
 async function saveIntlChart(platform: string, countryCode: string, entries: IntlChartEntry[]) {
   const key = `intl:${platform}:${countryCode}`;

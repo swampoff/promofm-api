@@ -1,0 +1,33 @@
+-- Migration 111: DROP TABLE kv_store — последний рудимент KV-эпохи
+--
+-- Контекст: профили (artist/radio/producer/venue/...) давно мигрировали
+-- на нативные SQL-таблицы (users + profiles + *_profiles). Слой «KV» —
+-- это легаси-обёртка vps-userdata.tsx, которая уже ходит в эти таблицы,
+-- а не в key-value store. Единственным реальным писателем в `kv_store`
+-- оставался vpsLogAuth() — fire-and-forget лог авторизации, который:
+--   (1) не имел НИ ОДНОГО вызова в кодовой базе (мёртвый код), и
+--   (2) был сломан: INSERT ... ON CONFLICT DO UPDATE SET updated_at=NOW(),
+--       но в таблице kv_store НЕТ колонки updated_at (только key + value),
+--       поэтому каждая запись падала и гасилась в catch{}.
+-- Итог — таблица всегда оставалась пустой (0 строк на проде, проверено).
+--
+-- vpsLogAuth() удалён в этом же изменении (src/vps-userdata.tsx). После
+-- деплоя на `kv_store` не ссылается НИКТО (grep по всему /opt/promofm-api,
+-- включая cron *.sh/*.py — 0 совпадений). Дроп безопасен.
+--
+-- Откат не предусмотрен: таблица пустая и без потребителей. При острой
+-- необходимости — `CREATE TABLE kv_store (key text PRIMARY KEY,
+-- value jsonb NOT NULL DEFAULT '{}'::jsonb);`.
+--
+-- ВАЖНО: применяется ПОСЛЕ деплоя кода (когда vpsLogAuth уже не пишет).
+-- Auto-runner'а миграций нет — применять вручную. Перед дропом
+-- зафиксировать в deploy-логе, что таблица пуста (ожидается 0):
+--   sudo -u postgres psql -d promofm -c 'SELECT count(*) FROM kv_store;'
+-- затем:
+--   sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+--   BEGIN;
+--   \i /opt/promofm-api/src/migrations/111_drop_kv_store.sql
+--   COMMIT;
+--   EOF
+
+DROP TABLE IF EXISTS kv_store;

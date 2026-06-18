@@ -73,7 +73,7 @@ async function ensureArtistProfile(artistName: string, coverUrl?: string, extra?
 const landing = new Hono();
 
 // ============================================
-// POPULAR ARTISTS (KV — unchanged)
+// POPULAR ARTISTS (platform_stats SQL via getPlatformStats)
 // ============================================
 
 landing.get('/popular-artists', async (c) => {
@@ -276,7 +276,7 @@ landing.get('/artists', async (c) => {
 });
 
 // ============================================
-// CHARTS (KV — unchanged)
+// CHARTS (platform_stats SQL via getPlatformStats)
 // ============================================
 
 landing.get('/charts/weekly', async (c) => {
@@ -795,7 +795,7 @@ landing.post("/releases/archive-past", async (c) => {
     return c.json({ success: false, error: String(error) }, 500);
   }
 });
-// NEWS (PUBLIC — KV, unchanged)
+// NEWS (PUBLIC — news_public SQL table)
 // ============================================
 
 
@@ -1066,7 +1066,7 @@ landing.get('/concerts', async (c) => {
 });
 
 // ============================================
-// PLATFORM STATS (KV — unchanged)
+// PLATFORM STATS (SQL)
 // ============================================
 
 landing.get('/radio-partners', async (c) => {
@@ -1118,7 +1118,7 @@ landing.get('/radio-partners', async (c) => {
 
 landing.get('/stats', async (c) => {
   try {
-    // Mix KV stats with real SQL counts
+    // Mix platform_stats cache with real SQL counts
     const raw = await getPlatformStats('platform');
     const baseStats = raw || {};
 
@@ -1189,7 +1189,7 @@ landing.get('/search', async (c) => {
       return c.json({ success: true, data: { artists: [], tracks: [] } });
     }
 
-    // Search artists (KV)
+    // Search artists (SQL profiles via getAllArtistProfiles)
     const allArtists = await getAllArtistProfiles();
     const matchedArtists = allArtists
       .filter((a: any) => a && a.name &&
@@ -1225,7 +1225,7 @@ landing.get('/search', async (c) => {
 });
 
 // ============================================
-// BEATS MARKETPLACE (KV — unchanged)
+// BEATS MARKETPLACE (beats SQL table)
 // ============================================
 
 landing.get('/beats', async (c) => {
@@ -1256,7 +1256,7 @@ landing.get('/beats', async (c) => {
 });
 
 // ============================================
-// PRODUCER SERVICES (KV — unchanged)
+// PRODUCER SERVICES (producer_services SQL table)
 // ============================================
 
 landing.get('/producer-services', async (c) => {
@@ -1701,7 +1701,7 @@ landing.post('/seed-live', requireAdminOrKey, async (c) => {
 });
 
 // ============================================
-// ADMIN: NEWS CRUD (KV — unchanged)
+// ADMIN: NEWS CRUD (news_public SQL table)
 // ============================================
 
 landing.post('/admin/news', requireAdminOrKey, async (c) => {

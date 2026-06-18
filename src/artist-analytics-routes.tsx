@@ -369,8 +369,8 @@ app.get('/platforms/:artistId', requireAuth, requireOwner('artistId'), async (c)
 //   pitching_submissions.status             : text
 //
 // What's NOT here (audit found no SQL source):
-//   - venue rotations  → no per-artist play log table exists, only
-//     venueAdCampaignsStore (KV, keyed by venue_id). Reporting honest
+//   - venue rotations  → no per-artist play log table exists; venue_ad_campaigns
+//     holds campaign config (not per-artist plays). Reporting honest
 //     null so the UI can show "Скоро" instead of inventing a number.
 app.get('/home/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   const artistId = c.req.param('artistId');

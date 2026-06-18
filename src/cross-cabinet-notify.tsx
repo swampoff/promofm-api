@@ -159,7 +159,7 @@ export async function notifyCrossCabinet(params: NotifyParams): Promise<CrossCab
     createdAt: new Date().toISOString(),
   };
 
-  // 1. Сохраняем в KV
+  // 1. Сохраняем в SQL-таблицу cross_cabinet_notifications (через upsertCcn)
   await upsertCcn(params.targetUserId, id, notification);
 
   // The old KV-counter (ccn_unread_count) was the source of the "9+ but

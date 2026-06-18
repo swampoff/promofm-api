@@ -82,7 +82,7 @@ app.post('/generate', requireAdminOrKey, async (c) => {
 
     console.log('Generating audio for order:', orderId);
 
-    // Получаем заказ из KV
+    // Получаем заказ из SQL-таблицы content_orders
     const _coRow = await elPool.query('SELECT * FROM content_orders WHERE id = $1', [orderId]);
     if (_coRow.rows.length === 0) {
       return c.json({ success: false, error: 'Order not found' }, 404);

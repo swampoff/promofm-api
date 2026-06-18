@@ -454,7 +454,7 @@ seoRoutes.get('/prerender/*', async (c) => {
 
     // ─── Charts ───
     if (path === '/charts') {
-      // Aggregate chart data from chart_sources KV store
+      // Aggregate chart data from the chart_sources SQL table (via getChartSource)
       const sourceIds = ['russkoe', 'nashe', 'dfm', 'europa', 'hitfm', 'retro'];
       const allTracks: { title: string; artist: string; source: string; pos: number }[] = [];
       // Native getChartSource — chart_sources data column was DROPPED in

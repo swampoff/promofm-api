@@ -3,7 +3,7 @@
  * Возвращает SVG 1200x630 для социальных сетей
  * 
  * Функционал:
- * - Динамические данные из KV (количество артистов, треков, продюсеров)
+ * - Динамические данные из SQL-таблицы platform_stats (количество артистов, треков, продюсеров)
  * - Dark/Light mode через query-параметр ?mode=light|dark
  * - Кабинет-специфичные OG с уникальными цветами
  * - Кэширование на 24 часа
@@ -15,7 +15,7 @@ import { getPlatformStats } from './db.tsx';
 
 const app = new Hono();
 
-/** Получение актуальной статистики платформы из KV */
+/** Получение актуальной статистики платформы из SQL-таблицы platform_stats */
 async function getOgPlatformStats(): Promise<{
   totalArtists: number;
   totalTracks: number;
