@@ -977,15 +977,44 @@ async function _getRadioWithdrawals(stationUserId: string): Promise<any[]> {
 }
 
 async function _getRadioBalance(stationUserId: string): Promise<number> {
-  // radio_finance table never populated — 0 writers в codebase. Balance
-  // computed solely from withdrawals (reserved amounts). Previously
-  // _getRadioBalance читал из jsonb-blob, который всегда был empty.
-  const balance = 0;
+  // 2026-06-18: balance больше не hardcoded 0. Источник тот же что и у
+  // /finance/overview (radio-routes.tsx:863-895): completed
+  // radio_venue_requests.stationPayout (85% от totalPrice, посчитан при
+  // создании кампании).
+  //
+  // До этого PR'а возвращалось ровно 0 → радио НЕ МОГЛО вывести ничего,
+  // никогда, даже при реально заработанных кампаниях. POST /finance/
+  // withdrawals на строке 1025 (`if (amount > balance)`) всегда падал
+  // в «Недостаточно средств. Доступно: 0 ₽».
+  //
+  // Available = earned - (completed_withdrawals + in_flight_reservations)
+  //   earned = SUM(stationPayout) WHERE status='completed'
+  //   completed_withdrawals = SUM(amount) WHERE status='completed' (выплачено)
+  //   in_flight = SUM(amount) WHERE status NOT IN ('rejected','cancelled','completed')
+  //               (создана заявка — деньги заморожены до решения)
+
+  let earned = 0;
+  try {
+    const station = await getStation(stationUserId);
+    if (station?.id) {
+      const requests = await listRadioVenueRequestsByStation(station.id);
+      earned = requests
+        .filter((r: any) => r.status === 'completed')
+        .reduce((s: number, r: any) => s + (Number(r.stationPayout) || 0), 0);
+    }
+  } catch (e: any) {
+    console.warn('[radio] _getRadioBalance earned-calc failed:', e?.message);
+  }
+
   const wds = await _getRadioWithdrawals(stationUserId);
   const reserved = wds
-    .filter((w: any) => w?.status !== 'rejected' && w?.status !== 'cancelled')
+    .filter((w: any) => w?.status !== 'rejected' && w?.status !== 'cancelled' && w?.status !== 'completed')
     .reduce((s: number, w: any) => s + (Number(w?.amount) || 0), 0);
-  return Math.max(0, balance - reserved);
+  const withdrawn = wds
+    .filter((w: any) => w?.status === 'completed')
+    .reduce((s: number, w: any) => s + (Number(w?.amount) || 0), 0);
+
+  return Math.max(0, earned - withdrawn - reserved);
 }
 
 // GET /finance/withdrawals — список заявок радиостанции
