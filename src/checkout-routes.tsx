@@ -2297,6 +2297,79 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       }
     }
 
+    // ── track_test_promote — артист оплачивает продвижение трека в секцию
+    // «Протестировано экспертами» на 14 дней (3000 ₽). Создание сессии
+    // делает админ через POST /track-test/pipeline/promoteToNovelty;
+    // артист переходит по payment-link из in-app notification. Этот
+    // gate защищает от tampering (артист подменяет amount на 1 ₽) и от
+    // прямого create-session с поддельной metadata.requestId.
+    if (type === 'purchase' && metadata?.type === 'track_test_promote') {
+      const reqId = metadata?.requestId;
+      if (!reqId) {
+        return c.json({ success: false, error: 'metadata.requestId обязателен для track_test_promote' }, 400);
+      }
+      try {
+        const { trackTestRequestsStore } = await import('./db.tsx');
+        const request: any = await trackTestRequestsStore.get(String(reqId));
+        if (!request) {
+          return c.json({ success: false, error: 'Заявка не найдена' }, 404);
+        }
+        if (request.user_id !== userId) {
+          log.warn({ userId, reqId, ownerId: request.user_id }, 'track_test_promote_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужую заявку' }, 403);
+        }
+        if (request.status !== 'completed') {
+          return c.json({ success: false, error: `Заявка не завершена (статус: ${request.status})` }, 400);
+        }
+        if (request?.data?.pipeline?.promote?.paid_at) {
+          return c.json({ success: false, error: 'Продвижение уже оплачено' }, 409);
+        }
+        const TRACK_TEST_PROMOTE_PRICE = 3000;
+        if (Math.abs(amount - TRACK_TEST_PROMOTE_PRICE) > 0.01) {
+          log.warn({ userId, reqId, expected: TRACK_TEST_PROMOTE_PRICE, received: amount }, 'track_test_promote_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене продвижения' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, reqId }, 'track_test_promote_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить заявку' }, 500);
+      }
+    }
+
+    // ── track_test_exclusive — артист оплачивает эксклюзив-pitch A&R
+    // (7000 ₽). Идемпотентность по pipeline.exclusive.paid_at;
+    // ownership-check симметричный track_test_promote.
+    if (type === 'purchase' && metadata?.type === 'track_test_exclusive') {
+      const reqId = metadata?.requestId;
+      if (!reqId) {
+        return c.json({ success: false, error: 'metadata.requestId обязателен для track_test_exclusive' }, 400);
+      }
+      try {
+        const { trackTestRequestsStore } = await import('./db.tsx');
+        const request: any = await trackTestRequestsStore.get(String(reqId));
+        if (!request) {
+          return c.json({ success: false, error: 'Заявка не найдена' }, 404);
+        }
+        if (request.user_id !== userId) {
+          log.warn({ userId, reqId, ownerId: request.user_id }, 'track_test_exclusive_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужую заявку' }, 403);
+        }
+        if (request.status !== 'completed') {
+          return c.json({ success: false, error: `Заявка не завершена (статус: ${request.status})` }, 400);
+        }
+        if (request?.data?.pipeline?.exclusive?.paid_at) {
+          return c.json({ success: false, error: 'Эксклюзив уже оплачен' }, 409);
+        }
+        const TRACK_TEST_EXCLUSIVE_PRICE = 7000;
+        if (Math.abs(amount - TRACK_TEST_EXCLUSIVE_PRICE) > 0.01) {
+          log.warn({ userId, reqId, expected: TRACK_TEST_EXCLUSIVE_PRICE, received: amount }, 'track_test_exclusive_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене эксклюзив-pitch' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, reqId }, 'track_test_exclusive_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить заявку' }, 500);
+      }
+    }
+
     // track_test — экспертный тест. SQL-таблица track_test_requests.
     if (type === 'purchase' && metadata?.type === 'track_test') {
       const reqId = metadata?.requestId;
