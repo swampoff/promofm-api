@@ -919,16 +919,44 @@ app.get('/subscription/:djId', requireAuth, requireDjRole, async (c) => {
   }
 });
 
-// POST /subscription/:djId/change - смена плана
+// POST /subscription/:djId/change - смена плана.
+// 2026-06-18: двойной P0 закрыт:
+//   (1) IDOR — раньше любой авторизованный DJ мог поменять чужой план
+//       (`POST /subscription/<любой_dj_id>/change` без сверки djId с
+//       c.get('userId')). Теперь 403 «Нельзя менять чужую подписку».
+//   (2) Bypass оплаты — раньше endpoint писал status='active' для ЛЮБОГО
+//       plan'а, включая paid (price > 0), без прохождения через YooKassa.
+//       Атакующий мог апгрейдить себя на elite за 0 ₽. Теперь paid планы
+//       редиректятся в /checkout/create-session (там уже amount-gate на
+//       строке 1721 checkout-routes.tsx); /change оставлен только для
+//       free-плана (free-downgrade или повторная активация free).
 app.post('/subscription/:djId/change', requireAuth, requireDjRole, async (c) => {
   try {
     const djId = c.req.param('djId');
+    const userId = c.get('userId');
+    if (djId !== userId) {
+      console.warn(`[dj-subscription] IDOR-attempt: userId=${userId} tried to change djId=${djId}`);
+      return c.json({ success: false, error: 'Нельзя менять чужую подписку' }, 403);
+    }
     const body = await c.req.json();
     const { planId, interval = 'month' } = body;
 
     const plan = DJ_PLANS.find(p => p.id === planId);
     if (!plan) {
       return c.json({ success: false, error: 'Plan not found' }, 404);
+    }
+
+    const price = interval === 'year' ? plan.priceYear : plan.price;
+    if (price > 0) {
+      // Paid plans must go through YooKassa; checkout-routes.tsx
+      // POST /checkout/create-session с metadata.type='dj_subscription'
+      // (amount-gate уже есть, line 1721), затем webhook flip'ит
+      // subscription на 'active'.
+      return c.json({
+        success: false,
+        error: 'Платные планы оплачиваются через /checkout/create-session с type="subscription" и metadata.role="dj"',
+        code: 'use_checkout',
+      }, 400);
     }
 
     const now = new Date();
@@ -944,7 +972,7 @@ app.post('/subscription/:djId/change', requireAuth, requireDjRole, async (c) => 
       planId: plan.id,
       planName: plan.name,
       status: 'active',
-      price: interval === 'year' ? plan.priceYear : plan.price,
+      price,
       currency: plan.currency,
       interval,
       startDate: now.toISOString(),
