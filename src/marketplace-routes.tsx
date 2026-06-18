@@ -997,16 +997,41 @@ app.put('/orders/:id/status', requireAuth, async (c) => {
     if (order.producerId !== userId && order.clientId !== userId) {
       return c.json({ success: false, error: 'Not authorized' }, 403);
     }
+    const actorRole: 'producer' | 'client' = order.producerId === userId ? 'producer' : 'client';
 
-    const validTransitions: Record<string, string[]> = {
-      'pending': ['accepted', 'rejected'],
-      'accepted': ['in_progress'],
-      'in_progress': ['revision', 'completed'],
-      'revision': ['in_progress', 'completed'],
+    // 2026-06-18: tightened workflow gates.
+    // (1) Terminal states ('completed', 'rejected') — больше не могут
+    //     быть restarted (раньше validTransitions[terminal] === undefined
+    //     → guard short-circuit'ил, продюсер мог вернуть 'completed'
+    //     обратно в 'pending' и получить commission дважды).
+    // (2) Role-based: producer двигает workflow forward (accept/in_progress/
+    //     complete/reject); client может только запросить revision на
+    //     in_progress и подтвердить completion. Раньше оба могли flip'ить
+    //     произвольно — клиент мог сам пометить «completed» и unfairly
+    //     зафиксировать commission в пользу продюсера / vice versa.
+    const validTransitions: Record<string, Array<{ to: string; role: 'producer' | 'client' | 'both' }>> = {
+      pending:     [{ to: 'accepted', role: 'producer' }, { to: 'rejected', role: 'producer' }],
+      accepted:    [{ to: 'in_progress', role: 'producer' }, { to: 'rejected', role: 'producer' }],
+      in_progress: [{ to: 'revision', role: 'client' }, { to: 'completed', role: 'producer' }],
+      revision:    [{ to: 'in_progress', role: 'producer' }, { to: 'completed', role: 'producer' }],
+      // terminal — no transitions allowed
+      completed:   [],
+      rejected:    [],
     };
 
-    if (status && validTransitions[order.status] && !validTransitions[order.status].includes(status)) {
-      return c.json({ success: false, error: `Cannot transition from ${order.status} to ${status}` }, 400);
+    if (status) {
+      const fromAllowed = validTransitions[order.status];
+      if (!fromAllowed) {
+        return c.json({ success: false, error: `Unknown current status: ${order.status}` }, 400);
+      }
+      const allowedEntry = fromAllowed.find((e) => e.to === status);
+      if (!allowedEntry) {
+        return c.json({ success: false, error: `Cannot transition from ${order.status} to ${status}` }, 400);
+      }
+      if (allowedEntry.role !== 'both' && allowedEntry.role !== actorRole) {
+        console.warn(`[service-order] role-guard: ${actorRole}=${userId} tried ${order.status}→${status} (allowed only for ${allowedEntry.role})`);
+        return c.json({ success: false, error: `Только ${allowedEntry.role === 'producer' ? 'продюсер' : 'клиент'} может выполнить переход ${order.status}→${status}` }, 403);
+      }
     }
 
     if (status) order.status = status;
