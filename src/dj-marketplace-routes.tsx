@@ -40,6 +40,10 @@ function mapRow(row: any) {
     name: row.dj_name || p.djName || d.djName || '',
     photo: row.photo_url || row.avatar_url || p.avatarUrl || d.avatarUrl || '',
     coverUrl: p.coverUrl || d.coverUrl || '',
+    // Social/streaming links — stored in the jsonb profile. Public page
+    // renders only the platforms that are actually set (camelCase keys,
+    // same shape as artist/label). Was previously dropped here entirely.
+    socials: p.socials || p.socialLinks || d.socials || d.socialLinks || row.social_links || {},
     city: row.location || p.city || d.city || '',
     genres: row.genres || p.genres || d.genres || [],
     rating: parseFloat(row.rating) || 0,

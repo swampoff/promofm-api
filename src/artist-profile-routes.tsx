@@ -58,6 +58,12 @@ interface ArtistProfile {
   totalFollowers: number;
   totalConcerts: number;
   totalTracks: number;
+  /** Distinct radio stations / cities where this artist's tracks have
+   *  aired (from track_radio_pickups — verified detections + partner
+   *  placements). 0 when none; the public page hides the tile rather
+   *  than render "0". Real airplay footprint, never fabricated. */
+  radioStations?: number;
+  radioCities?: number;
   coinsBalance: number;
   isVerified: boolean;
   socials: ArtistSocials;
@@ -107,6 +113,37 @@ async function lookupArtistProfileRow(idOrUserId: string): Promise<Record<string
   } catch (err) {
     console.warn('[ArtistProfile] lookupArtistProfileRow failed:', err);
     return null;
+  }
+}
+
+/**
+ * Real radio-airplay footprint for an artist: distinct stations + cities
+ * where any of the artist's tracks have been picked up
+ * (`track_radio_pickups` — verified fingerprint detections AND partner
+ * placements; both represent real airplay). Read-only aggregation;
+ * returns {0,0} on any error so the profile still renders. NEVER
+ * fabricated — when the artist has no airplay the caller hides the tiles.
+ *
+ * Cast note: `tracks.artist_id` is UUID; `$1` is `apRow.id`, which PG
+ * returns as a UUID-typed value, so NO `::text` cast (matches the
+ * track-count queries in this file). See memory promofm-chart-data-sources.
+ */
+async function computeRadioReach(artistProfileId: string): Promise<{ radioStations: number; radioCities: number }> {
+  if (!artistProfileId) return { radioStations: 0, radioCities: 0 };
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const { rows } = await pool.query(
+      `SELECT COUNT(DISTINCT trp.station_name)::int AS radios,
+              COUNT(DISTINCT trp.city)::int         AS cities
+         FROM tracks t
+         JOIN track_radio_pickups trp ON trp.track_id = t.id
+        WHERE t.artist_id = $1`,
+      [artistProfileId],
+    );
+    return { radioStations: rows[0]?.radios ?? 0, radioCities: rows[0]?.cities ?? 0 };
+  } catch (err) {
+    console.warn('[ArtistProfile] computeRadioReach failed:', err);
+    return { radioStations: 0, radioCities: 0 };
   }
 }
 
@@ -277,6 +314,14 @@ app.get('/profile/:artistId', async (c) => {
             );
             normalized.totalTracks = Number(rows[0]?.cnt ?? 0);
           } catch { /* keep whatever KV had */ }
+
+          // Real cover (the canonical column, not the stale KV/jsonb copy)
+          // and the live radio-airplay footprint — both feed the public
+          // profile hero. Missing/zero → the page hides them, never fakes.
+          if (apRow.cover_url) normalized.coverUrl = apRow.cover_url as string;
+          const reach = await computeRadioReach(String(apRow.id));
+          normalized.radioStations = reach.radioStations;
+          normalized.radioCities   = reach.radioCities;
         }
 
         return c.json({ success: true, source: 'kv', data: normalized });
@@ -382,7 +427,7 @@ app.get('/profile/:artistId', async (c) => {
           artistName: apRow.artist_name || '',
           bio: apRow.bio || '',
           avatarUrl: apRow.avatar_url || '',
-          coverUrl: apRow.data?.coverUrl || '',
+          coverUrl: apRow.cover_url || apRow.data?.coverUrl || '',
           city: apRow.city || '',
           country: apRow.country || 'Россия',
           genres: apRow.sub_genres || (apRow.genre ? [apRow.genre] : []),
@@ -412,6 +457,9 @@ app.get('/profile/:artistId', async (c) => {
             : null,
           verificationRejectionReason: apRow.verification_rejection_reason || null,
         });
+        const reach = await computeRadioReach(String(apRow.id));
+        sqlProfile.radioStations = reach.radioStations;
+        sqlProfile.radioCities   = reach.radioCities;
         return c.json({ success: true, source: 'sql', data: sqlProfile });
       }
     } catch (sqlErr) {
@@ -746,6 +794,10 @@ app.get('/profile/:artistId/tracks', async (c) => {
         duration: t.duration || '',
         plays: t.plays_count || 0,
         likes: t.likes_count || 0,
+        // Public page shows release dates («Последние релизы»). Prefer an
+        // explicit release_date, fall back to row creation time. Both are
+        // real timestamps — never synthesised.
+        releaseDate: t.release_date || t.created_at,
         createdAt: t.created_at,
       }));
       return c.json({ success: true, data: formatted });
