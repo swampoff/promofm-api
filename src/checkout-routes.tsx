@@ -2297,6 +2297,68 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       }
     }
 
+    // ── pitching_bundle — артист оплачивает пакет питчинга (influencers +
+    // media + playlists). Canonical price = SUM(pitching_submissions.price_rub)
+    // у submissions с этим payment_session_id. POST /pitching/submit делает
+    // server-side calc через applySubscriptionDiscount (pitching-routes.tsx
+    // :726, итог в data.amount/total) и кладёт finalPrice в каждую строку.
+    //
+    // Vector: артист открывает DevTools, подменяет amount=1₽; webhook
+    // flip'ит submissions в 'pending' без amount-check; платформа теряет
+    // 15000₽–30000₽ за каждый bundle (BLOCKER C класс, тот же что мы
+    // закрыли для track_publish, dj_mix_publish, beat_purchase, track_test_*).
+    //
+    // Guards:
+    //   - submission_ids обязателен и парсится из CSV-строки в metadata
+    //   - все submissions существуют + принадлежат userId (IDOR-safe)
+    //   - все в status='pending_payment' (повторная оплата того же bundle → 409)
+    //   - SUM(price_rub) === amount (tampering-gate)
+    if (type === 'purchase' && metadata?.itemType === 'pitching_bundle') {
+      const submissionIdsRaw = metadata?.submission_ids;
+      if (!submissionIdsRaw) {
+        return c.json({ success: false, error: 'metadata.submission_ids обязателен для pitching_bundle' }, 400);
+      }
+      const submissionIds = String(submissionIdsRaw)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (submissionIds.length === 0) {
+        return c.json({ success: false, error: 'submission_ids пуст' }, 400);
+      }
+      try {
+        const { pool: pp } = await import('./db-client.tsx');
+        const { rows } = await pp.query(
+          `SELECT id, user_id, status, price_rub
+             FROM pitching_submissions
+            WHERE id = ANY($1)`,
+          [submissionIds]
+        );
+        if (rows.length !== submissionIds.length) {
+          return c.json({ success: false, error: 'Часть submissions не найдена' }, 404);
+        }
+        const alienSubmission = rows.find((r: any) => r.user_id !== userId);
+        if (alienSubmission) {
+          log.warn({ userId, submissionId: alienSubmission.id, ownerId: alienSubmission.user_id }, 'pitching_bundle_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужой питчинг' }, 403);
+        }
+        const notPending = rows.find((r: any) => r.status !== 'pending_payment');
+        if (notPending) {
+          return c.json({ success: false, error: `Submission ${notPending.id} уже в статусе ${notPending.status}` }, 409);
+        }
+        const expected = rows.reduce((s: number, r: any) => s + Number(r.price_rub || 0), 0);
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: 'Серверная цена bundle не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, submissionIds, expected, received: amount }, 'pitching_bundle_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене питчинга' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, submissionIds }, 'pitching_bundle_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить bundle' }, 500);
+      }
+    }
+
     // ── track_test_promote — артист оплачивает продвижение трека в секцию
     // «Протестировано экспертами» на 14 дней (3000 ₽). Создание сессии
     // делает админ через POST /track-test/pipeline/promoteToNovelty;
