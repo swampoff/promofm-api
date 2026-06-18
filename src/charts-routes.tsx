@@ -1463,11 +1463,13 @@ charts.get('/promofm', async (c) => {
       return c.json({ success: true, data: { entries: [], updatedAt: null } });
     }
 
+    // RULE: отдаём только проигрываемые записи чарта (есть previewUrl).
+    const playable = chart.entries.filter((e: any) => e.previewUrl);
     return c.json({
       success: true,
       data: {
         ...chart,
-        entries: chart.entries.slice(0, limit),
+        entries: playable.slice(0, limit),
       },
     });
   } catch (error) {
@@ -1752,7 +1754,9 @@ charts.get('/weekly', async (c) => {
   try {
     const cached: any = await getPlatformStats('chart:weekly:top20');
     if (cached?.entries?.length) {
-      return c.json({ success: true, data: cached });
+      // RULE: только проигрываемые записи (есть previewUrl).
+      const playable = cached.entries.filter((e: any) => e.previewUrl);
+      return c.json({ success: true, data: { ...cached, entries: playable } });
     }
     return c.json({ success: true, data: { entries: [], updatedAt: null } });
   } catch (error) {
