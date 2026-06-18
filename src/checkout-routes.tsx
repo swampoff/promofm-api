@@ -2327,6 +2327,58 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       }
     }
 
+    // ── radio_campaign — venue оплачивает рекламную кампанию на радио.
+    // Canonical price = venue_ad_campaigns.budget (создан в
+    // venue-routes.tsx:766+ POST /radio-campaigns с body.budget).
+    //
+    // КАВЕАТ: venue-routes:790 принимает body.budget без серверной
+    // валидации против slot prices. Этот gate закрывает только
+    // DevTools-side tampering на /create-session (amount=1 при
+    // campaign.budget=10000). Полная защита потребует переноса pricing-
+    // расчёта в backend POST /radio-campaigns (отдельный PR), но даже
+    // без этого amount-gate здесь блокирует public attack vector.
+    //
+    // Guards (паттерн как у pitching_bundle, track_test_promote):
+    //   - metadata.campaignId обязателен
+    //   - campaign существует (404 иначе)
+    //   - campaign.venueId === venue profile id у userId (IDOR-safe:
+    //     платить можно только за свою campaign)
+    //   - campaign.status === 'pending' (нельзя дважды оплатить)
+    //   - amount === campaign.budget ± 0.01 (anti-tampering)
+    if (type === 'purchase' && metadata?.itemType === 'radio_campaign') {
+      const campaignId = metadata?.campaignId;
+      if (!campaignId) {
+        return c.json({ success: false, error: 'metadata.campaignId обязателен для radio_campaign' }, 400);
+      }
+      try {
+        const { getVenueAdCampaign, getVenueProfile: rcGetVenue } = await import('./db.tsx');
+        const campaign = await getVenueAdCampaign(String(campaignId));
+        if (!campaign) {
+          return c.json({ success: false, error: 'Кампания не найдена' }, 404);
+        }
+        const venueProfile = await rcGetVenue(userId);
+        const venueProfileId = (venueProfile as any)?.id;
+        if (!venueProfileId || campaign.venueId !== venueProfileId) {
+          log.warn({ userId, campaignId, campaignVenueId: campaign.venueId, venueProfileId }, 'radio_campaign_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужую кампанию' }, 403);
+        }
+        if (campaign.status !== 'pending') {
+          return c.json({ success: false, error: `Кампания в статусе ${campaign.status} — оплатить нельзя` }, 409);
+        }
+        const expected = Number(campaign.budget);
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: 'Бюджет кампании не определён' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, campaignId, expected, received: amount }, 'radio_campaign_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует бюджету кампании' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, campaignId }, 'radio_campaign_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить кампанию' }, 500);
+      }
+    }
+
     // ── pitching_bundle — артист оплачивает пакет питчинга (influencers +
     // media + playlists). Canonical price = SUM(pitching_submissions.price_rub)
     // у submissions с этим payment_session_id. POST /pitching/submit делает
