@@ -836,6 +836,149 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill track_test_promote — артист оплатил продвижение трека
+  // в секцию «Протестировано экспертами» на 14 дней (см.
+  // track-test-routes.tsx /pipeline/promoteToNovelty). ───
+  if (session.metadata?.type === 'track_test_promote' && session.metadata?.trackId) {
+    try {
+      const trackId = String(session.metadata.trackId);
+      const requestId = String(session.metadata.requestId || '');
+      const { pool: ttpPool } = await import('./db-client.tsx');
+
+      const ttpResult = await ttpPool.query(
+        `UPDATE tracks
+            SET expert_tested_until    = NOW() + INTERVAL '14 days',
+                expert_test_request_id = $2::uuid,
+                updated_at             = NOW()
+          WHERE id = $1::uuid
+          RETURNING id, title, artist`,
+        [trackId, requestId || null]
+      );
+
+      if (ttpResult.rowCount === 0) {
+        log.warn({ trackId, orderId: session.orderId }, 'track_test_promote_no_track_row');
+      } else {
+        log.info({ trackId, orderId: session.orderId }, 'track_test_promote_fulfilled');
+
+        // Mark the track_test_request so admin sees "оплачено".
+        if (requestId) {
+          try {
+            const { trackTestRequestsStore } = await import('./db.tsx');
+            const req: any = await trackTestRequestsStore.get(requestId);
+            if (req) {
+              req.data = req.data || {};
+              req.data.pipeline = req.data.pipeline || {};
+              req.data.pipeline.promote = {
+                ...(req.data.pipeline.promote || {}),
+                paid_at: now,
+                payment_amount: session.amount,
+              };
+              req.updated_at = now;
+              await trackTestRequestsStore.set(requestId, req);
+            }
+          } catch (e) {
+            log.warn({ err: (e as any)?.message, requestId }, 'track_test_promote_request_mark_failed');
+          }
+        }
+
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(session.userId, {
+            type: 'notification',
+            data: {
+              title: 'Трек продвигается',
+              comment: `«${ttpResult.rows[0]?.title || session.metadata.trackTitle}» — теперь в секции «Протестировано экспертами» на 14 дней`,
+            },
+          });
+        } catch {}
+      }
+    } catch (err) {
+      log.error({ err, trackId: session.metadata.trackId, orderId: session.orderId }, 'track_test_promote_fulfillment_error');
+    }
+  }
+
+  // ─── Fulfill track_test_exclusive — артист оплатил эксклюзив-pitch
+  // A&R-аудитории. Шлёт эксклюзивную рассылку всем label/producer (см.
+  // track-test-routes.tsx /pipeline/exclusivePitch). ───
+  if (session.metadata?.type === 'track_test_exclusive' && session.metadata?.requestId) {
+    try {
+      const requestId = String(session.metadata.requestId);
+      const { trackTestRequestsStore } = await import('./db.tsx');
+      const req: any = await trackTestRequestsStore.get(requestId);
+      if (!req) {
+        log.warn({ requestId, orderId: session.orderId }, 'track_test_exclusive_no_request');
+      } else if (req?.data?.pipeline?.exclusive?.paid_at) {
+        log.info({ requestId, orderId: session.orderId }, 'track_test_exclusive_duplicate_webhook_skip');
+      } else {
+        const { pool: tepPool } = await import('./db-client.tsx');
+        const recipientsRes = await tepPool.query(
+          `SELECT email FROM users
+            WHERE role IN ('label','producer')
+              AND email IS NOT NULL AND email <> ''
+              AND COALESCE((data->>'unsubscribed_newsletter')::boolean, false) = false`
+        );
+        const emails: string[] = recipientsRes.rows.map((r: any) => String(r.email)).filter(Boolean);
+
+        const trackUrl = `https://promo-music.ru/tracks/${req.track_id || ''}`;
+        const subject = `[ЭКСКЛЮЗИВ A&R] ${req.track_title} — экспертный анализ`;
+        const html = `
+          <div style="font-family:system-ui,sans-serif;max-width:600px;">
+            <div style="background:#FF577F;color:#fff;padding:12px 16px;border-radius:8px 8px 0 0;font-weight:700;">
+              ЭКСКЛЮЗИВНОЕ ПРЕДЛОЖЕНИЕ A&R
+            </div>
+            <div style="border:1px solid #eee;border-top:none;padding:16px;border-radius:0 0 8px 8px;">
+              <h2 style="margin-top:0;">${req.track_title}</h2>
+              <p><strong>${req.artist_name}</strong> · ${req.genre || '—'}</p>
+              <p>Средняя оценка экспертов: <strong>${req.average_rating ?? '—'}/10</strong></p>
+              ${req.consolidated_feedback ? `<div style="background:#f8f8f8;padding:12px;border-radius:6px;"><strong>Анализ экспертов:</strong><br>${req.consolidated_feedback}</div>` : ''}
+              <p style="margin-top:16px;"><a href="${trackUrl}" style="display:inline-block;padding:10px 20px;background:#FF577F;color:#fff;text-decoration:none;border-radius:6px;">Послушать и связаться</a></p>
+            </div>
+            <p style="color:#999;font-size:11px;margin-top:12px;">Эксклюзив-pitch на promo-music.ru для A&R и продюсеров.</p>
+          </div>`;
+
+        let sent = 0, failed = 0;
+        if (emails.length > 0) {
+          const { smtpSendBatch } = await import('./smtp-sender.tsx');
+          const r = await smtpSendBatch(
+            emails.map(e => ({ email: e })),
+            subject, html,
+            { campaignId: `track_test_exclusive:${requestId}` },
+          );
+          sent = r.sent;
+          failed = r.failed;
+        }
+
+        req.data = req.data || {};
+        req.data.pipeline = req.data.pipeline || {};
+        req.data.pipeline.exclusive = {
+          ...(req.data.pipeline.exclusive || {}),
+          paid_at: now,
+          payment_amount: session.amount,
+          recipients_count: emails.length,
+          success_count: sent,
+          fail_count: failed,
+        };
+        req.updated_at = now;
+        await trackTestRequestsStore.set(requestId, req);
+
+        log.info({ requestId, recipients: emails.length, sent, failed, orderId: session.orderId }, 'track_test_exclusive_fulfilled');
+
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(session.userId, {
+            type: 'notification',
+            data: {
+              title: 'Эксклюзив-pitch отправлен',
+              comment: `«${req.track_title}» — оценка отправлена ${emails.length} A&R менеджерам`,
+            },
+          });
+        } catch {}
+      }
+    } catch (err) {
+      log.error({ err, orderId: session.orderId }, 'track_test_exclusive_fulfillment_error');
+    }
+  }
+
   // ─── Fulfill banner_publish ───
   //
   // До 2026-06-16 ЭТО ОТСУТСТВОВАЛО ПОЛНОСТЬЮ. /checkout/create-session

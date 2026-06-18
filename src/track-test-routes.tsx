@@ -1071,6 +1071,295 @@ app.post('/send-feedback', requireAuth, requireAdmin, async (c) => {
 });
 
 // =====================================================
+// 7.a ADMIN PIPELINE — POST-TEST ПРОДВИЖЕНИЕ
+// =====================================================
+//
+// 3 кнопки в TrackTestManagement (UI) — нажимает админ ПОСЛЕ того,
+// как трек прошёл тест и фидбек отправлен артисту.
+//
+// A) /pipeline/promoteToNovelty — payment-link артисту на 3000 ₽.
+//    Webhook (checkout-routes.tsx, type='track_test_promote') после
+//    оплаты UPDATE tracks SET expert_tested_until = now() + interval
+//    '14 days' WHERE id = $request.track_id. Трек появляется на
+//    лендинге в секции «Протестировано экспертами».
+//
+// B) /pipeline/addToNewsletter — бесплатная синхронная рассылка email
+//    всем users.role IN ('label','producer'). Шаблон письма содержит
+//    среднюю экспертную оценку + ссылку на трек. Помечает
+//    request.data.pipeline.newsletter = { sent_at, recipients_count }.
+//
+// C) /pipeline/exclusivePitch — payment-link артисту на 7000 ₽.
+//    Webhook (type='track_test_exclusive') шлёт эксклюзивную рассылку
+//    тем же label/producer + помечает
+//    request.data.pipeline.exclusive = { sent_at, recipients_count }.
+
+const TRACK_TEST_PIPELINE_PROMOTE_PRICE = 3000;
+const TRACK_TEST_PIPELINE_EXCLUSIVE_PRICE = 7000;
+const TRACK_TEST_PROMOTE_DAYS = 14;
+
+async function createTrackTestPipelinePayment(
+  request: any,
+  type: 'track_test_promote' | 'track_test_exclusive',
+  amount: number,
+  description: string,
+): Promise<{ orderId: string; confirmationUrl: string } | { error: string }> {
+  if (!request.user_id) return { error: 'Заявка от гостя — payment-link невозможен' };
+  if (!request.track_id) return { error: 'request.track_id отсутствует' };
+
+  const { getGateway } = await import('./payment-gateway.tsx');
+  const { upsertPaymentSession } = await import('./db.tsx');
+  const orderId = crypto.randomUUID();
+  const returnUrl = 'https://promo-music.ru/cabinet/artist?tab=promolab';
+
+  try {
+    const gw = getGateway('yookassa');
+    const result = await gw.createPayment({
+      amount, currency: 'RUB', description,
+      gateway: 'yookassa',
+      userId: request.user_id,
+      orderId,
+      returnUrl,
+      metadata: {
+        type,
+        requestId: request.id,
+        trackId: request.track_id,
+        trackTitle: request.track_title,
+      },
+      savePaymentMethod: false,
+      type: 'purchase',
+    });
+
+    await upsertPaymentSession(orderId, {
+      orderId, userId: request.user_id,
+      gateway: 'yookassa',
+      gatewayPaymentId: result.sessionId,
+      amount, currency: 'RUB', status: 'pending',
+      type: 'purchase', description,
+      metadata: {
+        type, requestId: request.id,
+        trackId: request.track_id,
+        trackTitle: request.track_title,
+      },
+      savePaymentMethod: false,
+      confirmationUrl: result.confirmationUrl,
+      returnUrl,
+      createdAt: new Date().toISOString(),
+    });
+
+    return { orderId, confirmationUrl: result.confirmationUrl };
+  } catch (e: any) {
+    return { error: `YooKassa: ${e?.message || 'unknown'}` };
+  }
+}
+
+// A) Промо в секцию «Протестировано экспертами» (3000 ₽).
+app.post('/pipeline/promoteToNovelty', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { request_id } = await c.req.json();
+    if (!request_id) return c.json({ error: 'request_id required' }, 400);
+    const request: any = await trackTestRequestsStore.get(request_id);
+    if (!request) return c.json({ error: 'Request not found' }, 404);
+    if (request.status !== 'completed') {
+      return c.json({ error: 'Заявка ещё не завершена' }, 400);
+    }
+    if (request?.data?.pipeline?.promote?.paid_at) {
+      return c.json({ error: 'Этот трек уже промоутится' }, 409);
+    }
+
+    const payment = await createTrackTestPipelinePayment(
+      request,
+      'track_test_promote',
+      TRACK_TEST_PIPELINE_PROMOTE_PRICE,
+      `ПРОМО.ЛАБ: «${request.track_title}» — секция «Протестировано экспертами» на 14 дней`,
+    );
+    if ('error' in payment) return c.json({ error: payment.error }, 400);
+
+    // Pipeline state mark — payment_pending до webhook'а.
+    request.data = request.data || {};
+    request.data.pipeline = request.data.pipeline || {};
+    request.data.pipeline.promote = {
+      payment_order_id: payment.orderId,
+      requested_at: new Date().toISOString(),
+      requested_by_admin: c.get('userEmail') || c.get('userId'),
+      paid_at: null,
+    };
+    request.updated_at = new Date().toISOString();
+    await trackTestRequestsStore.set(request_id, request);
+
+    // In-app notification артисту со ссылкой на оплату.
+    const { upsertNotification } = await import('./db.tsx');
+    const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await upsertNotification(request.user_id, notifId, {
+      type: 'track_test_promote_invoice',
+      title: 'Продвижение трека в «Протестировано экспертами»',
+      message: `Админ предлагает разместить «${request.track_title}» на 14 дней в секции «Протестировано экспертами». Стоимость: ${TRACK_TEST_PIPELINE_PROMOTE_PRICE} ₽.`,
+      action_url: payment.confirmationUrl,
+      metadata: { request_id, order_id: payment.orderId, amount: TRACK_TEST_PIPELINE_PROMOTE_PRICE },
+      created_at: new Date().toISOString(),
+      read: false,
+    });
+
+    emitSSE(request.user_id, {
+      type: 'notification',
+      data: { title: 'Предложение от ПРОМО.МУЗЫКА', comment: `Продвинуть «${request.track_title}» за ${TRACK_TEST_PIPELINE_PROMOTE_PRICE} ₽` },
+    });
+
+    return c.json({
+      success: true,
+      message: 'Артисту отправлено уведомление с payment-link',
+      payment_order_id: payment.orderId,
+      confirmation_url: payment.confirmationUrl,
+    });
+  } catch (error) {
+    console.error('promoteToNovelty error:', error);
+    return c.json({ error: 'Internal error' }, 500);
+  }
+});
+
+// B) Рассылка label/producer (бесплатно, синхронно).
+app.post('/pipeline/addToNewsletter', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { request_id } = await c.req.json();
+    if (!request_id) return c.json({ error: 'request_id required' }, 400);
+    const request: any = await trackTestRequestsStore.get(request_id);
+    if (!request) return c.json({ error: 'Request not found' }, 404);
+    if (request.status !== 'completed') {
+      return c.json({ error: 'Заявка ещё не завершена' }, 400);
+    }
+    if (request?.data?.pipeline?.newsletter?.sent_at) {
+      return c.json({ error: 'Уже отправлено в рассылку' }, 409);
+    }
+
+    // Получатели: все label/producer юзеры. role хранится в users.role
+    // (text). Используем pool.query из db-client, не jsonbStore.
+    const recipientsRes = await pool.query(
+      `SELECT u.email FROM users u
+        WHERE u.role IN ('label','producer')
+          AND u.email IS NOT NULL AND u.email <> ''
+          AND COALESCE((u.data->>'unsubscribed_newsletter')::boolean, false) = false`
+    );
+    const emails: string[] = recipientsRes.rows.map((r: any) => String(r.email)).filter(Boolean);
+    if (emails.length === 0) {
+      return c.json({ error: 'Нет подписчиков label/producer' }, 400);
+    }
+
+    // Шаблон письма — простой HTML с ссылкой на трек.
+    const trackUrl = `https://promo-music.ru/tracks/${request.track_id || ''}`;
+    const subject = `[ПРОМО.МУЗЫКА] Новый трек прошёл экспертный тест: ${request.track_title}`;
+    const html = `
+      <div style="font-family: system-ui, sans-serif; max-width: 600px;">
+        <h2 style="color: #FF577F;">Трек прошёл экспертный тест</h2>
+        <p><strong>${request.track_title}</strong> — ${request.artist_name}</p>
+        <p>Жанр: ${request.genre || '—'}</p>
+        <p>Средняя оценка экспертов: <strong>${request.average_rating ?? '—'}/10</strong></p>
+        <p><a href="${trackUrl}" style="display:inline-block;padding:10px 20px;background:#FF577F;color:#fff;text-decoration:none;border-radius:6px;">Послушать трек</a></p>
+        <hr><p style="color:#999;font-size:12px;">Вы получаете эту рассылку как зарегистрированный label/producer на promo-music.ru.</p>
+      </div>`;
+
+    const { smtpSendBatch } = await import('./smtp-sender.tsx');
+    const sendResult = await smtpSendBatch(
+      emails.map(e => ({ email: e })),
+      subject,
+      html,
+      { campaignId: `track_test_newsletter:${request_id}` },
+    );
+
+    request.data = request.data || {};
+    request.data.pipeline = request.data.pipeline || {};
+    request.data.pipeline.newsletter = {
+      sent_at: new Date().toISOString(),
+      sent_by_admin: c.get('userEmail') || c.get('userId'),
+      recipients_count: emails.length,
+      success_count: sendResult.sent,
+      fail_count: sendResult.failed,
+    };
+    request.updated_at = new Date().toISOString();
+    await trackTestRequestsStore.set(request_id, request);
+
+    return c.json({
+      success: true,
+      recipients_count: emails.length,
+      message: `Письма отправлены ${emails.length} получателям`,
+    });
+  } catch (error) {
+    console.error('addToNewsletter error:', error);
+    return c.json({ error: 'Internal error' }, 500);
+  }
+});
+
+// C) Эксклюзив-pitch (7000 ₽).
+app.post('/pipeline/exclusivePitch', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { request_id } = await c.req.json();
+    if (!request_id) return c.json({ error: 'request_id required' }, 400);
+    const request: any = await trackTestRequestsStore.get(request_id);
+    if (!request) return c.json({ error: 'Request not found' }, 404);
+    if (request.status !== 'completed') {
+      return c.json({ error: 'Заявка ещё не завершена' }, 400);
+    }
+    if (request?.data?.pipeline?.exclusive?.paid_at) {
+      return c.json({ error: 'Эксклюзив уже отправлен' }, 409);
+    }
+
+    // Узнаём заранее количество получателей — для UI и UX.
+    const recipientsCountRes = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM users
+        WHERE role IN ('label','producer')
+          AND email IS NOT NULL AND email <> ''`
+    );
+    const editors_count = recipientsCountRes.rows[0]?.c || 0;
+
+    const payment = await createTrackTestPipelinePayment(
+      request,
+      'track_test_exclusive',
+      TRACK_TEST_PIPELINE_EXCLUSIVE_PRICE,
+      `ПРОМО.ЛАБ: эксклюзив-pitch «${request.track_title}» — ${editors_count} A&R`,
+    );
+    if ('error' in payment) return c.json({ error: payment.error }, 400);
+
+    request.data = request.data || {};
+    request.data.pipeline = request.data.pipeline || {};
+    request.data.pipeline.exclusive = {
+      payment_order_id: payment.orderId,
+      requested_at: new Date().toISOString(),
+      requested_by_admin: c.get('userEmail') || c.get('userId'),
+      planned_recipients_count: editors_count,
+      paid_at: null,
+    };
+    request.updated_at = new Date().toISOString();
+    await trackTestRequestsStore.set(request_id, request);
+
+    const { upsertNotification } = await import('./db.tsx');
+    const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await upsertNotification(request.user_id, notifId, {
+      type: 'track_test_exclusive_invoice',
+      title: 'Эксклюзив-pitch A&R',
+      message: `Админ предлагает отправить «${request.track_title}» с экспертной оценкой ${editors_count} A&R менеджерам. Стоимость: ${TRACK_TEST_PIPELINE_EXCLUSIVE_PRICE} ₽.`,
+      action_url: payment.confirmationUrl,
+      metadata: { request_id, order_id: payment.orderId, amount: TRACK_TEST_PIPELINE_EXCLUSIVE_PRICE, editors_count },
+      created_at: new Date().toISOString(),
+      read: false,
+    });
+
+    emitSSE(request.user_id, {
+      type: 'notification',
+      data: { title: 'Предложение от ПРОМО.МУЗЫКА', comment: `Эксклюзив A&R за ${TRACK_TEST_PIPELINE_EXCLUSIVE_PRICE} ₽` },
+    });
+
+    return c.json({
+      success: true,
+      editors_count,
+      payment_order_id: payment.orderId,
+      confirmation_url: payment.confirmationUrl,
+      message: `Артисту отправлено уведомление с payment-link на ${TRACK_TEST_PIPELINE_EXCLUSIVE_PRICE} ₽`,
+    });
+  } catch (error) {
+    console.error('exclusivePitch error:', error);
+    return c.json({ error: 'Internal error' }, 500);
+  }
+});
+
+// =====================================================
 // 8. ПОЛУЧЕНИЕ ДАННЫХ
 // =====================================================
 

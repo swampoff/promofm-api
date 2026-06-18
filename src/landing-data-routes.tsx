@@ -596,6 +596,36 @@ landing.get('/tracks/trending', async (c) => {
 });
 
 /**
+ * GET /tracks/expert-tested — секция «Протестировано экспертами».
+ * Треки с активным expert_tested_until (поставленным webhook'ом
+ * track_test_promote). По умолчанию TTL 14 дней — после
+ * expert_tested_until истекает, трек выпадает из выдачи. Partial
+ * index idx_tracks_expert_tested_until покрывает фильтр.
+ */
+landing.get('/tracks/expert-tested', async (c) => {
+  try {
+    const limit = Math.min(parseInt(c.req.query('limit') || '12'), 50);
+    const r = await pool.query(
+      `SELECT t.id, t.title, t.artist, t.genre, t.cover_url, t.audio_url,
+              t.duration, t.expert_tested_until, t.expert_test_avg_rating,
+              t.expert_test_request_id,
+              ap.slug AS artist_slug, ap.avatar_url AS artist_avatar
+         FROM tracks t
+         LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
+        WHERE t.expert_tested_until IS NOT NULL
+          AND t.expert_tested_until > NOW()
+          AND t.is_hidden = FALSE
+        ORDER BY t.expert_tested_until DESC
+        LIMIT $1`,
+      [limit]
+    );
+    return c.json({ success: true, data: r.rows });
+  } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+/**
  * GET /tracks/ai — AI-generated tracks
  */
 landing.get('/tracks/ai', async (c) => {
