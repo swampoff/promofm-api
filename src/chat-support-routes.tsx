@@ -140,13 +140,9 @@ app.post('/init', async (c) => {
     );
     const sessionId = r.rows[0].id;
 
-    // Notify admins about a new live-chat session
-    notifyChatNewSession({
-      sessionId,
-      guestName: guestName || undefined,
-      guestEmail: guestEmail || undefined,
-    }).catch((e) => console.warn('[chat-support] notifyChatNewSession failed:', safeErr(e)));
-
+    // NB: email/Telegram-пинг админу шлём НЕ здесь, а только когда гость
+    // реально напишет первое сообщение (см. POST /:sessionId/messages).
+    // Открытие виджета без сообщения больше не пингует и не плодит «пустые» чаты.
     emitSSE(ADMIN_BROADCAST_KEY, { type: 'chat_session_new', data: { sessionId, guestName, guestEmail, createdAt: new Date().toISOString() } });
 
     c.header('Set-Cookie', setGuestTokenCookie(token));
@@ -240,6 +236,16 @@ app.post('/:sessionId/messages', async (c) => {
     );
     const msg = ins.rows[0];
 
+    // Первое сообщение в сессии? (только что вставленную строку тоже считаем)
+    let isFirstMessage = false;
+    try {
+      const cnt = await pool.query(
+        `SELECT count(*)::int AS n FROM chat_messages WHERE session_id = $1`,
+        [sessionId]
+      );
+      isFirstMessage = (cnt.rows[0]?.n ?? 99) <= 1;
+    } catch { /* ignore — деградируем до bell-only ниже */ }
+
     const payload = {
       id: msg.id,
       sessionId,
@@ -251,6 +257,18 @@ app.post('/:sessionId/messages', async (c) => {
 
     // Push to admin dashboard
     emitSSE(ADMIN_BROADCAST_KEY, { type: 'chat_message_new', data: payload });
+
+    // Полноценный пинг (email + Telegram с текстом) — ТОЛЬКО на первое
+    // сообщение гостя. Раньше он висел в /init и срабатывал на пустое
+    // открытие виджета. Последующие сообщения — только bell ниже (c dedup).
+    if (isFirstMessage) {
+      notifyChatNewSession({
+        sessionId,
+        guestName: session.guest_name || undefined,
+        guestEmail: session.guest_email || undefined,
+        firstMessage: text,
+      }).catch((e) => console.warn('[chat-support] notifyChatNewSession failed:', safeErr(e)));
+    }
 
     // Bell-уведомление админам. Title привязан к sessionId, поэтому
     // dedup-окно (5 мин по target+type+title) поглотит десятки сообщений
@@ -415,6 +433,7 @@ app.get('/admin/sessions', requireAuth, requireAdmin, async (c) => {
               )::int AS unread_for_admin
          FROM chat_sessions s
         WHERE s.status = ANY($1::text[])
+          AND EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.id)
         ORDER BY s.last_message_at DESC NULLS LAST, s.created_at DESC
         LIMIT 200`,
       [statuses]
