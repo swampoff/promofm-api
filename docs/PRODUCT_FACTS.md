@@ -351,32 +351,42 @@ keep both in sync when prices change).
 Trial: 14 days at `effectivePlan='business'`. Stamped on first
 GET /venue/profile (`venue-trial.tsx:applyInitialTrial`).
 
-### Radio ad campaigns — pricing is by-agreement (NO server amount-gate)
+### Radio ad campaigns — pricing & amount-gate posture
 
-**Status:** by-agreement, **deliberately ungated**. Confirmed 2026-06-17.
+**Status (2026-06-18):** server-side amount-gate ADDED in PR #288.
+Previous PRODUCT_FACTS entry (deliberately ungated, 2026-06-17) is
+superseded.
 
 `venue/components/radio-section.tsx:180` creates a checkout session with
 `itemType: 'radio_campaign'` and `amount = selectedPackage.price`. The
-backend has NO server-side radio ad package price table —
-`createRadioCampaign` (`src/venue-routes.tsx:790`) stores
+backend does NOT yet have a canonical radio ad package price table —
+`POST /venue/radio-campaigns` (`src/venue-routes.tsx:790`) still stores
 `budget: body.budget` straight from the client. Package definitions live
 only in the frontend.
 
-That means `create-session` has NO amount-gate for `itemType:'radio_campaign'`
-(unlike `beat_purchase` / `digital_purchase` / `track_publish` etc which
-recompute server-side and compare). Any non-circular gate would need either
-(a) a canonical `radio_ad_packages` table, or (b) matching `amount` against
-`campaign.budget` — which the client also set, so it's circular.
+**New (#288) `/checkout/create-session` gate** for `metadata.itemType =
+'radio_campaign'`:
 
-**Risk accepted:** a venue can technically run a session with a lower
-amount than the displayed package price. Mitigated socially — radio ad
-deals are negotiated with each station/owner.
+| Check | Behaviour |
+|---|---|
+| `metadata.campaignId` обязателен | 400 |
+| campaign существует | 404 |
+| `campaign.venueId === getVenueProfile(userId).id` | 403 (IDOR-safe) |
+| `campaign.status === 'pending'` | 409 (защита от double-pay) |
+| `Math.abs(amount - campaign.budget) ≤ 0.01` | 400 + `radio_campaign_amount_tampering_blocked` |
 
-**If this changes** (we add a canonical price list): the gate template
-sits next to `digital_purchase` gate in `src/checkout-routes.tsx` —
-mirror it, recompute `expected` from a server source keyed on
-`metadata.packageType + stationId`, `Math.abs(amount - expected) > 0.01`
-→ 400.
+**Каваэт:** gate сравнивает `amount` против `campaign.budget`, который
+venue **сам же установил при `POST /radio-campaigns`**. Это закрывает
+**public DevTools-tampering на checkout**, но не полную защиту —
+venue всё ещё может занизить `body.budget` на этапе `POST /radio-
+campaigns` (это другой layer). Полная защита потребует переноса
+pricing-расчёта в backend (slot SUM или canonical package-price table) —
+отложено как отдельная PR.
+
+**Если будет добавлен canonical price source** (`radio_ad_packages`
+таблица): mirror шаблон рядом с `digital_purchase` gate; recompute
+`expected` из server source keyed на `metadata.packageType + stationId`,
+`Math.abs(amount - expected) > 0.01` → 400.
 
 ### Subscribe / save-card / recurring (venue billing)
 
@@ -1109,9 +1119,11 @@ EventSource doesn't carry Authorization header).
 
 ## Checkout / payment webhook — idempotency & amount-gate posture
 
-Audited end-to-end 2026-06-17 (all three gateways: YooKassa / T-Bank /
-Stripe). This is the single source of truth so the next session does NOT
-re-audit the whole `checkout-routes.tsx` fulfilment switch from scratch.
+Audited end-to-end 2026-06-17, **expanded 2026-06-18** to cover the new
+gates landed today (track_test_promote/exclusive, pitching_bundle,
+radio_campaign). This is the single source of truth so the next session
+does NOT re-audit the whole `checkout-routes.tsx` fulfilment switch
+from scratch.
 
 ### Two-layer defence
 
@@ -1138,30 +1150,63 @@ re-audit the whole `checkout-routes.tsx` fulfilment switch from scratch.
 | distribution / engineer_order / production_360 / collab_accept (escrow) | `WHERE status = <expected>` | server gate |
 | track_test / publish_order / content_order | status/flag guard | server gate |
 | beat / beat_purchase / digital_good / digital_purchase | deterministic id `bp-/dgp-${orderId}` + `ON CONFLICT (id) DO NOTHING`, side-effects gated on `rowCount>0` | `getBeat().licenseTypes[lt] ?? price` / `digital_goods.price` |
-| radio_campaign | deterministic id `rc-${orderId}` + `ON CONFLICT` | **none — by-agreement, see Venue cabinet section** |
+| radio_campaign | deterministic id `rc-${orderId}` + `ON CONFLICT` | **server gate (#288, 2026-06-18)** — `campaign.budget` from `venue_ad_campaigns` |
 | venue_radio_subscription | `WHERE COALESCE(payment_order_id,'') <> $1` (the `+ INTERVAL '30 days'` is an increment — without this guard a replay = a free month) | n/a (fixed 30d) |
-| pitching_bundle | `finalizePitchingBundle` UPDATE `WHERE status='pending_payment' AND payment_session_id=orderId` | server gate |
+| pitching_bundle | `finalizePitchingBundle` UPDATE `WHERE status='pending_payment' AND payment_session_id=orderId` | **server gate (#284, 2026-06-18)** — `SUM(pitching_submissions.price_rub)` |
+| track_test_promote | UPDATE `WHERE id=$trackId` (idempotent set of `expert_tested_until`) + `data.pipeline.promote.paid_at` guard | **hardcoded 3000 ₽** (`TRACK_TEST_PIPELINE_PROMOTE_PRICE`) + `request.user_id === userId` + `request.status === 'completed'` |
+| track_test_exclusive | `smtpSendBatch` + `data.pipeline.exclusive.paid_at` guard (skip on dup) | **hardcoded 7000 ₽** (`TRACK_TEST_PIPELINE_EXCLUSIVE_PRICE`) + same ownership/status |
+| engineer_order (revenue side) | `payee_id` resolved from `engineer_orders.engineer_id` (#287, 2026-06-18) — was hardcoded `metadata.artistId` (undefined for engineer_order → NULL payee) | `engineer_orders.price` via existing create-session gate |
 
 ### Known-residual (accepted, not bugs)
 
-- **radio_campaign has NO amount-gate** — deliberate, by-agreement. Full
-  rationale in `## Venue cabinet → Radio ad campaigns` above.
+- **radio_campaign first-layer gap** — `POST /venue/radio-campaigns` (venue-
+  routes.tsx:790) still accepts `body.budget` without server-side validation
+  against slot prices. The #288 amount-gate on `/checkout/create-session`
+  closes the public DevTools-tampering vector, but doesn't replace canonical
+  pricing. Full fix = canonical `radio_ad_packages` table OR slot-SUM
+  recompute in `POST /radio-campaigns`. Deliberate trade-off — radio ad
+  deals are negotiated socially.
 - **`itemType:'beat'` / `'digital_good'` legacy simple paths** — NOT dead
   code; create-session still accepts them and they ARE now amount-gated.
   Kept on purpose (orphaning would strand legacy `pending` sessions).
+- **`service_order` no money flow** — `POST /services/:id/order` does NOT
+  create a payment session; producer-client workflow runs on platform-
+  commission-only logic (`recordPlatformCommission` triggered on
+  `status='completed'`). Not a bug — design decision (gift-economy / future
+  feature). #290 (2026-06-18) added terminal-state lock + role-based
+  transitions to prevent workflow circumvention (producer reopening
+  completed orders for repeat commission, client self-marking completed).
 
-### Provenance (which commit each guarantee landed in)
+### Provenance — gates landed 2026-06-18 (this session)
 
-- Deterministic-id idempotency for beat/digital/radio + create-session
-  amount-gates for beat/digital_good → branch
-  `fix/webhook-idempotency-marketplace`.
-- venue_radio_subscription orderId-guard → same branch, commit `a626d1e`.
-- pitching_bundle wiring → branch `fix/pitching-bundle-fulfilment-wiring`.
+- **track_test_promote / track_test_exclusive** — `/checkout/create-session`
+  amount-gate added in PR #282, fulfilment in PR #280.
+- **pitching_bundle** — amount-gate added in PR #284 (was missing — last
+  gate of the BLOCKER C class found end-of-day).
+- **radio_campaign** — amount-gate added in PR #288 (closes public vector,
+  full slot-SUM gate still pending).
+- **digital-goods IDOR (POST)** — `producerId` from JWT in PR #283 (mirror
+  of `POST /beats` pattern).
+- **dj_subscription IDOR + free-paid-bypass** — `/dj-studio/subscription/:djId/
+  change` PR #286: djId === userId enforced; paid plans redirect to
+  `/checkout/create-session`.
+- **engineer revenue payee_id** — PR #287: derived from `engineer_orders`
+  (was hardcoded `metadata.artistId` → NULL for engineer_order →
+  `/engineer/earnings` returned 0 forever).
+- **radio balance** — PR #285: `_getRadioBalance` now reads
+  `SUM(stationPayout)` from `completed` venue_requests (was hardcoded
+  `const balance = 0` → radio could never withdraw earned ad revenue).
+- **tickets-system IDOR** — PR #289: owner-check on 5 endpoints (was: any
+  authenticated user could read/modify/delete tickets by guessing UUID).
+- **service_order workflow** — PR #290: terminal-state lock + role-based
+  transitions.
+- **track-test expert IDOR** — PR #278: identity from JWT on 5 expert
+  endpoints + owner-check on `/submit-review` (closes coins-reward theft
+  vector).
 
-⚠️ As of 2026-06-17 those branches are pushed but **await laptop pre-flight
-+ merge** — the rows above describe the posture once they land. Until merged,
-`main` still has the random-id beat/digital/radio handlers and the
-unguarded venue_radio_subscription `+30d`. Update this line when they merge.
+⚠️ Migrations 111 (DROP kv_store, PR #276) + 112 (track.expert_tested_until
+columns, PR #280) require manual psql application — see migration files'
+in-line MANUAL DEPLOY STEPS. Auto-runner is stub.
 
 ---
 
