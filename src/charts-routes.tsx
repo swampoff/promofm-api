@@ -88,7 +88,7 @@ const CHART_SOURCES: ChartSourceConfig[] = [
 const YANDEX_CHART_CONFIG = {
   id: 'yandex',
   name: 'Яндекс Музыка',
-  url: 'https://music.yandex.ru/handlers/chart.jsx',
+  url: 'https://api.music.yandex.net/landing3/chart/russia',
   logo: '🔴',
   type: 'streaming' as const,
   gradient: 'from-red-600/20 to-yellow-600/20',
@@ -531,62 +531,139 @@ async function parseRusskoeRadioHTML(html: string, prevTracks: ChartTrackEntry[]
   return entries;
 }
 
+// --- Shared helpers for deterministic HTML chart parsers (no LLM) ---
+
+/** Strip tags + decode entities + collapse whitespace from an HTML fragment. */
+function htmlFragmentText(s: string): string {
+  return decodeHtmlEntities(s.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
+/** Turn ordered {artist,title} pairs into ChartTrackEntry[] with trend vs previous chart. */
+function pairsToEntries(
+  pairs: { artist: string; title: string }[],
+  prevTracks: ChartTrackEntry[],
+  maxTracks: number,
+): ChartTrackEntry[] {
+  const prevPositionMap = new Map<string, number>();
+  prevTracks.forEach(t => prevPositionMap.set(`${t.artist}|||${t.title}`.toLowerCase(), t.position));
+
+  const entries: ChartTrackEntry[] = [];
+  for (const p of pairs) {
+    const title = (p.title || '').trim();
+    const artist = (p.artist || '').trim();
+    if (!title || !artist) continue;
+    if (entries.length >= maxTracks) break;
+
+    const position = entries.length + 1;
+    const prevPos = prevPositionMap.get(`${artist}|||${title}`.toLowerCase());
+    let trend: ChartTrackEntry['trend'] = 'new';
+    let trendValue = 0;
+    if (prevPos !== undefined) {
+      const diff = prevPos - position;
+      if (diff > 0) { trend = 'up'; trendValue = diff; }
+      else if (diff < 0) { trend = 'down'; trendValue = Math.abs(diff); }
+      else { trend = 'same'; }
+    }
+    entries.push({ position, previousPosition: prevPos ?? 0, title, artist, trend, trendValue });
+  }
+  return entries;
+}
+
+/** DFM Top-30 (dfm.ru/charts/top-30) — server-rendered rows, artist then title text nodes. */
+function parseDfmHTML(html: string, prevTracks: ChartTrackEntry[]): ChartTrackEntry[] {
+  const rows = html.split('class="group flex cursor-pointer items-center gap-4 self-center"').slice(1);
+  const pairs: { artist: string; title: string }[] = [];
+  for (const r of rows.slice(0, 30)) {
+    const tokens = r.slice(0, 1500)
+      .split(/<[^>]+>/)
+      .map(t => htmlFragmentText(t))
+      .filter(t => /[A-Za-zА-Яа-яЁё]/.test(t));
+    if (tokens.length >= 2) pairs.push({ artist: tokens[0], title: tokens[1] });
+  }
+  return pairsToEntries(pairs, prevTracks, 30);
+}
+
+/** Europa Plus Top-40 (europaplus.ru/programs/top40). */
+function parseEuropaHTML(html: string, prevTracks: ChartTrackEntry[]): ChartTrackEntry[] {
+  const blocks = html.split('class="track-and-artists"').slice(1, 41);
+  const pairs: { artist: string; title: string }[] = [];
+  for (const b of blocks) {
+    const nm = b.match(/class="track-name"[^>]*>([\s\S]*?)</);
+    const ar = b.match(/class="artist"[^>]*>([\s\S]*?)</);
+    if (nm && ar) pairs.push({ artist: htmlFragmentText(ar[1]), title: htmlFragmentText(nm[1]) });
+  }
+  return pairsToEntries(pairs, prevTracks, 40);
+}
+
+/** Наше Радио «Чартова дюжина» (nashe.ru/chartova): <p class="chartova__track">ARTIST / <span class="chartova__track_song">TITLE</span></p>. */
+function parseNasheHTML(html: string, prevTracks: ChartTrackEntry[]): ChartTrackEntry[] {
+  const pairs: { artist: string; title: string }[] = [];
+  const re = /class="chartova__track">([\s\S]*?)\/\s*<span class="chartova__track_song">([\s\S]*?)<\/span>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    pairs.push({ artist: htmlFragmentText(m[1]), title: htmlFragmentText(m[2]) });
+  }
+  return pairsToEntries(pairs, prevTracks, 13);
+}
+
 // ─── Aggregation Logic ──────────────────────────────────────
 
 async function aggregateSource(source: ChartSourceConfig): Promise<ExternalChartData> {
   const now = new Date().toISOString();
 
-  // Step 1: Fetch page text
-  const pageText = await fetchPageText(source.url);
-
-  if (!pageText) {
-    // Try to return cached data
+  // Step 1: SSRF check + fetch raw HTML (deterministic parsers need the markup)
+  const urlCheck = await isUrlSafe(source.url);
+  if (!urlCheck.safe) {
     const cached: any = await getChartSource(source.id);
-    if (cached && cached.tracks?.length > 0) {
-      console.log(`Using cached chart data for ${source.id} (fetch failed)`);
-      return { ...cached, error: 'Не удалось загрузить страницу, используются кэшированные данные' };
-    }
+    if (cached && cached.tracks?.length > 0) return { ...cached, error: 'SSRF blocked, используются кэшированные данные' };
     return {
-      sourceId: source.id,
-      sourceName: source.name,
-      sourceUrl: source.url,
-      logo: source.logo,
-      type: source.type,
-      gradient: source.gradient,
-      borderColor: source.borderColor,
-      tracks: [],
-      fetchedAt: now,
-      parsedBy: 'fallback',
-      error: 'Не удалось загрузить страницу чарта',
+      sourceId: source.id, sourceName: source.name, sourceUrl: source.url, logo: source.logo,
+      type: source.type, gradient: source.gradient, borderColor: source.borderColor,
+      tracks: [], fetchedAt: now, parsedBy: 'fallback', error: 'SSRF blocked: ' + urlCheck.reason,
     };
   }
 
-  // Step 2: Extract chart (direct HTML parser for russkoe, Gemini for others)
-  let tracks: ChartTrackEntry[] | null = null;
-  if (source.id === 'russkoe') {
-    // Fetch raw HTML (not stripped text) for direct parsing
-    try {
-      const rawResp = await fetch(source.url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
-          'Accept-Language': 'ru-RU,ru;q=0.9',
-        },
-      });
-      if (rawResp.ok) {
-        const rawHtml = await rawResp.text();
-        const prevData: any = await getChartSource(source.id);
-        const prevTracks: ChartTrackEntry[] = prevData?.tracks || [];
-        tracks = await parseRusskoeRadioHTML(rawHtml, prevTracks);
-        if (tracks.length > 0) {
-          console.log(`Parsed ${tracks.length} real tracks for russkoe via direct HTML parser`);
-        }
-      }
-    } catch (e) {
-      console.log(`Direct HTML fetch failed for russkoe: ${e}`);
+  let rawHtml: string | null = null;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    const rawResp = await fetch(source.url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+      },
+    });
+    clearTimeout(timeout);
+    if (rawResp.ok) rawHtml = await rawResp.text();
+    else console.log(`[charts] ${source.id} fetch failed: HTTP ${rawResp.status}`);
+  } catch (e) {
+    console.log(`[charts] ${source.id} fetch error: ${e}`);
+  }
+
+  if (!rawHtml) {
+    const cached: any = await getChartSource(source.id);
+    if (cached && cached.tracks?.length > 0) {
+      return { ...cached, error: 'Не удалось загрузить страницу, используются кэшированные данные' };
     }
-  } else {
-    tracks = await extractChartWithMistral(source, pageText);
+    return {
+      sourceId: source.id, sourceName: source.name, sourceUrl: source.url, logo: source.logo,
+      type: source.type, gradient: source.gradient, borderColor: source.borderColor,
+      tracks: [], fetchedAt: now, parsedBy: 'fallback', error: 'Не удалось загрузить страницу чарта',
+    };
+  }
+
+  // Step 2: Deterministic per-source HTML parser (no LLM)
+  const prevData: any = await getChartSource(source.id);
+  const prevTracks: ChartTrackEntry[] = prevData?.tracks || [];
+  let tracks: ChartTrackEntry[] = [];
+  switch (source.id) {
+    case 'russkoe': tracks = await parseRusskoeRadioHTML(rawHtml, prevTracks); break;
+    case 'dfm':     tracks = parseDfmHTML(rawHtml, prevTracks); break;
+    case 'europa':  tracks = parseEuropaHTML(rawHtml, prevTracks); break;
+    case 'nashe':   tracks = parseNasheHTML(rawHtml, prevTracks); break;
+    default:        tracks = [];
   }
 
   if (!tracks || tracks.length === 0) {
@@ -622,7 +699,7 @@ async function aggregateSource(source: ChartSourceConfig): Promise<ExternalChart
     borderColor: source.borderColor,
     tracks,
     fetchedAt: now,
-    parsedBy: 'mistral',
+    parsedBy: 'html_parser',
   };
 
   // Step 4: Upsert into chart_sources (Postgres)
@@ -661,24 +738,9 @@ async function aggregateYandexChart(): Promise<ExternalChartData> {
 
     const json: any = await resp.json();
 
-    // Парсим структуру Яндекс API
-    // handlers/chart.jsx возвращает: { trackIds: string[], tracksById: Record<string, Track>, tracks: Track[] }
-    // Каждый Track имеет: id, title, artists[], chart: { position, listeners, progress, shift }
-    const trackIds: string[] = json.trackIds || [];
-    const tracksMap: Record<string, any> = {};
-
-    // tracksById — самый надёжный источник (ID → полные данные трека)
-    if (json.tracksById) {
-      for (const [id, t] of Object.entries(json.tracksById)) {
-        tracksMap[id] = t;
-      }
-    }
-    // Fallback: массив tracks (те же данные, но в массиве)
-    if (Object.keys(tracksMap).length === 0 && json.tracks) {
-      for (const t of json.tracks) {
-        if (t.id) tracksMap[String(t.id)] = t;
-      }
-    }
+    // Парсим структуру landing3/chart/russia:
+    // result.chart.tracks[] = [{ track: { title, artists[] }, chart: { position, progress, shift, listeners } }]
+    const chartTracks: any[] = json?.result?.chart?.tracks || [];
 
     // Загружаем предыдущий чарт для трендов
     const prevData: any = await getChartSource(cfg.id);
@@ -686,19 +748,19 @@ async function aggregateYandexChart(): Promise<ExternalChartData> {
     const prevPosMap = new Map<string, number>();
     prevTracks.forEach(t => prevPosMap.set(`${t.artist}|||${t.title}`.toLowerCase(), t.position));
 
-    // Собираем треки — trackIds задаёт порядок чарта
+    // Порядок массива = порядок чарта
     const entries: ChartTrackEntry[] = [];
 
-    for (const tid of trackIds.slice(0, cfg.maxTracks)) {
-      const track = tracksMap[String(tid)];
+    for (const item of chartTracks.slice(0, cfg.maxTracks)) {
+      const track = item.track || item;
       if (!track) continue;
 
       const artist = extractYandexArtist(track);
       const title = track.title || '';
       if (!artist || !title) continue;
 
-      // Позиция из chart объекта трека (точная) или порядковый номер
-      const chartInfo = track.chart || track.chartPosition || {};
+      // Позиция/тренд из chart-объекта позиции в чарте
+      const chartInfo = item.chart || track.chart || {};
       const position = chartInfo.position || (entries.length + 1);
       const progress = chartInfo.progress || 'new'; // 'up' | 'down' | 'same' | 'new'
       const shift = chartInfo.shift || 0;
@@ -1244,9 +1306,15 @@ async function buildPromoFMChart(): Promise<PromoFMChartEntry[]> {
     { id: SHAZAM_CHART_CONFIG.id, name: SHAZAM_CHART_CONFIG.name },
   ];
 
+  const FRESH_MS = 4 * 24 * 60 * 60 * 1000; // источники старше 4 дней не учитываем — чтобы недоступные не лили старьё
   for (const source of allSourceIds) {
     const data: any = await getChartSource(source.id);
     if (!data?.tracks?.length) continue;
+    const fetchedMs = data.fetchedAt ? Date.parse(data.fetchedAt) : 0;
+    if (!fetchedMs || (Date.now() - fetchedMs) > FRESH_MS) {
+      console.log(`[charts] skip stale source ${source.id} (fetchedAt=${data.fetchedAt})`);
+      continue;
+    }
 
     const weight = SOURCE_WEIGHTS[source.id] || 1;
     const maxPos = data.tracks.length;
