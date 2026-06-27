@@ -20,8 +20,18 @@ const DEFAULT_SMTP_HOST = process.env.SMTP_HOST || 'localhost';
 const DEFAULT_SMTP_PORT = Number(process.env.SMTP_PORT || '25');
 const SMTP_USER = process.env.SMTP_USER || '';
 const SMTP_PASS = process.env.SMTP_PASS || '';
-const SMTP_FROM = process.env.SMTP_FROM || 'ПРОМО.МУЗЫКА <noreply@promofm.org>';
+// FROM по умолчанию на ВЕРИФИЦИРОВАННОМ домене promo-music.ru — тот же,
+// что использует транзакционный email-helper.tsx (FROM_EMAIL). Старый
+// дефолт `noreply@promofm.org` — невалидный домен для Resend → даже при
+// рабочем fallback'е письма bounce'ились. (2026-06-27)
+const SMTP_FROM = process.env.SMTP_FROM || 'ПРОМО.МУЗЫКА <noreply@promo-music.ru>';
+const SMTP_REPLY_TO = process.env.SMTP_REPLY_TO || 'noreply@promo-music.ru';
 const SMTP_TLS = process.env.SMTP_TLS === 'true';
+// Resend HTTP API fallback — тот же ключ/паттерн, что в email-helper.tsx.
+// Bulk-sender раньше умел ТОЛЬКО nodemailer→localhost:25 без fallback'а,
+// поэтому при недоступном Postfix кампании падали на 100% (а транзакционные
+// письма выживали через Resend). Теперь bulk наследует тот же запасной канал.
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const UNSUBSCRIBE_URL = 'https://promofm.org/unsubscribe';
 
 interface SmtpSendOptions {
@@ -110,26 +120,28 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
   const recipients = Array.isArray(opts.to) ? opts.to : [opts.to];
   const from = opts.from || SMTP_FROM;
 
+  // Заголовки строим ДО try, чтобы fallback (Resend) в catch'е переиспользовал
+  // те же List-Unsubscribe заголовки.
+  const headers: Record<string, string> = {
+    'X-Mailer': 'PromoMusic/2.0',
+    'Precedence': 'bulk',
+  };
+  if (opts.listUnsubscribe !== false) {
+    const email = recipients[0];
+    // Audit B-7 (2026-05-31): подписываем unsub-URL HMAC-токеном чтобы
+    // /unsubscribe endpoint мог отвергнуть mass-guess attack (POST с
+    // чужим email без токена). Старые письма без token продолжают
+    // работать в soft-режиме (см. STRICT_UNSUB_TOKEN ENV в endpoint).
+    const { t, sig } = generateUnsubToken(email);
+    const params = new URLSearchParams({ email, t: String(t), sig });
+    if (opts.campaignId) params.set('campaign', opts.campaignId);
+    const unsubUrl = `${UNSUBSCRIBE_URL}?${params.toString()}`;
+    headers['List-Unsubscribe'] = `<${unsubUrl}>`;
+    headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
+  }
+
   try {
     const transport = getTransporter();
-    const headers: Record<string, string> = {
-      'X-Mailer': 'PromoMusic/2.0',
-      'Precedence': 'bulk',
-    };
-
-    if (opts.listUnsubscribe !== false) {
-      const email = recipients[0];
-      // Audit B-7 (2026-05-31): подписываем unsub-URL HMAC-токеном чтобы
-      // /unsubscribe endpoint мог отвергнуть mass-guess attack (POST с
-      // чужим email без токена). Старые письма без token продолжают
-      // работать в soft-режиме (см. STRICT_UNSUB_TOKEN ENV в endpoint).
-      const { t, sig } = generateUnsubToken(email);
-      const params = new URLSearchParams({ email, t: String(t), sig });
-      if (opts.campaignId) params.set('campaign', opts.campaignId);
-      const unsubUrl = `${UNSUBSCRIBE_URL}?${params.toString()}`;
-      headers['List-Unsubscribe'] = `<${unsubUrl}>`;
-      headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
-    }
 
     const info = await transport.sendMail({
       from,
@@ -137,7 +149,7 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
       subject: opts.subject,
       html: opts.html,
       text: htmlToPlainText(opts.html),
-      replyTo: opts.replyTo,
+      replyTo: opts.replyTo || SMTP_REPLY_TO,
       headers,
     });
 
@@ -150,7 +162,56 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
     if (errMsg.includes('ECONNREFUSED') || errMsg.includes('ECONNRESET') || errMsg.includes('timeout')) {
       transporter = null;
     }
+
+    // Fallback: Resend HTTP API (port 443) — мирроринг email-helper.tsx.
+    // Срабатывает когда Postfix/localhost:25 недоступен. List-Unsubscribe
+    // и прочие заголовки сохраняются (Resend принимает `headers`).
+    const resendResult = await resendSendOnce({ ...opts, from, headers });
+    if (resendResult) return resendResult;
+
     return { success: false, error: errMsg };
+  }
+}
+
+/**
+ * Resend HTTP API send — запасной транспорт для bulk-рассылок.
+ * Возвращает null если RESEND_API_KEY не задан (тогда вызывающий код
+ * отдаёт исходную SMTP-ошибку), иначе — результат Resend-попытки.
+ */
+async function resendSendOnce(
+  opts: SmtpSendOptions & { from: string; headers: Record<string, string> }
+): Promise<SmtpResult | null> {
+  if (!RESEND_API_KEY) return null;
+  const recipients = Array.isArray(opts.to) ? opts.to : [opts.to];
+  try {
+    const resp = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: opts.from,
+        reply_to: opts.replyTo || SMTP_REPLY_TO,
+        to: recipients,
+        subject: opts.subject,
+        html: opts.html,
+        text: htmlToPlainText(opts.html),
+        headers: opts.headers,
+      }),
+    });
+    const result = await resp.json().catch(() => ({})) as { id?: string; message?: string };
+    if (!resp.ok) {
+      const detail = result?.message || `HTTP ${resp.status}`;
+      console.error(`[SMTP→Resend] API error for ${recipients.join(', ')}:`, detail);
+      return { success: false, error: `Resend: ${detail}` };
+    }
+    console.log(`[SMTP→Resend] Sent to ${recipients.join(', ')}, id: ${result.id}`);
+    return { success: true, messageId: result.id };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[SMTP→Resend] Fallback failed for ${recipients.join(', ')}:`, errMsg);
+    return { success: false, error: `Resend fallback: ${errMsg}` };
   }
 }
 

@@ -1018,11 +1018,24 @@ Used by: `notifyAdminTelegram()` in `email-helper.tsx` —
 
 ### Email transport
 
-`email-helper.tsx`:
+Два сендера, ОБА теперь с одинаковой устойчивостью (SMTP→Resend):
+
+**Транзакционные письма** — `email-helper.tsx` → `sendEmail()`:
 - Primary: SMTP via `127.0.0.1:25` Postfix relay (no auth)
 - Fallback: Resend HTTP API (env `RESEND_API_KEY`)
 - `FROM_EMAIL = '"ПРОМО.МУЗЫКА" <noreply@promo-music.ru>'`
 - `ADMIN_EMAIL = 'info@promofm.ru'`
+
+**Bulk/кампании** — `smtp-sender.tsx` → `smtpSendEmail()` / `smtpSendBatch()`
+(используется email-campaigns, track-test, checkout, email-routes):
+- Primary: SMTP via `SMTP_HOST:SMTP_PORT` (default `localhost:25`)
+- Fallback: Resend HTTP API (тот же `RESEND_API_KEY`) — добавлен 2026-06-27
+  (`smtp-sender.tsx:157+`). ДО этого fallback'а не было: при недоступном
+  Postfix кампании падали на 100%, хотя транзакционные письма выживали
+  через Resend. Это была root-cause «рассылка в админке не работает».
+- FROM default выровнен на верифицированный домен
+  `'ПРОМО.МУЗЫКА <noreply@promo-music.ru>'` (был невалидный `promofm.org`).
+- List-Unsubscribe HMAC-заголовки сохраняются и в Resend-ветке.
 
 ### Engineer marketplace e-mail pipeline (since 2026-06-11)
 
