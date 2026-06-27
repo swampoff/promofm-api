@@ -1559,13 +1559,23 @@ export async function upsertContentOrder(orderId: string, order: Record<string, 
 // ─── Email Campaigns (notifications) ───
 
 export async function getEmailCampaigns(artistId: string) {
+  // ВАЖНО (2026-06-27): фильтр/сортировку делаем по `data` jsonb в JS, а НЕ
+  // через .eq('artist_id')/.order('created_at') в SQL. upsertEmailCampaign
+  // пишет только {id, data, updated_at} — нативных колонок artist_id/created_at
+  // он НЕ заполняет. Старый `WHERE "artist_id" = $1` поэтому возвращал 0 строк
+  // ВСЕГДА → getCampaignById всегда null → /send и pre-send PUT отдавали 404
+  // «Campaign not found» (root-cause «не могу отправить рассылку»). Читаем все
+  // строки и фильтруем по data.artist_id — работает независимо от того, есть ли
+  // вообще нативные колонки в legacy-таблице email_campaigns.
   const { data, error } = await db()
     .from('email_campaigns')
-    .select('*')
-    .eq('artist_id', artistId)
-    .order('created_at', { ascending: false });
-  if (error) console.error('[db] getEmailCampaigns:', error);
-  return (data || []).map((r: any) => r.data || r);
+    .select('*');
+  if (error) { console.error('[db] getEmailCampaigns:', error); return []; }
+  return (data || [])
+    .map((r: any) => r.data || r)
+    .filter((c: any) => !artistId || !c.artist_id || c.artist_id === artistId)
+    .sort((a: any, b: any) =>
+      new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
 }
 
 export async function upsertEmailCampaign(campaignId: string, campaign: Record<string, any>) {
