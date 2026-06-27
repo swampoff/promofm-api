@@ -632,6 +632,27 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         }
       }
 
+      // ── Fulfill release_distribution — Distribution v2 ──
+      // Release создан через POST /releases, отправлен (pending_payment)
+      // через POST /releases/:id/submit. Webhook flip'ит pending_payment
+      // → paid, чтобы релиз попал в админ-очередь модерации. Идемпотентно
+      // через WHERE status='pending_payment'.
+      if (session.metadata?.type === 'release_distribution' && session.metadata?.releaseId) {
+        const { pool: relPool } = await import('./db-client.tsx');
+        const releaseId = String(session.metadata.releaseId);
+        const r = await relPool.query(
+          `UPDATE releases SET status = 'paid', payment_session_id = $2, updated_at = NOW()
+             WHERE id::text = $1 AND status = 'pending_payment'
+             RETURNING id::text AS id, title`,
+          [releaseId, session.orderId],
+        );
+        if (r.rowCount && r.rowCount > 0) {
+          log.info({ releaseId, amount: session.amount }, 'release_distribution_paid');
+        } else {
+          log.warn({ releaseId, sessionOrderId: session.orderId }, 'release_distribution_paid_noop');
+        }
+      }
+
       // ─── Fulfill pitching_bundle ───
       // The session is created in pitching-routes.tsx (POST /pitching/submit)
       // with submissions left in status='pending_payment'. finalizePitchingBundle
@@ -2142,6 +2163,46 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       } catch (err) {
         log.error({ err, distOrderId }, 'distribution_validation_error');
         return c.json({ success: false, error: 'Не удалось проверить заказ дистрибуции' }, 500);
+      }
+    }
+
+    // release_distribution — оплата релиза (Distribution v2). Canonical
+    // price = releases.price_rub (выставлен в POST /releases/:id/submit
+    // из суммы base-цен выбранных DSP с subscription-скидкой). Тот же
+    // amount-gate класс что и distribution v1 / track_publish / etc.
+    if (type === 'purchase' && metadata?.type === 'release_distribution') {
+      const releaseId = metadata?.releaseId;
+      if (!releaseId) {
+        return c.json({ success: false, error: 'metadata.releaseId обязателен для release_distribution' }, 400);
+      }
+      try {
+        const { pool: rpool } = await import('./db-client.tsx');
+        const { rows } = await rpool.query(
+          `SELECT user_id, status, price_rub FROM releases WHERE id::text = $1 LIMIT 1`,
+          [String(releaseId)],
+        );
+        if (rows.length === 0) {
+          return c.json({ success: false, error: 'Релиз не найден' }, 404);
+        }
+        const rel = rows[0];
+        if (rel.user_id !== userId) {
+          log.warn({ userId, releaseId, ownerId: rel.user_id }, 'release_distribution_unauthorized');
+          return c.json({ success: false, error: 'Нельзя оплатить чужой релиз' }, 403);
+        }
+        if (rel.status !== 'pending_payment') {
+          return c.json({ success: false, error: `Релиз в статусе ${rel.status} — оплата невозможна` }, 409);
+        }
+        const expected = Number(rel.price_rub) || 0;
+        if (!(expected > 0)) {
+          return c.json({ success: false, error: 'Цена релиза не определена' }, 400);
+        }
+        if (Math.abs(amount - expected) > 0.01) {
+          log.warn({ userId, releaseId, expected, received: amount }, 'release_distribution_amount_tampering_blocked');
+          return c.json({ success: false, error: 'Сумма не соответствует цене релиза' }, 400);
+        }
+      } catch (err) {
+        log.error({ err, releaseId }, 'release_distribution_validation_error');
+        return c.json({ success: false, error: 'Не удалось проверить релиз' }, 500);
       }
     }
 
