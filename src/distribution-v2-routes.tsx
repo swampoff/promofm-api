@@ -33,14 +33,15 @@
 
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { applySubscriptionDiscount } from './subscription-pricing.tsx';
-import { notifyAllAdmins } from './cross-cabinet-notify.tsx';
+import { notifyAllAdmins, notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import {
   mapReleaseRow, mapReleaseTrackRow, mapReleaseDeliveryRow,
   type ContributorRole, type DistributionDsp,
 } from './distribution-v2-types.ts';
+import { generateDdexErn } from './ddex-ern-export.tsx';
 
 const app = new Hono();
 
@@ -599,6 +600,254 @@ app.post('/:id/cancel', requireAuth, async (c) => {
 // ── Public: pricing list ────────────────────────────────────────────────
 app.get('/meta/pricing', (c) => {
   return c.json({ success: true, prices: DSP_BASE_PRICES });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// ADMIN — delivery console (requireAdmin)
+// ════════════════════════════════════════════════════════════════════
+//
+// Доставка сегодня — ручная (админ ведёт статус каждой release_delivery,
+// пока канал доставки в DSP не подключён). DDEX-ERN export даёт XML,
+// который вкладывается в посылку аггрегатору/каналу. Когда автоматический
+// delivery-worker подключится, он будет писать те же поля
+// (dsp_release_id, status, ddex_message_id) — endpoints не меняются.
+
+const ADMIN_QUEUE_STATUSES = ['paid', 'in_review', 'approved', 'delivering', 'live', 'rejected'];
+
+// GET /admin/queue?status= — релизы в работе
+app.get('/admin/queue', requireAuth, requireAdmin, async (c) => {
+  try {
+    const status = c.req.query('status');
+    let q = `SELECT * FROM releases WHERE status = ANY($1) ORDER BY updated_at DESC LIMIT 300`;
+    let params: any[] = [ADMIN_QUEUE_STATUSES];
+    if (status && ADMIN_QUEUE_STATUSES.includes(status)) {
+      q = `SELECT * FROM releases WHERE status = $1 ORDER BY updated_at DESC LIMIT 300`;
+      params = [status];
+    }
+    const r = await pool.query(q, params);
+    return c.json({ success: true, releases: r.rows.map(mapReleaseRow) });
+  } catch (err) {
+    return c.json({ success: false, error: safeErrorMessage(err) }, 500);
+  }
+});
+
+// GET /admin/releases/:id — полный релиз (admin может смотреть любой)
+app.get('/admin/releases/:id', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const rel = await pool.query(`SELECT * FROM releases WHERE id::text = $1 LIMIT 1`, [id]);
+    if (rel.rows.length === 0) return c.json({ success: false, error: 'Релиз не найден' }, 404);
+    const [tracks, deliveries] = await Promise.all([
+      pool.query(`SELECT * FROM release_tracks WHERE release_id = $1 ORDER BY disc_number, track_number`, [id]),
+      pool.query(`SELECT * FROM release_deliveries WHERE release_id = $1 ORDER BY target_dsp`, [id]),
+    ]);
+    const trackIds = tracks.rows.map((t: any) => t.id);
+    let contribByTrack: Record<string, any[]> = {};
+    if (trackIds.length > 0) {
+      const cr = await pool.query(`SELECT * FROM release_contributors WHERE release_track_id = ANY($1)`, [trackIds]);
+      for (const row of cr.rows) {
+        (contribByTrack[row.release_track_id] ||= []).push({ name: row.name, role: row.role, splitPct: Number(row.split_pct) || 0, payeeUserId: row.payee_user_id, ipi: row.ipi });
+      }
+    }
+    return c.json({
+      success: true,
+      release: mapReleaseRow(rel.rows[0]),
+      tracks: tracks.rows.map((t: any) => ({ ...mapReleaseTrackRow(t), contributors: contribByTrack[t.id] || [] })),
+      deliveries: deliveries.rows.map(mapReleaseDeliveryRow),
+    });
+  } catch (err) {
+    return c.json({ success: false, error: safeErrorMessage(err) }, 500);
+  }
+});
+
+// POST /admin/releases/:id/moderate — approve | reject
+app.post('/admin/releases/:id/moderate', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json().catch(() => ({} as any));
+    const action = body.action;
+    if (action !== 'approve' && action !== 'reject') {
+      return c.json({ success: false, error: "action: 'approve' | 'reject'" }, 400);
+    }
+    // Модерировать можно paid / in_review
+    const newStatus = action === 'approve' ? 'approved' : 'rejected';
+    const reason = action === 'reject' ? String(body.reason || '').trim() : null;
+    if (action === 'reject' && !reason) return c.json({ success: false, error: 'reason обязателен при reject' }, 400);
+
+    const upd = await pool.query(
+      `UPDATE releases SET status = $2, rejection_reason = $3, updated_at = NOW()
+        WHERE id::text = $1 AND status IN ('paid','in_review')
+        RETURNING id::text AS id, user_id, title, creator_role`,
+      [id, newStatus, reason],
+    );
+    if (upd.rowCount === 0) {
+      return c.json({ success: false, error: 'Релиз не в статусе paid/in_review' }, 409);
+    }
+    const rel = upd.rows[0];
+    // Уведомить артиста/DJ
+    notifyCrossCabinet({
+      targetUserId: rel.user_id,
+      sourceRole: 'admin',
+      targetRole: rel.creator_role === 'dj' ? 'dj' : 'artist',
+      type: 'order_update',
+      title: action === 'approve' ? 'Релиз одобрен' : 'Релиз отклонён',
+      message: action === 'approve'
+        ? `Релиз «${rel.title}» одобрен и будет доставлен в выбранные площадки.`
+        : `Релиз «${rel.title}» отклонён: ${reason}`,
+      link: rel.creator_role === 'dj' ? '/dj/promotion' : '/artist/pitching',
+      metadata: { releaseId: id },
+    }).catch(() => {});
+    return c.json({ success: true, status: newStatus });
+  } catch (err) {
+    return c.json({ success: false, error: safeErrorMessage(err) }, 500);
+  }
+});
+
+// POST /admin/releases/:id/assign-codes — присвоить UPC + ISRC трекам
+app.post('/admin/releases/:id/assign-codes', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json().catch(() => ({} as any));
+    const upc = body.upc != null ? String(body.upc).trim() : undefined;
+    const trackCodes: Array<{ trackRowId: string; isrc: string }> = Array.isArray(body.tracks) ? body.tracks : [];
+
+    if (upc !== undefined && upc && !/^[0-9]{12,13}$/.test(upc)) {
+      return c.json({ success: false, error: 'UPC должен быть 12-13 цифр' }, 400);
+    }
+    for (const tc of trackCodes) {
+      const clean = String(tc.isrc || '').replace(/-/g, '').toUpperCase();
+      if (clean && !/^[A-Z]{2}[A-Z0-9]{3}[0-9]{2}[0-9]{5}$/.test(clean)) {
+        return c.json({ success: false, error: `Некорректный ISRC: ${tc.isrc}` }, 400);
+      }
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      if (upc !== undefined) {
+        await client.query(`UPDATE releases SET upc = $2, updated_at = NOW() WHERE id::text = $1`, [id, upc || null]);
+      }
+      for (const tc of trackCodes) {
+        await client.query(
+          `UPDATE release_tracks SET isrc = $3, updated_at = NOW() WHERE id::text = $2 AND release_id::text = $1`,
+          [id, tc.trackRowId, String(tc.isrc).replace(/-/g, '').toUpperCase()],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    return c.json({ success: true });
+  } catch (err) {
+    return c.json({ success: false, error: safeErrorMessage(err) }, 500);
+  }
+});
+
+// POST /admin/deliveries/:deliveryId/update — обновить статус доставки в DSP
+app.post('/admin/deliveries/:deliveryId/update', requireAuth, requireAdmin, async (c) => {
+  try {
+    const deliveryId = c.req.param('deliveryId');
+    const body = await c.req.json().catch(() => ({} as any));
+    const allowed = ['queued', 'delivering', 'live', 'rejected', 'taken_down'];
+    if (body.status && !allowed.includes(body.status)) {
+      return c.json({ success: false, error: `status: ${allowed.join('|')}` }, 400);
+    }
+    const sets: string[] = [];
+    const vals: any[] = [];
+    let i = 1;
+    const map: Record<string, string> = {
+      status: 'status', dspReleaseId: 'dsp_release_id', dspUrl: 'dsp_url',
+      ddexMessageId: 'ddex_message_id', rejectedReason: 'rejected_reason',
+    };
+    for (const [k, col] of Object.entries(map)) {
+      if (k in body) { sets.push(`${col} = $${i++}`); vals.push(body[k] === '' ? null : body[k]); }
+    }
+    if (body.status === 'delivering') sets.push(`delivered_at = COALESCE(delivered_at, NOW())`);
+    if (body.status === 'live') sets.push(`live_at = COALESCE(live_at, NOW())`);
+    if (sets.length === 0) return c.json({ success: false, error: 'Нет полей' }, 400);
+    sets.push(`updated_at = NOW()`);
+    vals.push(deliveryId);
+    const upd = await pool.query(
+      `UPDATE release_deliveries SET ${sets.join(', ')} WHERE id::text = $${i} RETURNING release_id::text AS "releaseId"`,
+      vals,
+    );
+    if (upd.rowCount === 0) return c.json({ success: false, error: 'Доставка не найдена' }, 404);
+
+    // Пересчитать release.status из агрегата deliveries
+    const releaseId = upd.rows[0].releaseId;
+    const agg = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'live')::int AS live,
+         COUNT(*) FILTER (WHERE status = 'delivering')::int AS delivering,
+         COUNT(*)::int AS total
+       FROM release_deliveries WHERE release_id::text = $1`,
+      [releaseId],
+    );
+    const { live, delivering, total } = agg.rows[0];
+    let relStatus: string | null = null;
+    if (live > 0 && live === total) relStatus = 'live';
+    else if (live > 0 || delivering > 0) relStatus = 'delivering';
+    if (relStatus) {
+      await pool.query(
+        `UPDATE releases SET status = $2, updated_at = NOW()
+          WHERE id::text = $1 AND status IN ('approved','delivering','live')`,
+        [releaseId, relStatus],
+      );
+    }
+    return c.json({ success: true, releaseStatus: relStatus });
+  } catch (err) {
+    return c.json({ success: false, error: safeErrorMessage(err) }, 500);
+  }
+});
+
+// GET /admin/releases/:id/ddex — DDEX ERN XML (download)
+app.get('/admin/releases/:id/ddex', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const rel = await pool.query(`SELECT * FROM releases WHERE id::text = $1 LIMIT 1`, [id]);
+    if (rel.rows.length === 0) return c.json({ success: false, error: 'Релиз не найден' }, 404);
+    const tracksR = await pool.query(`SELECT * FROM release_tracks WHERE release_id = $1 ORDER BY disc_number, track_number`, [id]);
+    const deliveriesR = await pool.query(`SELECT * FROM release_deliveries WHERE release_id = $1`, [id]);
+    const trackIds = tracksR.rows.map((t: any) => t.id);
+    let contribByTrack: Record<string, any[]> = {};
+    if (trackIds.length > 0) {
+      const cr = await pool.query(`SELECT release_track_id, name, role FROM release_contributors WHERE release_track_id = ANY($1)`, [trackIds]);
+      for (const row of cr.rows) (contribByTrack[row.release_track_id] ||= []).push({ name: row.name, role: row.role });
+    }
+    const m = mapReleaseRow(rel.rows[0]);
+    const xml = generateDdexErn({
+      release: {
+        id: m.id, title: m.title, releaseType: m.releaseType, primaryArtistName: m.primaryArtistName,
+        labelName: m.labelName, upc: m.upc, genre: m.genre, language: m.language,
+        releaseDate: m.releaseDate, coverUrl: m.coverUrl, cLine: m.cLine, pLine: m.pLine,
+        cLineYear: m.cLineYear, pLineYear: m.pLineYear, explicit: m.explicit,
+      },
+      tracks: tracksR.rows.map((t: any) => {
+        const mt = mapReleaseTrackRow(t);
+        return {
+          id: mt.id, trackNumber: mt.trackNumber, discNumber: mt.discNumber, title: mt.title,
+          version: mt.version, isrc: mt.isrc, explicit: mt.explicit, language: mt.language,
+          durationSec: mt.durationSec, contributors: contribByTrack[t.id] || [],
+        };
+      }),
+      deliveries: deliveriesR.rows.map((d: any) => ({ targetDsp: d.target_dsp })),
+      messageId: `PROMOFM-${m.id}-${Date.now()}`,
+      senderName: 'PROMO.MUSIC',
+      createdAt: new Date().toISOString(),
+    });
+    return new Response(xml, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/xml; charset=utf-8',
+        'Content-Disposition': `attachment; filename="ddex-ern-${m.id}.xml"`,
+      },
+    });
+  } catch (err) {
+    return c.json({ success: false, error: safeErrorMessage(err) }, 500);
+  }
 });
 
 export default app;
