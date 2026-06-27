@@ -181,6 +181,85 @@ Public:
 
 ---
 
+## Distribution v2 — full Release model (DDEX-aware, in progress)
+
+**Source:** `src/migrations/113_distribution_v2_releases.sql` +
+`src/distribution-v2-types.ts`. Status as of 2026-06-18: **Phase 1
+(data model) landed, no code consumers yet** — 6 additive tables, zero
+changes to existing schema. v1 `distribution_orders` остаётся рабочим
+(DistributionTab всё ещё на нём); миграция UI на v2 — позже.
+
+### ⚠️ Реальность доставки в DSP (читать перед обещаниями)
+
+**Spotify и Apple Music НЕ имеют публичного upload-API.** «Spotify for
+Artists» = только аналитика (read-only). Доставка контента возможна
+ТОЛЬКО через аккредитованного дистрибьютора: DDEX-ERN + зашифрованный
+SFTP/Ingrid-канал + юридический договор (процесс на месяцы). Yandex/VK
+имеют RU-партнёрские программы, тоже через договор.
+
+Поэтому архитектура: **богатая Release-модель + DDEX-ready метаданные +
+pluggable delivery worker**. Сегодня delivery-адаптер = ручная
+админ-доставка; завтра подключается аккредитованный канал/агрегатор
+БЕЗ изменения модели данных. `release_deliveries.ddex_message_id` +
+`dsp_release_id` готовы под оба режима.
+
+### Модель (6 таблиц, миграция 113)
+
+```
+releases (single/EP/album: upc, cover 3000×3000, ℗/©, release_date, genre)
+  ├─ release_tracks (isrc, version, explicit, audio WAV master, is_dj_mix, rights_attested)
+  │    └─ release_contributors (composer/lyricist/producer + split_pct + payee_user_id)
+  └─ release_deliveries (per-DSP: status, ddex_message_id, dsp_url) UNIQUE(release_id, target_dsp)
+
+royalty_statements (импорт DSP-отчёта за период: target_dsp, period, total)
+  └─ royalty_lines (по isrc → matched release_track → user_id earner → net → payout_status)
+```
+
+### Что несёт каждое поле (для будущих фаз)
+
+- **releases.status** машина: `draft → pending_payment → paid → in_review
+  → approved → delivering → live` (+ `rejected`/`taken_down`/`cancelled`)
+- **release_tracks.is_dj_mix + rights_attested** — DJ-flow: миксы требуют
+  явного подтверждения прав на содержимое (clearance gate) перед submit
+- **release_contributors.split_pct + payee_user_id** — основа роялти-
+  сплита: сумма split_pct внутри role-группы = 100 (enforce на app-уровне,
+  не CHECK)
+- **royalty_lines.payout_status + payout_withdrawal_id** — связка с
+  существующим `payment_withdrawals` для выплат (реюз withdrawal infra)
+
+### Решения owner'а (2026-06-18, для контекста следующих фаз)
+
+- Доставка: **прямые DSP API** (с поправкой на реальность выше — реально
+  DDEX + аккредитация/агрегатор)
+- Модель: **полная Release-модель** (эта миграция)
+- Роялти: **сбор + выплата** (royalty_statements/lines + payout)
+- DJ: **оригиналы + миксы** (is_dj_mix + rights_attested gate)
+
+### Roadmap (фазы)
+
+1. ✅ Data model (миграция 113) — **эта PR**
+2. ⬜ Backend CRUD + валидация (release wizard endpoints, audio/cover
+   validation, ISRC/UPC assignment)
+3. ⬜ Артист wizard UI (многошаговый release-визард)
+4. ⬜ DJ flow (rights-attestation gate для миксов)
+5. ⬜ Delivery layer (DDEX-ERN export + admin delivery console + worker)
+6. ⬜ Royalty subsystem (импорт DSP-отчётов → split → payout)
+
+### MANUAL DEPLOY (миграция 113 — additive, safe)
+
+```bash
+sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+BEGIN;
+\i /opt/promofm-api/src/migrations/113_distribution_v2_releases.sql
+COMMIT;
+EOF
+```
+Идемпотентна (CREATE TABLE/INDEX IF NOT EXISTS). Ноль изменений
+существующих таблиц — можно применять без code-restart (код v2 ещё не
+читает эти таблицы).
+
+---
+
 ## Tracks
 
 ### Publication price flow
