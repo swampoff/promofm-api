@@ -23,6 +23,7 @@ import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { sendEmail, escapeHtml } from './email-helper.tsx';
+import { smtpSendBatch } from './smtp-sender.tsx';
 
 const radioDigest = new Hono();
 
@@ -30,7 +31,9 @@ const DIGEST_RECIPIENT = 'info@promofm.ru';
 const PER_RUN = 2;                       // сколько треков уходит за один запуск (= в день)
 const SITE_URL = 'https://promo-music.ru';
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
-const DIGEST_LOCK = 720107;              // ключ advisory-lock, уникальный для этого крона
+const DIGEST_LOCK = 720107;              // ключ advisory-lock, уникальный для daily info@-крона
+const WEEKLY_LOCK = 720108;              // ОТДЕЛЬНЫЙ ключ для понедельничного weekly-крона
+const WEEKLY_WINDOW_DAYS = 8;            // берём только свежий пятничный батч, не бэклог
 
 // Cron шлёт X-Internal-Key; из админ-сессии тоже можно дёрнуть вручную.
 async function requireAdminOrKey(c: any, next: any) {
@@ -136,6 +139,219 @@ radioDigest.post('/run', requireAdminOrKey, async (c) => {
   } finally {
     if (locked) {
       await client.query('SELECT pg_advisory_unlock($1)', [DIGEST_LOCK]).catch(() => {});
+    }
+    client.release();
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// WEEKLY — понедельничная прямая рассылка новинок всей базе радиостанций
+// ════════════════════════════════════════════════════════════════════════
+//
+// Отличие от daily info@-дайджеста выше:
+//   - шлёт НАПРЯМУЮ радиостанциям (зарегистрированным + партнёрам), не на info@;
+//   - весь пятничный батч недели за один раз, не по 2/день;
+//   - красивая карточная вёрстка с лого вместо плоского списка;
+//   - свой курсор radio_weekly_digest_sent_at (не конфликтует с #264).
+//
+// Cron: 0 12 * * 1 (понедельник 12:00) дёргает POST /run-weekly с X-Internal-Key.
+
+interface WeeklyTrack {
+  id: string;
+  title: string | null;
+  artist_name: string | null;
+  genre: string | null;
+  audio_url: string | null;
+  cover_url: string | null;
+}
+
+const COVER_GRADIENTS = [
+  'linear-gradient(135deg,#FF577F,#7C3AED)',
+  'linear-gradient(135deg,#7C3AED,#06B6D4)',
+  'linear-gradient(135deg,#F59E0B,#EF4444)',
+  'linear-gradient(135deg,#10B981,#06B6D4)',
+];
+
+function absUrl(path: string | null): string {
+  if (!path) return '';
+  return path.startsWith('http') ? path : `${SITE_URL}${path.startsWith('/') ? '' : '/'}${path}`;
+}
+
+function weeklyTrackCard(t: WeeklyTrack, i: number): string {
+  const cover = absUrl(t.cover_url);
+  const listen = t.audio_url ? absUrl(t.audio_url) : `${SITE_URL}/radio/weekly-releases`;
+  const coverCell = cover
+    ? `<img src="${escapeHtml(cover)}" width="64" height="64" alt="" style="border-radius:10px;display:block;" />`
+    : `<div style="width:64px;height:64px;border-radius:10px;background:${COVER_GRADIENTS[i % COVER_GRADIENTS.length]};text-align:center;line-height:64px;color:#fff;font-size:24px;font-weight:700;">&#9834;</div>`;
+  const genreChip = t.genre
+    ? `<span style="display:inline-block;padding:3px 10px;background:rgba(124,58,237,0.2);border:1px solid rgba(124,58,237,0.4);border-radius:20px;color:#C4B5FD;font-size:11px;">${escapeHtml(String(t.genre))}</span>`
+    : '';
+  return `
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:10px 0;background:#1d1d38;border:1px solid rgba(255,255,255,0.07);border-radius:14px;">
+          <tr>
+            <td width="76" style="padding:14px;vertical-align:middle;">${coverCell}</td>
+            <td style="padding:14px 8px;vertical-align:middle;">
+              <div style="color:#ffffff;font-size:16px;font-weight:700;margin-bottom:3px;">${escapeHtml(t.title || 'Без названия')}</div>
+              <div style="color:#FF8FA8;font-size:14px;margin-bottom:6px;">${escapeHtml(t.artist_name || 'Unknown Artist')}</div>
+              ${genreChip}
+            </td>
+            <td width="104" align="right" style="padding:14px;vertical-align:middle;">
+              <a href="${escapeHtml(listen)}" style="display:inline-block;padding:9px 18px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#fff;text-decoration:none;border-radius:8px;font-size:13px;font-weight:600;">&#9654; Слушать</a>
+            </td>
+          </tr>
+        </table>`;
+}
+
+function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string): string {
+  const cards = tracks.map((t, i) => weeklyTrackCard(t, i)).join('');
+  const releasesUrl = `${SITE_URL}/radio/weekly-releases`;
+  // {{name}} подставляет smtpSendBatch на каждого получателя (имя станции).
+  return `
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0a0a1a;padding:32px 16px;">
+  <table align="center" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;margin:0 auto;background:#14142a;border-radius:18px;overflow:hidden;">
+    <tr>
+      <td style="padding:30px 40px 26px;background:linear-gradient(135deg,#FF577F 0%,#7C3AED 100%);">
+        <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td align="left" style="vertical-align:middle;"><img src="${SITE_URL}/logo.png" alt="ПРОМО.МУЗЫКА" height="36" style="height:36px;display:block;border:0;" /></td>
+          <td align="right" style="vertical-align:middle;color:rgba(255,255,255,0.85);font-size:12px;letter-spacing:2px;text-transform:uppercase;">Дайджест для эфира</td>
+        </tr></table>
+        <h1 style="margin:22px 0 4px;color:#fff;font-size:27px;line-height:1.2;font-weight:800;">&#127925; Новинки недели</h1>
+        <p style="margin:0;color:rgba(255,255,255,0.9);font-size:15px;">Свежие треки для вашей ротации &middot; ${escapeHtml(dateLabel)}</p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:28px 40px 6px;color:#e6e6f0;font-size:16px;line-height:1.6;">
+        <p style="margin:0 0 14px;">Здравствуйте, <strong style="color:#fff;">{{name}}</strong>!</p>
+        <p style="margin:0 0 8px;">Подобрали новые релизы артистов ПРОМО.МУЗЫКА за прошедшую неделю — послушайте и забирайте подходящие в эфир. Все треки готовы к ротации: лицензии, метаданные и джинглы — в порядке.</p>
+      </td>
+    </tr>
+    <tr><td style="padding:12px 28px 4px;">${cards}</td></tr>
+    <tr><td align="center" style="padding:18px 40px 8px;">
+      <a href="${releasesUrl}" style="display:inline-block;padding:15px 38px;background:linear-gradient(135deg,#FF577F 0%,#7C3AED 100%);color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:16px;">Открыть все новинки недели</a>
+    </td></tr>
+    <tr><td align="center" style="padding:4px 40px 24px;color:#8a8aa0;font-size:13px;">В каталоге — полный список релизов с фильтрами по жанру, темпу и настроению.</td></tr>
+    <tr><td style="padding:24px 40px 30px;border-top:1px solid #2a2a45;text-align:center;">
+      <img src="${SITE_URL}/logo.png" alt="ПРОМО.МУЗЫКА" height="30" style="height:30px;margin-bottom:12px;border:0;" />
+      <p style="margin:0 0 6px;color:#c8c8d8;font-size:13px;font-weight:600;">Команда ПРОМО.МУЗЫКА</p>
+      <p style="margin:0;color:#666;font-size:12px;">&copy; ${new Date().getFullYear()} ПРОМО.МУЗЫКА — платформа продвижения музыки</p>
+      <p style="margin:6px 0 0;"><a href="${SITE_URL}" style="color:#FF577F;text-decoration:none;font-size:12px;">promo-music.ru</a></p>
+    </td></tr>
+  </table>
+</div>`;
+}
+
+/**
+ * Собрать получателей понедельничной рассылки:
+ *   1) зарегистрированные радио-аккаунты (users.role='radio_station');
+ *   2) внешние станции-партнёры (radio_partner_contacts, active, не отписаны);
+ *   3) info@promofm.ru (копия оператору для ручной пересылки тем, кого нет в б/д).
+ * Дедуп по lower(email). Глобально отписанные (email_unsubscribes) отсекаются.
+ */
+async function getWeeklyRecipients(client: any): Promise<{ email: string; name: string }[]> {
+  const users = await client.query(
+    `SELECT u.email AS email,
+            COALESCE(NULLIF(u.full_name, ''), split_part(u.email, '@', 1)) AS name
+       FROM users u
+      WHERE u.role = 'radio_station'
+        AND u.email IS NOT NULL AND u.email <> ''`
+  );
+  const partners = await client.query(
+    `SELECT email, station_name AS name
+       FROM radio_partner_contacts
+      WHERE active = TRUE AND unsubscribed_at IS NULL
+        AND email IS NOT NULL AND email <> ''`
+  );
+  const unsub = await client.query(`SELECT LOWER(email) AS email FROM email_unsubscribes`);
+  const unsubSet = new Set<string>(unsub.rows.map((r: any) => r.email));
+
+  const map = new Map<string, { email: string; name: string }>();
+  const push = (rawEmail: string, rawName: string) => {
+    const email = String(rawEmail || '').trim();
+    const key = email.toLowerCase();
+    if (!email || !key.includes('@') || unsubSet.has(key) || map.has(key)) return;
+    map.set(key, { email, name: String(rawName || '').trim() || email.split('@')[0] });
+  };
+  for (const r of users.rows) push(r.email, r.name);
+  for (const r of partners.rows) push(r.email, r.name);
+  push(DIGEST_RECIPIENT, 'ПРОМО.ФМ');
+  return [...map.values()];
+}
+
+/**
+ * POST /run-weekly — понедельничная прямая рассылка новинок недели всей базе.
+ * Защита: X-Internal-Key (cron) ИЛИ admin-сессия.
+ *
+ * Идемпотентность: advisory-lock от параллельного запуска + курсор
+ * radio_weekly_digest_sent_at (повторный запуск в тот же понедельник не
+ * перешлёт уже разосланные треки). Транспорт — bulk-sender с Resend-fallback;
+ * треки помечаются разосланными ТОЛЬКО если хоть одно письмо ушло.
+ */
+radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
+  const client = await pool.connect();
+  let locked = false;
+  try {
+    const lk = await client.query('SELECT pg_try_advisory_lock($1) AS got', [WEEKLY_LOCK]);
+    locked = !!lk.rows[0]?.got;
+    if (!locked) return c.json({ success: true, sent: 0, skipped: 'locked' });
+
+    const { rows: tracks } = await client.query(
+      `SELECT id, title, artist_name, genre, audio_url, cover_url
+         FROM tracks
+        WHERE moderation_status = 'published'
+          AND user_id = 'system-friday'
+          AND radio_weekly_digest_sent_at IS NULL
+          AND created_at >= NOW() - ($1 || ' days')::interval
+        ORDER BY created_at ASC
+        LIMIT 100`,
+      [String(WEEKLY_WINDOW_DAYS)]
+    );
+
+    if (tracks.length === 0) {
+      return c.json({ success: true, sent: 0, message: 'no pending friday tracks this week' });
+    }
+
+    const recipients = await getWeeklyRecipients(client);
+    if (recipients.length === 0) {
+      return c.json({ success: true, sent: 0, message: 'no radio recipients' });
+    }
+
+    const dateLabel = new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: 'long' });
+    const html = weeklyDigestHtml(tracks as WeeklyTrack[], dateLabel);
+    const subject = `🎵 Новинки недели для эфира — ${tracks.length} трек(ов) · ${dateLabel}`;
+
+    const result = await smtpSendBatch(
+      recipients.map(r => ({ email: r.email, vars: { name: r.name } })),
+      subject,
+      html,
+      { batchSize: 50, delayMs: 2000, replyTo: DIGEST_RECIPIENT }
+    );
+
+    if (result.sent === 0) {
+      // тотальный сбой транспорта — НЕ помечаем треки, попробуем в следующий запуск
+      console.error('[radio-weekly] transport failed for all recipients, tracks left in queue');
+      return c.json({ success: false, sent: 0, failed: result.failed, error: 'email transport failed' }, 502);
+    }
+
+    const ids = tracks.map((t: any) => t.id);
+    await client.query(
+      `UPDATE tracks SET radio_weekly_digest_sent_at = NOW() WHERE id = ANY($1::uuid[])`,
+      [ids]
+    );
+
+    console.log(`[radio-weekly] sent ${tracks.length} track(s) to ${result.sent}/${recipients.length} recipients (${result.failed} failed)`);
+    return c.json({
+      success: true,
+      tracks: tracks.length,
+      recipients: recipients.length,
+      sent: result.sent,
+      failed: result.failed,
+    });
+  } catch (err: any) {
+    console.error('[radio-weekly] run failed:', err?.message || err);
+    return c.json({ success: false, error: 'internal error' }, 500);
+  } finally {
+    if (locked) {
+      await client.query('SELECT pg_advisory_unlock($1)', [WEEKLY_LOCK]).catch(() => {});
     }
     client.release();
   }

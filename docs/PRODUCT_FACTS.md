@@ -1037,6 +1037,34 @@ Used by: `notifyAdminTelegram()` in `email-helper.tsx` —
   `'ПРОМО.МУЗЫКА <noreply@promo-music.ru>'` (был невалидный `promofm.org`).
 - List-Unsubscribe HMAC-заголовки сохраняются и в Resend-ветке.
 
+### Radio new-release digests — daily info@ vs weekly direct
+
+Источник новинок в обоих потоках: треки пятничного релиз-бота
+(`friday.js`) с `user_id='system-friday'`, `moderation_status='published'`.
+Два НЕЗАВИСИМЫХ потока с разными курсорами — не воруют треки друг у друга:
+
+| Поток | Курсор | Когда | Кому | Форма |
+|---|---|---|---|---|
+| **Daily** (#264) | `tracks.radio_digest_sent_at` (mig 110) | cron 10:00, по 2 трека/день | `info@promofm.ru` → оператор пересылает партнёрам ВРУЧНУЮ | плоский список |
+| **Weekly** (2026-06-27) | `tracks.radio_weekly_digest_sent_at` (mig 113) | cron **понедельник 12:00**, весь батч недели | НАПРЯМУЮ всей базе радио | карточная HTML с лого |
+
+Weekly-эндпоинт: `POST /server/api/radio-digest/run-weekly`
+(`radio-digest-routes.tsx`), защита `X-Internal-Key` или admin-сессия,
+advisory-lock `720108`, окно `created_at >= NOW() - 8 days`. Cron-скрипт
+`radio-weekly-cron.sh` (`CRON_TZ=Europe/Moscow; 0 12 * * 1`).
+
+**Получатели weekly** = объединение (дедуп по `lower(email)`,
+глобальные отписки `email_unsubscribes` отсекаются):
+1. зарегистрированные радио-аккаунты — `users.role='radio_station'`, `users.email`;
+2. внешние станции-партнёры — `radio_partner_contacts` (active, не отписаны);
+3. копия на `info@promofm.ru`.
+
+⚠️ **`radio_partner_contacts` пока ПУСТАЯ.** Каталог `pitching_radio`
+(~970 станций) адресов НЕ содержит (`009_pitching_schema_bridge.sql:90` —
+`contact_email = ''`, «no source column»). До импорта присланного оператором
+списка 800+ станций weekly уходит только зарегистрированным радио-юзерам +
+info@. Импорт = чистая загрузка данных в `radio_partner_contacts`, без правок кода.
+
 ### Engineer marketplace e-mail pipeline (since 2026-06-11)
 
 Прежде engineer-события шли только в SSE (колокольчик). С PR
