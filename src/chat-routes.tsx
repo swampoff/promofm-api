@@ -48,6 +48,18 @@ function genId(): string {
 app.get('/messages/:orderId', requireAuth, async (c) => {
   const orderId = c.req.param('orderId');
   try {
+    // Авторизация (2026-06-27): чат заказа виден только владельцу заказа или
+    // админу/модератору. Раньше requireAuth пускал ЛЮБОГО залогиненного читать
+    // чужую модерационную переписку по order_id из URL (IDOR).
+    const userId = c.get('userId');
+    const userRole = c.get('userRole');
+    const isAdmin = userRole === 'admin' || userRole === 'superadmin';
+    const ownerOrder = await getPublishOrder(orderId);
+    if (!ownerOrder) return c.json({ success: false, error: 'Order not found' }, 404);
+    if (!isAdmin && ownerOrder.userId !== userId) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+
     const r = await pool.query(
       `SELECT app_id, order_id, sender_id, sender_name, sender_role,
               body, attachment, is_read, created_at
@@ -77,7 +89,7 @@ app.get('/messages/:orderId', requireAuth, async (c) => {
 app.post('/messages/:orderId', requireAuth, async (c) => {
   const orderId = c.req.param('orderId');
   try {
-    const { senderId, senderName, senderRole, text, attachment } = await c.req.json();
+    const { senderId, senderName, text, attachment } = await c.req.json();
     if (!senderId || !text) {
       return c.json({ success: false, error: 'senderId and text required' }, 400);
     }
@@ -88,12 +100,25 @@ app.post('/messages/:orderId', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Access denied: senderId does not match authenticated user' }, 403);
     }
 
+    // Авторизация (2026-06-27): писать в чат заказа может только владелец заказа
+    // или админ/модератор. Роль выводим из аутентификации, НЕ из body — раньше
+    // любой залогиненный мог прислать senderRole:'moderator' в ЧУЖОЙ заказ и
+    // выдать фишинг за сообщение модератора (IDOR + role-spoofing).
+    const userRole = c.get('userRole');
+    const isAdmin = userRole === 'admin' || userRole === 'superadmin';
+    const order = await getPublishOrder(orderId);
+    if (!order) return c.json({ success: false, error: 'Order not found' }, 404);
+    if (!isAdmin && order.userId !== authUserId) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+    const effectiveRole: 'artist' | 'moderator' = isAdmin ? 'moderator' : 'artist';
+
     const message: ChatMessage = {
       id: genId(),
       orderId,
       senderId,
-      senderName: senderName || (senderRole === 'moderator' ? 'Модератор' : 'Артист'),
-      senderRole: senderRole || 'artist',
+      senderName: senderName || (effectiveRole === 'moderator' ? 'Модератор' : 'Артист'),
+      senderRole: effectiveRole,
       text,
       attachment,
       read: false,
@@ -113,20 +138,16 @@ app.post('/messages/:orderId', requireAuth, async (c) => {
       ]
     );
 
-    // Определяем получателя для SSE
-    // Ищем заказ чтобы узнать userId артиста
-    const order = await getPublishOrder(orderId);
-    if (order) {
-      // 'admin' is the shared broadcast channel all admin UIs subscribe to.
-      // Previous 'admin-moderator' was a phantom channel — no one listened to
-      // it, so artist-side chat messages never reached moderators in realtime.
-      const recipientId = senderRole === 'artist' ? 'admin' : order.userId;
+    // SSE получателю. 'admin' — общий канал всех админ-UI. Артист→admin,
+    // модератор→владелец заказа. Роль уже выведена из аутентификации выше.
+    {
+      const recipientId = effectiveRole === 'artist' ? 'admin' : order.userId;
       emitSSE(recipientId, {
         type: 'chat_message',
         data: {
           orderId,
           senderName: message.senderName,
-          senderRole,
+          senderRole: effectiveRole,
           text: text.length > 80 ? text.slice(0, 80) + '...' : text,
           message: `Новое сообщение по заказу "${order.title || orderId}"`,
         },
