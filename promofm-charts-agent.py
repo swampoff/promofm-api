@@ -99,6 +99,26 @@ def fetch_deezer(artist: str, title: str) -> dict:
         return {}
 
 
+def fetch_itunes(artist: str, title: str) -> dict:
+    """Fallback cover from iTunes/Apple Music (reachable from RU VPS)."""
+    q = quote(f"{artist} {title}")
+    url = f"https://itunes.apple.com/search?term={q}&entity=song&limit=1"
+    try:
+        raw = fetch(url, timeout=10)
+        if not raw:
+            return {}
+        hit = (json.loads(raw).get("results") or [None])[0]
+        if not hit:
+            return {}
+        art = hit.get("artworkUrl100") or ""
+        if not art:
+            return {}
+        return {"coverUrl": art.replace("100x100bb", "600x600bb"), "coverSmall": art, "previewUrl": hit.get("previewUrl") or ""}
+    except Exception as e:
+        log.debug(f"iTunes error for {artist} - {title}: {e}")
+        return {}
+
+
 def enrich_tracks(tracks: list[dict], batch_size: int = 5) -> int:
     """Enrich tracks with Deezer data. Returns count of enriched."""
     enriched = 0
@@ -112,6 +132,14 @@ def enrich_tracks(tracks: list[dict], batch_size: int = 5) -> int:
             if data:
                 t.update(data)
                 if data.get("coverUrl") or data.get("previewUrl"):
+                    enriched += 1
+            if not t.get("coverUrl"):
+                it = fetch_itunes(t["artist"], t["title"])
+                if it.get("coverUrl"):
+                    t["coverUrl"] = it["coverUrl"]
+                    t["coverSmall"] = it.get("coverSmall") or t.get("coverSmall", "")
+                    if it.get("previewUrl") and not t.get("previewUrl"):
+                        t["previewUrl"] = it["previewUrl"]
                     enriched += 1
             time.sleep(0.2)  # Rate limit Deezer API
     return enriched
@@ -168,7 +196,7 @@ def parse_yandex() -> list[dict]:
     """Яндекс Музыка Chart — JSON API."""
     log.info("Parsing Яндекс Музыка...")
     html = fetch(
-        "https://music.yandex.ru/handlers/chart.jsx",
+        "https://api.music.yandex.net/landing3/chart/russia",
         accept="application/json",
     )
     if not html:
@@ -180,29 +208,25 @@ def parse_yandex() -> list[dict]:
         log.error("Yandex: invalid JSON")
         return []
 
-    track_ids = data.get("trackIds", [])
-    tracks_by_id = data.get("tracksById", {})
-    if not tracks_by_id and data.get("tracks"):
-        for t in data["tracks"]:
-            if t.get("id"):
-                tracks_by_id[str(t["id"])] = t
+    # landing3/chart/russia: result.chart.tracks[] = [{track:{title,artists[]}, chart:{position}}]
+    chart_tracks = (((data.get("result") or {}).get("chart") or {}).get("tracks")) or []
 
     tracks = []
-    for pos, tid in enumerate(track_ids, 1):
-        t = tracks_by_id.get(str(tid))
-        if not t:
-            continue
+    for i, item in enumerate(chart_tracks, 1):
+        t = item.get("track") or item
+        ch = item.get("chart") or {}
         artists_list = t.get("artists", [])
         artist = ", ".join(a.get("name", "") for a in artists_list) if artists_list else "Unknown"
         title = t.get("title", "")
         if not title:
             continue
+        pos = ch.get("position") or i
         tracks.append({
             "position": pos,
             "artist": artist,
             "title": title,
         })
-        if pos >= 50:
+        if len(tracks) >= 50:
             break
 
     log.info(f"Yandex: {len(tracks)} tracks")
