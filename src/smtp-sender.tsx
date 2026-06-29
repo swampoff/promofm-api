@@ -78,9 +78,12 @@ function createTransporter() {
     opts.auth = { user: SMTP_USER, pass: SMTP_PASS };
   }
 
-  if (DEFAULT_SMTP_PORT === 25 && !SMTP_USER) {
-    opts.tls = { rejectUnauthorized: false };
-  }
+  // Local Postfix relay (and most providers) present a STARTTLS cert whose
+  // CN/SAN does not match the connect host (e.g. 127.0.0.1). Skip verification,
+  // mirroring email-helper.tsx (which sets this unconditionally and works).
+  // Without it, port-25 + SMTP_USER sends die with "Hostname/IP does not match
+  // certificate's altnames" and the entire campaign send path fails.
+  opts.tls = { ...(opts.tls || {}), rejectUnauthorized: false };
 
   return nodemailer.createTransport(opts);
 }
