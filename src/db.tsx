@@ -195,11 +195,15 @@ export async function createDonation(artistId: string, donationId: string, donat
   const row = {
     id: donationId,
     recipient_id: artistId,
-    donor_id: donation.donor_id || null,
+    // Все вызывающие шлют camelCase (donorId/isAnonymous) — раньше читались
+    // только snake_case, поэтому donor_id всегда NULL, is_anonymous всегда
+    // false: анонимные донаты писались как НЕ анонимные, атрибуция донора
+    // терялась. Принимаем оба варианта (2026-06-27).
+    donor_id: donation.donorId ?? donation.donor_id ?? null,
     amount: donation.amount || 0,
     currency: donation.currency || 'RUB',
     message: donation.message || '',
-    is_anonymous: donation.is_anonymous || false,
+    is_anonymous: donation.isAnonymous ?? donation.is_anonymous ?? false,
     status: donation.status || 'completed',
   };
   const { error } = await db()

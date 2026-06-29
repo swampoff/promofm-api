@@ -181,7 +181,7 @@ async function ttsAndInject(text: string, author: string): Promise<{ok: boolean;
 
 app.post("/speak", async (c) => {
   const key = c.req.header("X-Internal-Key") || "";
-  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
+  if (!INTERNAL_KEY || key !== INTERNAL_KEY) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
@@ -222,7 +222,7 @@ app.post("/speak", async (c) => {
 
 app.post("/text", async (c) => {
   const key = c.req.header("X-Internal-Key") || "";
-  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
+  if (!INTERNAL_KEY || key !== INTERNAL_KEY) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
@@ -285,7 +285,7 @@ async function broadcastNews(newsId: string): Promise<boolean> {
 app.post('/broadcast/:newsId', async (c) => {
   const newsId = c.req.param('newsId');
   const key = c.req.header('X-Internal-Key') || '';
-  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
+  if (!INTERNAL_KEY || key !== INTERNAL_KEY) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
@@ -366,7 +366,7 @@ app.get('/status', async (c) => {
 
 app.post('/concerts', async (c) => {
   const key = c.req.header('X-Internal-Key') || '';
-  if (INTERNAL_KEY && key !== INTERNAL_KEY) {
+  if (!INTERNAL_KEY || key !== INTERNAL_KEY) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 

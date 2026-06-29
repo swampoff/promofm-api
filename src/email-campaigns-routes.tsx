@@ -75,7 +75,15 @@ async function saveCampaign(campaign: Campaign): Promise<void> {
 async function isUnsubscribed(email: string): Promise<boolean> {
   try {
     const data = await getPublishEmailPrefs(`${UNSUB_PREFIX}${email.toLowerCase()}`);
-    return !!data;
+    if (data) return true;
+  } catch { /* ignore, проверяем второй стор ниже */ }
+  // Уважаем и глобальный opt-out из email_unsubscribes — туда пишет
+  // List-Unsubscribe / транзакционная отписка (email-helper). Раньше
+  // campaign-сендер этот стор игнорировал → отписавшийся через письмо
+  // продолжал получать кампании (две разрозненные базы отписок). 2026-06-27.
+  try {
+    const { isUnsubscribed: isGloballyUnsubscribed } = await import('./email-helper.tsx');
+    return await isGloballyUnsubscribed(email);
   } catch {
     return false;
   }
