@@ -42,7 +42,13 @@ Cancellation: `POST /:userId/cancel` → status='cancelled', SSE +
 cross-cabinet notification.
 Recurring: `POST /server/subscriptions/charge-recurring` (CRON_SECRET)
 — scans subscriptions ≤3d before expiry, charges saved card OR
-downgrades to spark.
+downgrades to spark. Подписка продлевается ТОЛЬКО при
+`chargeResult.status === 'succeeded'` (2026-06-27 fix): YooKassa
+off-session `capture:true` резолвится синхронно, gateway отдаёт реальный
+статус (`gateway-yookassa.tsx`). До фикса хардкодили `'pending'` и
+продлевали ВСЕГДА → отклонённая карта давала бесплатный период + фантом-
+выручку. `canceled` → не продлеваем (downgrade при истёкшей), `pending`
+(редкий 3DS) → следующий прогон через Idempotence-Key добивает.
 
 ### Tier discounts on one-off charges
 
@@ -1018,11 +1024,76 @@ Used by: `notifyAdminTelegram()` in `email-helper.tsx` —
 
 ### Email transport
 
-`email-helper.tsx`:
+Два сендера, ОБА теперь с одинаковой устойчивостью (SMTP→Resend):
+
+**Транзакционные письма** — `email-helper.tsx` → `sendEmail()`:
 - Primary: SMTP via `127.0.0.1:25` Postfix relay (no auth)
 - Fallback: Resend HTTP API (env `RESEND_API_KEY`)
 - `FROM_EMAIL = '"ПРОМО.МУЗЫКА" <noreply@promo-music.ru>'`
 - `ADMIN_EMAIL = 'info@promofm.ru'`
+
+**Bulk/кампании** — `smtp-sender.tsx` → `smtpSendEmail()` / `smtpSendBatch()`
+(используется email-campaigns, track-test, checkout, email-routes):
+- Primary: SMTP via `SMTP_HOST:SMTP_PORT` (default `localhost:25`)
+- Fallback: Resend HTTP API (тот же `RESEND_API_KEY`) — добавлен 2026-06-27
+  (`smtp-sender.tsx:157+`). ДО этого fallback'а не было: при недоступном
+  Postfix кампании падали на 100%, хотя транзакционные письма выживали
+  через Resend. Это была root-cause «рассылка в админке не работает».
+- FROM default выровнен на верифицированный домен
+  `'ПРОМО.МУЗЫКА <noreply@promo-music.ru>'` (был невалидный `promofm.org`).
+- List-Unsubscribe HMAC-заголовки сохраняются и в Resend-ветке.
+
+**Scheduled-кампании** (2026-06-27): `scheduled_at` в редакторе ставит статус
+`scheduled`. Их запускает крон `email-campaigns-cron.sh` (каждые 5 мин →
+`POST /email-campaigns/campaigns/run-scheduled`, advisory-lock 720110): берёт
+`status='scheduled'` со `scheduled_at <= now` и шлёт тем же ядром
+`beginCampaignSend`, что и ручной `/send`. До этого крона scheduled-кампании
+не уходили ВООБЩЕ (silent no-op). `scheduled_at` — datetime-local без TZ,
+сравнение по серверному времени (CRON_TZ скрипта). Битая отложенная кампания
+(нет получателей/html) помечается `failed`, чтобы не зациклить крон.
+
+### Radio new-release digests — daily info@ vs weekly direct
+
+Источник новинок в обоих потоках: треки пятничного релиз-бота
+(`friday.js`) с `user_id='system-friday'`, `moderation_status='published'`.
+Два НЕЗАВИСИМЫХ потока с разными курсорами — не воруют треки друг у друга:
+
+| Поток | Курсор | Когда | Кому | Форма |
+|---|---|---|---|---|
+| **Daily** (#264) | `tracks.radio_digest_sent_at` (mig 110) | cron 10:00, по 2 трека/день | `info@promofm.ru` → оператор пересылает партнёрам ВРУЧНУЮ | плоский список |
+| **Weekly** (2026-06-27) | `tracks.radio_weekly_digest_sent_at` (mig 113) | cron **понедельник 12:00**, весь батч недели | НАПРЯМУЮ всей базе радио | карточная HTML с лого |
+
+Weekly-эндпоинт: `POST /server/api/radio-digest/run-weekly`
+(`radio-digest-routes.tsx`), защита `X-Internal-Key` или admin-сессия,
+advisory-lock `720108`, окно `created_at >= NOW() - 8 days`. Cron-скрипт
+`radio-weekly-cron.sh` (`CRON_TZ=Europe/Moscow; 0 12 * * 1`).
+
+**Получатели weekly** = объединение (дедуп по `lower(email)`,
+глобальные отписки `email_unsubscribes` отсекаются):
+1. зарегистрированные радио-аккаунты — `users.role='radio_station'`, `users.email`;
+2. внешние станции-партнёры — `radio_partner_contacts` (active, не отписаны);
+3. копия на `info@promofm.ru`.
+
+**`radio_partner_contacts` сидируется миграцией 114** — 1195 уникальных
+email'ов радиостанций, собранных из присланных списков (2gis-директория
+19022024 → 931, муз.редакторы → 211, холдинги → 53; дедуп по lower(email)).
+Каталог `pitching_radio` (~970 станций) адресов НЕ содержит
+(`009_pitching_schema_bridge.sql:90` — `contact_email = ''`), поэтому адреса
+взяты из внешних списков, а не из каталога.
+
+**Единая система рассылки** (migration 115 + `docs/RADIO_MAILING_SYSTEM.md`):
+`radio_partner_contacts` — ЕДИНСТВЕННЫЙ источник истины для cloud-крона И
+laptop. Колонки `last_sent_at` / `send_count` штампуются после каждой отправки
+(weekly-крон делает это автоматом), чтобы два актора не били по одним адресам.
+«Можно слать» = `active AND unsubscribed_at IS NULL`; «холодный прогон по
+оставшимся» = `last_sent_at IS NULL`. Laptop штампует свой уже-разосланный
+батч (шаги в RADIO_MAILING_SYSTEM.md) → дубли исключаются автоматически.
+
+⚠️ Это **холодные внешние адреса** (2gis-скрейп) — массовая рассылка на них
+несёт риск для репутации домена/попадания в спам (ровно та причина, по которой
+#264 шлёт на info@ для ручной пересылки). Перед первым проходом по всей базе
+оператору стоит решить вопрос прогрева домена / согласия. Зарегистрированным
+радио-юзерам (opted-in) это не грозит.
 
 ### Engineer marketplace e-mail pipeline (since 2026-06-11)
 

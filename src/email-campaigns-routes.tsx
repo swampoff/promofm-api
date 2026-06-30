@@ -15,8 +15,24 @@ import { upsertEmailCampaign, getEmailCampaigns } from './db.tsx';
 import { smtpSendEmail, smtpSendBatch } from './smtp-sender.tsx';
 import { vpsListProfiles } from './vps-userdata.tsx';
 import { signRedirectUrl, isRedirectAllowed } from './track-url-token.tsx';
+import { pool } from './db-client.tsx';
 
 const app = new Hono();
+
+// In-process guard против двойного запуска одной кампании (см. POST /send).
+const campaignsStarting = new Set<string>();
+
+// Планировщик scheduled-кампаний.
+const SCHED_LOCK = 720110;                              // advisory-lock крона
+const SCHED_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+
+// Cron шлёт X-Internal-Key; из админ-сессии тоже можно дёрнуть вручную.
+// Fail-closed: пустой ключ → только admin-сессия (X-Internal-Key не пройдёт).
+async function requireAdminOrKey(c: any, next: any) {
+  const k = c.req.header('X-Internal-Key');
+  if (k && SCHED_INTERNAL_KEY && k === SCHED_INTERNAL_KEY) return next();
+  return requireAuth(c, async () => { await requireAdmin(c, next); });
+}
 
 // ── Unsubscribes — publish_email_prefs SQL table (см. db.tsx get/setPublishEmailPrefs) ──
 // Stored as user_id = 'unsub:<email>', data jsonb = { email, unsubscribed_at, campaign_id? }
@@ -75,7 +91,15 @@ async function saveCampaign(campaign: Campaign): Promise<void> {
 async function isUnsubscribed(email: string): Promise<boolean> {
   try {
     const data = await getPublishEmailPrefs(`${UNSUB_PREFIX}${email.toLowerCase()}`);
-    return !!data;
+    if (data) return true;
+  } catch { /* ignore, проверяем второй стор ниже */ }
+  // Уважаем и глобальный opt-out из email_unsubscribes — туда пишет
+  // List-Unsubscribe / транзакционная отписка (email-helper). Раньше
+  // campaign-сендер этот стор игнорировал → отписавшийся через письмо
+  // продолжал получать кампании (две разрозненные базы отписок). 2026-06-27.
+  try {
+    const { isUnsubscribed: isGloballyUnsubscribed } = await import('./email-helper.tsx');
+    return await isGloballyUnsubscribed(email);
   } catch {
     return false;
   }
@@ -719,140 +743,141 @@ app.post('/campaigns/:id/test', requireAuth, requireAdmin, async (c) => {
   }
 });
 
+/**
+ * Общее ядро запуска рассылки — используется и ручным POST /send, и
+ * планировщиком /run-scheduled. Валидирует, считает получателей, помечает
+ * 'sending' и запускает фоновую отправку. Возвращает результат (не бросает на
+ * бизнес-ошибках). Вызывающий отвечает за guard (campaignsStarting) и логи.
+ */
+async function beginCampaignSend(campaign: Campaign): Promise<{ ok: boolean; error?: string; recipients?: number }> {
+  if (campaign.status === 'sending') return { ok: false, error: 'Campaign already sending' };
+  if (!campaign.html || !campaign.subject) return { ok: false, error: 'Campaign needs subject and HTML body' };
+
+  let recipients = await getRecipientsBySegment(campaign.segment);
+  recipients = await filterUnsubscribed(recipients);
+  if (recipients.length === 0) return { ok: false, error: 'No recipients match the segment (or all unsubscribed)' };
+
+  const id = campaign.id;
+  campaign.status = 'sending';
+  campaign.stats.total_recipients = recipients.length;
+  campaign.updated_at = new Date().toISOString();
+  await saveCampaign(campaign);
+
+  const sendInBackground = async () => {
+    try {
+      const recipientsWithTracking = recipients.map(r => {
+        let html = campaign.html;
+        if (r.name) html = html.replace(/\{\{name\}\}/g, r.name);
+        html = html.replace(/\{\{email\}\}/g, r.email);
+        html = html.replace(/\{\{role\}\}/g, r.role);
+        html = injectClickTracking(html, campaign.id, r.email);
+        html = injectTrackingPixel(html, campaign.id, r.email);
+        return { email: r.email, vars: { name: r.name, email: r.email, role: r.role }, html };
+      });
+
+      let sent = 0;
+      let failed = 0;
+      const errors: string[] = [];
+      const batchSize = 50;
+      const delayMs = 2000;
+
+      for (let i = 0; i < recipientsWithTracking.length; i += batchSize) {
+        const freshCampaign = await getCampaignById(id);
+        if (freshCampaign?.status === 'paused') {
+          console.log(`[Campaigns] Campaign ${id} paused at ${sent}/${recipientsWithTracking.length}`);
+          return;
+        }
+        const batch = recipientsWithTracking.slice(i, i + batchSize);
+        for (const r of batch) {
+          const result = await smtpSendEmail({
+            to: r.email, subject: campaign.subject, html: r.html,
+            listUnsubscribe: true, campaignId: campaign.id,
+          });
+          if (result.success) {
+            sent++;
+            await upsertEmailHistory({
+              id: `${campaign.id}_sent_${r.email}`,
+              campaignId: campaign.id, kind: 'sent', toEmail: r.email,
+              subject: campaign.subject, type: 'campaign', status: 'sent',
+              sentAt: new Date().toISOString(), opened: false, clicked: false,
+            });
+          } else {
+            failed++;
+            errors.push(`${r.email}: ${result.error}`);
+          }
+        }
+        if (i + batchSize < recipientsWithTracking.length) {
+          await new Promise(r => setTimeout(r, delayMs));
+        }
+      }
+
+      campaign.stats.sent = sent;
+      campaign.stats.failed = failed;
+      campaign.stats.errors = errors.slice(0, 50);
+      campaign.status = failed > 0 && sent === 0 ? 'failed' : 'sent';
+      campaign.sent_at = new Date().toISOString();
+      campaign.updated_at = new Date().toISOString();
+      await saveCampaign(campaign);
+      console.log(`[Campaigns] Campaign ${id} completed: ${sent} sent, ${failed} failed`);
+    } catch (err) {
+      console.error(`[Campaigns] Campaign ${id} send error:`, err);
+      campaign.status = 'failed';
+      campaign.stats.errors = [String(err)];
+      campaign.updated_at = new Date().toISOString();
+      await saveCampaign(campaign);
+    }
+  };
+
+  sendInBackground();
+  return { ok: true, recipients: recipients.length };
+}
+
 // ============================================
 // POST /campaigns/:id/send — Start campaign sending
 // ============================================
 app.post('/campaigns/:id/send', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
+
+  // Анти-дабл-сенд (2026-06-27): два почти-одновременных POST /send (двойной
+  // клик «Отправить» или два админа) раньше оба проходили проверку
+  // status==='sending' ДО того как кто-то её сохранит → каждый получатель
+  // получал письмо ДВАЖДЫ. Guard на время check-and-set; деплой single-process
+  // (systemd) — in-process Set достаточно. status='sending' персистится внутри,
+  // так что после снятия guard'а повторный /send отлетит на проверке статуса.
+  if (campaignsStarting.has(id)) {
+    return c.json({ success: false, error: 'Отправка этой кампании уже запускается' }, 409);
+  }
+  campaignsStarting.add(id);
   try {
     const campaign = await getCampaignById(id);
     if (!campaign) return c.json({ success: false, error: 'Campaign not found' }, 404);
 
-    if (campaign.status === 'sending') {
-      return c.json({ success: false, error: 'Campaign already sending' }, 400);
-    }
-    if (!campaign.html || !campaign.subject) {
-      return c.json({ success: false, error: 'Campaign needs subject and HTML body' }, 400);
-    }
-
-    // Get recipients and filter unsubscribed
-    let recipients = await getRecipientsBySegment(campaign.segment);
-    recipients = await filterUnsubscribed(recipients);
-
-    if (recipients.length === 0) {
-      return c.json({ success: false, error: 'No recipients match the segment (or all unsubscribed)' }, 400);
-    }
+    const res = await beginCampaignSend(campaign);
+    if (!res.ok) return c.json({ success: false, error: res.error }, 400);
 
     // Audit B-8: forensic trail кто запустил mass email-кампанию.
     logAdminAction(c, {
       action: 'email_campaign_send',
       resourceType: 'email_campaign',
       targetId: String(id),
-      details: { name: campaign.name, subject: campaign.subject, recipientCount: recipients.length, segment: campaign.segment },
+      details: { name: campaign.name, subject: campaign.subject, recipientCount: res.recipients, segment: campaign.segment },
     });
-
-    // Mark as sending
-    campaign.status = 'sending';
-    campaign.stats.total_recipients = recipients.length;
-    campaign.updated_at = new Date().toISOString();
-    await saveCampaign(campaign);
-
-    // Send in background (non-blocking response)
-    const sendInBackground = async () => {
-      try {
-        // Inject tracking pixel per recipient
-        const recipientsWithTracking = recipients.map(r => {
-          let html = campaign.html;
-          // Replace template vars
-          if (r.name) html = html.replace(/\{\{name\}\}/g, r.name);
-          html = html.replace(/\{\{email\}\}/g, r.email);
-          html = html.replace(/\{\{role\}\}/g, r.role);
-          // Inject tracking
-          html = injectClickTracking(html, campaign.id, r.email);
-          html = injectTrackingPixel(html, campaign.id, r.email);
-          return { email: r.email, vars: { name: r.name, email: r.email, role: r.role }, html };
-        });
-
-        // Use smtpSendBatch but with pre-processed HTML per email
-        let sent = 0;
-        let failed = 0;
-        const errors: string[] = [];
-        const batchSize = 50;
-        const delayMs = 2000;
-
-        for (let i = 0; i < recipientsWithTracking.length; i += batchSize) {
-          // Check if campaign was paused
-          const freshCampaign = await getCampaignById(id);
-          if (freshCampaign?.status === 'paused') {
-            console.log(`[Campaigns] Campaign ${id} paused at ${sent}/${recipientsWithTracking.length}`);
-            return;
-          }
-
-          const batch = recipientsWithTracking.slice(i, i + batchSize);
-
-          for (const r of batch) {
-            const result = await smtpSendEmail({
-              to: r.email,
-              subject: campaign.subject,
-              html: r.html,
-              listUnsubscribe: true,
-              campaignId: campaign.id,
-            });
-
-            if (result.success) {
-              sent++;
-              // Track sent email
-              await upsertEmailHistory({
-                id: `${campaign.id}_sent_${r.email}`,
-                campaignId: campaign.id, kind: 'sent', toEmail: r.email,
-                subject: campaign.subject, type: 'campaign', status: 'sent',
-                sentAt: new Date().toISOString(), opened: false, clicked: false,
-              });
-            } else {
-              failed++;
-              errors.push(`${r.email}: ${result.error}`);
-            }
-          }
-
-          // Delay between batches
-          if (i + batchSize < recipientsWithTracking.length) {
-            await new Promise(r => setTimeout(r, delayMs));
-          }
-        }
-
-        campaign.stats.sent = sent;
-        campaign.stats.failed = failed;
-        campaign.stats.errors = errors.slice(0, 50);
-        campaign.status = failed > 0 && sent === 0 ? 'failed' : 'sent';
-        campaign.sent_at = new Date().toISOString();
-        campaign.updated_at = new Date().toISOString();
-        await saveCampaign(campaign);
-
-        console.log(`[Campaigns] Campaign ${id} completed: ${sent} sent, ${failed} failed`);
-      } catch (err) {
-        console.error(`[Campaigns] Campaign ${id} send error:`, err);
-        campaign.status = 'failed';
-        campaign.stats.errors = [String(err)];
-        campaign.updated_at = new Date().toISOString();
-        await saveCampaign(campaign);
-      }
-    };
-
-    // Fire and forget
-    sendInBackground();
 
     return c.json({
       success: true,
       data: {
         campaign_id: id,
         status: 'sending',
-        recipients_count: recipients.length,
-        message: `Отправка начата. ${recipients.length} получателей.`,
+        recipients_count: res.recipients,
+        message: `Отправка начата. ${res.recipients} получателей.`,
       },
     });
   } catch (error) {
     console.error('[Campaigns] Send error:', error);
     return c.json({ success: false, error: 'Failed to start campaign' }, 500);
+  } finally {
+    // status='sending' уже сохранён (или старт упал) — снимаем guard.
+    campaignsStarting.delete(id);
   }
 });
 
@@ -931,6 +956,68 @@ app.get('/stats', requireAuth, requireAdmin, async (c) => {
     });
   } catch (error) {
     return c.json({ success: false, error: 'Failed to load stats' }, 500);
+  }
+});
+
+// ============================================
+// POST /campaigns/run-scheduled — Планировщик отложенных рассылок
+// ============================================
+// Cron (email-campaigns-cron.sh, каждые 5 мин) дёргает этот эндпоинт.
+// Берёт кампании status='scheduled' со scheduled_at <= now и запускает их
+// тем же ядром, что и ручной /send. Раньше scheduled-кампании НЕ уходили
+// никогда — статус ставился, но отправлять их было некому (silent no-op).
+app.post('/campaigns/run-scheduled', requireAdminOrKey, async (c) => {
+  const client = await pool.connect();
+  let locked = false;
+  try {
+    const lk = await client.query('SELECT pg_try_advisory_lock($1) AS got', [SCHED_LOCK]);
+    locked = !!lk.rows[0]?.got;
+    if (!locked) return c.json({ success: true, started: 0, skipped: 'locked' });
+
+    const all = await getEmailCampaigns('admin');
+    const nowMs = Date.now();
+    const due = all.filter((c: any) =>
+      c.status === 'scheduled' && c.scheduled_at &&
+      new Date(c.scheduled_at).getTime() <= nowMs &&
+      !String(c.name || '').startsWith('[DELETED]')
+    );
+
+    let started = 0;
+    const out: any[] = [];
+    for (const camp of due) {
+      if (campaignsStarting.has(camp.id)) { out.push({ id: camp.id, skipped: 'starting' }); continue; }
+      campaignsStarting.add(camp.id);
+      try {
+        const res = await beginCampaignSend(camp as Campaign);
+        if (res.ok) {
+          started++;
+          out.push({ id: camp.id, recipients: res.recipients });
+        } else {
+          // Не зацикливать крон на «битой» отложенной кампании — помечаем failed.
+          out.push({ id: camp.id, failed: res.error });
+          const fresh = await getCampaignById(camp.id);
+          if (fresh && fresh.status === 'scheduled') {
+            fresh.status = 'failed';
+            fresh.stats.errors = [res.error || 'scheduled send failed'];
+            fresh.updated_at = new Date().toISOString();
+            await saveCampaign(fresh);
+          }
+        }
+      } catch (e: any) {
+        out.push({ id: camp.id, error: e?.message || String(e) });
+      } finally {
+        campaignsStarting.delete(camp.id);
+      }
+    }
+
+    console.log(`[Campaigns] run-scheduled: ${started}/${due.length} запущено`);
+    return c.json({ success: true, started, due: due.length, results: out });
+  } catch (err: any) {
+    console.error('[Campaigns] run-scheduled error:', err?.message || err);
+    return c.json({ success: false, error: 'internal error' }, 500);
+  } finally {
+    if (locked) await client.query('SELECT pg_advisory_unlock($1)', [SCHED_LOCK]).catch(() => {});
+    client.release();
   }
 });
 

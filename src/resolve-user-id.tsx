@@ -41,7 +41,11 @@ export async function resolveUserId(c: any): Promise<string | null> {
 
   // 3. Internal API calls (with X-Internal-Key)
   const internalKey = c.req.header('X-Internal-Key');
-  if (internalKey === process.env.VPS_INTERNAL_KEY) {
+  // Fail-closed (2026-06-27): без `expectedKey &&` пустой/незаданный
+  // VPS_INTERNAL_KEY давал `undefined === undefined` → запрос БЕЗ заголовка
+  // проходил и handler доверял attacker-supplied X-User-Id (имперсонация).
+  const expectedKey = process.env.VPS_INTERNAL_KEY;
+  if (expectedKey && internalKey === expectedKey) {
     const headerUserId = c.req.header('X-User-Id');
     if (headerUserId) return headerUserId;
   }

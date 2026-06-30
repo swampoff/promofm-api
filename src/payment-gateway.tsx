@@ -28,7 +28,10 @@ export interface PaymentSessionResult {
   sessionId: string;          // gateway-specific payment ID
   confirmationUrl: string;    // redirect URL for the user
   gateway: GatewayName;
-  status: 'pending';
+  // createSession всегда 'pending' (redirect-flow). chargeRecurring (off-session
+  // capture:true) у YooKassa резолвится синхронно — возвращает реальный исход,
+  // чтобы вызывающий НЕ продлевал подписку до подтверждения списания.
+  status: 'pending' | 'succeeded' | 'canceled';
 }
 
 export interface WebhookPayload {
