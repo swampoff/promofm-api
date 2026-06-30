@@ -39,19 +39,28 @@ export async function getTracksByUser(userId: string) {
   // Without this, t.isPaid is always undefined and the 'awaiting payment'
   // banner shows even for tracks marked is_paid=true (e.g. legacy imports
   // already paid for on the old platform).
-  return (data || []).map((t: any) => ({
+  return (data || []).map((t: any) => {
+    // legacy = мигрированный с promo.fm трек (mig 117), уже оплачен там.
+    const legacy = t.is_legacy === true;
+    return {
     ...t,
-    isPaid: t.is_paid === true,
+    // legacy считаем оплаченным → кабинет не просит оплату повторно.
+    isPaid: t.is_paid === true || legacy,
+    isLegacy: legacy,
     audioUrl: t.audio_url || '',
     coverUrl: t.cover_url || '',
     artistName: t.artist_name || '',
-    // Virtual status: paid+approved tracks render as 'published' in the cabinet
-    // so users see "Опубликован" instead of "Ожидает оплаты". Raw
-    // moderation_status stays untouched in the DB row above (via ...t).
-    status: t.is_paid === true && t.moderation_status === 'approved'
-      ? 'published'
-      : (t.moderation_status || 'draft'),
-  }));
+    // Virtual status. legacy → 'legacy' (кабинет: «Архив · promo.fm», и все
+    // условия status==='approved' — кнопка оплаты/счётчик/баннер — его минуют).
+    // paid+approved → 'published' («Опубликован»). Raw moderation_status в БД
+    // не трогаем (via ...t) → legacy НЕ уходит в новый эфир/чарты.
+    status: legacy
+      ? 'legacy'
+      : (t.is_paid === true && t.moderation_status === 'approved'
+          ? 'published'
+          : (t.moderation_status || 'draft')),
+    };
+  });
 }
 
 export async function getTracksByStatus(status: string) {
