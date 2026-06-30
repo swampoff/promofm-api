@@ -765,6 +765,14 @@ auth.post("/reset-password", async (c) => {
 
     const resetData = await vpsGetToken(token);
     if (!resetData) return c.json({ success: false, error: "Недействительная ссылка" }, 400);
+    // Token-confusion guard (2026-06-27): vpsGetToken отдаёт токен ЛЮБОГО типа.
+    // Оба входа на /reset-password кладут тип 'password_reset' (line 743 reset,
+    // 1324 активация мигрированных). Без проверки email_verify-токен (выдаётся
+    // на регистрации) можно было переиграть сюда. `type &&` — legacy-токены без
+    // типа продолжают работать.
+    if (resetData.type && resetData.type !== 'password_reset') {
+      return c.json({ success: false, error: "Недействительная ссылка" }, 400);
+    }
     if (new Date() > new Date(resetData.expiresAt)) { await vpsUseToken(token); return c.json({ success: false, error: "Ссылка истекла." }, 400); }
     if (resetData.usedAt) return c.json({ success: false, error: "Ссылка уже использована." }, 400);
 

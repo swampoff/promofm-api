@@ -18,6 +18,9 @@ import { signRedirectUrl, isRedirectAllowed } from './track-url-token.tsx';
 
 const app = new Hono();
 
+// In-process guard против двойного запуска одной кампании (см. POST /send).
+const campaignsStarting = new Set<string>();
+
 // ── Unsubscribes — publish_email_prefs SQL table (см. db.tsx get/setPublishEmailPrefs) ──
 // Stored as user_id = 'unsub:<email>', data jsonb = { email, unsubscribed_at, campaign_id? }
 const UNSUB_PREFIX = 'unsub:';
@@ -732,6 +735,17 @@ app.post('/campaigns/:id/test', requireAuth, requireAdmin, async (c) => {
 // ============================================
 app.post('/campaigns/:id/send', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');
+
+  // Анти-дабл-сенд (2026-06-27): два почти-одновременных POST /send (двойной
+  // клик «Отправить» или два админа) раньше оба проходили проверку
+  // status==='sending' ДО того как кто-то её сохранит → каждый получатель
+  // получал письмо ДВАЖДЫ. Guard на время check-and-set; деплой single-process
+  // (systemd) — in-process Set достаточно. status='sending' персистится внутри,
+  // так что после снятия guard'а повторный /send отлетит на проверке статуса.
+  if (campaignsStarting.has(id)) {
+    return c.json({ success: false, error: 'Отправка этой кампании уже запускается' }, 409);
+  }
+  campaignsStarting.add(id);
   try {
     const campaign = await getCampaignById(id);
     if (!campaign) return c.json({ success: false, error: 'Campaign not found' }, 404);
@@ -861,6 +875,9 @@ app.post('/campaigns/:id/send', requireAuth, requireAdmin, async (c) => {
   } catch (error) {
     console.error('[Campaigns] Send error:', error);
     return c.json({ success: false, error: 'Failed to start campaign' }, 500);
+  } finally {
+    // status='sending' уже сохранён (или старт упал) — снимаем guard.
+    campaignsStarting.delete(id);
   }
 });
 
