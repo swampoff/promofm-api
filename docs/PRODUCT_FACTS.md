@@ -42,7 +42,13 @@ Cancellation: `POST /:userId/cancel` → status='cancelled', SSE +
 cross-cabinet notification.
 Recurring: `POST /server/subscriptions/charge-recurring` (CRON_SECRET)
 — scans subscriptions ≤3d before expiry, charges saved card OR
-downgrades to spark.
+downgrades to spark. Подписка продлевается ТОЛЬКО при
+`chargeResult.status === 'succeeded'` (2026-06-27 fix): YooKassa
+off-session `capture:true` резолвится синхронно, gateway отдаёт реальный
+статус (`gateway-yookassa.tsx`). До фикса хардкодили `'pending'` и
+продлевали ВСЕГДА → отклонённая карта давала бесплатный период + фантом-
+выручку. `canceled` → не продлеваем (downgrade при истёкшей), `pending`
+(редкий 3DS) → следующий прогон через Idempotence-Key добивает.
 
 ### Tier discounts on one-off charges
 
@@ -1036,6 +1042,15 @@ Used by: `notifyAdminTelegram()` in `email-helper.tsx` —
 - FROM default выровнен на верифицированный домен
   `'ПРОМО.МУЗЫКА <noreply@promo-music.ru>'` (был невалидный `promofm.org`).
 - List-Unsubscribe HMAC-заголовки сохраняются и в Resend-ветке.
+
+**Scheduled-кампании** (2026-06-27): `scheduled_at` в редакторе ставит статус
+`scheduled`. Их запускает крон `email-campaigns-cron.sh` (каждые 5 мин →
+`POST /email-campaigns/campaigns/run-scheduled`, advisory-lock 720110): берёт
+`status='scheduled'` со `scheduled_at <= now` и шлёт тем же ядром
+`beginCampaignSend`, что и ручной `/send`. До этого крона scheduled-кампании
+не уходили ВООБЩЕ (silent no-op). `scheduled_at` — datetime-local без TZ,
+сравнение по серверному времени (CRON_TZ скрипта). Битая отложенная кампания
+(нет получателей/html) помечается `failed`, чтобы не зациклить крон.
 
 ### Radio new-release digests — daily info@ vs weekly direct
 

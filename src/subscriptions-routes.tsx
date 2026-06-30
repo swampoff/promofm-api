@@ -940,7 +940,12 @@ subscriptions.post('/charge-recurring', async (c) => {
           userId,
         });
 
-        // Save payment session
+        // Реальный исход списания (YooKassa off-session capture:true резолвится
+        // синхронно). Раньше тут хардкодили 'pending' и продлевали ВСЕГДА —
+        // отклонённая карта = бесплатный период + фантом-выручка.
+        const chargeStatus = chargeResult.status; // 'succeeded' | 'canceled' | 'pending'
+
+        // Save payment session с РЕАЛЬНЫМ статусом
         await upsertPaymentSession(orderId, {
           orderId,
           userId,
@@ -948,7 +953,7 @@ subscriptions.post('/charge-recurring', async (c) => {
           gatewayPaymentId: chargeResult.sessionId,
           amount,
           currency: 'RUB',
-          status: 'pending',
+          status: chargeStatus === 'succeeded' ? 'succeeded' : chargeStatus === 'canceled' ? 'canceled' : 'pending',
           type: 'subscription',
           description: `Продление подписки «${plan.name}»`,
           metadata: { tier, interval, recurring: 'true' },
@@ -957,6 +962,20 @@ subscriptions.post('/charge-recurring', async (c) => {
           returnUrl: 'https://promo-music.ru/cabinet',
           createdAt: now.toISOString(),
         });
+
+        // Списание не подтверждено — НЕ продлеваем.
+        if (chargeStatus === 'canceled') {
+          // отказ карты — переиспользуем decline-обработку в catch ниже
+          // (downgrade при уже-истёкшей подписке).
+          throw new Error('recurring charge declined by gateway (canceled)');
+        }
+        if (chargeStatus !== 'succeeded') {
+          // 'pending' (редкий 3DS/async) — не продлеваем; следующий прогон через
+          // Idempotence-Key вернёт уже резолвленный платёж и продлит при успехе.
+          skipped++;
+          results.push({ userId, action: 'charge_pending', orderId });
+          continue;
+        }
 
         // Extend subscription period
         const daysToAdd = interval === 'year' ? 365 : 30;

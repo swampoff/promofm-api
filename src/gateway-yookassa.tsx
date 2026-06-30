@@ -374,11 +374,18 @@ export class YooKassaGateway implements PaymentGateway {
       throw new Error(data.description || `YooKassa recurring error ${response.status}`);
     }
 
+    // off-session capture:true резолвится синхронно — отдаём РЕАЛЬНЫЙ статус,
+    // а не хардкод 'pending'. Без этого вызывающий не отличал успех от отказа
+    // карты и продлевал подписку всегда (бесплатный период + фантом-выручка).
+    const mapped: 'pending' | 'succeeded' | 'canceled' =
+      data.status === 'succeeded' ? 'succeeded'
+      : data.status === 'canceled' ? 'canceled'
+      : 'pending';
     return {
       sessionId: data.id,
       confirmationUrl: '', // No redirect needed for recurring
       gateway: 'yookassa',
-      status: 'pending',
+      status: mapped,
     };
   }
 }
