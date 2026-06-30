@@ -795,6 +795,9 @@ app.get('/profile/:artistId/tracks', async (c) => {
         duration: t.duration || '',
         plays: t.plays_count || 0,
         likes: t.likes_count || 0,
+        // Авторство — видно в публичном профиле (раздельно Слова/Музыка).
+        lyricist: t.lyricist || '',
+        musicComposer: t.music_composer || '',
         // Public page shows release dates («Последние релизы»). Prefer an
         // explicit release_date, fall back to row creation time. Both are
         // real timestamps — never synthesised.
