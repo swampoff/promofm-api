@@ -338,6 +338,21 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
       [ids]
     );
 
+    // Единая база рассылки: штампуем last_sent_at у партнёров-станций, которым
+    // ушёл дайджест — чтобы laptop/холодный прогон не били повторно по тем же
+    // адресам (migration 115). Best-effort: колонки могут отсутствовать до 115.
+    try {
+      const partnerEmails = recipients.map(r => r.email.toLowerCase());
+      await client.query(
+        `UPDATE radio_partner_contacts
+            SET last_sent_at = NOW(), send_count = send_count + 1
+          WHERE LOWER(email) = ANY($1::text[])`,
+        [partnerEmails]
+      );
+    } catch (e: any) {
+      console.warn('[radio-weekly] last_sent_at stamp skipped:', e?.message || e);
+    }
+
     console.log(`[radio-weekly] sent ${tracks.length} track(s) to ${result.sent}/${recipients.length} recipients (${result.failed} failed)`);
     return c.json({
       success: true,
