@@ -76,6 +76,24 @@ UPDATE radio_partner_contacts SET unsubscribed_at=NOW(), active=false
  WHERE LOWER(email)=LOWER('<email>');
 ```
 
+## Источники (`source`) и какая рассылка кому
+
+| `source` | Что это | Music-дайджест (weekly) | Реклам. аутрич |
+|---|---|---|---|
+| `directory_2gis_19022024` / `music_editors_sorted` / `holdings` | станции (2gis + муз.редакторы + холдинги), mig 114 | ДА (целевая аудитория) | — |
+| `curated_2026` | сейлз-хаусы + рекламные контакты (ГПМ/ЕМГ/НРА…), mig 116 | **НЕТ** (исключены в `/run-weekly`) | ДА |
+| `laptop_*` | что влил laptop | по договорённости | по договорённости |
+
+`curated_2026` — 69 адресов преимущественно рекламных отделов. Музыкальный
+дайджест им НЕ уходит (не та аудитория). Для них — отдельный **рекламный
+аутрич** (шаблоны #1/#2 в `RADIO_MAILING_REPLIES.md`): предложить продавать
+свои рекламные слоты на платформе. Кого слать по рекламе:
+```sql
+SELECT station_name, email, city FROM radio_partner_contacts
+ WHERE source = 'curated_2026' AND active AND unsubscribed_at IS NULL
+   AND last_sent_at IS NULL;
+```
+
 ## Что НЕ надо делать
 - Не слать в обход таблицы (тогда last_sent_at не обновится → дубли).
 - Не держать второй список в Excel как «рабочий» — Excel это импорт-источник,

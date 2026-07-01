@@ -256,10 +256,15 @@ async function getWeeklyRecipients(client: any): Promise<{ email: string; name: 
         AND u.email IS NOT NULL AND u.email <> ''`
   );
   const partners = await client.query(
+    // source='curated_2026' — курированные РЕКЛАМНЫЕ контакты (сейлз-хаусы
+    // ГПМ/ЕМГ/НРА и т.п.). Музыкальный дайджест «забирайте треки в ротацию» им
+    // слать НЕЛЬЗЯ (не та аудитория) — исключаем из weekly. Они в базе для
+    // рекламного аутрича + суппрессии, но не для music-рассылки.
     `SELECT email, station_name AS name
        FROM radio_partner_contacts
       WHERE active = TRUE AND unsubscribed_at IS NULL
-        AND email IS NOT NULL AND email <> ''`
+        AND email IS NOT NULL AND email <> ''
+        AND COALESCE(source, '') <> 'curated_2026'`
   );
   const unsub = await client.query(`SELECT LOWER(email) AS email FROM email_unsubscribes`);
   const unsubSet = new Set<string>(unsub.rows.map((r: any) => r.email));
