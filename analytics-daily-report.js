@@ -22,12 +22,12 @@ const TO = (process.env.ANALYTICS_REPORT_TO || 'info@promo-music.ru').split(',')
        count(DISTINCT pv.session_id)::int visitors, count(DISTINCT pv.ip)::int ips, count(*)::int views,
        count(DISTINCT pv.session_id) FILTER (WHERE fs.fd=${MSK})::int nv
      FROM page_views pv JOIN fs USING(session_id)
-     WHERE ${HUMAN} AND created_at > (now() - interval '8 days') GROUP BY 1,2 ORDER BY 2`)).rows;
+     WHERE ${HUMAN} AND ${MSK} <= ${YDAY} AND ${MSK} > (${YDAY} - 8) GROUP BY 1,2 ORDER BY 2`)).rows;
   const y = series[series.length - 1] || { visitors: 0, ips: 0, views: 0, nv: 0 };
   const prev = series[series.length - 2] || null;
   const pages = (await pool.query(`SELECT path, count(DISTINCT session_id)::int v FROM page_views WHERE ${HUMAN} AND ${MSK}=${YDAY} GROUP BY 1 ORDER BY 2 DESC LIMIT 8`)).rows;
-  const src = (await pool.query(`SELECT ${SRC} s, count(DISTINCT session_id)::int v FROM page_views WHERE ${HUMAN} AND created_at > (now()-interval '8 days') GROUP BY 1 ORDER BY 2 DESC`)).rows;
-  const geo = (await pool.query(`SELECT coalesce(nullif(country,''),'??') c, count(DISTINCT session_id)::int v FROM page_views WHERE ${HUMAN} AND created_at > (now()-interval '8 days') GROUP BY 1 ORDER BY 2 DESC LIMIT 6`)).rows;
+  const src = (await pool.query(`SELECT ${SRC} s, count(DISTINCT session_id)::int v FROM page_views WHERE ${HUMAN} AND ${MSK} <= ${YDAY} AND ${MSK} > (${YDAY} - 7) GROUP BY 1 ORDER BY 2 DESC`)).rows;
+  const geo = (await pool.query(`SELECT coalesce(nullif(country,''),'??') c, count(DISTINCT session_id)::int v FROM page_views WHERE ${HUMAN} AND ${MSK} <= ${YDAY} AND ${MSK} > (${YDAY} - 7) GROUP BY 1 ORDER BY 2 DESC LIMIT 6`)).rows;
 
   const trend = prev ? y.visitors - prev.visitors : 0;
   const arrow = trend > 0 ? `<span style="color:#4ade80">▲ +${trend}</span>` : trend < 0 ? `<span style="color:#f87171">▼ ${trend}</span>` : '<span style="color:#888">=</span>';
