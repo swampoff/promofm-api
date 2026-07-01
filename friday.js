@@ -203,6 +203,7 @@ async function scanAndCreate(trackDir) {
     const artists = artistName.split(/,\s*|&\s*|\s+feat\.?\s+/i).map(a => a.trim()).filter(Boolean);
     const primaryArtist = artists[0];
     const slug = slugify(primaryArtist);
+    const cabUserId = randomUUID(); // FIX 2026-06-13: уникальный user_id кабинета (idx_artist_profiles_user UNIQUE); раньше константа SYSTEM_OWNER ловила duplicate key на 2-м+ артисте
     const trackId = randomUUID();
     const audioUrl = `/server/uploads/tracks/${encodeURIComponent(file)}`;
 
@@ -220,7 +221,7 @@ async function scanAndCreate(trackDir) {
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (slug) DO UPDATE SET genre = COALESCE(NULLIF(artist_profiles.genre, ''), $5)
         RETURNING id
-      `, [randomUUID(), SYSTEM_OWNER, slug, primaryArtist, genre]);
+      `, [randomUUID(), cabUserId, slug, primaryArtist, genre]);
       finalArtistId = artistResult.rows[0].id;
 
       // Copy file BEFORE track INSERT — если cp падает, не записываем
@@ -237,7 +238,7 @@ async function scanAndCreate(trackDir) {
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'published')
         ON CONFLICT (id) DO NOTHING
       `, [
-        trackId, finalArtistId, SYSTEM_OWNER,
+        trackId, finalArtistId, cabUserId,
         title, artistName, genre, duration, audioUrl,
         now.toISOString(),
       ]);
@@ -345,7 +346,7 @@ async function scanAndCreate(trackDir) {
       try {
         await pool.query(
           `INSERT INTO track_radio_pickups (track_id, station_name, city, country, source)
-           VALUES ($1, $2, $3, 'Россия', 'auto') ON CONFLICT (track_id, station_name) DO NOTHING`,
+           VALUES ($1, $2, $3, 'Россия', 'auto') ON CONFLICT (track_id, station_name, city) DO NOTHING`,
           [tid, st.name, city]
         );
         pickupCount++;
