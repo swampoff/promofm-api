@@ -25,7 +25,7 @@ const bar = (n, max, w = 18) => '#'.repeat(Math.max(0, Math.round((n / (max || 1
   const p = [DAYS];
   const daily = (await pool.query(`
     WITH firstseen AS (SELECT session_id, min(${MSK}) fd FROM page_views WHERE ${HUMAN} GROUP BY 1)
-    SELECT ${MSK} d,
+    SELECT to_char(${MSK},'YYYY-MM-DD') d,
       count(DISTINCT pv.session_id) visitors, count(DISTINCT pv.ip) ips, count(*) views,
       count(DISTINCT pv.session_id) FILTER (WHERE fs.fd = ${MSK}) new_v
     FROM page_views pv JOIN firstseen fs USING (session_id)
