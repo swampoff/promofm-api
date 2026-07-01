@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
+import geoip from 'geoip-lite';
 
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 
@@ -16,7 +17,9 @@ async function requireAdminOrKey(c: any, next: any) {
 
 const app = new Hono();
 
-const BOT_RE = /bot|crawl|spider|slurp|bingbot|googlebot|yandex|baidu|facebook|twitter|telegram|whatsapp|semrush|ahrefs|gptbot|claudebot|bytespider|petalbot/i;
+// is_bot detection at insert time. Extended 2026-07: +prerender (крон prerender.py
+// UA "PromoFM-Prerender" раньше считался человеком) + headless/monitor/curl и т.п.
+const BOT_RE = /bot|crawl|spider|slurp|bingbot|googlebot|yandex|baidu|facebook|twitter|telegram|whatsapp|semrush|ahrefs|gptbot|claudebot|bytespider|petalbot|prerender|headless|monitor|uptime|pingdom|dataprovider|externalagent|python-requests|curl\/|wget/i;
 
 function parseUA(ua: string) {
   let device = 'desktop';
@@ -53,10 +56,12 @@ app.post('/pv', async (c) => {
 
     const { device, browser, os } = parseUA(ua);
     const isBot = BOT_RE.test(ua);
+    const geo = ip && ip !== '0.0.0.0' ? geoip.lookup(ip) : null;
+    const country = geo?.country || null;
 
     await pool.query(
-      `INSERT INTO page_views (path, referrer, user_agent, ip, device, browser, os, screen_w, screen_h, language, session_id, user_id, is_bot, load_time)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+      `INSERT INTO page_views (path, referrer, user_agent, ip, device, browser, os, screen_w, screen_h, language, session_id, user_id, is_bot, load_time, country)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
       [
         (body.p || '/').substring(0, 500),
         (body.r || '').substring(0, 1000) || null,
@@ -72,6 +77,7 @@ app.post('/pv', async (c) => {
         body.uid || null,
         isBot,
         body.lt || null,
+        country,
       ]
     );
 
@@ -109,6 +115,59 @@ app.get('/live', requireAdminOrKey, async (c) => {
     });
   } catch (e: any) {
     console.error('[analytics/live]', e.message);
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+// GET /stats?days=N — многодневная аналитика реальных посетителей (admin).
+// Надёжный фильтр людей (is_bot + UA): page_views.is_bot НЕ ловит prerender-крон
+// на исторических строках, поэтому фильтруем и по user_agent.
+app.get('/stats', requireAdminOrKey, async (c) => {
+  try {
+    const days = Math.min(365, Math.max(1, parseInt(c.req.query('days') || '30')));
+    const HUMAN = `NOT is_bot AND coalesce(user_agent,'') !~* '(prerender|bot|crawl|spider|slurp|externalagent|headless|phantom|python|curl|wget|monitor|uptime|pingdom|facebookexternalhit|semrush|ahrefs|bytespider|gptbot|claudebot|dataprovider|petalbot)'`;
+    const MSK = `(created_at AT TIME ZONE 'Europe/Moscow')::date`;
+    const SINCE = `created_at > (now() - ($1 * interval '1 day'))`;
+    const pr = [days];
+
+    const [daily, sum, pages, sources, devices, browsers, geo] = await Promise.all([
+      pool.query(`WITH fs AS (SELECT session_id, min(${MSK}) fd FROM page_views WHERE ${HUMAN} GROUP BY 1)
+        SELECT to_char(${MSK},'YYYY-MM-DD') AS date, count(DISTINCT pv.session_id)::int AS visitors,
+          count(DISTINCT pv.ip)::int AS ips, count(*)::int AS views,
+          count(DISTINCT pv.session_id) FILTER (WHERE fs.fd = ${MSK})::int AS new_visitors
+        FROM page_views pv JOIN fs USING (session_id)
+        WHERE ${HUMAN} AND ${SINCE} GROUP BY 1 ORDER BY 1`, pr),
+      pool.query(`SELECT count(DISTINCT session_id) FILTER (WHERE ${HUMAN})::int AS visitors,
+          count(DISTINCT ip) FILTER (WHERE ${HUMAN})::int AS ips,
+          count(*) FILTER (WHERE ${HUMAN})::int AS views,
+          count(*) FILTER (WHERE NOT (${HUMAN}))::int AS bots_excluded
+        FROM page_views WHERE ${SINCE}`, pr),
+      pool.query(`SELECT path, count(DISTINCT session_id)::int AS visitors, count(*)::int AS views
+        FROM page_views WHERE ${HUMAN} AND ${SINCE} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`, pr),
+      pool.query(`SELECT CASE
+          WHEN referrer IS NULL OR referrer = '' THEN 'Прямые/закладки'
+          WHEN referrer ~* 'promo-music\\.ru' THEN 'Внутренние'
+          WHEN referrer ~* '(google|yandex|bing|duckduck|search)' THEN 'Поиск'
+          WHEN referrer ~* '(vk\\.com|t\\.me|telegram|instagram|facebook|youtube|tiktok|ok\\.ru|dzen)' THEN 'Соцсети'
+          ELSE 'Другие сайты' END AS source, count(DISTINCT session_id)::int AS visitors
+        FROM page_views WHERE ${HUMAN} AND ${SINCE} GROUP BY 1 ORDER BY 2 DESC`, pr),
+      pool.query(`SELECT coalesce(nullif(device,''),'?') AS device, count(DISTINCT session_id)::int AS visitors
+        FROM page_views WHERE ${HUMAN} AND ${SINCE} GROUP BY 1 ORDER BY 2 DESC`, pr),
+      pool.query(`SELECT coalesce(nullif(browser,''),'?') AS browser, count(DISTINCT session_id)::int AS visitors
+        FROM page_views WHERE ${HUMAN} AND ${SINCE} GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, pr),
+      pool.query(`SELECT coalesce(nullif(country,''),'??') AS country, count(DISTINCT session_id)::int AS visitors
+        FROM page_views WHERE ${HUMAN} AND ${SINCE} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`, pr),
+    ]);
+
+    const s0 = sum.rows[0] || {};
+    return c.json({ success: true, data: {
+      days,
+      summary: { ...s0, perDayVisitors: Math.round((s0.visitors || 0) / days), perDayViews: Math.round((s0.views || 0) / days) },
+      daily: daily.rows, topPages: pages.rows, sources: sources.rows,
+      devices: devices.rows, browsers: browsers.rows, geo: geo.rows,
+    }});
+  } catch (e: any) {
+    console.error('[analytics/stats]', e.message);
     return c.json({ success: false, error: e.message }, 500);
   }
 });

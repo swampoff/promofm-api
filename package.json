@@ -17,6 +17,7 @@
     "bcryptjs": "^2.4.3",
     "dotenv": "^16.4.0",
     "file-type": "^16.5.4",
+    "geoip-lite": "^1.4.10",
     "hono": "^4.6.0",
     "jsonwebtoken": "^9.0.0",
     "multer": "^1.4.5-lts.1",
