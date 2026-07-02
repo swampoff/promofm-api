@@ -1281,6 +1281,38 @@ in-line MANUAL DEPLOY STEPS. Auto-runner is stub.
 
 ---
 
+## DM-жалобы, onboarding, admin-блокировка (contract-audit 2026-07-02)
+
+Полная сверка фронт↔бэк контрактов нашла 8 разрывов «фронт зовёт —
+роута нет». Три закрыты новыми endpoint'ами (остальные — правки URL
+на фронте, см. Promomusicfigma тот же день):
+
+- **POST `/server/api/messaging/reports`** — юзер жалуется на
+  собеседника из messages-page. Пишет в `dm_reports` (migration 022),
+  category ∈ spam|abuse|impersonation|other, анти-флуд 20/24h на
+  reporter'а. Source: `messaging-routes.tsx` (рядом с GET /admin/reports).
+- **POST `/server/api/messaging/admin/reports/:id/resolve`** — админ
+  закрывает жалобу: status → reviewed|rejected|actioned + resolution,
+  проставляет reviewer_id/reviewed_at. До этого AdminDmReports.tsx мог
+  только читать очередь.
+- **POST `/server/api/settings/onboarding`** — ответы onboarding-визарда
+  сохраняются в `user_settings.data.onboarding` (userId из JWT-cookie,
+  НЕ из URL/тела). Раньше визард слал в несуществующий
+  `/settings/user/unknown/onboarding` и данные молча терялись.
+- **POST `/server/api/landing-data/admin/users/:userId/status`** —
+  блокировка/разблокировка юзера из админки. UI-статус 'blocked' ↔
+  enum-значение `'banned'::user_status` (login-гейт `db-client.tsx:641`).
+  До фикса кнопка «заблокировать» в UsersManagement только оптимистично
+  перекрашивала UI — запрос уходил в 404.
+
+Известный НЕзакрытый разрыв: `admin/pages/VideoModeration.tsx` зовёт
+`/api/videos/{promoteToNovelty,addToNewsletter,exclusivePitch}` (10 000 ₽ /
+бесплатно / 15 000 ₽) — на бэке видео-pipeline не реализован (существующие
+`/api/track-test/pipeline/*` — про треки ПРОМО.ЛАБ, другая сущность и цены).
+Ждёт продуктового решения по ценам/флоу — НЕ чинить молча.
+
+---
+
 ## Critical column-type cheat sheet (echoed from CLAUDE.md)
 
 Verified columns / types — DO NOT INVENT:
