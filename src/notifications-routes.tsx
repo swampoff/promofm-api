@@ -135,9 +135,18 @@ notifications.post('/reminder', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
 
+    // Target = сам аутентифицированный юзер (2026-07-02). Раньше body.userId
+    // позволял любому залогиненному ЗАПИСАТЬ уведомление в ЧУЖУЮ ленту с
+    // произвольным title/message — stored-фишинг («Аккаунт заблокирован,
+    // подтвердите: evil.link»). Админ может указать target явно.
+    const authUserId = c.get('userId');
+    const userRole = c.get('userRole');
+    const isAdmin = userRole === 'admin' || userRole === 'superadmin';
+    const targetUserId = isAdmin && body.userId ? body.userId : authUserId;
+
     const notification: Notification = {
       id: `notif-${crypto.randomUUID()}`,
-      userId: body.userId,
+      userId: targetUserId,
       concertId: body.concertId,
       type: 'reminder',
       title: body.title || 'Напоминание о концерте',
@@ -168,7 +177,12 @@ notifications.post('/auto-reminders/:concertId', requireAuth, async (c) => {
     const body = await c.req.json();
 
     const concert = body.concert;
-    const artistId = body.artistId;
+    // Target = сам аутентифицированный юзер (2026-07-02): body.artistId
+    // позволял писать напоминания в чужую ленту (см. /reminder выше).
+    const authUserId = c.get('userId');
+    const userRole = c.get('userRole');
+    const isAdmin = userRole === 'admin' || userRole === 'superadmin';
+    const artistId = isAdmin && body.artistId ? body.artistId : authUserId;
 
     const settings = await db.getNotificationSettings(artistId) as NotificationSettings | null;
     const reminderDays = settings?.reminderDaysBefore || [7, 3, 1];
@@ -218,6 +232,12 @@ notifications.post('/auto-reminders/:concertId', requireAuth, async (c) => {
 notifications.get('/campaigns/:artistId', requireAuth, async (c) => {
   try {
     const artistId = c.req.param('artistId');
+    // Owner-or-admin (2026-07-02): раньше любой залогиненный читал ЧУЖИЕ
+    // кампании по artistId из URL (тема/контент — IDOR-read).
+    const userRole = c.get('userRole');
+    if (artistId !== c.get('userId') && userRole !== 'admin' && userRole !== 'superadmin') {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
     const campaigns = await db.getEmailCampaigns(artistId);
 
     return c.json({

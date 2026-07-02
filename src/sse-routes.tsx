@@ -15,7 +15,7 @@ const app = new Hono();
 // Allow-list of trusted origins — wildcard '*' previously let any site read
 // authenticated event streams, so a malicious page could subscribe a victim's
 // SSE channel and intercept their notifications.
-import { requireAuth, requireOwner } from './auth-middleware.tsx';
+import { requireAuth, requireOwner, requireAdmin } from './auth-middleware.tsx';
 
 const SSE_ALLOWED_ORIGINS = new Set([
   'https://promo-music.ru',
@@ -170,8 +170,10 @@ app.post('/emit/:userId', requireAuth, async (c) => {
   }
 });
 
-// GET /connections - статистика активных подключений
-app.get('/connections', requireAuth, (c) => {
+// GET /connections - статистика активных подключений.
+// requireAdmin (2026-07-02): раньше ЛЮБОЙ залогиненный видел карту «кто сейчас
+// онлайн» (все userId с числом подключений) — presence-разведка чужих юзеров.
+app.get('/connections', requireAuth, requireAdmin, (c) => {
   const stats: Record<string, number> = {};
   for (const [userId, conns] of connections) {
     stats[userId] = conns.size;
