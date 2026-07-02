@@ -339,7 +339,7 @@ ${valid ? `<button id="u" style="margin-top:16px;padding:12px 28px;border:none;b
 <script>document.getElementById('u').onclick=async function(){this.disabled=true;this.textContent='…';try{var r=await fetch('/server/api/email-campaigns/unsubscribe?${qs.toString()}',{method:'POST'});var j=await r.json();document.getElementById('d').textContent=j.success?'Готово — больше писем не придёт.':(j.error||'Не получилось — напишите на info@promo-music.ru');this.style.display='none'}catch(e){document.getElementById('d').textContent='Ошибка сети, попробуйте ещё раз';this.disabled=false;this.textContent='Отписаться'}};</script>` : ''}
 <p style="margin-top:24px;"><a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>
 </div></body></html>`,
-      res.status
+      valid ? 200 : 400
     );
   } catch (error) {
     console.error('[Campaigns] Unsubscribe GET error:', error);
