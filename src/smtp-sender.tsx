@@ -15,6 +15,7 @@
 
 import nodemailer from 'nodemailer';
 import { generateUnsubToken } from './unsub-token.tsx';
+import { escapeHtml } from './email-helper.tsx';
 
 const DEFAULT_SMTP_HOST = process.env.SMTP_HOST || 'localhost';
 const DEFAULT_SMTP_PORT = Number(process.env.SMTP_PORT || '25');
@@ -32,7 +33,14 @@ const SMTP_TLS = process.env.SMTP_TLS === 'true';
 // поэтому при недоступном Postfix кампании падали на 100% (а транзакционные
 // письма выживали через Resend). Теперь bulk наследует тот же запасной канал.
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
-const UNSUBSCRIBE_URL = 'https://promofm.org/unsubscribe';
+// 2026-07-02: (а) домен выровнен на рабочий promo-music.ru — promofm.org не
+// обслуживает SPA/API, все unsubscribe-клики уходили в никуда; (б) цель —
+// API-эндпоинт, а не SPA-страница: RFC 8058 One-Click (Gmail/Yahoo) делает
+// server-side POST по URL из List-Unsubscribe — SPA-страница JS не исполняет
+// и POST не обрабатывает, One-Click был мёртв. Эндпоинт принимает и GET
+// (человеческий клик), и POST (One-Click), параметры из query.
+const PUBLIC_SITE_URL = process.env.PUBLIC_URL || 'https://promo-music.ru';
+const UNSUBSCRIBE_URL = `${PUBLIC_SITE_URL}/server/api/email-campaigns/unsubscribe`;
 
 interface SmtpSendOptions {
   to: string | string[];
@@ -106,9 +114,11 @@ function getTransporter() {
 }
 
 export async function smtpSendEmail(opts: SmtpSendOptions, retries = 2): Promise<SmtpResult> {
+  let lastError = 'Max retries exceeded';
   for (let attempt = 0; attempt <= retries; attempt++) {
     const result = await smtpSendEmailOnce(opts);
     if (result.success) return result;
+    lastError = result.error || lastError;
     if (result.error?.includes('Invalid login') || result.error?.includes('rejected')) return result;
     if (attempt < retries) {
       const delay = 1000 * Math.pow(2, attempt);
@@ -116,7 +126,9 @@ export async function smtpSendEmail(opts: SmtpSendOptions, retries = 2): Promise
       await new Promise(r => setTimeout(r, delay));
     }
   }
-  return { success: false, error: 'Max retries exceeded' };
+  // 2026-07-02: возвращаем ПОСЛЕДНЮЮ реальную ошибку, а не «Max retries
+  // exceeded» — иначе campaign.stats.errors превращался в N бесполезных копий.
+  return { success: false, error: lastError };
 }
 
 async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
@@ -166,11 +178,23 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
       transporter = null;
     }
 
+    // Перманентный SMTP-отказ (auth misconfig / 550 rejected) — НЕ маскируем
+    // fallback'ом: retry-цикл выше должен увидеть маркер в error и прерваться,
+    // иначе на каждого получателя крутились 3 полных цикла SMTP(30s)+Resend,
+    // а реальная причина терялась (2026-07-02).
+    if (errMsg.includes('Invalid login') || errMsg.includes('rejected')) {
+      return { success: false, error: errMsg };
+    }
+
     // Fallback: Resend HTTP API (port 443) — мирроринг email-helper.tsx.
     // Срабатывает когда Postfix/localhost:25 недоступен. List-Unsubscribe
     // и прочие заголовки сохраняются (Resend принимает `headers`).
+    // SMTP-ошибку сохраняем в итоговом сообщении — иначе диагностика теряется.
     const resendResult = await resendSendOnce({ ...opts, from, headers });
-    if (resendResult) return resendResult;
+    if (resendResult) {
+      if (resendResult.success) return resendResult;
+      return { success: false, error: `SMTP: ${errMsg}; ${resendResult.error}` };
+    }
 
     return { success: false, error: errMsg };
   }
@@ -251,7 +275,10 @@ export async function smtpSendBatch(
       let html = htmlTemplate;
       if (rcpt.vars) {
         for (const [key, val] of Object.entries(rcpt.vars)) {
-          html = html.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), val);
+          // escapeHtml: vars (full_name юзера) — user-controlled, без экранирования
+          // это HTML-инъекция в письмо. Функция-замена вместо строки — иначе
+          // `$&`/`$'` в имени ломают replace (2026-07-02).
+          html = html.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), () => escapeHtml(String(val ?? '')));
         }
       }
 

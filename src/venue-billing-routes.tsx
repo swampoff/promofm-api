@@ -353,7 +353,13 @@ app.post('/cron/charge-recurring', async (c) => {
 
         // Card present + active → charge it.
         const amount = interval === 'year' ? plan.price_year : plan.price_month;
-        const orderId = `venue-renew-${row.user_id}-${expiresAt.getTime()}`;
+        // Day-stamp в orderId (2026-07-02): orderId = Idempotence-Key у YooKassa.
+        // Чисто-детерминированный ключ по expiresAt после ОТКАЗА карты возвращал
+        // тот же canceled-платёж на все ретраи в окне ключа — починивший карту
+        // подписчик не мог продлиться. День в ключе: crash-safe внутри суток,
+        // свежий ключ на следующий прогон.
+        const dayStamp = now.toISOString().slice(0, 10);
+        const orderId = `venue-renew-${row.user_id}-${expiresAt.getTime()}-${dayStamp}`;
         const prior = await getPaymentSession(orderId) as any;
         if (prior && (prior.status === 'succeeded' || prior.status === 'processing')) {
           skipped++;
@@ -372,21 +378,42 @@ app.post('/cron/charge-recurring', async (c) => {
           userId: row.user_id,
         });
 
+        // Реальный исход списания (YooKassa off-session capture:true — синхронно).
+        // 2026-07-02: раньше статус игнорировался ПОЛНОСТЬЮ — отклонённая карта
+        // всё равно продлевала venue на месяц и писала фантомную выручку (та же
+        // бага, что чинили в артистском рекурренте). ВАЖНО: planKey из metadata
+        // УБРАН — иначе webhook-ветка venue_subscription (checkout-routes, гейт
+        // по metadata.planKey) продлевала бы период ВТОРОЙ раз на каждый
+        // успешный платёж (30 дней оплачено → 60 выдано). Единственная точка
+        // фулфилмента рекуррента — этот cron, как у артистов.
+        const chargeStatus = chargeResult.status; // 'succeeded' | 'canceled' | 'pending'
+
         await upsertPaymentSession(orderId, {
           orderId,
           userId: row.user_id,
           gateway: card.gateway || 'yookassa',
           gatewayPaymentId: chargeResult.sessionId,
           amount, currency: 'RUB',
-          status: 'pending',
+          status: chargeStatus === 'succeeded' ? 'succeeded' : chargeStatus === 'canceled' ? 'canceled' : 'pending',
           type: 'venue_subscription',
           description: `Продление «${plan.name}»`,
-          metadata: { planKey: tier, interval, recurring: true, userId: row.user_id, venueId: data.id },
+          metadata: { tier, interval, recurring: true, userId: row.user_id, venueId: data.id },
           savePaymentMethod: false,
           confirmationUrl: '',
           returnUrl: 'https://promo-music.ru/venue',
           createdAt: now.toISOString(),
         });
+
+        if (chargeStatus === 'canceled') {
+          // отказ карты — в catch ниже (там mark-expired при истёкшем периоде)
+          throw new Error('venue recurring charge declined by gateway (canceled)');
+        }
+        if (chargeStatus !== 'succeeded') {
+          // 'pending' (редкий async) — не продлеваем, следующий прогон добьёт
+          skipped++;
+          results.push({ userId: row.user_id, action: 'charge_pending', orderId });
+          continue;
+        }
 
         // Extend period in profile (paid in advance — extend from
         // current expires_at, not from now, so customers who pay

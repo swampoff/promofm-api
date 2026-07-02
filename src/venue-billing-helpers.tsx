@@ -82,21 +82,35 @@ export async function tryAutoChargeAtTrialEnd(userId: string, profileData: any):
       userId,
     });
 
+    // Реальный исход списания (2026-07-02): раньше статус не проверялся —
+    // отклонённая карта на границе триала всё равно активировала платный месяц
+    // и писала фантомную выручку, а caller получал true и НЕ делал mark-expired.
+    // planKey из metadata убран — иначе webhook-ветка venue_subscription
+    // активировала бы подписку ВТОРОЙ раз (см. venue-billing-routes).
+    const chargeStatus = chargeResult.status; // 'succeeded' | 'canceled' | 'pending'
+
     await upsertPaymentSession(orderId, {
       orderId,
       userId,
       gateway: card.gateway || 'yookassa',
       gatewayPaymentId: chargeResult.sessionId,
       amount, currency: 'RUB',
-      status: 'pending',
+      status: chargeStatus === 'succeeded' ? 'succeeded' : chargeStatus === 'canceled' ? 'canceled' : 'pending',
       type: 'venue_subscription',
       description: `Первый месяц «${plan.name}» после триала`,
-      metadata: { planKey: tier, interval, autoTrialEnd: true, userId },
+      metadata: { tier, interval, autoTrialEnd: true, userId },
       savePaymentMethod: false,
       confirmationUrl: '',
       returnUrl: 'https://promo-music.ru/venue',
       createdAt: now.toISOString(),
     });
+
+    if (chargeStatus !== 'succeeded') {
+      // Списание не подтверждено → false: caller (trial-cron) делает свой
+      // штатный mark-expired фолбэк.
+      console.warn(`[venue-billing-helpers] auto-charge not succeeded (${chargeStatus}) for`, userId);
+      return false;
+    }
 
     // Extend period. Starts from NOW (the trial expiry moment) —
     // venue has been getting free service these 14 days, so the

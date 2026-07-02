@@ -203,10 +203,36 @@ tracksRoutes.put('/:id', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Not authorized to edit this track' }, 403);
     }
 
+    // Mass-assignment guard (2026-07-02): PUT раньше спредил body целиком в
+    // UPDATE — владелец мог прислать moderation_status='published' (обход
+    // модерации И платной публикации; BLOCKER A закрыл это в POST 2026-06-03,
+    // а PUT остался дырой), payment_completed=true / requires_payment=false /
+    // paid_at (обход оплаты), plays/likes (накрутка), user_id/artist_id
+    // (переприсвоение). Системные поля вырезаем МОЛЧА — фронт при
+    // редактировании шлёт объект трека целиком (JSON.stringify(track)),
+    // reject сломал бы легитимный флоу. Канонизация ключа (lower, без '_')
+    // отсекает и snake_case, и camelCase варианты.
+    const PROTECTED_TRACK_FIELDS = new Set([
+      'id', 'userid', 'artistid', 'artistname', 'labelid', 'actingforuserid',
+      'moderationstatus', 'status',
+      'paymentcompleted', 'paymentamount', 'paymentorderid', 'paymentgateway',
+      'paidat', 'requirespayment', 'firsttrackfreeapplied', 'lastpaymentreminderat',
+      'upcominguntil', 'approvedforreleaseat', 'publishedat',
+      'plays', 'playscount', 'likes', 'likescount', 'downloads', 'shares',
+      'aiscore', 'aiverdict', 'aianalysis', 'aiflagged', 'aicategory',
+      'radiodigestsentat', 'radioweeklydigestsentat',
+      'experttesteduntil', 'experttestavgrating', 'experttestrequestid',
+      'shoutouturl', 'data', 'createdat', 'updatedat',
+    ]);
+    const safeBody: Record<string, any> = {};
+    for (const [k, v] of Object.entries(body as Record<string, any>)) {
+      if (!PROTECTED_TRACK_FIELDS.has(k.toLowerCase().replace(/_/g, ''))) safeBody[k] = v;
+    }
+
     // Streaming-links (migration 095) — нормализуем camelCase + валидируем
     // URL. Sanitize'нутый ('') не перезаписывает уже сохранённое значение
     // (не путать «не прислал» с «удалил»). Чтобы удалить — фронт шлёт null.
-    const normalized: Record<string, any> = { ...body };
+    const normalized: Record<string, any> = { ...safeBody };
     for (const [camel, snake] of [
       ['yandexMusicUrl', 'yandex_music_url'],
       ['spotifyUrl',     'spotify_url'],

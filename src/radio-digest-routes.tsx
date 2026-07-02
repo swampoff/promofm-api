@@ -256,10 +256,15 @@ async function getWeeklyRecipients(client: any): Promise<{ email: string; name: 
         AND u.email IS NOT NULL AND u.email <> ''`
   );
   const partners = await client.query(
+    // source='curated_2026' — курированные РЕКЛАМНЫЕ контакты (сейлз-хаусы
+    // ГПМ/ЕМГ/НРА и т.п.). Музыкальный дайджест «забирайте треки в ротацию» им
+    // слать НЕЛЬЗЯ (не та аудитория) — исключаем из weekly. Они в базе для
+    // рекламного аутрича + суппрессии, но не для music-рассылки.
     `SELECT email, station_name AS name
        FROM radio_partner_contacts
       WHERE active = TRUE AND unsubscribed_at IS NULL
-        AND email IS NOT NULL AND email <> ''`
+        AND email IS NOT NULL AND email <> ''
+        AND COALESCE(source, '') <> 'curated_2026'`
   );
   const unsub = await client.query(`SELECT LOWER(email) AS email FROM email_unsubscribes`);
   const unsubSet = new Set<string>(unsub.rows.map((r: any) => r.email));
@@ -282,13 +287,20 @@ async function getWeeklyRecipients(client: any): Promise<{ email: string; name: 
  * Защита: X-Internal-Key (cron) ИЛИ admin-сессия.
  *
  * Идемпотентность: advisory-lock от параллельного запуска + курсор
- * radio_weekly_digest_sent_at (повторный запуск в тот же понедельник не
- * перешлёт уже разосланные треки). Транспорт — bulk-sender с Resend-fallback;
- * треки помечаются разосланными ТОЛЬКО если хоть одно письмо ушло.
+ * radio_weekly_digest_sent_at. Отправка — В ФОНЕ (2026-07-02): раньше
+ * ~1200 писем с троттлингом 2с/50 шли ИНЛАЙН до HTTP-ответа — cron'овский
+ * curl -m 120 гарантированно обрывался каждый понедельник, а рестарт сервиса
+ * посреди многоминутной отправки оставлял треки без штампа → полная
+ * пере-рассылка всей базе на следующем прогоне. Теперь отвечаем сразу (202),
+ * а lock и клиент держим до завершения фоновой отправки — конкурентный запуск
+ * невозможен. Треки штампуются только если хоть одно письмо ушло; партнёры —
+ * ТОЛЬКО успешно доставленные (F4: неудачные адреса не выпадают из «холодного
+ * остатка» laptop'а).
  */
 radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
   const client = await pool.connect();
   let locked = false;
+  let backgrounded = false;
   try {
     const lk = await client.query('SELECT pg_try_advisory_lock($1) AS got', [WEEKLY_LOCK]);
     locked = !!lk.rows[0]?.got;
@@ -319,56 +331,77 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
     const html = weeklyDigestHtml(tracks as WeeklyTrack[], dateLabel);
     const subject = `🎵 Новинки недели для эфира — ${tracks.length} трек(ов) · ${dateLabel}`;
 
-    const result = await smtpSendBatch(
-      recipients.map(r => ({ email: r.email, vars: { name: r.name } })),
-      subject,
-      html,
-      { batchSize: 50, delayMs: 2000, replyTo: DIGEST_RECIPIENT }
-    );
+    // Фоновая отправка: lock + client переходят во владение фоновой задачи.
+    backgrounded = true;
+    const finishInBackground = async () => {
+      try {
+        const result = await smtpSendBatch(
+          recipients.map(r => ({ email: r.email, vars: { name: r.name } })),
+          subject,
+          html,
+          { batchSize: 50, delayMs: 2000, replyTo: DIGEST_RECIPIENT }
+        );
 
-    if (result.sent === 0) {
-      // тотальный сбой транспорта — НЕ помечаем треки, попробуем в следующий запуск
-      console.error('[radio-weekly] transport failed for all recipients, tracks left in queue');
-      return c.json({ success: false, sent: 0, failed: result.failed, error: 'email transport failed' }, 502);
-    }
+        if (result.sent === 0) {
+          // тотальный сбой транспорта — НЕ помечаем треки, следующий прогон повторит
+          console.error('[radio-weekly] transport failed for all recipients, tracks left in queue');
+          return;
+        }
 
-    const ids = tracks.map((t: any) => t.id);
-    await client.query(
-      `UPDATE tracks SET radio_weekly_digest_sent_at = NOW() WHERE id = ANY($1::uuid[])`,
-      [ids]
-    );
+        const ids = tracks.map((t: any) => t.id);
+        await client.query(
+          `UPDATE tracks SET radio_weekly_digest_sent_at = NOW() WHERE id = ANY($1::uuid[])`,
+          [ids]
+        );
 
-    // Единая база рассылки: штампуем last_sent_at у партнёров-станций, которым
-    // ушёл дайджест — чтобы laptop/холодный прогон не били повторно по тем же
-    // адресам (migration 115). Best-effort: колонки могут отсутствовать до 115.
-    try {
-      const partnerEmails = recipients.map(r => r.email.toLowerCase());
-      await client.query(
-        `UPDATE radio_partner_contacts
-            SET last_sent_at = NOW(), send_count = send_count + 1
-          WHERE LOWER(email) = ANY($1::text[])`,
-        [partnerEmails]
-      );
-    } catch (e: any) {
-      console.warn('[radio-weekly] last_sent_at stamp skipped:', e?.message || e);
-    }
+        // Единая база рассылки: last_sent_at ТОЛЬКО успешно доставленным.
+        // errors из smtpSendBatch имеют вид "email: причина" — адрес до ':'.
+        try {
+          const failedEmails = new Set(
+            (result.errors || []).map(e => String(e).split(':')[0].trim().toLowerCase())
+          );
+          const okEmails = recipients
+            .map(r => r.email.toLowerCase())
+            .filter(e => !failedEmails.has(e));
+          if (okEmails.length > 0) {
+            await client.query(
+              `UPDATE radio_partner_contacts
+                  SET last_sent_at = NOW(), send_count = send_count + 1
+                WHERE LOWER(email) = ANY($1::text[])`,
+              [okEmails]
+            );
+          }
+        } catch (e: any) {
+          console.warn('[radio-weekly] last_sent_at stamp skipped:', e?.message || e);
+        }
 
-    console.log(`[radio-weekly] sent ${tracks.length} track(s) to ${result.sent}/${recipients.length} recipients (${result.failed} failed)`);
+        console.log(`[radio-weekly] completed: ${tracks.length} track(s) to ${result.sent}/${recipients.length} recipients (${result.failed} failed)`);
+      } catch (err: any) {
+        console.error('[radio-weekly] background send failed:', err?.message || err);
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1)', [WEEKLY_LOCK]).catch(() => {});
+        client.release();
+      }
+    };
+    finishInBackground();
+
     return c.json({
       success: true,
+      started: true,
       tracks: tracks.length,
       recipients: recipients.length,
-      sent: result.sent,
-      failed: result.failed,
-    });
+      message: `Отправка начата в фоне: ${recipients.length} получателей, ${tracks.length} трек(ов). Итог — в логе [radio-weekly].`,
+    }, 202);
   } catch (err: any) {
     console.error('[radio-weekly] run failed:', err?.message || err);
     return c.json({ success: false, error: 'internal error' }, 500);
   } finally {
-    if (locked) {
-      await client.query('SELECT pg_advisory_unlock($1)', [WEEKLY_LOCK]).catch(() => {});
+    if (!backgrounded) {
+      if (locked) {
+        await client.query('SELECT pg_advisory_unlock($1)', [WEEKLY_LOCK]).catch(() => {});
+      }
+      client.release();
     }
-    client.release();
   }
 });
 

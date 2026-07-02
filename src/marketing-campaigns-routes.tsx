@@ -183,8 +183,30 @@ marketing.patch('/campaigns/:campaignId', requireAuth, async (c) => {
     const campaign = await getNotificationCampaign(campaignId);
     if (!campaign) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
 
-    const updated = { ...campaign, ...body };
-    await upsertNotificationCampaign(updated.user_id, campaignId, updated);
+    // Авторизация + mass-assignment guard (2026-07-02). Раньше: (а) не было
+    // owner-check — любой залогиненный патчил ЧУЖУЮ кампанию по id (IDOR);
+    // (б) body спредился целиком — свой же pending_review можно было перевести
+    // в {"status":"approved","final_price":0}, минуя requireAdmin-флоу
+    // approve/reject и обнуляя цену. GET-сосед (строка 36) owner-check имеет —
+    // выравниваем. Системные поля вырезаем молча (совместимость с округлым
+    // echo-back объектом с фронта).
+    const authUserId = c.get('userId');
+    const userRole = c.get('userRole');
+    const isAdmin = userRole === 'admin' || userRole === 'superadmin';
+    if (!isAdmin && campaign.user_id !== authUserId) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
+    const PROTECTED_CAMPAIGN_FIELDS = new Set([
+      'id', 'userid', 'status', 'finalprice', 'approvedat', 'rejectedat',
+      'moderatorresponse', 'createdat', 'updatedat',
+    ]);
+    const safeBody: Record<string, any> = {};
+    for (const [k, v] of Object.entries(body as Record<string, any>)) {
+      if (isAdmin || !PROTECTED_CAMPAIGN_FIELDS.has(k.toLowerCase().replace(/_/g, ''))) safeBody[k] = v;
+    }
+
+    const updated = { ...campaign, ...safeBody, id: campaignId, user_id: campaign.user_id };
+    await upsertNotificationCampaign(campaign.user_id, campaignId, updated);
     return c.json({ success: true, data: updated });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -196,7 +218,16 @@ marketing.patch('/campaigns/:campaignId', requireAuth, async (c) => {
 marketing.delete('/campaigns/:campaignId', requireAuth, async (c) => {
   const campaignId = c.req.param('campaignId');
   try {
-    // Atomic existence-check + delete: single DELETE returns rowCount.
+    // Owner-check (2026-07-02): раньше любой залогиненный удалял ЧУЖУЮ
+    // кампанию по id (IDOR-delete). Существование проверяем до удаления —
+    // атомарность здесь дешевле потерять, чем доступ.
+    const campaign = await getNotificationCampaign(campaignId);
+    if (!campaign) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
+    const userRole = c.get('userRole');
+    const isAdmin = userRole === 'admin' || userRole === 'superadmin';
+    if (!isAdmin && campaign.user_id !== c.get('userId')) {
+      return c.json({ success: false, error: 'Access denied' }, 403);
+    }
     const rowCount = await deleteNotificationCampaign(campaignId);
     if (rowCount === 0) return c.json({ success: false, error: 'Кампания не найдена' }, 404);
     return c.json({ success: true });
