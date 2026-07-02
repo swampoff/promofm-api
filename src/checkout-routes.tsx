@@ -979,6 +979,147 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill video_promote — артист оплатил продвижение клипа в
+  // секцию «Новые клипы» на главной на 14 дней (см. videos-routes.tsx
+  // /promoteToNovelty, migration 120). Idempotency: повторный webhook
+  // просто передвинет promoted_until от NOW() — вреда нет, paid_at
+  // перезаписывается тем же значением сессии. ───
+  if (session.metadata?.type === 'video_promote' && session.metadata?.videoId) {
+    try {
+      const videoId = String(session.metadata.videoId);
+      const { pool: vpPool } = await import('./db-client.tsx');
+
+      // videos.id — uuid, metadata.videoId — text → сравнение по ::text
+      const vpResult = await vpPool.query(
+        `UPDATE videos
+            SET promoted_until = NOW() + INTERVAL '14 days',
+                pipeline = jsonb_set(
+                  COALESCE(pipeline, '{}'::jsonb),
+                  '{promote}',
+                  COALESCE(pipeline->'promote', '{}'::jsonb)
+                    || jsonb_build_object('paid_at', $2::text, 'payment_amount', $3::numeric),
+                  true),
+                updated_at = NOW()
+          WHERE id::text = $1
+          RETURNING id, title, user_id`,
+        [videoId, now, session.amount]
+      );
+
+      if (vpResult.rowCount === 0) {
+        log.warn({ videoId, orderId: session.orderId }, 'video_promote_no_video_row');
+      } else {
+        log.info({ videoId, orderId: session.orderId }, 'video_promote_fulfilled');
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(session.userId, {
+            type: 'notification',
+            data: {
+              title: 'Клип продвигается',
+              comment: `«${vpResult.rows[0]?.title || session.metadata.videoTitle}» — теперь в секции «Новые клипы» на главной на 14 дней`,
+            },
+          });
+        } catch {}
+      }
+    } catch (err) {
+      log.error({ err, videoId: session.metadata.videoId, orderId: session.orderId }, 'video_promote_fulfillment_error');
+    }
+  }
+
+  // ─── Fulfill video_exclusive — артист оплатил эксклюзив-pitch клипа.
+  // Шлёт рассылку по той же ТВ/радио-базе, что weekly-дайджест
+  // (getWeeklyRecipients: radio-юзеры + radio_partner_contacts минус
+  // curated_2026 и отписки). Idempotency: pipeline.exclusive.paid_at. ───
+  if (session.metadata?.type === 'video_exclusive' && session.metadata?.videoId) {
+    try {
+      const videoId = String(session.metadata.videoId);
+      const { pool: vePool } = await import('./db-client.tsx');
+
+      const veRow = await vePool.query(
+        `SELECT v.id, v.title, v.video_url, v.thumbnail_url, v.pipeline,
+                COALESCE(NULLIF(u.full_name, ''), NULLIF(u.display_name, ''), 'Артист') AS artist_name
+           FROM videos v
+           LEFT JOIN users u ON u.id::text = v.user_id::text
+          WHERE v.id::text = $1
+          LIMIT 1`,
+        [videoId]
+      );
+      const video = veRow.rows[0];
+
+      if (!video) {
+        log.warn({ videoId, orderId: session.orderId }, 'video_exclusive_no_video_row');
+      } else if (video?.pipeline?.exclusive?.paid_at) {
+        log.info({ videoId, orderId: session.orderId }, 'video_exclusive_duplicate_webhook_skip');
+      } else {
+        const { getWeeklyRecipients } = await import('./radio-digest-routes.tsx');
+        const recipients = await getWeeklyRecipients(vePool);
+
+        const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const watchUrl = video.video_url && String(video.video_url).startsWith('http')
+          ? String(video.video_url)
+          : `https://promo-music.ru${String(video.video_url || '').startsWith('/') ? '' : '/'}${video.video_url || ''}`;
+        const subject = `[ЭКСКЛЮЗИВ] Клип для эфира: ${video.artist_name} — ${video.title}`;
+        const html = `
+          <div style="font-family:system-ui,sans-serif;max-width:600px;">
+            <div style="background:#7C3AED;color:#fff;padding:12px 16px;border-radius:8px 8px 0 0;font-weight:700;">
+              ЭКСКЛЮЗИВНОЕ ПРЕДЛОЖЕНИЕ ДЛЯ ЭФИРА
+            </div>
+            <div style="border:1px solid #eee;border-top:none;padding:16px;border-radius:0 0 8px 8px;">
+              ${video.thumbnail_url ? `<img src="${esc(video.thumbnail_url)}" alt="" style="width:100%;max-width:568px;border-radius:8px;display:block;margin-bottom:12px;" />` : ''}
+              <h2 style="margin-top:0;">${esc(video.title)}</h2>
+              <p><strong>${esc(video.artist_name)}</strong></p>
+              <p>Здравствуйте, {{name}}! Предлагаем клип артиста ПРОМО.МУЗЫКА к размещению в вашем эфире — эксклюзивно, до широкой ротации.</p>
+              <p style="margin-top:16px;"><a href="${esc(watchUrl)}" style="display:inline-block;padding:10px 20px;background:#7C3AED;color:#fff;text-decoration:none;border-radius:6px;">Смотреть клип</a></p>
+            </div>
+            <p style="color:#999;font-size:11px;margin-top:12px;">Эксклюзив-pitch на promo-music.ru для ТВ и радио.</p>
+          </div>`;
+
+        let sent = 0, failed = 0;
+        if (recipients.length > 0) {
+          const { smtpSendBatch } = await import('./smtp-sender.tsx');
+          const r = await smtpSendBatch(
+            recipients.map((rc: any) => ({ email: rc.email, vars: { name: rc.name } })),
+            subject, html,
+            { campaignId: `video_exclusive:${videoId}` },
+          );
+          sent = r.sent;
+          failed = r.failed;
+        }
+
+        await vePool.query(
+          `UPDATE videos
+              SET pipeline = jsonb_set(
+                    COALESCE(pipeline, '{}'::jsonb),
+                    '{exclusive}',
+                    COALESCE(pipeline->'exclusive', '{}'::jsonb)
+                      || jsonb_build_object(
+                           'paid_at', $2::text,
+                           'payment_amount', $3::numeric,
+                           'recipients_count', $4::int,
+                           'success_count', $5::int,
+                           'fail_count', $6::int),
+                    true),
+                  updated_at = NOW()
+            WHERE id::text = $1`,
+          [videoId, now, session.amount, recipients.length, sent, failed]
+        );
+
+        log.info({ videoId, recipients: recipients.length, sent, failed, orderId: session.orderId }, 'video_exclusive_fulfilled');
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(session.userId, {
+            type: 'notification',
+            data: {
+              title: 'Эксклюзив-pitch отправлен',
+              comment: `Клип «${video.title}» отправлен ${recipients.length} ТВ/радио-редакторам`,
+            },
+          });
+        } catch {}
+      }
+    } catch (err) {
+      log.error({ err, videoId: session.metadata.videoId, orderId: session.orderId }, 'video_exclusive_fulfillment_error');
+    }
+  }
+
   // ─── Fulfill banner_publish ───
   //
   // До 2026-06-16 ЭТО ОТСУТСТВОВАЛО ПОЛНОСТЬЮ. /checkout/create-session

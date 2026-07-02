@@ -202,8 +202,46 @@ function weeklyTrackCard(t: WeeklyTrack, i: number): string {
         </table>`;
 }
 
-function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string): string {
+// Промо-клипы из video promo-pipeline (videos-routes.tsx /addToNewsletter,
+// migration 120) — секция «Новые клипы для эфира» под треками.
+interface WeeklyVideo {
+  id: string;
+  title: string | null;
+  artist_name: string | null;
+  thumbnail_url: string | null;
+  video_url: string | null;
+}
+
+function weeklyVideoCard(v: WeeklyVideo, i: number): string {
+  const thumb = absUrl(v.thumbnail_url);
+  const watch = v.video_url ? absUrl(v.video_url) : SITE_URL;
+  const thumbCell = thumb
+    ? `<img src="${escapeHtml(thumb)}" width="96" height="64" alt="" style="border-radius:10px;display:block;object-fit:cover;" />`
+    : `<div style="width:96px;height:64px;border-radius:10px;background:${COVER_GRADIENTS[i % COVER_GRADIENTS.length]};text-align:center;line-height:64px;color:#fff;font-size:24px;font-weight:700;">&#9654;</div>`;
+  return `
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:10px 0;background:#1d1d38;border:1px solid rgba(255,255,255,0.07);border-radius:14px;">
+          <tr>
+            <td width="112" style="padding:14px;vertical-align:middle;">${thumbCell}</td>
+            <td style="padding:14px 8px;vertical-align:middle;">
+              <div style="color:#ffffff;font-size:16px;font-weight:700;margin-bottom:3px;">${escapeHtml(v.title || 'Без названия')}</div>
+              <div style="color:#FF8FA8;font-size:14px;">${escapeHtml(v.artist_name || 'Артист')}</div>
+            </td>
+            <td width="112" align="right" style="padding:14px;vertical-align:middle;">
+              <a href="${escapeHtml(watch)}" style="display:inline-block;padding:9px 18px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#fff;text-decoration:none;border-radius:8px;font-size:13px;font-weight:600;">&#9654; Смотреть</a>
+            </td>
+          </tr>
+        </table>`;
+}
+
+function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: WeeklyVideo[] = []): string {
   const cards = tracks.map((t, i) => weeklyTrackCard(t, i)).join('');
+  const videoSection = videos.length
+    ? `
+    <tr><td style="padding:16px 40px 0;color:#e6e6f0;font-size:16px;">
+      <h2 style="margin:0;color:#fff;font-size:20px;font-weight:800;">&#127916; Новые клипы для эфира</h2>
+    </td></tr>
+    <tr><td style="padding:8px 28px 4px;">${videos.map((v, i) => weeklyVideoCard(v, i)).join('')}</td></tr>`
+    : '';
   const releasesUrl = `${SITE_URL}/radio/weekly-releases`;
   // {{name}} подставляет smtpSendBatch на каждого получателя (имя станции).
   return `
@@ -225,7 +263,7 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string): string {
         <p style="margin:0 0 8px;">Подобрали новые релизы артистов ПРОМО.МУЗЫКА за прошедшую неделю — послушайте и забирайте подходящие в эфир. Все треки готовы к ротации: лицензии, метаданные и джинглы — в порядке.</p>
       </td>
     </tr>
-    <tr><td style="padding:12px 28px 4px;">${cards}</td></tr>
+    <tr><td style="padding:12px 28px 4px;">${cards}</td></tr>${videoSection}
     <tr><td align="center" style="padding:18px 40px 8px;">
       <a href="${releasesUrl}" style="display:inline-block;padding:15px 38px;background:linear-gradient(135deg,#FF577F 0%,#7C3AED 100%);color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:16px;">Открыть все новинки недели</a>
     </td></tr>
@@ -247,7 +285,7 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string): string {
  *   3) info@promofm.ru (копия оператору для ручной пересылки тем, кого нет в б/д).
  * Дедуп по lower(email). Глобально отписанные (email_unsubscribes) отсекаются.
  */
-async function getWeeklyRecipients(client: any): Promise<{ email: string; name: string }[]> {
+export async function getWeeklyRecipients(client: any): Promise<{ email: string; name: string }[]> {
   const users = await client.query(
     `SELECT u.email AS email,
             COALESCE(NULLIF(u.full_name, ''), split_part(u.email, '@', 1)) AS name
@@ -318,7 +356,28 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
       [String(WEEKLY_WINDOW_DAYS)]
     );
 
-    if (tracks.length === 0) {
+    // Промо-клипы, поставленные админом в очередь (videos-routes
+    // /addToNewsletter). Ошибка (миграция 120 ещё не применена) не
+    // роняет трек-дайджест — просто без видео-секции.
+    let promoVideos: WeeklyVideo[] = [];
+    try {
+      const { rows } = await client.query(
+        `SELECT v.id, v.title, v.thumbnail_url, v.video_url,
+                COALESCE(NULLIF(u.full_name, ''), NULLIF(u.display_name, ''), 'Артист') AS artist_name
+           FROM videos v
+           LEFT JOIN users u ON u.id::text = v.user_id::text
+          WHERE v.newsletter_requested_at IS NOT NULL
+            AND v.newsletter_sent_at IS NULL
+            AND COALESCE(v.is_hidden, false) = FALSE
+          ORDER BY v.newsletter_requested_at ASC
+          LIMIT 20`
+      );
+      promoVideos = rows;
+    } catch (e: any) {
+      console.warn('[radio-weekly] promo videos query skipped:', e?.message || e);
+    }
+
+    if (tracks.length === 0 && promoVideos.length === 0) {
       return c.json({ success: true, sent: 0, message: 'no pending friday tracks this week' });
     }
 
@@ -328,8 +387,12 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
     }
 
     const dateLabel = new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: 'long' });
-    const html = weeklyDigestHtml(tracks as WeeklyTrack[], dateLabel);
-    const subject = `🎵 Новинки недели для эфира — ${tracks.length} трек(ов) · ${dateLabel}`;
+    const html = weeklyDigestHtml(tracks as WeeklyTrack[], dateLabel, promoVideos);
+    const subjectParts = [
+      tracks.length ? `${tracks.length} трек(ов)` : '',
+      promoVideos.length ? `${promoVideos.length} клип(ов)` : '',
+    ].filter(Boolean).join(' + ');
+    const subject = `🎵 Новинки недели для эфира — ${subjectParts} · ${dateLabel}`;
 
     // Фоновая отправка: lock + client переходят во владение фоновой задачи.
     backgrounded = true;
@@ -348,11 +411,21 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
           return;
         }
 
-        const ids = tracks.map((t: any) => t.id);
-        await client.query(
-          `UPDATE tracks SET radio_weekly_digest_sent_at = NOW() WHERE id = ANY($1::uuid[])`,
-          [ids]
-        );
+        if (tracks.length > 0) {
+          const ids = tracks.map((t: any) => t.id);
+          await client.query(
+            `UPDATE tracks SET radio_weekly_digest_sent_at = NOW() WHERE id = ANY($1::uuid[])`,
+            [ids]
+          );
+        }
+
+        if (promoVideos.length > 0) {
+          // videos.id — uuid; сравниваем по ::text (id пришли SELECT'ом выше)
+          await client.query(
+            `UPDATE videos SET newsletter_sent_at = NOW() WHERE id::text = ANY($1::text[])`,
+            [promoVideos.map((v: any) => String(v.id))]
+          ).catch((e: any) => console.warn('[radio-weekly] video stamp failed:', e?.message || e));
+        }
 
         // Единая база рассылки: last_sent_at ТОЛЬКО успешно доставленным.
         // errors из smtpSendBatch имеют вид "email: причина" — адрес до ':'.

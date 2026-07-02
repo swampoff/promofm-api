@@ -1305,11 +1305,36 @@ in-line MANUAL DEPLOY STEPS. Auto-runner is stub.
   До фикса кнопка «заблокировать» в UsersManagement только оптимистично
   перекрашивала UI — запрос уходил в 404.
 
-Известный НЕзакрытый разрыв: `admin/pages/VideoModeration.tsx` зовёт
-`/api/videos/{promoteToNovelty,addToNewsletter,exclusivePitch}` (10 000 ₽ /
-бесплатно / 15 000 ₽) — на бэке видео-pipeline не реализован (существующие
-`/api/track-test/pipeline/*` — про треки ПРОМО.ЛАБ, другая сущность и цены).
-Ждёт продуктового решения по ценам/флоу — НЕ чинить молча.
+## Video promo-pipeline (VideoModeration, добавлен 2026-07-02)
+
+Три admin-действия над клипом из `admin/pages/VideoModeration.tsx`.
+Цены подтверждены Никитой 2026-07-02 (совпадают с копирайтом UI).
+Source: `videos-routes.tsx` (хендлеры + константы цен), фулфилмент
+платных — webhook `checkout-routes.tsx` по `metadata.type`.
+Требует **migration 120** (`videos.promoted_until / pipeline /
+newsletter_requested_at / newsletter_sent_at`) — применить ДО рестарта.
+
+- **POST `/api/videos/promoteToNovelty`** — 10 000 ₽. Артисту уходит
+  payment-link (уведомление + SSE); после оплаты webhook
+  (`video_promote`) ставит `promoted_until = NOW()+14d`. GET
+  `/api/videos/newClips` подмешивает такие клипы ПЕРЕД спарсенным
+  чартом (`source: 'promo_music'`) — секция «Новые клипы» на главной.
+- **POST `/api/videos/addToNewsletter`** — бесплатно, мгновенной
+  отправки НЕТ: клип ставится в очередь понедельничного weekly-дайджеста
+  (`radio-digest-routes.tsx /run-weekly`, секция «Новые клипы для
+  эфира», курсор `newsletter_requested_at → newsletter_sent_at`,
+  штамп только при успешной отправке SMTP).
+- **POST `/api/videos/exclusivePitch`** — 15 000 ₽. Payment-link
+  артисту; после оплаты webhook (`video_exclusive`) шлёт именную
+  рассылку по той же базе, что weekly-дайджест (`getWeeklyRecipients`:
+  radio-юзеры + `radio_partner_contacts` минус `curated_2026` и
+  отписки). `editors_count` в ответе = размер этой базы.
+  Idempotency: `pipeline.exclusive.paid_at` — повторный webhook skip.
+
+Известное ограничение: `VideoModeration.tsx` берёт список видео из
+локального `DataContext` (демо-стор без fetch'а) — для демо-видео
+pipeline-кнопки получат 404 `Video not found` от бэка. Реальные видео
+(таблица `videos`) работают end-to-end.
 
 ---
 

@@ -2,7 +2,8 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { pool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { emitSSE } from './sse-routes.tsx';
 import { getPlatformStats, setPlatformStats } from './db.tsx';
 import { notifyVideoUpload } from './email-helper.tsx';
 
@@ -174,6 +175,39 @@ function parseMuzTVChart(md: string): Array<{
 videosRoutes.get('/newClips', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '20');
+
+    // Оплаченные промо-клипы артистов платформы (video promo-pipeline,
+    // migration 120): пока promoted_until в будущем — идут ПЕРЕД
+    // спарсенным чартом. Ошибка запроса (например, миграция ещё не
+    // применена) не роняет секцию — остаётся чистый чарт.
+    let promoted: any[] = [];
+    try {
+      const { rows } = await pool.query(
+        `SELECT v.id, v.title, v.thumbnail_url, v.video_url,
+                COALESCE(NULLIF(u.full_name, ''), NULLIF(u.display_name, ''), 'Артист') AS artist
+           FROM videos v
+           LEFT JOIN users u ON u.id::text = v.user_id::text
+          WHERE v.promoted_until > NOW()
+            AND COALESCE(v.is_hidden, false) = FALSE
+          ORDER BY v.promoted_until DESC
+          LIMIT 6`
+      );
+      promoted = rows.map((v: any) => ({
+        id: String(v.id),
+        videoId: '',
+        title: v.title || 'Без названия',
+        artist: v.artist,
+        views: 0,
+        thumbnail: v.thumbnail_url || '',
+        thumbnail_url: v.thumbnail_url || '',
+        url: v.video_url || '',
+        source: 'promo_music',
+        promoted: true,
+      }));
+    } catch (promoErr: any) {
+      console.warn('[videos] promoted clips query skipped:', promoErr?.message);
+    }
+
     const cached: any = await getPlatformStats('videos:new_clips');
     if (cached?.clips?.length) {
       // Normalize field names and proxy YouTube thumbnails (YouTube CDN blocked in Russia)
@@ -192,9 +226,9 @@ videosRoutes.get('/newClips', async (c) => {
           };
         })
         .filter((clip: any) => clip.thumbnail && clip.videoId);
-      return c.json({ success: true, clips: normalized.slice(0, limit) });
+      return c.json({ success: true, clips: [...promoted, ...normalized].slice(0, limit) });
     }
-    return c.json({ success: true, clips: [] });
+    return c.json({ success: true, clips: promoted.slice(0, limit) });
   } catch (error) {
     console.error('Error fetching new clips:', error);
     return c.json({ success: true, clips: [] });
@@ -470,6 +504,255 @@ videosRoutes.post('/', requireAuth, async (c) => {
     return c.json({ success: true, data: video }, 201);
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// VIDEO PROMO-PIPELINE — admin-действия из VideoModeration.tsx.
+// Зеркалит track-test pipeline (track-test-routes.tsx /pipeline/*):
+// платные действия выставляют артисту payment-link (ЮКасса), фулфилмент
+// в webhook'е checkout-routes.tsx по metadata.type. Цены подтверждены
+// продуктом 2026-07-02 (совпадают с копирайтом в VideoModeration.tsx).
+// Требует migration 120 (promoted_until / pipeline / newsletter_*).
+// ═══════════════════════════════════════════════════════════════
+
+const VIDEO_PIPELINE_PROMOTE_PRICE = 10000;
+const VIDEO_PIPELINE_EXCLUSIVE_PRICE = 15000;
+const VIDEO_PROMOTE_DAYS = 14;
+
+async function getVideoRow(videoId: string) {
+  // videos.id — uuid, videoId приходит text'ом из тела запроса → ::text.
+  // user_id в videos — text (пишется из JWT в upsertVideo) → users.id::text.
+  const { rows } = await pool.query(
+    `SELECT v.id, v.user_id, v.title, v.video_url, v.thumbnail_url,
+            v.promoted_until, v.pipeline, v.newsletter_requested_at, v.newsletter_sent_at,
+            COALESCE(NULLIF(u.full_name, ''), NULLIF(u.display_name, ''), 'Артист') AS artist_name
+       FROM videos v
+       LEFT JOIN users u ON u.id::text = v.user_id::text
+      WHERE v.id::text = $1
+      LIMIT 1`,
+    [String(videoId)]
+  );
+  return rows[0] || null;
+}
+
+async function setVideoPipelineKey(videoId: string, key: string, value: Record<string, any>) {
+  await pool.query(
+    `UPDATE videos
+        SET pipeline = jsonb_set(COALESCE(pipeline, '{}'::jsonb), $2::text[], $3::jsonb, true),
+            updated_at = NOW()
+      WHERE id::text = $1`,
+    [String(videoId), `{${key}}`, JSON.stringify(value)]
+  );
+}
+
+async function createVideoPipelinePayment(
+  video: any,
+  type: 'video_promote' | 'video_exclusive',
+  amount: number,
+  description: string,
+): Promise<{ orderId: string; confirmationUrl: string } | { error: string }> {
+  if (!video.user_id) return { error: 'У клипа нет владельца — payment-link невозможен' };
+
+  const { getGateway } = await import('./payment-gateway.tsx');
+  const { upsertPaymentSession } = await import('./db.tsx');
+  const orderId = crypto.randomUUID();
+  const returnUrl = 'https://promo-music.ru/cabinet/artist?tab=video';
+
+  try {
+    const gw = getGateway('yookassa');
+    const result = await gw.createPayment({
+      amount, currency: 'RUB', description,
+      gateway: 'yookassa',
+      userId: video.user_id,
+      orderId,
+      returnUrl,
+      metadata: {
+        type,
+        videoId: String(video.id),
+        videoTitle: video.title,
+      },
+      savePaymentMethod: false,
+      type: 'purchase',
+    });
+
+    await upsertPaymentSession(orderId, {
+      orderId, userId: video.user_id,
+      gateway: 'yookassa',
+      gatewayPaymentId: result.sessionId,
+      amount, currency: 'RUB', status: 'pending',
+      type: 'purchase', description,
+      metadata: {
+        type,
+        videoId: String(video.id),
+        videoTitle: video.title,
+      },
+      savePaymentMethod: false,
+      confirmationUrl: result.confirmationUrl,
+      returnUrl,
+      createdAt: new Date().toISOString(),
+    });
+
+    return { orderId, confirmationUrl: result.confirmationUrl };
+  } catch (e: any) {
+    return { error: `YooKassa: ${e?.message || 'unknown'}` };
+  }
+}
+
+// A) Промо в секцию «Новые клипы» на главной (10 000 ₽, 14 дней).
+videosRoutes.post('/promoteToNovelty', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { videoId } = await c.req.json().catch(() => ({} as any));
+    if (!videoId) return c.json({ success: false, error: 'videoId required' }, 400);
+    const video = await getVideoRow(videoId);
+    if (!video) return c.json({ success: false, error: 'Video not found' }, 404);
+    if (video?.pipeline?.promote?.paid_at) {
+      return c.json({ success: false, error: 'Этот клип уже промоутится' }, 409);
+    }
+    if (video.promoted_until && new Date(video.promoted_until) > new Date()) {
+      return c.json({ success: false, error: 'Промо этого клипа ещё активно' }, 409);
+    }
+
+    const payment = await createVideoPipelinePayment(
+      video,
+      'video_promote',
+      VIDEO_PIPELINE_PROMOTE_PRICE,
+      `Клип «${video.title}» — секция «Новые клипы» на главной, ${VIDEO_PROMOTE_DAYS} дней`,
+    );
+    if ('error' in payment) return c.json({ success: false, error: payment.error }, 400);
+
+    await setVideoPipelineKey(video.id, 'promote', {
+      payment_order_id: payment.orderId,
+      requested_at: new Date().toISOString(),
+      requested_by_admin: c.get('userEmail') || c.get('userId'),
+      paid_at: null,
+    });
+
+    const { upsertNotification } = await import('./db.tsx');
+    const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await upsertNotification(video.user_id, notifId, {
+      type: 'video_promote_invoice',
+      title: 'Продвижение клипа в «Новые клипы»',
+      message: `Админ предлагает разместить клип «${video.title}» на ${VIDEO_PROMOTE_DAYS} дней в секции «Новые клипы» на главной. Стоимость: ${VIDEO_PIPELINE_PROMOTE_PRICE} ₽.`,
+      link: payment.confirmationUrl,
+      metadata: { video_id: String(video.id), order_id: payment.orderId, amount: VIDEO_PIPELINE_PROMOTE_PRICE },
+      created_at: new Date().toISOString(),
+      read: false,
+    });
+    emitSSE(video.user_id, {
+      type: 'notification',
+      data: { title: 'Предложение от ПРОМО.МУЗЫКА', comment: `Продвинуть клип «${video.title}» за ${VIDEO_PIPELINE_PROMOTE_PRICE} ₽` },
+    });
+
+    return c.json({
+      success: true,
+      message: 'Артисту отправлено уведомление с payment-link',
+      payment_order_id: payment.orderId,
+      confirmation_url: payment.confirmationUrl,
+    });
+  } catch (error) {
+    console.error('video promoteToNovelty error:', error);
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+// B) Включение в понедельничный weekly-дайджест для ТВ и радио (бесплатно).
+// Ничего не шлёт сразу — ставит клип в очередь radio-digest /run-weekly
+// (курсор newsletter_requested_at → newsletter_sent_at).
+videosRoutes.post('/addToNewsletter', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { videoId } = await c.req.json().catch(() => ({} as any));
+    if (!videoId) return c.json({ success: false, error: 'videoId required' }, 400);
+    const video = await getVideoRow(videoId);
+    if (!video) return c.json({ success: false, error: 'Video not found' }, 404);
+    if (video.newsletter_sent_at) {
+      return c.json({ success: false, error: 'Клип уже уходил в рассылку' }, 409);
+    }
+    if (video.newsletter_requested_at) {
+      return c.json({ success: false, error: 'Клип уже в очереди ближайшей рассылки' }, 409);
+    }
+
+    await pool.query(
+      `UPDATE videos SET newsletter_requested_at = NOW(), updated_at = NOW() WHERE id::text = $1`,
+      [String(video.id)]
+    );
+    await setVideoPipelineKey(video.id, 'newsletter', {
+      requested_at: new Date().toISOString(),
+      requested_by_admin: c.get('userEmail') || c.get('userId'),
+    });
+
+    return c.json({
+      success: true,
+      message: 'Клип попадёт в ближайший понедельничный дайджест для ТВ и радио',
+    });
+  } catch (error) {
+    console.error('video addToNewsletter error:', error);
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+// C) Эксклюзив-pitch ТВ/радио-редакторам (15 000 ₽). Рассылка уходит
+// после оплаты (webhook checkout-routes, metadata.type='video_exclusive')
+// по той же базе, что и weekly-дайджест (getWeeklyRecipients).
+videosRoutes.post('/exclusivePitch', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { videoId } = await c.req.json().catch(() => ({} as any));
+    if (!videoId) return c.json({ success: false, error: 'videoId required' }, 400);
+    const video = await getVideoRow(videoId);
+    if (!video) return c.json({ success: false, error: 'Video not found' }, 404);
+    if (video?.pipeline?.exclusive?.paid_at) {
+      return c.json({ success: false, error: 'Эксклюзив уже отправлен' }, 409);
+    }
+
+    const { getWeeklyRecipients } = await import('./radio-digest-routes.tsx');
+    const recipients = await getWeeklyRecipients(pool);
+    const editors_count = recipients.length;
+    if (editors_count === 0) {
+      return c.json({ success: false, error: 'Нет получателей ТВ/радио-базы' }, 400);
+    }
+
+    const payment = await createVideoPipelinePayment(
+      video,
+      'video_exclusive',
+      VIDEO_PIPELINE_EXCLUSIVE_PRICE,
+      `Эксклюзив-pitch клипа «${video.title}» — ${editors_count} ТВ/радио-редакторам`,
+    );
+    if ('error' in payment) return c.json({ success: false, error: payment.error }, 400);
+
+    await setVideoPipelineKey(video.id, 'exclusive', {
+      payment_order_id: payment.orderId,
+      requested_at: new Date().toISOString(),
+      requested_by_admin: c.get('userEmail') || c.get('userId'),
+      planned_recipients_count: editors_count,
+      paid_at: null,
+    });
+
+    const { upsertNotification } = await import('./db.tsx');
+    const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await upsertNotification(video.user_id, notifId, {
+      type: 'video_exclusive_invoice',
+      title: 'Эксклюзив-pitch клипа ТВ и радио',
+      message: `Админ предлагает отправить клип «${video.title}» ${editors_count} ТВ/радио-редакторам. Стоимость: ${VIDEO_PIPELINE_EXCLUSIVE_PRICE} ₽.`,
+      link: payment.confirmationUrl,
+      metadata: { video_id: String(video.id), order_id: payment.orderId, amount: VIDEO_PIPELINE_EXCLUSIVE_PRICE, editors_count },
+      created_at: new Date().toISOString(),
+      read: false,
+    });
+    emitSSE(video.user_id, {
+      type: 'notification',
+      data: { title: 'Предложение от ПРОМО.МУЗЫКА', comment: `Эксклюзив-pitch клипа «${video.title}» за ${VIDEO_PIPELINE_EXCLUSIVE_PRICE} ₽` },
+    });
+
+    return c.json({
+      success: true,
+      message: 'Артисту отправлено уведомление с payment-link',
+      editors_count,
+      payment_order_id: payment.orderId,
+      confirmation_url: payment.confirmationUrl,
+    });
+  } catch (error) {
+    console.error('video exclusivePitch error:', error);
+    return c.json({ success: false, error: 'Internal error' }, 500);
   }
 });
 
