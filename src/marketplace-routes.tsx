@@ -901,13 +901,9 @@ app.post('/services/:id/order', requireAuth, async (c) => {
     const basePrice = service.basePrice || service.price || 0;
     const urgencyMult = urgency === 'urgent' ? 2 : urgency === 'fast' ? 1.5 : 1;
     const totalPrice = Math.round(basePrice * urgencyMult);
-    // Комиссия платформы per-seller (2026-07-02, слияние engineer→marketplace):
-    // инженерные услуги 5% (решение владельца), продюсерские 10%. sellerType
-    // проставлен в extra при migration 120. Fallback 'producer'/10% — без
-    // регрессии для существующих продюсерских услуг.
-    const sellerType = (service as any).sellerType || (service as any).extra?.sellerType || 'producer';
-    const commissionRate = sellerType === 'engineer' ? 0.05 : 0.10;
-    const commission = Math.round(totalPrice * commissionRate);
+    // Комиссия платформы 10% — единая для продюсеров и инженеров (решение
+    // владельца 2026-07-02: слияние engineer→marketplace, одна ставка).
+    const commission = Math.round(totalPrice * 0.1);
     const producerPayout = totalPrice - commission;
 
     const orderId = genId('sord');

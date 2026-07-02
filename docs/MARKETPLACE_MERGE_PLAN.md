@@ -84,12 +84,12 @@ write-side кабинета применяются вместе.
   связке** с шагами 2–3 (иначе разрыв видимости заказов, см. выше).
 
 ## Решения владельца (2026-07-02) — ЗАКРЫТЫ
-1. **Комиссия инженерных заказов = 5%** (продюсерских — 10%). Реализовано:
-   - Новые заказы: `POST /marketplace/services/:id/order` берёт ставку
-     per-seller по `service.sellerType` (5% engineer / 10% producer);
-     `sellerType` приходит из `extra` (migration 120 проставляет).
-   - Backfill исторических (migration 121): commission=price·0.05,
-     payout=price·0.95; реальный ledger platform_revenue не трогается.
+1. **Комиссия инженерных заказов = 10%** — единая с продюсерами (одна ставка,
+   финальное решение). Реализовано:
+   - Новые заказы: `POST /marketplace/services/:id/order` — плоские 10% для
+     всех продавцов (per-seller ветку убрали за ненадобностью).
+   - Backfill исторических (migration 121): commission=price·0.10,
+     payout=price·0.90; реальный ledger platform_revenue не трогается.
 2. **Статус `delivered` → `in_progress`** (migration 121, оригинал в
    `extra.origStatus`).
 

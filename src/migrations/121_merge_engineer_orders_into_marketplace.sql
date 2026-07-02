@@ -1,7 +1,7 @@
 -- Migration 121: слияние engineer_orders в service_orders (маркетплейс)
 --
--- Шаг 2 «полного слияния» (владелец: комиссия инженерных заказов = 5%,
--- статус 'delivered' → 'in_progress'). Идёт ПОСЛЕ 120 (услуги).
+-- Шаг 2 «полного слияния» (владелец: комиссия инженерных заказов = 10%,
+-- как у продюсеров; статус 'delivered' → 'in_progress'). Идёт ПОСЛЕ 120.
 --
 -- ВАЖНО про деньги: реальные выплаты инженеров уже проведены отдельным
 -- каналом platform_revenue channel='engineer_order' — этот backfill их НЕ
@@ -48,8 +48,8 @@ SELECT
   eo.brief,
   'normal',
   COALESCE(eo.price, 0),
-  ROUND(COALESCE(eo.price, 0) * 0.05, 2),
-  ROUND(COALESCE(eo.price, 0) * 0.95, 2),
+  ROUND(COALESCE(eo.price, 0) * 0.10, 2),
+  ROUND(COALESCE(eo.price, 0) * 0.90, 2),
   CASE eo.status
     WHEN 'delivered' THEN 'in_progress'
     WHEN 'declined'  THEN 'rejected'
@@ -66,7 +66,7 @@ SELECT
     'srcTable',       'engineer_orders',
     'srcId',          eo.id::text,
     'origStatus',     eo.status,
-    'commissionRate', 0.05,
+    'commissionRate', 0.10,
     'deliveryUrl',    eo.delivery_url,
     'deliveryNote',   eo.delivery_note,
     'paymentOrderId', eo.payment_order_id,
