@@ -756,4 +756,115 @@ videosRoutes.post('/exclusivePitch', requireAuth, requireAdmin, async (c) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// ADMIN MODERATION — реальная очередь модерации для VideoModeration.tsx
+// (до 2026-07-02 админка жила на локальном DataContext-демо и ничего
+// не писала на сервер). Требует migration 121 (moderation_*).
+// ═══════════════════════════════════════════════════════════════
+
+// GET /admin/list — все видимые видео для admin-очереди.
+videosRoutes.get('/admin/list', requireAuth, requireAdmin, async (c) => {
+  try {
+    const limit = Math.min(parseInt(c.req.query('limit') || '500', 10) || 500, 1000);
+    const { rows } = await pool.query(
+      `SELECT v.id, v.user_id, v.title, v.description, v.video_url, v.thumbnail_url,
+              v.created_at, v.moderation_status, v.moderation_note,
+              v.promoted_until, v.newsletter_requested_at, v.newsletter_sent_at, v.pipeline,
+              COALESCE(NULLIF(u.full_name, ''), NULLIF(u.display_name, ''), 'Артист') AS artist_name
+         FROM videos v
+         LEFT JOIN users u ON u.id::text = v.user_id::text
+        WHERE COALESCE(v.is_hidden, false) = FALSE
+        ORDER BY v.created_at DESC
+        LIMIT $1`,
+      [limit]
+    );
+    return c.json({
+      success: true,
+      videos: rows.map((r: any) => ({
+        id: String(r.id),
+        userId: r.user_id ? String(r.user_id) : '',
+        title: r.title || 'Без названия',
+        artist: r.artist_name,
+        description: r.description || '',
+        videoUrl: r.video_url || '',
+        thumbnailUrl: r.thumbnail_url || '',
+        createdAt: r.created_at,
+        status: r.moderation_status || 'pending',
+        moderationNote: r.moderation_note || '',
+        promotedUntil: r.promoted_until,
+        newsletterRequestedAt: r.newsletter_requested_at,
+        newsletterSentAt: r.newsletter_sent_at,
+        pipeline: r.pipeline || {},
+      })),
+    });
+  } catch (error) {
+    console.error('videos admin/list error:', error);
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
+// POST /:id/moderate — решение админа: approved | rejected (+ note).
+// Регистрируется ПОСЛЕ всех статических POST'ов (promoteToNovelty и
+// т.д.) — Hono route ordering, см. память проекта про /subscriptions/plans.
+videosRoutes.post('/:id/moderate', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json().catch(() => ({} as any));
+    const status = String(body.status || '');
+    if (status !== 'approved' && status !== 'rejected') {
+      return c.json({ success: false, error: "status must be 'approved' or 'rejected'" }, 400);
+    }
+    const note = typeof body.note === 'string' ? body.note.trim().slice(0, 2000) : '';
+    if (status === 'rejected' && !note) {
+      return c.json({ success: false, error: 'Причина отклонения обязательна' }, 400);
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE videos
+          SET moderation_status = $2,
+              moderation_note = NULLIF($3, ''),
+              moderated_at = NOW(),
+              moderated_by = $4,
+              updated_at = NOW()
+        WHERE id::text = $1
+        RETURNING id, title, user_id`,
+      [String(id), status, note, String(c.get('userEmail') || c.get('userId') || '')]
+    );
+    if (rows.length === 0) return c.json({ success: false, error: 'Video not found' }, 404);
+    const video = rows[0];
+
+    // Реальное уведомление артисту (тексты зеркалят прежние демо-тосты UI).
+    if (video.user_id) {
+      try {
+        const { upsertNotification } = await import('./db.tsx');
+        const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        await upsertNotification(video.user_id, notifId, {
+          type: status === 'approved' ? 'video_approved' : 'video_rejected',
+          title: status === 'approved' ? '✅ Видео одобрено!' : '❌ Видео отклонено',
+          message: status === 'approved'
+            ? `Ваше видео «${video.title}» успешно прошло модерацию и опубликовано.`
+            : `Ваше видео «${video.title}» не прошло модерацию. Причина: ${note}`,
+          metadata: { video_id: String(video.id) },
+          created_at: new Date().toISOString(),
+          read: false,
+        });
+        emitSSE(video.user_id, {
+          type: 'notification',
+          data: {
+            title: status === 'approved' ? 'Видео одобрено' : 'Видео отклонено',
+            comment: `«${video.title}»${status === 'rejected' ? ` — ${note}` : ''}`,
+          },
+        });
+      } catch (notifyErr) {
+        console.error('[videos] moderate notify failed:', notifyErr);
+      }
+    }
+
+    return c.json({ success: true, id: String(video.id), status });
+  } catch (error) {
+    console.error('videos moderate error:', error);
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
 export default videosRoutes;
