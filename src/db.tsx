@@ -249,6 +249,24 @@ export async function incrementCoinBalanceAtomic(userId: string, delta: number):
   return Number(res.rows[0]?.balance ?? 0);
 }
 
+// ─── Atomic guarded coin debit ───
+// Списание с полом: одна команда UPDATE ... WHERE balance >= amount закрывает
+// и уход в минус, и lost-update гонку двух параллельных спендов (2026-07-02:
+// раньше spend шёл через get→set — два одновременных списания по 100 при
+// балансе 100 оба проходили). null = недостаточно средств, списания НЕ было.
+export async function debitCoinBalanceAtomic(userId: string, amount: number): Promise<number | null> {
+  const { pool } = await import('./db-client.tsx');
+  const res = await pool.query(
+    `UPDATE coin_balances
+        SET balance = balance - $2::numeric, updated_at = NOW()
+      WHERE user_id = $1 AND balance >= $2::numeric
+      RETURNING balance`,
+    [userId, Math.abs(amount)]
+  );
+  if (res.rowCount === 0) return null;
+  return Number(res.rows[0].balance);
+}
+
 /**
  * Webhook-retry idempotency guard: returns true ровно ОДИН раз для
  * данной пары (orderId, kind). На последующие вызовы возвращает false.
@@ -1575,9 +1593,19 @@ export async function getEmailCampaigns(artistId: string) {
     .from('email_campaigns')
     .select('*');
   if (error) { console.error('[db] getEmailCampaigns:', error); return []; }
+  // Владелец лежит в data как artist_id (admin-кампании) ИЛИ artistId
+  // (артистские из notifications-routes). 2026-07-02: прежний фильтр
+  // `!c.artist_id ||` пропускал ВСЕ artistId-кампании ЛЮБОМУ вызывающему
+  // (artist_id undefined → true) — утечка чужих кампаний. Кампании совсем
+  // без владельца видит только admin-вызов.
   return (data || [])
     .map((r: any) => r.data || r)
-    .filter((c: any) => !artistId || !c.artist_id || c.artist_id === artistId)
+    .filter((c: any) => {
+      if (!artistId) return true;
+      const owner = c.artist_id ?? c.artistId;
+      if (owner === undefined || owner === null) return artistId === 'admin';
+      return owner === artistId;
+    })
     .sort((a: any, b: any) =>
       new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
 }

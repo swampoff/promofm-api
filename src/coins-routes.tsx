@@ -44,18 +44,24 @@ coinsRoutes.post('/transactions', requireAuth, async (c) => {
       createdAt: now,
     };
 
-    // Update balance
-    const current = await db.getCoinBalance(userId);
-    const currentBalance = Number(current?.balance) || 0;
-    // Users can only subtract coins (expense); positive additions require admin/webhook
-    const safeAmount = transaction.type === 'expense' ? -Math.abs(Number(transaction.amount || 0)) : Number(transaction.amount || 0);
-    const newBalance = currentBalance + safeAmount;
-    await db.setCoinBalance(userId, newBalance);
+    // Атомарное списание с полом (2026-07-02). Раньше get→set: (а) баланс мог
+    // уйти в произвольный минус (спенд 500 при 100 → −400, но фулфилмент шёл);
+    // (б) lost-update — два одновременных спенда по 100 при балансе 100 оба
+    // читали 100 и оба писали 0 → товара на 200 за 100 коинов. Теперь одна
+    // команда UPDATE ... WHERE balance >= amount закрывает оба вектора.
+    const spend = Math.abs(Number(transaction.amount || 0));
+    if (!Number.isFinite(spend) || spend <= 0) {
+      return c.json({ success: false, error: 'Некорректная сумма' }, 400);
+    }
+    const newBalance = await db.debitCoinBalanceAtomic(userId, spend);
+    if (newBalance === null) {
+      return c.json({ success: false, error: 'Недостаточно коинов' }, 400);
+    }
 
-    // Save transaction
-    await db.createCoinTransaction(userId, txId, transaction);
+    // Save transaction (amount в истории остаётся положительным — контракт с FE)
+    await db.createCoinTransaction(userId, txId, { ...transaction, amount: spend });
 
-    return c.json({ success: true, data: { transaction, balance: newBalance } }, 201);
+    return c.json({ success: true, data: { transaction: { ...transaction, amount: spend }, balance: newBalance } }, 201);
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }

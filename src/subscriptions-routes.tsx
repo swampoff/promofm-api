@@ -732,7 +732,24 @@ subscriptions.post('/:userId/change-plan', requireAuth, async (c) => {
         error: 'Invalid plan ID'
       }, 400);
     }
-    
+
+    // Payment-gate (2026-07-02): раньше этот эндпоинт АКТИВИРОВАЛ любой платный
+    // тариф без единого рубля (self-serve elite бесплатно) и вдобавок писал
+    // фантомную выручку recordRevenue на неоплаченную сумму. Платные тарифы —
+    // только через /subscribe (checkout → webhook активирует по факту оплаты).
+    // Self-service здесь остаётся ТОЛЬКО для бесплатного тарифа (даунгрейд на
+    // spark); админ может выставить любой тариф вручную (комп/саппорт).
+    const requestedPrice = interval === 'year' ? plan.price_year : plan.price_month;
+    const callerRole = c.get('userRole');
+    const callerIsAdmin = callerRole === 'admin' || callerRole === 'superadmin';
+    if (requestedPrice > 0 && !callerIsAdmin) {
+      return c.json({
+        success: false,
+        error: 'Платный тариф активируется через оплату — используйте оформление подписки',
+        code: 'PAYMENT_REQUIRED',
+      }, 402);
+    }
+
     const currentDate = new Date();
     const nextBillingDate = new Date(currentDate);
     nextBillingDate.setMonth(nextBillingDate.getMonth() + (interval === 'year' ? 12 : 1));
@@ -762,24 +779,17 @@ subscriptions.post('/:userId/change-plan', requireAuth, async (c) => {
     const price = newSubscription.price;
 
     if (price > 0) {
-      // Транзакция
+      // Только admin-ветка (см. payment-gate выше). Транзакция — след в истории.
       const txId = `tx-sub-${crypto.randomUUID()}`;
       const tx = {
         id: txId, userId, type: 'expense', category: 'subscription',
-        amount: price, description: `Смена тарифа на «${plan.name}» (${interval === 'year' ? 'год' : 'мес'})`,
-        metadata: { planId, interval }, status: 'pending', createdAt: new Date().toISOString(),
+        amount: price, description: `Смена тарифа на «${plan.name}» (${interval === 'year' ? 'год' : 'мес'}, admin)`,
+        metadata: { planId, interval, via: 'admin_change_plan' }, status: 'pending', createdAt: new Date().toISOString(),
       };
       await insertPaymentTx(tx);
-
-      try {
-        await recordRevenue({
-          channel: 'subscription',
-          description: `Смена тарифа на «${plan.name}» (${interval}): ${userId}`,
-          grossAmount: price, platformRevenue: price, payoutAmount: 0,
-          commissionRate: 1.0, payerId: userId, payerName: userId,
-          metadata: { planId, interval },
-        });
-      } catch (e) { console.log('[subscriptions] recordRevenue warning:', e); }
+      // recordRevenue УБРАН (2026-07-02): деньги через этот эндпоинт не
+      // проходят — admin-комп не выручка. Реальная выручка подписок пишется
+      // в checkout-webhook по факту оплаты.
     }
 
     emitSSE(userId, {
@@ -918,12 +928,15 @@ subscriptions.post('/charge-recurring', async (c) => {
         const interval = sub.interval || 'month';
         const amount = interval === 'year' ? plan.price_year : plan.price_month;
 
-        // Deterministic orderId per renewal cycle. If this cron run crashes
-        // between the charge call and the session-save, the next run will
-        // reuse the same orderId — and each gateway's Idempotence-Key header
-        // collapses repeated requests with the same key into a single charge.
-        // Also lets us cheap-skip cycles that are already in-flight or done.
-        const orderId = `renew-${userId}-${expiresAt.getTime()}`;
+        // Deterministic orderId per renewal cycle + day-stamp (2026-07-02).
+        // orderId = Idempotence-Key у YooKassa: crash между charge и session-save
+        // внутри суток схлопывается в один платёж. Day-stamp нужен потому, что
+        // ключ ТОЛЬКО по expiresAt после ОТКАЗА карты возвращал тот же
+        // canceled-платёж на все ретраи в окне ключа (~24ч) — починивший карту
+        // подписчик не мог продлиться до конца grace-периода. День в ключе:
+        // idempotent внутри суток, свежий ключ на завтрашний прогон.
+        const dayStamp = now.toISOString().slice(0, 10);
+        const orderId = `renew-${userId}-${expiresAt.getTime()}-${dayStamp}`;
         const prior = await getPaymentSession(orderId) as any;
         if (prior && (prior.status === 'succeeded' || prior.status === 'processing')) {
           skipped++;
