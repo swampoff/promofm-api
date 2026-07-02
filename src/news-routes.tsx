@@ -66,6 +66,21 @@ newsRoutes.get('/', async (c) => {
   }
 });
 
+// Own news of the authenticated artist (таблица news, не news_public).
+// Регистрируется ДО '/:id' — Hono route ordering (см. память проекта).
+// До 2026-07-02 такого роута не было: news-page.tsx жила целиком на
+// localStorage и после подключения POST не могла бы перечитать своё.
+newsRoutes.get('/mine', requireAuth, async (c) => {
+  try {
+    const userId = String(c.get('userId') || '');
+    const items = await db.getNewsByUser(userId);
+    return c.json({ success: true, data: items });
+  } catch (error) {
+    console.error('[news] GET /mine error:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
 // Get single article by ID
 newsRoutes.get('/:id', async (c) => {
   try {
@@ -102,14 +117,47 @@ newsRoutes.get('/:id', async (c) => {
 // Create/update article (authenticated)
 newsRoutes.post('/', requireAuth, async (c) => {
   try {
-    const userId = c.get('userId');
+    const userId = String(c.get('userId') || '');
     const body = await c.req.json();
     const newsId = body.id || `news-${crypto.randomUUID()}`;
+
+    // Owner-guard на upsert: без него артист A мог бы POST'нуть id чужой
+    // новости и перезаписать её (upsertNews апсертит по id вслепую).
+    if (body.id) {
+      const { data: existing } = await getDbClient()
+        .from('news')
+        .select('author_id')
+        .eq('id', String(body.id))
+        .maybeSingle();
+      if (existing && String(existing.author_id) !== userId) {
+        return c.json({ success: false, error: 'Not your article' }, 403);
+      }
+    }
+
     await db.upsertNews(userId, newsId, {
       ...body,
       status: body.status || 'draft',
     });
     return c.json({ success: true, id: newsId }, 201);
+  } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// Delete own article. news.id и news.author_id — text, кастов не нужно.
+newsRoutes.delete('/:id', requireAuth, async (c) => {
+  try {
+    const userId = String(c.get('userId') || '');
+    const id = c.req.param('id');
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `DELETE FROM news WHERE id = $1 AND author_id = $2`,
+      [String(id), userId]
+    );
+    if (r.rowCount === 0) {
+      return c.json({ success: false, error: 'Article not found' }, 404);
+    }
+    return c.json({ success: true });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }

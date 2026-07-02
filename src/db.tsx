@@ -118,6 +118,11 @@ export async function getNewsByUser(userId: string) {
 }
 
 export async function upsertNews(userId: string, newsId: string, news: Record<string, any>) {
+  // ВНИМАНИЕ: это полный upsert — отсутствующие поля перезапишутся
+  // дефолтами. Caller обязан слать объект целиком (см. news-page.tsx
+  // handlePublishDraft). image_url — migration 123; data:-URL не храним.
+  let imageUrl = String(news.image_url || news.coverImage || '');
+  if (imageUrl.length > 2048 || imageUrl.startsWith('data:')) imageUrl = '';
   const row = {
     id: newsId,
     author_id: userId,
@@ -127,6 +132,7 @@ export async function upsertNews(userId: string, newsId: string, news: Record<st
     category: news.category || 'general',
     status: news.status || 'draft',
     author_name: news.author_name || '',
+    image_url: imageUrl,
     updated_at: new Date().toISOString(),
   };
   const { error } = await db()
