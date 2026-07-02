@@ -83,8 +83,21 @@ write-side кабинета применяются вместе.
 - Миграция 120 (услуги) — безопасный первый шаг, но **применять только в
   связке** с шагами 2–3 (иначе разрыв видимости заказов, см. выше).
 
-## Открытые вопросы владельцу (блокируют шаги 2–3)
-1. Комиссия платформы для инженерных заказов = как у продюсеров? (влияет на
-   commission/producer_payout при backfill'е и на новые заказы).
-2. Статус `delivered` инженеров → маппить в `in_progress` или добавить
-   'delivered' в producer-словарь?
+## Решения владельца (2026-07-02) — ЗАКРЫТЫ
+1. **Комиссия инженерных заказов = 5%** (продюсерских — 10%). Реализовано:
+   - Новые заказы: `POST /marketplace/services/:id/order` берёт ставку
+     per-seller по `service.sellerType` (5% engineer / 10% producer);
+     `sellerType` приходит из `extra` (migration 120 проставляет).
+   - Backfill исторических (migration 121): commission=price·0.05,
+     payout=price·0.95; реальный ledger platform_revenue не трогается.
+2. **Статус `delivered` → `in_progress`** (migration 121, оригинал в
+   `extra.origStatus`).
+
+## Остаток (laptop, runtime-тест) — write-side кабинета
+Готово из cloud: миграции 120/121 + per-seller комиссия в order-эндпоинте.
+Осталось (нельзя без прода/теста):
+- Engineer-кабинет FE: создание/список/действия услуг и заказов → маркетплейс-
+  эндпоинты (producer_services/service_orders) вместо `/engineer/services|orders`.
+- Роль-гейты FE `role === 'producer'` → `['producer','engineer'].includes(role)`.
+- Проверка цикла на проде (создание → каталог → заказ → выплата 5%).
+- Phase-3 (отдельный PR): drop engineer_services/orders после верификации.
