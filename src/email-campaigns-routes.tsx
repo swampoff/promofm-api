@@ -13,6 +13,7 @@ import { logAdminAction } from './audit-helper.tsx';
 import { findCampaignEmailEvent, upsertEmailHistory, getPublishEmailPrefs, setPublishEmailPrefs } from './db.tsx';
 import { upsertEmailCampaign, getEmailCampaigns } from './db.tsx';
 import { smtpSendEmail, smtpSendBatch } from './smtp-sender.tsx';
+import { escapeHtml } from './email-helper.tsx';
 import { vpsListProfiles } from './vps-userdata.tsx';
 import { signRedirectUrl, isRedirectAllowed } from './track-url-token.tsx';
 import { pool } from './db-client.tsx';
@@ -110,7 +111,10 @@ async function isUnsubscribed(email: string): Promise<boolean> {
  * Adds a 1x1 transparent pixel that calls our tracking endpoint
  */
 function injectTrackingPixel(html: string, campaignId: string, email: string): string {
-  const baseUrl = process.env.PUBLIC_URL || 'https://promofm.org';
+  // 2026-07-02: дефолт выровнен на рабочий домен — promofm.org не обслуживает
+  // SPA/API: пиксель открытий и клик-редирект по всем ссылкам кампаний были
+  // мёртвыми URL (opens вечно 0, все ссылки в письмах вели в никуда).
+  const baseUrl = process.env.PUBLIC_URL || 'https://promo-music.ru';
   const trackingUrl = `${baseUrl}/server/api/email-campaigns/track/open?c=${encodeURIComponent(campaignId)}&e=${encodeURIComponent(email)}`;
   const pixel = `<img src="${trackingUrl}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;" />`;
 
@@ -126,7 +130,10 @@ function injectTrackingPixel(html: string, campaignId: string, email: string): s
  * Replaces <a href="URL"> with <a href="track/click?url=URL&c=campaign&e=email">
  */
 function injectClickTracking(html: string, campaignId: string, email: string): string {
-  const baseUrl = process.env.PUBLIC_URL || 'https://promofm.org';
+  // 2026-07-02: дефолт выровнен на рабочий домен — promofm.org не обслуживает
+  // SPA/API: пиксель открытий и клик-редирект по всем ссылкам кампаний были
+  // мёртвыми URL (opens вечно 0, все ссылки в письмах вели в никуда).
+  const baseUrl = process.env.PUBLIC_URL || 'https://promo-music.ru';
   // Match href="..." in <a> tags, skip mailto: and # links
   return html.replace(
     /(<a\s[^>]*href=")([^"]+)(")/gi,
@@ -222,51 +229,112 @@ async function filterUnsubscribed(recipients: { email: string; name: string; rol
 // ============================================
 // POST /unsubscribe — Unsubscribe from campaigns
 // ============================================
+/**
+ * Общая логика отписки для POST (RFC 8058 One-Click от Gmail/Yahoo) и GET
+ * (человеческий клик по ссылке из письма). Возвращает {ok, status, message}.
+ *
+ * 2026-07-02 (F1 полного аудита): отписка теперь пишется во ВСЕ три стора —
+ * раньше только в publish_email_prefs, а weekly-дайджест фильтровал по
+ * email_unsubscribes и radio_partner_contacts.unsubscribed_at (которую вообще
+ * никто не писал) → отписавшаяся станция получала дайджест снова каждый
+ * понедельник. Split-brain закрыт: один клик глушит и кампании, и дайджест.
+ */
+async function performUnsubscribe(
+  email: string, campaignId: string | null, t: any, sig: any, ip: string
+): Promise<{ ok: boolean; status: 200 | 400 | 403; message: string }> {
+  if (!email || !email.includes('@')) {
+    return { ok: false, status: 400, message: 'Valid email required' };
+  }
+
+  const { verifyUnsubToken } = await import('./unsub-token.tsx');
+  const result = verifyUnsubToken(email, t, sig);
+  const STRICT = process.env.STRICT_UNSUB_TOKEN === 'true';
+
+  if (result.ok === false) {
+    if (result.reason === 'missing' && !STRICT) {
+      // Legacy email (до 2026-05-31) или ручной запрос — soft-accept.
+      console.warn(`[Campaigns] Unsub WITHOUT token (legacy/soft): ${email} ip=${ip}`);
+    } else {
+      console.warn(`[Campaigns] Unsub REJECTED (${result.reason}): ${email}`);
+      return { ok: false, status: 403, message: 'Invalid or expired unsubscribe link' };
+    }
+  }
+
+  await setPublishEmailPrefs(`${UNSUB_PREFIX}${email}`, {
+    email,
+    unsubscribed_at: new Date().toISOString(),
+    campaign_id: campaignId,
+  });
+  // Глобальный стор (его читают email-helper и weekly-дайджест) + карточка
+  // станции в единой базе рассылки. Best-effort — основной стор уже записан.
+  try {
+    await pool.query(
+      `INSERT INTO email_unsubscribes (email) VALUES ($1) ON CONFLICT DO NOTHING`,
+      [email]
+    );
+  } catch (e: any) {
+    console.warn('[Campaigns] email_unsubscribes write skipped:', e?.message || e);
+  }
+  try {
+    await pool.query(
+      `UPDATE radio_partner_contacts SET unsubscribed_at = NOW(), active = FALSE
+        WHERE LOWER(email) = $1`,
+      [email]
+    );
+  } catch (e: any) {
+    console.warn('[Campaigns] radio_partner_contacts unsub skipped:', e?.message || e);
+  }
+
+  console.log(`[Campaigns] Unsubscribed: ${email} (campaign: ${campaignId || 'all'}, verified: ${result.ok})`);
+  return { ok: true, status: 200, message: 'Successfully unsubscribed' };
+}
+
 app.post('/unsubscribe', async (c) => {
   try {
-    // Audit B-7 (2026-05-31): accept token из query или body (List-Unsubscribe
-    // ссылки кликают как GET-форму; некоторые клиенты конвертируют в POST с
-    // empty body). Принимаем оба источника.
+    // Audit B-7 (2026-05-31): accept token из query или body (One-Click POST
+    // приходит с form-encoded телом, параметры остаются в query).
     const body = await c.req.json().catch(() => ({}));
     const q = c.req.query();
     const email = (body.email || q.email || '').trim().toLowerCase();
     const campaignId = body.campaign_id || q.campaign || null;
-    const t = body.t ?? q.t;
-    const sig = body.sig ?? q.sig;
-
-    if (!email || !email.includes('@')) {
-      return c.json({ success: false, error: 'Valid email required' }, 400);
-    }
-
-    // Verify HMAC token.
-    const { verifyUnsubToken } = await import('./unsub-token.tsx');
-    const result = verifyUnsubToken(email, t, sig);
-    const STRICT = process.env.STRICT_UNSUB_TOKEN === 'true';
-
-    if (result.ok === false) {
-      if (result.reason === 'missing' && !STRICT) {
-        // Legacy email (отправленный до 2026-05-31) или ручной запрос —
-        // soft-accept с warning, до закрытия migration window.
-        console.warn(`[Campaigns] Unsub WITHOUT token (legacy/soft): ${email} ip=${c.req.header('x-forwarded-for') || ''}`);
-      } else {
-        // expired / invalid / strict-missing — отклоняем.
-        console.warn(`[Campaigns] Unsub REJECTED (${result.reason}): ${email}`);
-        return c.json({ success: false, error: 'Invalid or expired unsubscribe link' }, 403);
-      }
-    }
-
-    // Store unsubscribe
-    await setPublishEmailPrefs(`${UNSUB_PREFIX}${email}`, {
-      email,
-      unsubscribed_at: new Date().toISOString(),
-      campaign_id: campaignId,
-    });
-
-    console.log(`[Campaigns] Unsubscribed: ${email} (campaign: ${campaignId || 'all'}, verified: ${result.ok})`);
-    return c.json({ success: true, message: 'Successfully unsubscribed' });
+    const res = await performUnsubscribe(
+      email, campaignId, body.t ?? q.t, body.sig ?? q.sig,
+      c.req.header('x-forwarded-for') || ''
+    );
+    return c.json({ success: res.ok, ...(res.ok ? { message: res.message } : { error: res.message }) }, res.status);
   } catch (error) {
     console.error('[Campaigns] Unsubscribe error:', error);
     return c.json({ success: false, error: 'Failed to unsubscribe' }, 500);
+  }
+});
+
+// GET — человеческий клик по ссылке List-Unsubscribe из почтового клиента
+// (2026-07-02: ссылка теперь ведёт на этот API-эндпоинт, а не на SPA-страницу,
+// чтобы One-Click POST работал; GET отдаёт минимальную HTML-подтверждалку).
+app.get('/unsubscribe', async (c) => {
+  try {
+    const q = c.req.query();
+    const email = (q.email || '').trim().toLowerCase();
+    const res = await performUnsubscribe(
+      email, q.campaign || null, q.t, q.sig,
+      c.req.header('x-forwarded-for') || ''
+    );
+    const title = res.ok ? 'Вы отписаны от рассылки' : 'Не удалось отписаться';
+    const detail = res.ok
+      ? 'Больше писем не придёт. Если передумаете — напишите нам.'
+      : 'Ссылка недействительна или устарела. Напишите на info@promofm.ru — отпишем вручную.';
+    return c.html(
+      `<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title></head>
+<body style="font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;">
+<div style="max-width:420px;padding:40px;text-align:center;background:#1a1a2e;border-radius:16px;">
+<h1 style="color:#fff;font-size:22px;">${title}</h1><p style="color:#aaa;">${detail}</p>
+<p style="margin-top:24px;"><a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>
+</div></body></html>`,
+      res.status
+    );
+  } catch (error) {
+    console.error('[Campaigns] Unsubscribe GET error:', error);
+    return c.html('<html><body>Ошибка. Напишите на info@promofm.ru</body></html>', 500);
   }
 });
 
@@ -371,7 +439,7 @@ app.get('/track/click', async (c) => {
   if (url) {
     console.warn('[Campaigns] track/click blocked unsigned external redirect:', url.slice(0, 120));
   }
-  return c.redirect('https://promofm.org', 302);
+  return c.redirect('https://promo-music.ru', 302);
 });
 
 // ============================================
@@ -418,9 +486,12 @@ app.post('/campaigns/:id/resend-unopened', requireAuth, requireAdmin, async (c) 
 
         for (const r of unopened) {
           let html = campaign.html;
-          if (r.name) html = html.replace(/\{\{name\}\}/g, r.name);
-          html = html.replace(/\{\{email\}\}/g, r.email);
-          html = html.replace(/\{\{role\}\}/g, r.role);
+          // escapeHtml + функция-замена (2026-07-02): name — user-controlled
+          // (full_name), без экранирования это HTML-инъекция в письмо; строка
+          // с `$&` в имени ломала replace.
+          if (r.name) html = html.replace(/\{\{name\}\}/g, () => escapeHtml(r.name));
+          html = html.replace(/\{\{email\}\}/g, () => escapeHtml(r.email));
+          html = html.replace(/\{\{role\}\}/g, () => escapeHtml(r.role));
           html = injectTrackingPixel(html, campaign.id, r.email);
           html = injectClickTracking(html, campaign.id, r.email);
 
@@ -553,6 +624,21 @@ app.put('/campaigns/:id', requireAuth, requireAdmin, async (c) => {
       id, // prevent id change
       updated_at: new Date().toISOString(),
     };
+
+    // Пересчёт draft↔scheduled из scheduled_at (2026-07-02). Раньше статус
+    // ставился ТОЛЬКО на POST-создании: (а) добавил дату в существующий
+    // черновик → scheduled_at сохранялся, но status оставался 'draft' —
+    // планировщик такие пропускает, кампания молча НЕ уходила никогда;
+    // (б) «Сбросить» дату → FE дропает ключ → старый scheduled_at выживал
+    // через spread и «отменённая» кампания всё равно улетала. Явный null
+    // от FE снимает расписание. Трогаем только draft/scheduled — sent/
+    // sending/paused/failed не переклассифицируем.
+    if ('scheduled_at' in body && (body.scheduled_at === null || body.scheduled_at === '')) {
+      updated.scheduled_at = undefined;
+    }
+    if (updated.status === 'draft' || updated.status === 'scheduled') {
+      updated.status = updated.scheduled_at ? 'scheduled' : 'draft';
+    }
 
     await saveCampaign(updated);
     return c.json({ success: true, data: updated });
@@ -767,9 +853,10 @@ async function beginCampaignSend(campaign: Campaign): Promise<{ ok: boolean; err
     try {
       const recipientsWithTracking = recipients.map(r => {
         let html = campaign.html;
-        if (r.name) html = html.replace(/\{\{name\}\}/g, r.name);
-        html = html.replace(/\{\{email\}\}/g, r.email);
-        html = html.replace(/\{\{role\}\}/g, r.role);
+        // escapeHtml + функция-замена — см. комментарий в resend-unopened.
+        if (r.name) html = html.replace(/\{\{name\}\}/g, () => escapeHtml(r.name));
+        html = html.replace(/\{\{email\}\}/g, () => escapeHtml(r.email));
+        html = html.replace(/\{\{role\}\}/g, () => escapeHtml(r.role));
         html = injectClickTracking(html, campaign.id, r.email);
         html = injectTrackingPixel(html, campaign.id, r.email);
         return { email: r.email, vars: { name: r.name, email: r.email, role: r.role }, html };
@@ -934,7 +1021,10 @@ app.post('/segment/preview', requireAuth, requireAdmin, async (c) => {
 // ============================================
 app.get('/stats', requireAuth, requireAdmin, async (c) => {
   try {
-    const campaigns = await getEmailCampaigns('admin');
+    // [DELETED] исключены (2026-07-02): DELETE только переименовывает — удалённые
+    // кампании навсегда инфлейтили счётчики и open-rate при скрытом списке.
+    const campaigns = (await getEmailCampaigns('admin'))
+      .filter((c: any) => !String(c.name || '').startsWith('[DELETED]'));
     const total = campaigns.length;
     const sent = campaigns.filter((c: any) => c.status === 'sent').length;
     const drafts = campaigns.filter((c: any) => c.status === 'draft').length;
@@ -976,11 +1066,38 @@ app.post('/campaigns/run-scheduled', requireAdminOrKey, async (c) => {
 
     const all = await getEmailCampaigns('admin');
     const nowMs = Date.now();
+
+    // datetime-local из админки приходит БЕЗ таймзоны («2026-07-06T12:00»).
+    // new Date() на сервере (UTC) трактовал бы это как UTC → кампания уходила
+    // бы на 3 часа позже, чем видит админ (он вводит московское время, и FE
+    // показывает его же). Строку без offset'а трактуем как МСК (+03:00).
+    const parseScheduledAt = (s: string): number => {
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(s)) {
+        return new Date(`${s}+03:00`).getTime();
+      }
+      return new Date(s).getTime();
+    };
+
     const due = all.filter((c: any) =>
       c.status === 'scheduled' && c.scheduled_at &&
-      new Date(c.scheduled_at).getTime() <= nowMs &&
+      parseScheduledAt(String(c.scheduled_at)) <= nowMs &&
       !String(c.name || '').startsWith('[DELETED]')
     );
+
+    // Самолечение зависших 'sending' (2026-07-02): рестарт сервиса посреди
+    // фоновой отправки оставлял кампанию в 'sending' навсегда — /send отдавал
+    // «already sending», PUT/DELETE блокировались. Старше 2 часов → 'paused'
+    // (resume дошлёт остаток: уже-отправленные дедупятся по email_history).
+    const STUCK_MS = 2 * 60 * 60 * 1000;
+    for (const c2 of all) {
+      if (c2.status === 'sending' && c2.updated_at &&
+          nowMs - new Date(c2.updated_at).getTime() > STUCK_MS) {
+        c2.status = 'paused';
+        c2.updated_at = new Date().toISOString();
+        await saveCampaign(c2 as Campaign);
+        console.warn(`[Campaigns] stuck 'sending' → 'paused': ${c2.id}`);
+      }
+    }
 
     let started = 0;
     const out: any[] = [];
