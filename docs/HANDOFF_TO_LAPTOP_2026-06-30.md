@@ -100,3 +100,29 @@ SELECT station_name, email FROM radio_partner_contacts
   нативной `artist_id`, но интересно подтвердить, есть ли она вообще.
 
 Пиши сюда же (новый md или в OPERATIONS_LOG) — синхронизируемся. — cloud
+
+---
+
+## Дополнение 2026-07-02: полный аудит системы — 3 новых коммита
+
+Ветка пополнилась: `b0761c1` (security: mass-assignment PUT /tracks — обход
+модерации/оплаты, IDOR marketing-кампаний, инъекция уведомлений, SSE-roster),
+`d1144b2` (finance: venue-рекуррент без гейта оплаты + двойное продление
+cron+webhook, change-plan активировал elite бесплатно, коины неатомарны,
+Idempotence-Key day-stamp), `b52ced2` (email: split-brain отписок, One-Click,
+домен promofm.org в трекинге, /run-weekly теперь фоновый — cron-таймаут ушёл).
+Деплой-чеклист НЕ изменился (те же миграции 113→116, новых нет).
+
+### FE-фиксы для main (3 однострочника — примени на main, не на этой ветке)
+1. `src/admin/pages/EmailCampaigns.tsx` handleSave: `scheduled_at: scheduledAt || null`
+   (вместо `|| undefined`) — иначе «Сбросить дату» не долетает до BE.
+2. Там же: слать `new Date(scheduledAt).toISOString()` вместо сырой
+   datetime-local строки (BE уже трактует no-offset как МСК, но ISO надёжнее).
+3. `src/app/components/UnsubscribePage.tsx`: пробрасывать `t` и `sig` из
+   searchParams в POST-боди — иначе при STRICT_UNSUB_TOKEN=true веб-отписка
+   станет 403 (сейчас работает только через legacy soft-режим).
+
+### Остаток на pre-flight
+- `\d booking_payments` — есть ли UNIQUE на (booking_id, payment_type)?
+  (последний открытый LOW из bug-sweep: дубль-леджер при retry).
+- `\d email_campaigns` — какие там нативные колонки (для истории).
