@@ -25,6 +25,7 @@
  *   GET    /rules
  *   POST   /presence
  *   GET    /search-contacts
+ *   POST   /reports                                    — user files a report
  *   GET    /admin/reports                              — admin queue
  *   POST   /admin/reports/:id/resolve                  — admin close
  */
@@ -924,6 +925,61 @@ app.get('/blocks', requireAuth, async (c) => {
   }
 });
 
+// ── POST /reports — жалоба юзера на собеседника ──
+//
+// Header doc и messages-page.tsx (handleReportUser) ссылались на этот
+// endpoint, но реализации не было — жалобы уходили в 404 (contract-audit
+// 2026-07-02). Таблица dm_reports из migration 022.
+app.post('/reports', requireAuth, async (c) => {
+  try {
+    const reporterId = String(c.get('userId') || '');
+    const body = await c.req.json().catch(() => ({}));
+    const reportedId = String(body.reportedId || '').trim();
+    if (!reportedId) {
+      return c.json({ success: false, error: 'reportedId required' }, 400);
+    }
+    if (reportedId === reporterId) {
+      return c.json({ success: false, error: 'Нельзя пожаловаться на себя' }, 400);
+    }
+    const CATEGORIES = ['spam', 'abuse', 'impersonation', 'other'];
+    const category = CATEGORIES.includes(body.category) ? body.category : 'other';
+    const details =
+      typeof body.details === 'string' && body.details.trim()
+        ? body.details.trim().slice(0, 2000)
+        : null;
+    // message_id — uuid колонка; кладём только валидный uuid, иначе null
+    // (жалоба «на контакт целиком», не на конкретное сообщение).
+    const messageId =
+      typeof body.messageId === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.messageId)
+        ? body.messageId
+        : null;
+
+    // Анти-флуд по idx_dm_reports_reporter (индекс заведён под этот
+    // сценарий ещё в migration 022).
+    const rl = await pool.query(
+      `SELECT COUNT(*)::int AS c
+         FROM dm_reports
+        WHERE reporter_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
+      [reporterId]
+    );
+    if ((rl.rows[0]?.c || 0) >= 20) {
+      return c.json({ success: false, error: 'Слишком много жалоб, попробуйте позже' }, 429);
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO dm_reports (reporter_id, reported_id, message_id, category, details)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [reporterId, reportedId, messageId, category, details]
+    );
+    return c.json({ success: true, id: String(rows[0].id) });
+  } catch (err: any) {
+    log.error({ err }, 'messaging_report_create_failed');
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
 // ── GET /admin/reports — очередь жалоб для админа ──
 //
 // Аналогично /blocks — был задокументирован в header'е, но не
@@ -968,6 +1024,45 @@ app.get('/admin/reports', requireAuth, requireAdmin, async (c) => {
   } catch (err: any) {
     log.error({ err }, 'messaging_admin_reports_failed');
     return c.json({ success: true, reports: [] });
+  }
+});
+
+// ── POST /admin/reports/:id/resolve — закрыть жалобу ──
+//
+// AdminDmReports.tsx шлёт { status: 'reviewed'|'rejected'|'actioned',
+// resolution? }. Роут был обещан в header'е, но не реализован.
+app.post('/admin/reports/:id/resolve', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json().catch(() => ({}));
+    const ALLOWED = ['reviewed', 'rejected', 'actioned'];
+    const status = String(body.status || '');
+    if (!ALLOWED.includes(status)) {
+      return c.json(
+        { success: false, error: `status must be one of: ${ALLOWED.join(', ')}` },
+        400
+      );
+    }
+    const resolution =
+      typeof body.resolution === 'string' && body.resolution.trim()
+        ? body.resolution.trim().slice(0, 2000)
+        : null;
+    const reviewerId = String(c.get('userId') || '');
+    // id — uuid PK, параметр приходит text'ом из URL → сравниваем по ::text
+    const { rows } = await pool.query(
+      `UPDATE dm_reports
+          SET status = $1, reviewer_id = $2, reviewed_at = NOW(), resolution = $3
+        WHERE id::text = $4
+        RETURNING id, status`,
+      [status, reviewerId, resolution, id]
+    );
+    if (rows.length === 0) {
+      return c.json({ success: false, error: 'Report not found' }, 404);
+    }
+    return c.json({ success: true, id: String(rows[0].id), status: rows[0].status });
+  } catch (err: any) {
+    log.error({ err }, 'messaging_report_resolve_failed');
+    return c.json({ success: false, error: 'Internal error' }, 500);
   }
 });
 
