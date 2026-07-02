@@ -315,19 +315,28 @@ app.get('/unsubscribe', async (c) => {
   try {
     const q = c.req.query();
     const email = (q.email || '').trim().toLowerCase();
-    const res = await performUnsubscribe(
-      email, q.campaign || null, q.t, q.sig,
-      c.req.header('x-forwarded-for') || ''
-    );
-    const title = res.ok ? 'Вы отписаны от рассылки' : 'Не удалось отписаться';
-    const detail = res.ok
-      ? 'Больше писем не придёт. Если передумаете — напишите нам.'
-      : 'Ссылка недействительна или устарела. Напишите на info@promofm.ru — отпишем вручную.';
+    // GET НЕ мутирует (post-review 2026-07-02): почтовые сканеры/префетчеры
+    // переходят по ссылкам и молча отписывали живых получателей. Подтверждение
+    // кнопкой → POST на этот же эндпоинт (POST принимает параметры из query).
+    const valid = !!email && email.includes('@');
+    const title = valid ? 'Отписаться от рассылки?' : 'Не удалось отписаться';
+    const detail = valid
+      ? `Адрес: ${email}. Нажмите кнопку, чтобы больше не получать письма.`
+      : 'Ссылка недействительна. Напишите на info@promo-music.ru — отпишем вручную.';
+    const qs = new URLSearchParams();
+    if (valid) {
+      qs.set('email', email);
+      if (q.campaign) qs.set('campaign', String(q.campaign));
+      if (q.t) qs.set('t', String(q.t));
+      if (q.sig) qs.set('sig', String(q.sig));
+    }
     return c.html(
       `<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title></head>
 <body style="font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;">
 <div style="max-width:420px;padding:40px;text-align:center;background:#1a1a2e;border-radius:16px;">
-<h1 style="color:#fff;font-size:22px;">${title}</h1><p style="color:#aaa;">${detail}</p>
+<h1 style="color:#fff;font-size:22px;">${title}</h1><p id="d" style="color:#aaa;">${detail}</p>
+${valid ? `<button id="u" style="margin-top:16px;padding:12px 28px;border:none;border-radius:10px;background:#FF577F;color:#fff;font-size:15px;cursor:pointer;">Отписаться</button>
+<script>document.getElementById('u').onclick=async function(){this.disabled=true;this.textContent='…';try{var r=await fetch('/server/api/email-campaigns/unsubscribe?${qs.toString()}',{method:'POST'});var j=await r.json();document.getElementById('d').textContent=j.success?'Готово — больше писем не придёт.':(j.error||'Не получилось — напишите на info@promo-music.ru');this.style.display='none'}catch(e){document.getElementById('d').textContent='Ошибка сети, попробуйте ещё раз';this.disabled=false;this.textContent='Отписаться'}};</script>` : ''}
 <p style="margin-top:24px;"><a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>
 </div></body></html>`,
       res.status

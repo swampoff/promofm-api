@@ -223,6 +223,8 @@ tracksRoutes.put('/:id', requireAuth, async (c) => {
       'radiodigestsentat', 'radioweeklydigestsentat',
       'experttesteduntil', 'experttestavgrating', 'experttestrequestid',
       'shoutouturl', 'data', 'createdat', 'updatedat',
+      // post-review 2026-07-02: оплата/скрытие/архив — тоже state-поля
+      'ispaid', 'ishidden', 'islegacy',
     ]);
     const safeBody: Record<string, any> = {};
     for (const [k, v] of Object.entries(body as Record<string, any>)) {
