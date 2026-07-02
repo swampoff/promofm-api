@@ -1331,10 +1331,15 @@ newsletter_requested_at / newsletter_sent_at`) — применить ДО ре�
   отписки). `editors_count` в ответе = размер этой базы.
   Idempotency: `pipeline.exclusive.paid_at` — повторный webhook skip.
 
-Известное ограничение: `VideoModeration.tsx` берёт список видео из
-локального `DataContext` (демо-стор без fetch'а) — для демо-видео
-pipeline-кнопки получат 404 `Video not found` от бэка. Реальные видео
-(таблица `videos`) работают end-to-end.
+Модерация видео (добавлено следом, тот же день): очередь стала
+реальной — `GET /api/videos/admin/list` (все видимые видео + artist
+name + pipeline-состояние), решение `POST /api/videos/:id/moderate`
+(`approved`/`rejected`+note, note обязательна при reject; артисту
+уходит настоящее уведомление + SSE). Требует **migration 121**
+(`moderation_status/note/moderated_at/moderated_by`; grandfather-шаг
+помечает все существующие видео `approved`). `VideoModeration.tsx`
+грузит этот список и шлёт решения на бэк; локальный `DataContext`
+остался только как fallback при недоступном бэке.
 
 ---
 
