@@ -476,7 +476,13 @@ videosRoutes.post('/', requireAuth, async (c) => {
       ...body, userId,
       createdAt: body.createdAt || now, updatedAt: now,
     };
-    await db.upsertVideo(userId, videoId, video);
+    const row = await db.upsertVideo(userId, videoId, video);
+    if (row?.id) {
+      // Настоящий id строки БД — клиент хранит его для последующих
+      // pipeline/moderation-действий (фиктивный video-<uuid> им не матчится).
+      video.id = String(row.id);
+      (video as any).status = row.moderation_status || 'pending';
+    }
 
     // Notify admin (email + Telegram). Resolve email/name from users so the
     // alert carries real identity. Fire-and-forget — the upload mustn't fail
@@ -768,6 +774,7 @@ videosRoutes.get('/admin/list', requireAuth, requireAdmin, async (c) => {
     const limit = Math.min(parseInt(c.req.query('limit') || '500', 10) || 500, 1000);
     const { rows } = await pool.query(
       `SELECT v.id, v.user_id, v.title, v.description, v.video_url, v.thumbnail_url,
+              v.category, v.tags,
               v.created_at, v.moderation_status, v.moderation_note,
               v.promoted_until, v.newsletter_requested_at, v.newsletter_sent_at, v.pipeline,
               COALESCE(NULLIF(u.full_name, ''), NULLIF(u.display_name, ''), 'Артист') AS artist_name
@@ -788,6 +795,8 @@ videosRoutes.get('/admin/list', requireAuth, requireAdmin, async (c) => {
         description: r.description || '',
         videoUrl: r.video_url || '',
         thumbnailUrl: r.thumbnail_url || '',
+        category: r.category || '',
+        tags: Array.isArray(r.tags) ? r.tags : [],
         createdAt: r.created_at,
         status: r.moderation_status || 'pending',
         moderationNote: r.moderation_note || '',

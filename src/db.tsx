@@ -70,24 +70,39 @@ export async function getVideosByUser(userId: string) {
 }
 
 export async function upsertVideo(userId: string, videoId: string, video: Record<string, any>) {
-  // videoId may not be a valid UUID — use insert instead of upsert for non-UUID IDs
+  // videoId с фронта НЕ используется как PK (uuid генерит БД) — параметр
+  // оставлен для сигнатурной совместимости. Возвращаем реальную вставленную
+  // строку, чтобы caller отдавал клиенту настоящий id (до 2026-07-02
+  // ответ POST /api/videos содержал фиктивный id, не совпадающий с БД).
+  // category/tags — migration 122: раньше эти поля формы молча терялись.
   try {
-    const { error } = await db()
-      .from('videos')
-      .insert({
-        artist_id: userId,
-        user_id: userId,
-        title: video.title || 'Untitled',
-        description: video.description || '',
-        video_url: video.video_url || video.url || '',
-        thumbnail_url: video.thumbnail_url || '',
-      });
-    if (error) console.error('[db] upsertVideo:', error);
+    const { pool } = await import('./db-client.tsx');
+    const tags = Array.isArray(video.tags)
+      ? video.tags.map((t: any) => String(t).slice(0, 64)).filter(Boolean).slice(0, 20)
+      : [];
+    // data:-URL превью в сотни КБ раздувают таблицу — не храним такие.
+    let thumbnailUrl = String(video.thumbnail_url || video.thumbnail || '');
+    if (thumbnailUrl.length > 2048) thumbnailUrl = '';
+    const { rows } = await pool.query(
+      `INSERT INTO videos (artist_id, user_id, title, description, video_url, thumbnail_url, category, tags)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        userId,
+        userId,
+        video.title || 'Untitled',
+        video.description || '',
+        video.video_url || video.url || '',
+        thumbnailUrl,
+        video.category ? String(video.category).slice(0, 64) : null,
+        tags,
+      ]
+    );
+    return rows[0] || null;
   } catch (e: any) {
     console.error('[db] upsertVideo exception:', e.message);
+    return null;
   }
-  // Duplicate console.error выше — вне catch, error из внешнего scope не
-  // существует. Это был copy-paste дубль; удалён 2026-06-14.
 }
 
 // ─── News ───

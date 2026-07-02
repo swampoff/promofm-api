@@ -1331,6 +1331,17 @@ newsletter_requested_at / newsletter_sent_at`) — применить ДО ре�
   отписки). `editors_count` в ответе = размер этой базы.
   Idempotency: `pipeline.exclusive.paid_at` — повторный webhook skip.
 
+Загрузка видео артистом (добавлено следом, тот же день): `video-page.tsx`
+теперь POST'ит метаданные link-видео (YouTube/VK) на `POST /api/videos`
+→ строка в `videos` с реальным uuid + email-алерт админу; `upsertVideo`
+(db.tsx) сохраняет `category`/`tags` (**migration 122**) и возвращает
+вставленную строку (раньше ответ содержал фиктивный id, а
+category/tags молча терялись). Ограничения: file-источник НЕ грузит
+файл на сервер (модалка хранит только имя файла, прогресс
+симулированный) — такие видео и черновики остаются локальными;
+base64-превью из FileReader на сервер не шлётся (guard и на фронте,
+и в upsertVideo: >2 КБ URL → '').
+
 Модерация видео (добавлено следом, тот же день): очередь стала
 реальной — `GET /api/videos/admin/list` (все видимые видео + artist
 name + pipeline-состояние), решение `POST /api/videos/:id/moderate`
