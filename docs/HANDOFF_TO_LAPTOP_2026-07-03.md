@@ -216,3 +216,18 @@ ALTER TYPE ADD VALUE 'blocked', в транзакции легален (PG16), �
   автору приходит уведомление.
 
 Продюсер-кабинет по аудиту здоров (только косметика месяца — исправлена).
+
+### Дополнение №3: PromoLab схлопнут в track-test (решение владельца)
+
+PromoLab = тест трека. Дублирующий вход убран по прецеденту видео:
+- FE `Promomusicfigma`: карточка «PROMO Lab — тест трека» в PromotionHub
+  теперь ведёт на канонический `/artist/track-test`; отдельная форма
+  PromotionPromoLab и админ-таб PromoLabModeration УДАЛЕНЫ (у track-test
+  свой зрелый админ-пайплайн «Тест трека»).
+- BE: `/promotion/promolab/*` помечены deprecated, НЕ удалены — через
+  `GET /promotion/promolab/admin/list` можно разобрать исторические заявки.
+
+**Действие:** `SELECT count(*), status FROM promo_lab_experiments GROUP BY status;`
+— если есть 'draft'-заявки, разобрать их (через admin API или SQL), после
+чего эндпоинты можно дропнуть отдельным PR. Аналогично проверь
+`production_360_requests` — этот таб теперь ЖИВОЙ (заявки видны админу).

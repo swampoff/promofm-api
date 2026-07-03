@@ -855,6 +855,12 @@ promotion.get('/event/:artistId', requireAuth, async (c) => {
 // PROMO LAB (Экспериментальное продвижение)
 // ============================================
 
+// DEPRECATED 2026-07-03 (решение владельца): PromoLab = тест трека, и
+// дублирующий вход схлопнут в каноничный track-test флоу (FE карточка
+// PromoLab ведёт на /artist/track-test, отдельной формы больше нет).
+// Эндпоинты /promolab/* сохранены для legacy-данных promo_lab_experiments
+// (исторические заявки; admin/list ниже позволяет их разобрать). Новые
+// заявки сюда с фронта больше не приходят.
 promotion.post('/promolab/submit', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
