@@ -286,7 +286,11 @@ app.get('/venue-requests', requireAuth, async (c) => {
     }
 
     const requestsData = await listRadioVenueRequestsByStation(station.id);
-    const requests = Array.isArray(requestsData) ? requestsData : [];
+    // 'pending_payment' — заявка создана, но заведение ещё не оплатило.
+    // Радио её не видит и не может одобрить/начать эфир, пока webhook не
+    // переведёт в 'pending' после оплаты (см. checkout radio_campaign).
+    const requests = (Array.isArray(requestsData) ? requestsData : [])
+      .filter((r: any) => r.status !== 'pending_payment');
 
     return c.json({ success: true, data: requests });
   } catch (error: any) {
@@ -306,12 +310,16 @@ app.put('/venue-requests/:id/approve', requireAuth, async (c) => {
 
     const requestId = c.req.param('id');
     // Atomic UPDATE — race-free vs legacy get→mutate→set.
+    // requireStatus:'pending' — одобрить можно ТОЛЬКО оплаченную заявку.
+    // Неоплаченная лежит как 'pending_payment' → UPDATE вернёт 0 строк →
+    // updated=null → 409. Деньги станции (station_payout) не начислятся за
+    // неоплаченную кампанию.
     const now = new Date().toISOString();
     const updated = await updateRadioVenueRequest(station.id, requestId, {
       status: 'approved', approvedAt: now, reviewedAt: now,
-    });
+    }, { requireStatus: 'pending' });
     if (!updated) {
-      return c.json({ error: 'Venue request not found' }, 404);
+      return c.json({ error: 'Заявку нельзя одобрить: не найдена, не оплачена или уже обработана' }, 409);
     }
 
     // Email admin about approved venue request

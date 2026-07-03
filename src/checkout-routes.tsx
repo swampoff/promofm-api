@@ -504,8 +504,30 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         } else {
           log.info({ campaignId: campaign.id, orderId: session.orderId }, 'radio_campaign_already_created_skip');
         }
+
+        // Оплата прошла → делаем заявку заведения видимой радио. Заявка
+        // (radio_venue_requests) создаётся в venue-routes как
+        // 'pending_payment' и до этого момента НЕ показывается станции и не
+        // может быть одобрена. Идемпотентно: WHERE status='pending_payment'
+        // (webhook retry → 0 строк). id заявки == metadata.campaignId.
+        if (session.metadata.campaignId) {
+          try {
+            const { pool: rvrPool } = await import('./db-client.tsx');
+            const flipped = await rvrPool.query(
+              `UPDATE radio_venue_requests
+                  SET status = 'pending', updated_at = NOW()
+                WHERE id = $1 AND status = 'pending_payment'`,
+              [String(session.metadata.campaignId)]
+            );
+            if (flipped.rowCount) {
+              log.info({ campaignId: session.metadata.campaignId }, 'radio_venue_request_marked_paid');
+            }
+          } catch (rvrErr: any) {
+            log.warn({ campaignId: session.metadata.campaignId, err: rvrErr?.message }, 'radio_venue_request_flip_failed');
+          }
+        }
       }
-    
+
       if (itemType === 'content_order' && session.metadata.contentOrderId) {
         const { pool: coPool } = await import('./db-client.tsx');
         const coid = session.metadata.contentOrderId;
