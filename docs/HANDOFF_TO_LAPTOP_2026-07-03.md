@@ -1,66 +1,162 @@
 # Хэндофф: cloud-Claude → laptop-Claude (2026-07-03)
 
-Привет! Никита сказал «добей отбитые» — это твой финальный шаг по
-артист-рассылке 2026-07-02 (ты сам поставил его себе в todo в конце
-той сессии). У меня нет ssh к VPS — postfix и прод-SQL за тобой.
-Контекст ниже, детали механики — в твоей памяти той сессии и в
-`docs/OPERATIONS_LOG.md` (запись «2026-07-02 — Артист-рассылка: финал
-прогона»).
+Общее письмо по накопленному за сессию. Ветка — та же
+**`claude/add-external-clips-HK56I`** в обоих репо (`promofm-api` +
+`Promomusicfigma`). У меня нет ssh к VPS: DDL, миграции, мерж в main,
+рестарт и **любой runtime-тест денег** — за тобой.
+
+Три темы этой сессии: **(1) escrow коллабораций**, **(2) слияние
+engineer-маркетплейса**, **(3) схлопывание видео-модерации**. Ниже — что
+задеплоить, в каком порядке, и что проверить руками (деньги).
+
+Предыдущее письмо `HANDOFF_TO_LAPTOP_2026-06-30.md` (email/radio-рассылки,
+аудит) — **всё ещё в силе**, его чеклист миграций 113→116 не отменялся.
+Начни с него, если ещё не деплоил; это письмо — сверху.
 
 ---
 
-## Задача: добить 219 deferred
+## 1. Escrow коллабораций — закрыть дыру «продюсер не получает денег» ⚠️ ДЕНЬГИ
 
-Состояние на конец 2026-07-02:
-- 873 отправлено, 0 сбоев на отправке;
-- 729 delivered;
-- 138 hard-bounce — УЖЕ вычищены тобой (стоп-лист артистов 188 → 326,
-  `reason=hard_bounce`; список: `~/Desktop/artist-bounced-2026-07-02.txt`);
-- **219 deferred** — временные отказы (грейлистинг/лимиты), на
-  2026-07-02 их трогать было нельзя (резолвятся 24–48ч).
+**Проблема (подтверждена Никитой):** бэкенд escrow-контур собран и **уже на
+main** (checkout `collab_accept` → `escrow_pending` → webhook `escrow_held`
+→ `/complete` release; auto-complete cron; admin-arbitrage). Но фронт
+никогда не роутил приём платного оффера через оплату, а `/respond` не
+проверял цену. Итог на проде: платный оффер принимается бесплатно,
+завершается бесплатно, **продюсер не получает выплату**. Весь escrow —
+мёртвый код.
 
-Сейчас (≥24ч спустя) нужно:
+**Что в ветке (2 коммита, оба этой сессии):**
 
-1. **Снять финальный статус по 219 deferred из postfix** — тем же
-   способом, каким ты снимал статусы вчера (mail.log / postfix queue).
-   Ожидаемо: большинство доставится, хвост превратится в постоянные
-   bounce.
-2. **Постоянные bounce → в стоп-лист артистов** с `reason=hard_bounce`
-   — та же операция, что вчера для 138 (та же таблица/механика из
-   твоей памяти; cloud её не знает и намеренно не выдумывает SQL).
-3. **Всё ещё deferred (если остались)** — оставить, отметить количество:
-   если через 48ч они не резолвятся, следующий прогон почты сам их
-   добьёт в bounce.
+| Repo | Commit | Что |
+|---|---|---|
+| promofm-api | `6da0742` | **source-of-truth money-guard**: `PUT /collaboration/offers/:id/respond` c `status=accepted` на оффере `price>0` → **402 payment_required**, статус не меняется. decline/discussion и бесплатные офферы — как раньше. |
+| Promomusicfigma | `cddfdb8` | FE: артист жмёт «Принять» на `price>0` → `redirectToPayment(collab_accept)`; escrow-бейджи («Ожидает оплаты»/«В escrow»/«Выплачено»/«Возврат») у артиста и продюсера; `paymentStatus` в типе `CollabOffer`; хинт «после подтверждения N ₽ уйдут продюсеру». |
 
-## Критерий готовности (проверяемый)
+**СХЕМА НЕ ТРОГАЕТСЯ.** Миграций нет. `6da0742` — только доп. проверка
+`Number(price)>0` в существующем хендлере. FE — автодеплой.
 
-- По каждому из 219 адресов известен финальный статус:
-  delivered / bounced / still-deferred (числа сходятся: d + b + s = 219).
-- Стоп-лист артистов вырос ровно на число новых постоянных bounce
-  (326 → 326 + b), все новые строки с `reason=hard_bounce`.
-- Обновлён список на десктопе (или новый файл
-  `~/Desktop/artist-bounced-2026-07-03.txt`).
+**Порядок деплоя (важно из-за гейта):**
+- Деплой **FE первым или одновременно** с BE. FE-first безопасен: платный
+  приём уходит в checkout ещё до гейта. **BE-first в одиночку** сделает
+  платный оффер непринимаемым в UI (кнопка «Принять» → 402), пока FE не
+  уедет. Не стейджь BE раньше FE.
 
-## После выполнения — обязательная запись
+**⚠️ Дубликат — смержить ОДНУ версию:** у тебя есть ветка
+`feat/collab-frontend-accept-via-checkout` (`ef4c477`) — тот же accept→checkout.
+Мой `cddfdb8` — **суперсет** (тот же флоу + `returnUrl`/metadata как у тебя +
+видимость статуса + хинты + тип). Мержи `cddfdb8`, ветку `feat/…` дропни,
+иначе конфликт по `handleRespond`.
 
-Допиши итог в `docs/OPERATIONS_LOG.md` к записи 2026-07-02 (или новой
-записью 2026-07-03): сколько долетело, сколько ушло в стоп-лист,
-финальный размер стоп-листа. Это закрывает follow-up «⏳ 2026-07-03:
-добить deferred» из той записи.
+**Кроны (если ещё не стоят — auto-complete escrow по дедлайну):**
+```cron
+0 4 * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" \
+  http://127.0.0.1:3000/server/api/collaboration/offers/auto-complete \
+  >> /var/log/promofm-collab-autocomplete.log 2>&1
+```
 
-## Напоминания из вчерашней сессии (чтобы не потерять)
+**Критерий «что должно стать правдой» (прогони на проде/стейдже, YooKassa-цикл):**
+1. Платный оффер (`price>0`) → артист «Принять» → редирект ЮКасса → оплата
+   → webhook → `collab_offers.payment_status='escrow_held'`, `status='accepted'`,
+   оффер показывает «В escrow».
+2. Артист «Подтвердить завершение» → `payment_balances.available` продюсера
+   `+= price` (0% комиссия), `payment_status='released'`, `status='completed'`.
+3. Прямой API: `PUT /collaboration/offers/<paid>/respond {"status":"accepted"}`
+   → **402**, `status` не меняется.
+4. Бесплатный оффер (`price` пусто/0) → «Принять» → сразу `accepted`, без оплаты.
 
-- **Фильтр синтетических кабинетов**: 1484 из 2384 артист-адресов —
-  `@promofm.ru`. Любая будущая выборка артист-базы обязана их
-  исключать (`email NOT ILIKE '%@promofm.ru'`).
-- Отписка в письмах — STRICT-footer; глобальные отписки живут в
-  `email_unsubscribes`, их уважают все рассылки.
+---
 
-## Заодно, если будешь на VPS (опционально, отдельная тема)
+## 2. Слияние engineer-маркетплейса в producer-маркетплейс ⚠️ ДЕНЬГИ
 
-На ветке `claude/promomusicfigma-architecture-ms7sbs` (оба репо) ждёт
-pre-flight большая пачка работы cloud-сессии: миграции **120–124**
-(видео-pipeline, модерация видео, category/tags, news image_url,
-модерация артист-новостей) + фиксы контрактов фронт↔бэк. Каждый коммит
-самодостаточен: критерии и списки колонок в телах коммитов. Это НЕ
-блокирует «добей отбитые» — просто чтобы два захода на VPS не делать.
+Решение владельца (закрыто 2026-07-02): engineer продаёт на общем
+маркетплейсе как producer, комиссия **10%** (единая). Детали и маппинг
+статусов — `docs/MARKETPLACE_MERGE_PLAN.md`.
+
+**Что в ветке (cloud, готово):**
+- `src/migrations/120_merge_engineer_services_into_marketplace.sql` — backfill
+  услуг `engineer_services → producer_services` (id `eng-svc-<uuid>`, аддитивно,
+  `ON CONFLICT DO NOTHING`, старая таблица цела).
+- `src/migrations/121_merge_engineer_orders_into_marketplace.sql` — backfill
+  заказов `engineer_orders → service_orders` (id `eng-ord-<uuid>`, commission
+  10% / payout 90% как учётная запись, `delivered→in_progress`, оригиналы в
+  `extra`). **Реальный ledger `platform_revenue channel='engineer_order'` НЕ
+  трогается** — это только копия для единой витрины/истории.
+- `marketplace-routes.tsx` `POST /services/:id/order` — плоские 10% для всех
+  продавцов.
+
+**Порядок деплоя:** миграции строго **120 → 121**, dry-run сначала:
+```bash
+sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+\i /opt/promofm-api/src/migrations/120_merge_engineer_services_into_marketplace.sql
+\i /opt/promofm-api/src/migrations/121_merge_engineer_orders_into_marketplace.sql
+ROLLBACK;   -- поменяй на COMMIT после проверки row-count'ов
+SQL
+```
+Pre-flight-колонки — в шапках обоих файлов (сверены по коду, но прогони `\d`).
+
+**Осталось за тобой (write-side, нельзя из облака — прод + деньги):**
+- Engineer-кабинет FE: создание/список/действия услуг и заказов → маркетплейс-
+  эндпоинты (`producer_services`/`service_orders`) вместо `/engineer/services|orders`.
+- Роль-гейты FE `role === 'producer'` → `['producer','engineer'].includes(role)`.
+- Runtime-цикл на проде: инженер создаёт услугу → в общем каталоге → клиент
+  заказывает → инженер видит заказ → проводит по статусам → выплата в ledger.
+- **Phase-3 (отдельный PR, после верификации):** `DROP TABLE engineer_services,
+  engineer_orders` + удалить `/engineer/services|orders` эндпоинты.
+
+---
+
+## 3. Схлопывание видео-модерации (FE, отдельная ветка)
+
+Видео больше не отдельная тема модерации — оно уже идёт через publish/releases
+флоу (работает для артиста И лейбла). Я убрал дублирующую ветку.
+
+- Ветка **`claude/video-moderation-pipeline`** (Promomusicfigma):
+  `src/app/routes.ts` — `/artist/video` → `redirect('/artist/publish')`;
+  `src/admin/pages/Moderation.tsx` — убран таб «Видео» (модерация видео живёт
+  в `PublishModeration`).
+- Бэкенд-часть видео-пайплайна я **откатил** (не нужна) — на main ничего
+  лишнего не уехало.
+- Действие: смержи FE-ветку в main (только эти два файла), проверь что
+  `/artist/video` редиректит и в админ-модерации нет пустого таба «Видео».
+
+---
+
+## 4. Сводный порядок (если деплоишь всё разом)
+
+1. **promofm-api** сначала (фронт зависит):
+   - Прошлое письмо: миграции 113→116 (если ещё не), ENV `RESEND_API_KEY`, кроны.
+   - Это письмо: миграции **120→121** (marketplace, dry-run→commit).
+   - Мерж ветки в main → `systemctl restart promofm-api`.
+   - Кроны: collab auto-complete (§1), radio-weekly + email-campaigns (прошлое письмо).
+2. **Promomusicfigma** (автодеплой):
+   - Мерж `claude/add-external-clips-HK56I` (collab escrow FE `cddfdb8`).
+   - Мерж `claude/video-moderation-pipeline` (видео-редирект).
+   - Дропни `feat/collab-frontend-accept-via-checkout` (суперсед, см. §1).
+3. **Runtime-тесты денег** (§1 критерий + §2 цикл) — на тебе, у меня нет прода.
+
+---
+
+## 5. Остаток на pre-flight (из прошлого письма, ещё открыто)
+- `\d booking_payments` — есть ли UNIQUE на `(booking_id, payment_type)`?
+  (LOW: дубль-леджер при retry).
+- `\d email_campaigns` — нативные колонки (для истории).
+
+Пиши сюда же или в `OPERATIONS_LOG.md`. — cloud
+
+---
+
+## Аддендум (cloud, вторая сессия, 2026-07-03) — ЗАКРЫТО
+
+Параллельно с этим письмом существовал мой runbook «добей отбитые»
+(219 deferred артист-рассылки) под тем же именем файла — merge-конфликт
+разрешён в пользу этого письма, потому что задача УЖЕ исполнена:
+OPERATIONS_LOG (append-строки внизу) — «artist relaunch email blast:
+873 sent / 0 failed; 138 hard-bounce suppressed (stop-list 326);
+Deferred settled: 0 new bounces». Стоп-лист остался 326.
+
+Также: мои миграции на ветке `claude/promomusicfigma-architecture-ms7sbs`
+ПЕРЕНУМЕРОВАНЫ 120–124 → **122–126** (номера 120/121 заняли твои
+marketplace-миграции, уже применённые на проде). Актуальный список моей
+ветки: 122_videos_pipeline, 123_videos_moderation,
+124_videos_category_tags, 125_news_image_url, 126_news_moderation.
