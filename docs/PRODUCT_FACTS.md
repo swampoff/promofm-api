@@ -1356,6 +1356,16 @@ base64-превью из FileReader на сервер не шлётся (guard �
 модерирует news_public). Статусы `draft`/`pending` пишутся, но
 модератора у них нет — известный gap.
 
+Обложки/превью (fix 2026-07-02, тот же день): оба пути обложки новости
+(кнопка И drag&drop) идут через общий `processCoverFile` →
+`/storage/upload` (bucket `news-images`); превью видео в
+`video-upload-modal.tsx` тоже грузится в storage (bucket
+`video-thumbnails`) вместо FileReader-base64. Bucket `news-images`
+открыт артистам в `storage-routes.tsx` `ARTIST_WRITABLE_BUCKETS` —
+до этого артистский аплоад обложки новости получал 403 (bucket был
+admin-only с времён, когда новости писали только агенты), но этого
+никто не видел, т.к. новости жили в localStorage.
+
 Модерация видео (добавлено следом, тот же день): очередь стала
 реальной — `GET /api/videos/admin/list` (все видимые видео + artist
 name + pipeline-состояние), решение `POST /api/videos/:id/moderate`

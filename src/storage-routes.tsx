@@ -25,15 +25,21 @@ import { join } from 'path';
 const storage = new Hono();
 
 // Buckets a regular authenticated user (artist) is allowed to write to.
-// Everything else (attachments, concert-banners, banner-images, news-images,
-// misc) requires admin/moderator role. `attachments` is marked private and
+// Everything else (attachments, concert-banners, banner-images, misc)
+// requires admin/moderator role. `attachments` is marked private and
 // must never be writable by an arbitrary artist.
+//
+// news-images открыт артистам 2026-07-02: артисты теперь создают свои
+// новости (news-page.tsx -> POST /api/news), и обложка грузится сюда.
+// До этого артистский аплоад обложки получал 403 — фича новостей
+// целиком жила в localStorage и этого никто не видел.
 const ARTIST_WRITABLE_BUCKETS = new Set([
   'track-covers',
   'track-audio',
   'artist-avatars',
   'video-files',
   'video-thumbnails',
+  'news-images',
 ]);
 const PRIVILEGED_ROLES = new Set(['admin', 'superadmin', 'moderator']);
 
