@@ -818,7 +818,11 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
         platformFee: splitRadioCampaignAmount(campaign.budget || 0).platformFee,
         stationPayout: splitRadioCampaignAmount(campaign.budget || 0).stationPayout,
         timeSlots: campaign.timeSlots,
-        status: 'pending',
+        // Платная кампания видна радио только ПОСЛЕ оплаты: создаём заявку
+        // как 'pending_payment' (радио её не видит и не может одобрить),
+        // webhook checkout radio_campaign переведёт в 'pending' после
+        // успешной оплаты. Бесплатная (budget<=0) — сразу 'pending'.
+        status: (Number(campaign.budget) || 0) > 0 ? 'pending_payment' : 'pending',
         submittedAt: new Date().toISOString(),
       };
 

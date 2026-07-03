@@ -149,13 +149,16 @@ export function calculateProduction360Price(
 // место, забудешь другое → station_payout разойдётся с тем, что
 // реально удержано. Единый источник.
 //
-// Отдельно от MARKETPLACE_COMMISSION_RATE (10% на beats/digital/
-// services) — у радио своя ставка 15%.
+// 2026-07-03 (решение владельца): ставка радио выровнена с общей
+// комиссией платформы — 10%. Раньше здесь было 0.15, но ledger
+// platform_revenue в checkout-webhook писал 10% для radio_campaign →
+// выплата станции (85%) не сходилась с бухгалтерией платформы (10%).
+// Теперь везде единые 10% / станция 90%.
 
-export const RADIO_COMMISSION_RATE = 0.15;
+export const RADIO_COMMISSION_RATE = 0.10;
 
 /** Разбивка суммы рекламной кампании заведения: комиссия платформы
- *  (15%) + выплата станции (85%). Округление до рубля (как
+ *  (10%) + выплата станции (90%). Округление до рубля (как
  *  исторически Math.round). */
 export function splitRadioCampaignAmount(grossPrice: number): {
   platformFee: number;
