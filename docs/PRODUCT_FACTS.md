@@ -1349,12 +1349,26 @@ base64-превью из FileReader на сервер не шлётся (guard �
 /api/news` (upsert в таблицу `news` c owner-guard'ом — чужой id → 403),
 свой список → новый `GET /api/news/mine`, удаление → новый `DELETE
 /api/news/:id` (только своё). Обложка — `news.image_url` (**migration
-123**), `data:`-URL отбрасываются с обеих сторон. Публичная лента
-`GET /api/news` по-прежнему читает `news_public` (агентские новости) —
-артист-новости в неё НЕ попадают; admin-модерация артист-новостей —
-отдельная несуществующая пока поверхность (NewsModeration.tsx
-модерирует news_public). Статусы `draft`/`pending` пишутся, но
-модератора у них нет — известный gap.
+123**), `data:`-URL отбрасываются с обеих сторон. Модерация артист-новостей (добавлено следом, тот же день; продуктовое
+решение Никиты: одобренные — на страницу артиста И в общую ленту):
+- Очередь: `GET /api/news/admin/artist-queue` (таблица `news` + имя
+  артиста из `users`). `NewsModeration.tsx` переведена на неё — раньше
+  страница читала `GET /api/news` (лента `news_public`) и парсила ответ
+  как `{data}` при голом массиве → список был ВСЕГДА пуст, а
+  approve/reject мутировали только локальный стейт.
+- Решение: `POST /api/news/admin/:id/moderate` (`approved`/`rejected`+
+  note, note обязательна при reject; migration 124 —
+  `news.moderation_note/moderated_at/moderated_by` + индексы).
+  Артисту уходит уведомление + SSE; причину отклонения он видит в
+  news-page (`moderation_note` через GET /mine).
+- **approve → общая лента:** строка копируется в `news_public` через
+  существующий `upsertNewsPublic` (`source='artist'`,
+  `status='published'`) — `GET /api/news` подхватывает её как обычную
+  статью, тот же id (детальная `GET /api/news/:id` работает).
+- **Страница артиста:** `GET /api/news/artist/:artistId` (public) —
+  approved-новости; принимает и `users.id`, и `artist_profiles.id`.
+  `ArtistPublicProfile.tsx` рендерит секцию «Новости артиста» (карточки,
+  секция скрыта при нуле новостей).
 
 Обложки/превью (fix 2026-07-02, тот же день): оба пути обложки новости
 (кнопка И drag&drop) идут через общий `processCoverFile` →
