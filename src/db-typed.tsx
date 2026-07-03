@@ -307,10 +307,14 @@ export async function insertConcert(concert: Record<string, any>) {
       event_date: concert.event_date || concert.date || null,
       event_time: concert.event_time || concert.time || '19:00',
       event_type: concert.event_type || concert.type || 'Концерт',
-      banner_image_url: concert.banner_image_url || concert.banner || '',
+      // banner_url / ticket_url — имена полей формы кабинета (concert-schema).
+      // Без этих алиасов баннер/ссылка терялись, а getPublishedConcerts
+      // ТРЕБУЕТ непустой banner_image_url → пользовательский концерт никогда
+      // не попадал в публичную афишу. Алиасы аддитивны, приоритет у canonical.
+      banner_image_url: concert.banner_image_url || concert.banner || concert.banner_url || '',
       ticket_price_min: concert.ticket_price_min || concert.ticketPriceFrom || null,
       ticket_price_max: concert.ticket_price_max || concert.ticketPriceTo || null,
-      ticket_link: concert.ticket_link || concert.ticketLink || '',
+      ticket_link: concert.ticket_link || concert.ticketLink || concert.ticket_url || '',
       ticket_capacity: concert.ticket_capacity || null,
       user_id: concert.user_id || null,
       artist_id: concert.artist_id || null,
