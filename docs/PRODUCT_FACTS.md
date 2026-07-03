@@ -1276,6 +1276,17 @@ from scratch.
   `radio_campaign` переводит в `'pending'` после оплаты; approve требует
   `requireStatus:'pending'`. Раньше станция могла одобрить/заработать
   `stationPayout` на неоплаченной кампании.
+- **cabinet audit fixes 2026-07-03** — (1) engineer payout attribution:
+  webhook принимает metadata.itemType|type='engineer_order' → payee_id +
+  channel='engineer_order' пишутся, /engineer/earnings живой (раньше вечный
+  ₽0 из-за key-mismatch); (2) label track publish ожил: label-routes мапит
+  approved→pending_payment, price из tracks.payment_amount (7000), FE URL
+  чекаута с /api/; (3) admin block: POST /auth/admin/users/:id/status +
+  migration 122 ('blocked' в user_status) + login-гейт + token_version bump
+  (живые сессии умирают сразу); (4) news moderation реальная: GET
+  /news/admin/list + POST /news/admin/:id/moderate → news_public + уведомление
+  автору; (5) admin-стабы Production360/PromoLab/Партнёры помечены «не
+  подключено к серверу».
 - **radio ad pricing = слоты станции (server-side)** — 2026-07-03 (решение
   владельца: «радио выставляет слоты, заведение их покупает, комиссия 10%»).
   `POST /venue/radio-campaigns` теперь ТРЕБУЕТ `timeSlots[]` = реальные slot id
