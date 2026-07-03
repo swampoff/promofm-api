@@ -2350,15 +2350,11 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
     }
 
     // ── radio_campaign — venue оплачивает рекламную кампанию на радио.
-    // Canonical price = venue_ad_campaigns.budget (создан в
-    // venue-routes.tsx:766+ POST /radio-campaigns с body.budget).
-    //
-    // КАВЕАТ: venue-routes:790 принимает body.budget без серверной
-    // валидации против slot prices. Этот gate закрывает только
-    // DevTools-side tampering на /create-session (amount=1 при
-    // campaign.budget=10000). Полная защита потребует переноса pricing-
-    // расчёта в backend POST /radio-campaigns (отдельный PR), но даже
-    // без этого amount-gate здесь блокирует public attack vector.
+    // Canonical price = venue_ad_campaigns.budget. С 2026-07-03 budget
+    // считается СЕРВЕРОМ в POST /radio-campaigns: SUM(radio_ad_slots.price
+    // выбранных слотов станции) × durationDays — body.budget игнорируется.
+    // Этот gate сверяет оплату с той серверной цифрой (полная цепочка:
+    // слоты станции → серверный бюджет → amount-gate → webhook 10%/90%).
     //
     // Guards (паттерн как у pitching_bundle, track_test_promote):
     //   - metadata.campaignId обязателен

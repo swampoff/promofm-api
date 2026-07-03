@@ -1276,6 +1276,16 @@ from scratch.
   `radio_campaign` переводит в `'pending'` после оплаты; approve требует
   `requireStatus:'pending'`. Раньше станция могла одобрить/заработать
   `stationPayout` на неоплаченной кампании.
+- **radio ad pricing = слоты станции (server-side)** — 2026-07-03 (решение
+  владельца: «радио выставляет слоты, заведение их покупает, комиссия 10%»).
+  `POST /venue/radio-campaigns` теперь ТРЕБУЕТ `timeSlots[]` = реальные slot id
+  из `radio_ad_slots` этой станции (status='available') и считает
+  `budget = SUM(slot.price) × durationDays` САМ — `body.budget` игнорируется
+  (раньше принимался как есть → 1₽-кампания проходила amount-gate). Легаси
+  строки ('any_time' и т.п.) → 400. FE venue radio-section: модалка покупки
+  показывает живые слоты станции (GET /radio-profile/profile/:id/ad-slots),
+  платит `campaign.budget` из ответа сервера. `slot.price` = ₽ за день ротации
+  в слоте. Станция без слотов → покупка недоступна (сообщение в модалке).
 - **tickets-system IDOR** — PR #289: owner-check on 5 endpoints (was: any
   authenticated user could read/modify/delete tickets by guessing UUID).
 - **service_order workflow** — PR #290: terminal-state lock + role-based
