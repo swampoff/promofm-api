@@ -250,11 +250,31 @@ function concertFormToColumns(body: Record<string, any>): Record<string, any> {
   return out;
 }
 
+// Ownership guard: возвращает концерт, только если вызывающий — его владелец
+// (concerts.user_id === JWT userId) или админ. Иначе null. 404 отдаётся и на
+// «не найдено», и на «не твой» — чтобы не палить существование чужих записей.
+// Модерация правит концерты своим роутом (concert-moderation) — там свои гейты.
+async function loadOwnedConcert(c: any, concertId: string): Promise<any | null> {
+  const userId = c.get('userId') as string;
+  const role = c.get('userRole') as string;
+  const concert = await typed.getConcertById(concertId);
+  if (!concert) return null;
+  const isAdmin = role === 'admin' || role === 'superadmin';
+  if (!isAdmin && String(concert.user_id) !== String(userId)) return null;
+  return concert;
+}
+
 // PUT /:id — Update concert
 app.put('/:id', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
     const body = await c.req.json();
+
+    // IDOR-guard: править можно только свой концерт (или админ).
+    const owned = await loadOwnedConcert(c, concertId);
+    if (!owned) {
+      return c.json({ success: false, error: 'Concert not found' }, 404);
+    }
 
     const concert = await typed.updateConcert(concertId, concertFormToColumns(body));
     if (!concert) {
@@ -271,6 +291,13 @@ app.put('/:id', requireAuth, async (c) => {
 app.delete('/:id', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
+
+    // IDOR-guard: удалять можно только свой концерт (или админ).
+    const owned = await loadOwnedConcert(c, concertId);
+    if (!owned) {
+      return c.json({ success: false, error: 'Concert not found' }, 404);
+    }
+
     await typed.deleteConcert(concertId);
     return c.json({ success: true, message: 'Concert deleted' });
   } catch (error) {
@@ -282,6 +309,13 @@ app.delete('/:id', requireAuth, async (c) => {
 app.post('/:id/submit', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
+
+    // IDOR-guard: отправлять на модерацию можно только свой концерт (или админ).
+    const owned = await loadOwnedConcert(c, concertId);
+    if (!owned) {
+      return c.json({ success: false, error: 'Concert not found' }, 404);
+    }
+
     const concert = await typed.updateConcert(concertId, {
       moderation_status: 'pending',
     });
@@ -302,7 +336,8 @@ app.post('/:id/promote', requireAuth, async (c) => {
     const body = await c.req.json();
     const cost = body.cost || 100;
 
-    const concert = await typed.getConcertById(concertId);
+    // IDOR-guard: продвигать (за свои коины) можно только свой концерт (или админ).
+    const concert = await loadOwnedConcert(c, concertId);
     if (!concert) {
       return c.json({ success: false, error: 'Concert not found' }, 404);
     }
