@@ -200,6 +200,25 @@ app.put('/offers/:id/respond', requireAuth, async (c) => {
       );
     }
 
+    // Source-of-truth money guard: платный оффер НЕЛЬЗЯ принять напрямую
+    // этим эндпоинтом — деньги обязаны пройти через escrow
+    // (POST /checkout/create-session {type:'collab_accept'} → webhook
+    // ставит status='accepted' + payment_status='escrow_held'). Иначе оффер
+    // стал бы 'accepted' при payment_status='unpaid', и /complete пропустил
+    // бы release → продюсер не получил бы выплату. decline/discussion —
+    // бесплатны, поэтому разрешены. Бесплатные офферы (price 0/пусто)
+    // принимаются здесь напрямую без escrow.
+    if (status === 'accepted' && Number(original.price) > 0) {
+      return c.json(
+        {
+          success: false,
+          error: 'Платный оффер принимается через оплату (escrow), не напрямую. Используйте checkout collab_accept.',
+          code: 'payment_required',
+        },
+        402,
+      );
+    }
+
     const now = new Date().toISOString();
     const updated: CollabOffer = {
       ...original,
