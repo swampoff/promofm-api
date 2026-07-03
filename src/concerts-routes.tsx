@@ -225,13 +225,38 @@ app.post('/', requireAuth, async (c) => {
   }
 });
 
+// Форма кабинета (concert-schema) шлёт имена полей banner_url/ticket_url/date/…
+// которые НЕ являются колонками concerts. updateConcert строит
+// SET "<key>"=$n для каждого ключа → сырой body ронял весь UPDATE на
+// несуществующей колонке. Нормализуем в реальные колонки, включая только
+// присутствующие поля (partial update; пустая строка = осознанная очистка).
+function concertFormToColumns(body: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  const set = (col: string, val: any) => { if (val !== undefined) out[col] = val; };
+  set('title', body.title);
+  set('artist_name', body.artist_name ?? body.artist);
+  set('description', body.description);
+  set('city', body.city);
+  set('venue_name', body.venue_name ?? body.venue);
+  set('venue_address', body.venue_address);
+  set('event_date', body.event_date ?? body.date);
+  set('event_time', body.event_time ?? body.time);
+  set('event_type', body.event_type ?? body.type);
+  set('banner_image_url', body.banner_image_url ?? body.banner ?? body.banner_url);
+  set('ticket_price_min', body.ticket_price_min ?? body.ticketPriceFrom);
+  set('ticket_price_max', body.ticket_price_max ?? body.ticketPriceTo);
+  set('ticket_link', body.ticket_link ?? body.ticketLink ?? body.ticket_url);
+  set('ticket_capacity', body.ticket_capacity);
+  return out;
+}
+
 // PUT /:id — Update concert
 app.put('/:id', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
     const body = await c.req.json();
 
-    const concert = await typed.updateConcert(concertId, body);
+    const concert = await typed.updateConcert(concertId, concertFormToColumns(body));
     if (!concert) {
       return c.json({ success: false, error: 'Concert not found' }, 404);
     }
