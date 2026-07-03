@@ -186,6 +186,22 @@ app.get('/:id', requireAuth, async (c) => {
     if (!concert) {
       return c.json({ success: false, error: 'Concert not found' }, 404);
     }
+
+    // Одобренные (в афише) концерты читает любой авторизованный — это
+    // карточка публичной афиши. Черновики/на-модерации/отклонённые/отменённые
+    // — только владелец или админ, иначе 404 (не палим существование и
+    // содержимое чужих неопубликованных событий). Синхронно с публичными
+    // статусами getPublishedConcerts (['approved','published']).
+    const PUBLIC_STATUSES = ['approved', 'published'];
+    if (!PUBLIC_STATUSES.includes(concert.moderation_status)) {
+      const userId = c.get('userId') as string;
+      const role = c.get('userRole') as string;
+      const isAdmin = role === 'admin' || role === 'superadmin';
+      if (!isAdmin && String(concert.user_id) !== String(userId)) {
+        return c.json({ success: false, error: 'Concert not found' }, 404);
+      }
+    }
+
     return c.json({ success: true, data: concert });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
