@@ -1083,7 +1083,7 @@ app.get('/releases', requireAuth, async (c) => {
       // Используем native cols + индекс idx_tracks_label_id.
       `SELECT t.id, t.title, t.artist_name, t.moderation_status,
               t.cover_url, t.audio_url, t.genre, t.created_at, t.updated_at,
-              t.artist_id, t.label_id,
+              t.artist_id, t.label_id, t.payment_amount,
               ap.artist_name AS resolved_artist_name
        FROM tracks t
        LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
@@ -1098,11 +1098,19 @@ app.get('/releases', requireAuth, async (c) => {
     // so the frontend doesn't have to deal with two collections. `type:
     // 'track'` is a new union member; `status` maps moderation_status →
     // existing release-status vocab so the same status pills work.
+    // Для трека moderation_status='approved' = «одобрен, ждёт ОПЛАТЫ
+    // публикации» (checkout-gate track_publish пускает только approved).
+    // FE рисует кнопку «Оплатить» на 'pending_payment' → мапим
+    // approved→pending_payment. Раньше approved→approved — кнопка не
+    // показывалась НИКОГДА, платная публикация лейбла была мертва.
+    // paid/upcoming — постоплатные статусы, для лейбла это «опубликован».
     const STATUS_MAP: Record<string, string> = {
       draft: 'draft',
       pending: 'pending_review',
-      approved: 'approved',
+      approved: 'pending_payment',
       pending_payment: 'pending_payment',
+      paid: 'published',
+      upcoming: 'published',
       published: 'published',
       rejected: 'rejected',
     };
@@ -1116,7 +1124,10 @@ app.get('/releases', requireAuth, async (c) => {
         title: row.title,
         status: STATUS_MAP[row.moderation_status] || row.moderation_status,
         plan: 'track',
-        price: 5000,
+        // Цена из track.payment_amount (модерация ставит PUBLICATION_PRICE=7000;
+        // amount-gate чекаута сверяет ровно с ней). Хардкод 5000 был устаревшим
+        // → оплата отбивалась 400 по несовпадению суммы.
+        price: Number(row.payment_amount) || 7000,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         actingForArtistId: row.artist_id,
