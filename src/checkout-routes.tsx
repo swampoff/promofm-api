@@ -1590,7 +1590,14 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     // (б) идемпотентно для webhook retry
     let payeeId: string | undefined = session.metadata.artistId;
     let payeeName: string | undefined = session.metadata.artistName;
-    if (session.metadata?.itemType === 'engineer_order' && session.metadata?.engineerOrderId) {
+    // FE (EngineerStorefront) шлёт metadata.type='engineer_order', НЕ itemType.
+    // Проверка только itemType (как было) → payee_id=NULL и channel='purchase'
+    // → /engineer/earnings (WHERE channel='engineer_order') вечно 0 строк —
+    // инженер не видел заработок вообще. Принимаем оба ключа.
+    const isEngineerOrder =
+      session.metadata?.itemType === 'engineer_order' ||
+      session.metadata?.type === 'engineer_order';
+    if (isEngineerOrder && session.metadata?.engineerOrderId) {
       try {
         const { pool: rrPool } = await import('./db-client.tsx');
         const r = await rrPool.query(
@@ -1607,7 +1614,12 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
 
     await recordRevenue({
-      channel: session.type === 'purchase' ? (session.metadata.itemType || 'purchase') : session.type,
+      // isEngineerOrder-ветка: без неё channel падал в 'purchase' (см. выше).
+      // Узко только для engineer_order — прочие metadata.type (collab_accept,
+      // banner_publish…) НЕ должны менять channel, их семантика другая.
+      channel: session.type === 'purchase'
+        ? (session.metadata.itemType || (isEngineerOrder ? 'engineer_order' : 'purchase'))
+        : session.type,
       description: session.description,
       grossAmount: session.amount,
       platformRevenue: session.amount * commissionRate,
