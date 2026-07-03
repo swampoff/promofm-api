@@ -74,7 +74,7 @@ export async function upsertVideo(userId: string, videoId: string, video: Record
   // оставлен для сигнатурной совместимости. Возвращаем реальную вставленную
   // строку, чтобы caller отдавал клиенту настоящий id (до 2026-07-02
   // ответ POST /api/videos содержал фиктивный id, не совпадающий с БД).
-  // category/tags — migration 122: раньше эти поля формы молча терялись.
+  // category/tags — migration 124: раньше эти поля формы молча терялись.
   try {
     const { pool } = await import('./db-client.tsx');
     const tags = Array.isArray(video.tags)
@@ -120,7 +120,7 @@ export async function getNewsByUser(userId: string) {
 export async function upsertNews(userId: string, newsId: string, news: Record<string, any>) {
   // ВНИМАНИЕ: это полный upsert — отсутствующие поля перезапишутся
   // дефолтами. Caller обязан слать объект целиком (см. news-page.tsx
-  // handlePublishDraft). image_url — migration 123; data:-URL не храним.
+  // handlePublishDraft). image_url — migration 125; data:-URL не храним.
   let imageUrl = String(news.image_url || news.coverImage || '');
   if (imageUrl.length > 2048 || imageUrl.startsWith('data:')) imageUrl = '';
   const row = {

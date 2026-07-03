@@ -177,7 +177,7 @@ videosRoutes.get('/newClips', async (c) => {
     const limit = parseInt(c.req.query('limit') || '20');
 
     // Оплаченные промо-клипы артистов платформы (video promo-pipeline,
-    // migration 120): пока promoted_until в будущем — идут ПЕРЕД
+    // migration 122): пока promoted_until в будущем — идут ПЕРЕД
     // спарсенным чартом. Ошибка запроса (например, миграция ещё не
     // применена) не роняет секцию — остаётся чистый чарт.
     let promoted: any[] = [];
@@ -519,7 +519,7 @@ videosRoutes.post('/', requireAuth, async (c) => {
 // платные действия выставляют артисту payment-link (ЮКасса), фулфилмент
 // в webhook'е checkout-routes.tsx по metadata.type. Цены подтверждены
 // продуктом 2026-07-02 (совпадают с копирайтом в VideoModeration.tsx).
-// Требует migration 120 (promoted_until / pipeline / newsletter_*).
+// Требует migration 122 (promoted_until / pipeline / newsletter_*).
 // ═══════════════════════════════════════════════════════════════
 
 const VIDEO_PIPELINE_PROMOTE_PRICE = 10000;
@@ -765,7 +765,7 @@ videosRoutes.post('/exclusivePitch', requireAuth, requireAdmin, async (c) => {
 // ═══════════════════════════════════════════════════════════════
 // ADMIN MODERATION — реальная очередь модерации для VideoModeration.tsx
 // (до 2026-07-02 админка жила на локальном DataContext-демо и ничего
-// не писала на сервер). Требует migration 121 (moderation_*).
+// не писала на сервер). Требует migration 123 (moderation_*).
 // ═══════════════════════════════════════════════════════════════
 
 // GET /admin/list — все видимые видео для admin-очереди.

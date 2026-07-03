@@ -981,7 +981,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
 
   // ─── Fulfill video_promote — артист оплатил продвижение клипа в
   // секцию «Новые клипы» на главной на 14 дней (см. videos-routes.tsx
-  // /promoteToNovelty, migration 120). Idempotency: повторный webhook
+  // /promoteToNovelty, migration 122). Idempotency: повторный webhook
   // просто передвинет promoted_until от NOW() — вреда нет, paid_at
   // перезаписывается тем же значением сессии. ───
   if (session.metadata?.type === 'video_promote' && session.metadata?.videoId) {

@@ -1311,7 +1311,7 @@ in-line MANUAL DEPLOY STEPS. Auto-runner is stub.
 Цены подтверждены Никитой 2026-07-02 (совпадают с копирайтом UI).
 Source: `videos-routes.tsx` (хендлеры + константы цен), фулфилмент
 платных — webhook `checkout-routes.tsx` по `metadata.type`.
-Требует **migration 120** (`videos.promoted_until / pipeline /
+Требует **migration 122** (`videos.promoted_until / pipeline /
 newsletter_requested_at / newsletter_sent_at`) — применить ДО рестарта.
 
 - **POST `/api/videos/promoteToNovelty`** — 10 000 ₽. Артисту уходит
@@ -1334,7 +1334,7 @@ newsletter_requested_at / newsletter_sent_at`) — применить ДО ре�
 Загрузка видео артистом (добавлено следом, тот же день): `video-page.tsx`
 теперь POST'ит метаданные link-видео (YouTube/VK) на `POST /api/videos`
 → строка в `videos` с реальным uuid + email-алерт админу; `upsertVideo`
-(db.tsx) сохраняет `category`/`tags` (**migration 122**) и возвращает
+(db.tsx) сохраняет `category`/`tags` (**migration 124**) и возвращает
 вставленную строку (раньше ответ содержал фиктивный id, а
 category/tags молча терялись). Ограничения: file-источник НЕ грузит
 файл на сервер (модалка хранит только имя файла, прогресс
@@ -1357,7 +1357,7 @@ base64-превью из FileReader на сервер не шлётся (guard �
   как `{data}` при голом массиве → список был ВСЕГДА пуст, а
   approve/reject мутировали только локальный стейт.
 - Решение: `POST /api/news/admin/:id/moderate` (`approved`/`rejected`+
-  note, note обязательна при reject; migration 124 —
+  note, note обязательна при reject; migration 126 —
   `news.moderation_note/moderated_at/moderated_by` + индексы).
   Артисту уходит уведомление + SSE; причину отклонения он видит в
   news-page (`moderation_note` через GET /mine).
@@ -1384,7 +1384,7 @@ admin-only с времён, когда новости писали только 
 реальной — `GET /api/videos/admin/list` (все видимые видео + artist
 name + pipeline-состояние), решение `POST /api/videos/:id/moderate`
 (`approved`/`rejected`+note, note обязательна при reject; артисту
-уходит настоящее уведомление + SSE). Требует **migration 121**
+уходит настоящее уведомление + SSE). Требует **migration 125**
 (`moderation_status/note/moderated_at/moderated_by`; grandfather-шаг
 помечает все существующие видео `approved`). `VideoModeration.tsx`
 грузит этот список и шлёт решения на бэк; локальный `DataContext`

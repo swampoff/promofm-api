@@ -86,7 +86,7 @@ newsRoutes.get('/mine', requireAuth, async (c) => {
 // Продуктовое решение: одобренная новость артиста выходит (а) в общую
 // ленту news_public (копия через upsertNewsPublic, source='artist' —
 // GET '/' подхватывает её без изменений) и (б) на публичную страницу
-// артиста (GET /artist/:artistId ниже). Требует migration 124.
+// артиста (GET /artist/:artistId ниже). Требует migration 126.
 
 // Очередь модерации для админа (все статусы, фильтрует фронт).
 newsRoutes.get('/admin/artist-queue', requireAuth, requireAdmin, async (c) => {

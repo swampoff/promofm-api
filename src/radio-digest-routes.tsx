@@ -203,7 +203,7 @@ function weeklyTrackCard(t: WeeklyTrack, i: number): string {
 }
 
 // Промо-клипы из video promo-pipeline (videos-routes.tsx /addToNewsletter,
-// migration 120) — секция «Новые клипы для эфира» под треками.
+// migration 122) — секция «Новые клипы для эфира» под треками.
 interface WeeklyVideo {
   id: string;
   title: string | null;
