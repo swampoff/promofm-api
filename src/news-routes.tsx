@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { getDbClient } from './db-client.tsx';
 import * as db from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
@@ -35,6 +35,111 @@ newsRoutes.get("/public", async (c) => {
   const url = new URL(c.req.url);
   url.pathname = url.pathname.replace("/public", "");
   return c.redirect(url.pathname + url.search, 301);
+});
+
+// ── Admin-модерация пользовательских новостей (таблица news) ──
+//
+// Раньше админ-таб «Новости» вообще не имел бэкенда: approve/reject были
+// локальным setState + фейковыми тостами («автор получит уведомление» —
+// никто ничего не получал), а список грузился из news_public (уже
+// ОПУБЛИКОВАННЫЕ статьи) со status по умолчанию 'pending'.
+//
+// Реальный контур: пользователь создаёт новость POST /news → таблица news
+// (status='draft'/'pending'); админ видит их здесь; approve → status='approved'
+// + публикация в news_public (лента лендинга) + уведомление автору;
+// reject → status='rejected' + уведомление с причиной.
+
+newsRoutes.get('/admin/list', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `SELECT id, author_id, title, content, summary, category, status,
+              author_name, created_at, updated_at
+         FROM news
+        ORDER BY created_at DESC
+        LIMIT 500`
+    );
+    return c.json({
+      success: true,
+      data: r.rows.map((n: any) => ({
+        id: n.id,
+        title: n.title,
+        content: n.content,
+        preview: n.summary || (n.content || '').slice(0, 100),
+        category: n.category || 'general',
+        status: n.status === 'draft' ? 'pending' : (n.status || 'pending'),
+        author: n.author_name || '',
+        authorId: n.author_id,
+        createdAt: n.created_at,
+        updatedAt: n.updated_at,
+      })),
+    });
+  } catch (error) {
+    console.error('[news] admin/list error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+newsRoutes.post('/admin/:id/moderate', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const { action, note } = await c.req.json() as { action: string; note?: string };
+    if (action !== 'approve' && action !== 'reject') {
+      return c.json({ success: false, error: "action должен быть 'approve' или 'reject'" }, 400);
+    }
+    const newStatus = action === 'approve' ? 'approved' : 'rejected';
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `UPDATE news SET status = $2, updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, author_id, title, content, summary, category, author_name`,
+      [id, newStatus]
+    );
+    if (!r.rowCount) return c.json({ success: false, error: 'Новость не найдена' }, 404);
+    const row = r.rows[0];
+
+    // Approve → публикация в news_public (это и есть публичная лента лендинга).
+    if (action === 'approve') {
+      try {
+        await db.upsertNewsPublic({
+          id: row.id,
+          title: row.title,
+          excerpt: row.summary || (row.content || '').slice(0, 200),
+          content: row.content || '',
+          category: row.category || 'industry',
+          source: 'user',
+          authorName: row.author_name || null,
+          status: 'published',
+        } as any);
+      } catch (pubErr) {
+        console.error('[news] publish to news_public failed:', pubErr);
+        return c.json({ success: false, error: 'Статус обновлён, но публикация в ленту не удалась' }, 500);
+      }
+    }
+
+    // Уведомление автору — то, что фейковый тост только обещал.
+    if (row.author_id) {
+      try {
+        const notifId = `notif_news_${action}_${Date.now()}`;
+        await db.upsertNotification(row.author_id, notifId, {
+          id: notifId,
+          userId: row.author_id,
+          type: 'info',
+          title: action === 'approve' ? 'Новость опубликована' : 'Новость отклонена',
+          message: action === 'approve'
+            ? `«${row.title}» одобрена и опубликована в ленте.`
+            : `«${row.title}» отклонена.${note ? ` Причина: ${note}` : ''}`,
+          read: false,
+          createdAt: new Date().toISOString(),
+        });
+      } catch { /* уведомление best-effort */ }
+    }
+
+    return c.json({ success: true, id, status: newStatus });
+  } catch (error) {
+    console.error('[news] moderate error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
 });
 
 newsRoutes.get('/', async (c) => {
