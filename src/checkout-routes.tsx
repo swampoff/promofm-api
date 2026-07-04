@@ -1888,46 +1888,21 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       }
     }
 
-    // video_publish / concert_publish — оплата размещения клипа/концерта
-    // (publish_orders). Webhook (стр. ~1207) помечал order 'paid' БЕЗ сверки
-    // суммы, а create-session НЕ имел amount-gate → за 1₽ (MIN_PAYMENT)
-    // проходила публикация за 10000/19990 (видео) или 5000/9990 (концерт).
-    // Канон-цена НЕ нужна: она уже серверная в publish_orders.price
-    // (PRICING + resolvePriceForUser с учётом подписки) — как у track_publish.
-    //
-    // Guard'ы (паттерн track_publish):
-    //   - metadata.orderId обязателен
-    //   - order существует
-    //   - order.userId === плательщик (IDOR: нельзя оплатить/опубликовать
-    //     ЧУЖОЙ клип; для label-flow userId = label, он же владелец/плательщик)
-    //   - amount === order.price ± 0.01 (anti-tampering)
-    if (type === 'purchase' && (metadata?.type === 'video_publish' || metadata?.type === 'concert_publish')) {
-      const orderId = metadata?.orderId;
-      if (!orderId) {
-        return c.json({ success: false, error: 'metadata.orderId обязателен для публикации' }, 400);
-      }
-      try {
-        const { getPublishOrder } = await import('./db.tsx');
-        const ord = await getPublishOrder(String(orderId));
-        if (!ord) {
-          return c.json({ success: false, error: 'Заказ публикации не найден' }, 404);
-        }
-        if (String(ord.userId) !== String(userId)) {
-          log.warn({ userId, orderId, ownerId: ord.userId }, 'publish_order_pay_unauthorized');
-          return c.json({ success: false, error: 'Нельзя оплатить чужую публикацию' }, 403);
-        }
-        const expected = Number(ord.price) || 0;
-        if (!(expected > 0)) {
-          return c.json({ success: false, error: 'Цена публикации не определена (возможно, бесплатный тариф — оплата не требуется)' }, 400);
-        }
-        if (Math.abs(amount - expected) > 0.01) {
-          log.warn({ userId, orderId, expected, received: amount }, 'publish_order_amount_tampering_blocked');
-          return c.json({ success: false, error: 'Сумма не соответствует цене публикации' }, 400);
-        }
-      } catch (err) {
-        log.error({ err, orderId }, 'publish_order_validation_error');
-        return c.json({ success: false, error: 'Не удалось проверить заказ публикации' }, 500);
-      }
+    // video_publish / concert_publish (+ несуществующие пока video_promote /
+    // video_exclusive) — платёжная сессия этих типов рождается ТОЛЬКО
+    // сервером в publish-routes.tsx `PUT /orders/:id/pay` (amount=order.price,
+    // серверная цена из PRICING; бесплатный тариф оплату вообще минует).
+    // Легальный трафик НИКОГДА не шлёт эти type'ы в клиентский
+    // /checkout/create-session → любой такой вызов = крафт-байпас (за 1₽
+    // опубликовать клип/концерт за 10000/19990/5000/9990). Отклоняем весь
+    // класс: цену/владельца проверять не нужно — этих сессий тут быть не должно.
+    // (Проверено: publish-routes.tsx:664 amount=order.price, :644 free→skip.)
+    if (
+      type === 'purchase' &&
+      ['video_publish', 'concert_publish', 'video_promote', 'video_exclusive'].includes(metadata?.type)
+    ) {
+      log.warn({ userId, metadataType: metadata?.type, amount }, 'publish_type_via_create_session_blocked');
+      return c.json({ success: false, error: 'Оплата этого типа создаётся сервером (через кабинет публикаций), не напрямую' }, 400);
     }
 
     // collab_accept — артист принимает collab-оффер от продюсера с
