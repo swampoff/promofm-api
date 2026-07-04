@@ -21,7 +21,7 @@
 
 import { Hono } from 'hono';
 import crypto from 'crypto';
-import { existsSync, mkdirSync, writeFileSync, statSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, statSync, unlinkSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { getSystemConfig, upsertSystemConfig } from './db.tsx';
@@ -262,6 +262,178 @@ app.get('/admin/connected-devices', requireAuth, requireAdmin, async (c) => {
     return c.json({ success: true, devices });
   } catch (error: any) {
     console.error('GET /venue-apk/admin/connected-devices:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// ПЕРСОНАЛЬНЫЙ APK НА ЗАВЕДЕНИЕ (migration 124: venue_apk_builds)
+//
+// Заведение заказывает сборку из кабинета → админ собирает и грузит
+// персональный файл конкретному заведению → заведение качает ТОЛЬКО свой
+// (авторизованный /my/download, не открытая статика). Отдельно от общего
+// APK (system_config) выше — тот остаётся как есть.
+// ═══════════════════════════════════════════════════════════════════
+
+const VENUE_APK_DIR = '/opt/promofm-api/uploads/venue-apk';
+const ALLOWED_APK_EXT = new Set(['apk']);
+
+function mapBuild(r: any) {
+  return {
+    id: r.id,
+    venueId: r.venue_id,
+    status: r.status,
+    fileName: r.file_name || null,
+    fileBytes: r.file_bytes != null ? Number(r.file_bytes) : null,
+    version: r.version || null,
+    notes: r.notes || null,
+    requestedAt: r.requested_at,
+    uploadedAt: r.uploaded_at || null,
+    // downloadUrl — авторизованный эндпоинт, не прямой путь к файлу.
+    downloadUrl: r.status === 'ready' ? '/api/venue-apk/my/download' : null,
+  };
+}
+
+// ── POST /request — заведение заказывает персональный APK ──
+app.post('/request', requireAuth, async (c) => {
+  try {
+    const venueId = c.get('userId') as string;
+    const { pool } = await import('./db-client.tsx');
+    // Одна активная сборка на заведение: если уже есть requested/building/ready
+    // — возвращаем её; иначе создаём заявку. Пере-заказ (rebuild) допускаем,
+    // только если предыдущая failed.
+    const existing = await pool.query(
+      `SELECT * FROM venue_apk_builds
+        WHERE venue_id = $1 AND status IN ('requested','building','ready')
+        ORDER BY requested_at DESC LIMIT 1`,
+      [venueId]
+    );
+    if (existing.rowCount) {
+      return c.json({ success: true, build: mapBuild(existing.rows[0]), already: true });
+    }
+    const ins = await pool.query(
+      `INSERT INTO venue_apk_builds (venue_id, status) VALUES ($1, 'requested') RETURNING *`,
+      [venueId]
+    );
+    return c.json({ success: true, build: mapBuild(ins.rows[0]) });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── GET /my — статус персонального APK заведения ──
+app.get('/my', requireAuth, async (c) => {
+  try {
+    const venueId = c.get('userId') as string;
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `SELECT * FROM venue_apk_builds WHERE venue_id = $1 ORDER BY requested_at DESC LIMIT 1`,
+      [venueId]
+    );
+    return c.json({ success: true, build: r.rowCount ? mapBuild(r.rows[0]) : null });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── GET /my/download — авторизованное скачивание СВОЕГО APK ──
+app.get('/my/download', requireAuth, async (c) => {
+  try {
+    const venueId = c.get('userId') as string;
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `SELECT file_name FROM venue_apk_builds
+        WHERE venue_id = $1 AND status = 'ready' AND file_name IS NOT NULL
+        ORDER BY uploaded_at DESC NULLS LAST LIMIT 1`,
+      [venueId]
+    );
+    if (!r.rowCount) return c.json({ success: false, error: 'APK ещё не готов' }, 404);
+    const fileName = String(r.rows[0].file_name);
+    // Path-traversal guard: имя из БД, но проверяем ещё раз.
+    if (fileName.includes('..') || fileName.includes('/')) return c.json({ success: false, error: 'bad file' }, 400);
+    const filePath = join(VENUE_APK_DIR, venueId, fileName);
+    if (!existsSync(filePath)) return c.json({ success: false, error: 'Файл отсутствует' }, 404);
+    const buf = readFileSync(filePath);
+    return new Response(buf, {
+      headers: {
+        'Content-Type': 'application/vnd.android.package-archive',
+        'Content-Disposition': `attachment; filename="${fileName}"`,
+        'Cache-Control': 'private, no-store',
+      },
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── GET /admin/builds — список всех заявок/сборок (admin) ──
+app.get('/admin/builds', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `SELECT b.*, COALESCE(NULLIF(u.full_name,''), u.email, b.venue_id) AS venue_name
+         FROM venue_apk_builds b
+         LEFT JOIN users u ON u.id::text = b.venue_id
+        ORDER BY b.requested_at DESC LIMIT 500`
+    );
+    return c.json({ success: true, builds: r.rows.map((row: any) => ({ ...mapBuild(row), venueName: row.venue_name })) });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── POST /admin/:venueId/upload — админ грузит персональный APK заведению ──
+app.post('/admin/:venueId/upload', requireAuth, requireAdmin, async (c) => {
+  try {
+    const venueId = c.req.param('venueId');
+    const body = await c.req.parseBody();
+    const file = body.file as File;
+    const version = body.version ? String(body.version).trim() : null;
+    if (!file) return c.json({ success: false, error: 'file required' }, 400);
+    if (file.size === 0) return c.json({ success: false, error: 'file is empty' }, 400);
+    if (file.size > MAX_APK_BYTES) return c.json({ success: false, error: `file too large (max ${MAX_APK_BYTES / 1024 / 1024}MB)` }, 413);
+    const ext = (file.name.split('.').pop() || 'apk').toLowerCase();
+    if (!ALLOWED_APK_EXT.has(ext)) return c.json({ success: false, error: 'only .apk allowed' }, 400);
+
+    const buf = Buffer.from(await file.arrayBuffer());
+    // ZIP-magic (APK = zip) sniff — как в общем /admin/upload.
+    if (!(buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04)) {
+      return c.json({ success: false, error: 'not a valid APK (zip magic)' }, 400);
+    }
+    const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+    const dir = join(VENUE_APK_DIR, venueId);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const fileName = `venue-radio-${venueId}.apk`;
+    writeFileSync(join(dir, fileName), buf);
+
+    const { pool } = await import('./db-client.tsx');
+    // Обновляем последнюю заявку заведения в ready, либо создаём готовую строку.
+    const upd = await pool.query(
+      `UPDATE venue_apk_builds
+          SET status='ready', file_name=$2, file_bytes=$3, sha256=$4, version=$5,
+              uploaded_at=NOW(), updated_at=NOW()
+        WHERE id = (SELECT id FROM venue_apk_builds WHERE venue_id=$1
+                     ORDER BY requested_at DESC LIMIT 1)
+        RETURNING *`,
+      [venueId, fileName, buf.length, sha256, version]
+    );
+    let build;
+    if (upd.rowCount) {
+      build = upd.rows[0];
+    } else {
+      const ins = await pool.query(
+        `INSERT INTO venue_apk_builds (venue_id, status, file_name, file_bytes, sha256, version, uploaded_at)
+         VALUES ($1, 'ready', $2, $3, $4, $5, NOW()) RETURNING *`,
+        [venueId, fileName, buf.length, sha256, version]
+      );
+      build = ins.rows[0];
+    }
+    try {
+      const { emitSSE } = await import('./sse-routes.tsx');
+      emitSSE(venueId, { type: 'venue_apk_ready', data: { title: 'Ваше приложение готово', message: 'Персональный APK радио доступен для скачивания в кабинете.' } });
+    } catch {}
+    return c.json({ success: true, build: mapBuild(build) });
+  } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
