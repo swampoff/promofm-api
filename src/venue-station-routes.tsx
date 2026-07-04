@@ -94,6 +94,7 @@ function rowToRequest(r: any) {
     takenAt: r.taken_at,
     provisionedAt: r.provisioned_at,
     liveAt: r.live_at,
+    monthlyPrice: r.monthly_price != null ? Number(r.monthly_price) : 0,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -526,6 +527,10 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
     const bearerTokenId = body.bearerTokenId ? String(body.bearerTokenId).trim() : null;
     const locationId   = body.locationId   ? String(body.locationId).trim()   : null;
     const geminiConfig = body.geminiConfig || null;
+    // Цена абонемента по типу эфира — админ задаёт при провижининге
+    // (migration 123). 0 допустимо (проставит позже), триал стартует
+    // независимо от цены.
+    const monthlyPrice = Number(body.monthlyPrice) || 0;
 
     if (!streamUrl) {
       return c.json({ success: false, error: 'streamUrl is required' }, 400);
@@ -564,11 +569,37 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
       `UPDATE venue_station_requests
           SET status         = 'provisioned',
               provisioned_at = NOW(),
+              monthly_price  = $2,
               updated_at     = NOW()
         WHERE id = $1
         RETURNING *`,
-      [req.id]
+      [req.id, monthlyPrice]
     );
+
+    // ── 14-дневный бесплатный триал стартует с момента провижининга ──
+    // Пишем venue_radio_subscriptions строкой status='active' (без нового
+    // enum-значения → без риска CHECK), plan_id='trial', +14 дней. stream-token
+    // пускает active+период → эфир играет сразу; по истечении доступ гаснет
+    // по дате, дальше нужен платный абонемент. Идемпотентно: только если у
+    // заведения ещё нет живой подписки (active с непросроченным периодом).
+    try {
+      await pool.query(
+        `INSERT INTO venue_radio_subscriptions
+           (venue_id, plan_id, status, current_period_start, current_period_end, created_at, updated_at)
+         SELECT $1, 'trial', 'active', NOW(), NOW() + INTERVAL '14 days', NOW(), NOW()
+          WHERE NOT EXISTS (
+            SELECT 1 FROM venue_radio_subscriptions
+             WHERE venue_id = $1
+               AND status = 'active'
+               AND (current_period_end IS NULL OR current_period_end > NOW())
+          )`,
+        [req.venue_id]
+      );
+    } catch (trialErr: any) {
+      // Триал best-effort: не валим провижининг, если подписочная таблица
+      // недоступна — админ соберёт станцию, триал можно завести отдельно.
+      console.error('[venue-station] trial start failed:', trialErr?.message);
+    }
 
     // Notify venue with the pairing code — this is the critical
     // moment in the funnel: admin's done, venue sees the code in

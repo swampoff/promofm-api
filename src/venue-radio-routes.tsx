@@ -90,15 +90,38 @@ app.post('/subscribe', requireAuth, async (c) => {
     const { planId, returnUrl } = await c.req.json();
     if (!planId) return c.json({ success: false, error: 'planId required' }, 400);
 
-    const planRes = await pool.query(
-      `SELECT id, name, price_month FROM venue_radio_plans WHERE id = $1 AND is_active = true`,
-      [planId]
-    );
-    if (planRes.rows.length === 0) {
-      return c.json({ success: false, error: 'План не найден' }, 404);
+    // Два источника цены:
+    //  • planId='efir' — цена по типу эфира заведения (monthly_price,
+    //    проставлена админом при провижининге, migration 123). Это основной
+    //    путь по решению владельца «цена зависит от того, какой эфир».
+    //  • иначе — legacy generic-планы venue_radio_plans (basic/pro/business).
+    let planName: string;
+    let price: number;
+    if (planId === 'efir') {
+      const st = await pool.query(
+        `SELECT monthly_price FROM venue_station_requests
+          WHERE venue_id = $1 AND monthly_price > 0
+          ORDER BY provisioned_at DESC NULLS LAST, updated_at DESC
+          LIMIT 1`,
+        [venueId]
+      );
+      const mp = st.rows[0] ? Number(st.rows[0].monthly_price) : 0;
+      if (!(mp > 0)) {
+        return c.json({ success: false, error: 'Цена эфира ещё не назначена администратором' }, 409);
+      }
+      planName = 'Абонемент ПРОМО.ЭИР';
+      price = mp;
+    } else {
+      const planRes = await pool.query(
+        `SELECT id, name, price_month FROM venue_radio_plans WHERE id = $1 AND is_active = true`,
+        [planId]
+      );
+      if (planRes.rows.length === 0) {
+        return c.json({ success: false, error: 'План не найден' }, 404);
+      }
+      planName = planRes.rows[0].name;
+      price = parseFloat(planRes.rows[0].price_month);
     }
-    const plan = planRes.rows[0];
-    const price = parseFloat(plan.price_month);
 
     const safeReturnUrl = returnUrl || 'https://promo-music.ru/venue/promo-air';
     try {
@@ -126,7 +149,7 @@ app.post('/subscribe', requireAuth, async (c) => {
     const result = await gw.createPayment({
       amount: price,
       currency: 'RUB',
-      description: `Подписка ПРОМО.ЭИР: ${plan.name}`,
+      description: `Подписка ПРОМО.ЭИР: ${planName}`,
       gateway: 'yookassa',
       userId: venueId,
       orderId,
@@ -150,7 +173,7 @@ app.post('/subscribe', requireAuth, async (c) => {
       currency: 'RUB',
       status: 'pending',
       type: 'subscription',
-      description: `Подписка ПРОМО.ЭИР: ${plan.name}`,
+      description: `Подписка ПРОМО.ЭИР: ${planName}`,
       metadata: {
         type: 'venue_radio_subscription',
         subscriptionId,
