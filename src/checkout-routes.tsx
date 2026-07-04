@@ -351,6 +351,57 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   }
 
 
+  // ─── Fulfill venue_radio_subscription (type='subscription') ───
+  //
+  // /subscribe (venue-radio-routes) создаёт сессию с type='subscription' и
+  // metadata.type='venue_radio_subscription' (БЕЗ itemType). Раньше активация
+  // жила под guard'ом purchase+itemType (см. ниже) и была НЕДОСТИЖИМА →
+  // заведение платило, подписка навсегда pending_payment, stream-token 403:
+  // деньги взяты, доступ не выдан. Теперь активируем на subscription-пути.
+  // Идемпотентность — orderId-keyed (COALESCE(payment_order_id,'') <> $1):
+  // retry с тем же orderId апдейтит 0 строк, реальное продление (новый
+  // orderId) продлевает от max(текущий конец, сейчас).
+  if (
+    session.type === 'subscription' &&
+    session.metadata?.type === 'venue_radio_subscription' &&
+    session.metadata?.subscriptionId
+  ) {
+    try {
+      const { pool: vrPool } = await import('./db-client.tsx');
+      const subId = String(session.metadata.subscriptionId);
+      const r = await vrPool.query(
+        `UPDATE venue_radio_subscriptions
+            SET status = 'active',
+                current_period_start = COALESCE(current_period_start, NOW()),
+                current_period_end = GREATEST(COALESCE(current_period_end, NOW()), NOW()) + INTERVAL '30 days',
+                payment_order_id = $1, payment_gateway = $2,
+                auto_renew = true, updated_at = NOW()
+          WHERE id = $3
+            AND COALESCE(payment_order_id, '') <> $1
+          RETURNING venue_id, plan_id, current_period_end`,
+        [session.orderId, session.gateway, subId]
+      );
+      if (r.rows.length > 0) {
+        log.info({ subscriptionId: subId, venueId: r.rows[0].venue_id, planId: r.rows[0].plan_id, until: r.rows[0].current_period_end, amount: session.amount }, 'venue_radio_subscription_activated');
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(r.rows[0].venue_id, {
+            type: 'venue_radio_activated',
+            data: {
+              title: 'Подписка ПРОМО.ЭИР активна',
+              message: `Доступ к эфиру до ${new Date(r.rows[0].current_period_end).toLocaleDateString('ru-RU')}`,
+              subscriptionId: subId,
+              planId: r.rows[0].plan_id,
+            },
+          });
+        } catch {}
+      }
+    } catch (err) {
+      log.error({ err, subscriptionId: session.metadata?.subscriptionId, orderId: session.orderId }, 'venue_radio_subscription_activation_error');
+      throw err;
+    }
+  }
+
   // ─── Fulfill marketplace purchase ───
   if (session.type === 'purchase' && session.metadata?.itemType) {
     try {
@@ -540,54 +591,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         }
       }
 
-      // ─── Fulfill venue_radio_subscription ───
-      if (itemType === 'venue_radio_subscription' && session.metadata.subscriptionId) {
-        const { pool: vrPool } = await import('./db-client.tsx');
-        const subId = session.metadata.subscriptionId;
-        // Activate for 30 days; extend if already active.
-        //
-        // Idempotency guard: `COALESCE(payment_order_id,'') <> $1`. The outer
-        // claimPaymentSessionForProcessing already dedups naive re-delivery,
-        // but the partial-failure → revertPaymentSessionToPending → gateway
-        // retry path can re-enter this block. Without the guard, every
-        // re-entry would add ANOTHER 30 days (the `+ INTERVAL '30 days'` is an
-        // increment, not an absolute set) — a free month per replay. With it,
-        // a retry carrying the SAME orderId UPDATEs 0 rows; a genuine renewal
-        // (new orderId) still extends. Mirrors the orderId-keyed idempotency
-        // used by the beat/digital/radio handlers above.
-        const r = await vrPool.query(
-          `UPDATE venue_radio_subscriptions
-           SET status = 'active',
-               current_period_start = COALESCE(current_period_start, NOW()),
-               current_period_end = COALESCE(current_period_end, NOW()) + INTERVAL '30 days',
-               payment_order_id = $1, payment_gateway = $2,
-               auto_renew = true, updated_at = NOW()
-           WHERE id = $3
-             AND COALESCE(payment_order_id, '') <> $1
-           RETURNING venue_id, plan_id, current_period_end`,
-          [session.orderId, session.gateway, subId]
-        );
-        if (r.rows.length > 0) {
-          log.info({
-            subscriptionId: subId, venueId: r.rows[0].venue_id, planId: r.rows[0].plan_id,
-            until: r.rows[0].current_period_end, amount: session.amount,
-          }, 'venue_radio_subscription_activated');
-
-          // SSE notify venue
-          try {
-            const { emitSSE } = await import('./sse-routes.tsx');
-            emitSSE(r.rows[0].venue_id, {
-              type: 'venue_radio_activated',
-              data: {
-                title: 'Подписка ПРОМО.ЭИР активна',
-                message: `Доступ к эфиру до ${new Date(r.rows[0].current_period_end).toLocaleDateString('ru-RU')}`,
-                subscriptionId: subId,
-                planId: r.rows[0].plan_id,
-              },
-            });
-          } catch {}
-        }
-      }
+      // venue_radio_subscription активируется на subscription-пути выше
+      // (type='subscription'), НЕ здесь — этот purchase+itemType guard для
+      // неё никогда не срабатывал (сессия создаётся с type='subscription').
 
 
       if (itemType === 'booking_payment' && session.metadata.bookingId) {
