@@ -11,6 +11,32 @@ import { pool } from './db-client.tsx';
 
 const app = new Hono();
 
+// ── Серверный каталог цен (source of truth) ──
+// Раньше цену присылал клиент, а amount-gate чекаута сверял оплату с той же
+// клиентской цифрой (ord.price) → self-referential: заказ за 1₽ на джингл в
+// 10000₽ проходил. Теперь цену считает сервер, body.price игнорируется.
+// Два входа с разными схемами цены:
+//   • jingle-order-modal — по именованному стилю (styleTier из 5 тарифов);
+//   • radio-brand inline  — по (contentType, urgency: standard|urgent).
+const CONTENT_STYLE_TIER_PRICES: Record<string, number> = {
+  energetic: 2000, professional: 3000, friendly: 2500, luxury: 5000, custom: 10000,
+};
+const CONTENT_TYPE_PRICES: Record<string, { standard: number; urgent: number }> = {
+  jingles:       { standard: 1500, urgent: 2500 },
+  ads:           { standard: 2000, urgent: 3000 },
+  announcements: { standard: 2500, urgent: 3500 },
+};
+// styleTier (модалка) имеет приоритет; иначе (contentType, urgent) из radio-brand.
+// Возвращает null, если спецификацию нельзя оценить (→ 400, а не молчаливый 0).
+function computeContentOrderPrice(contentType: string, styleTier?: string, urgent?: boolean): number | null {
+  if (styleTier && Object.prototype.hasOwnProperty.call(CONTENT_STYLE_TIER_PRICES, styleTier)) {
+    return CONTENT_STYLE_TIER_PRICES[styleTier];
+  }
+  const t = CONTENT_TYPE_PRICES[contentType];
+  if (!t) return null;
+  return urgent ? t.urgent : t.standard;
+}
+
 interface ContentOrder {
   id: string;
   venueId: string;
@@ -65,7 +91,7 @@ function rowToOrder(r: any): ContentOrder {
 app.post('/orders', requireAuth, profileLimiter, async (c) => {
   try {
     const body = await c.req.json();
-    const { venueName, contentType, text, style, duration, voiceType, price } = body;
+    const { venueName, contentType, text, style, duration, voiceType } = body;
     const userId = c.get('userId' as never) as string | undefined;
     const userRole = c.get('userRole' as never) as string | undefined;
 
@@ -75,7 +101,8 @@ app.post('/orders', requireAuth, profileLimiter, async (c) => {
     const isAdmin = userRole === 'admin' || userRole === 'superadmin';
     const venueId = isAdmin && body.venueId ? String(body.venueId) : userId;
 
-    if (!venueId || !venueName || !contentType || !text || !style || !voiceType || !price) {
+    // price НЕ из body — только required-поля спецификации.
+    if (!venueId || !venueName || !contentType || !text || !style || !voiceType) {
       return c.json({ success: false, error: 'Missing required fields' }, 400);
     }
     if (!['jingles', 'ads', 'announcements'].includes(contentType)) {
@@ -83,6 +110,14 @@ app.post('/orders', requireAuth, profileLimiter, async (c) => {
     }
     if (text.length < 10 || text.length > 300) {
       return c.json({ success: false, error: 'Text must be between 10 and 300 characters' }, 400);
+    }
+
+    // Цена — только серверная (см. computeContentOrderPrice). body.price
+    // намеренно игнорируется; клиент присылает styleTier ИЛИ urgent как
+    // селектор тарифа, а не саму сумму.
+    const price = computeContentOrderPrice(contentType, body.styleTier, !!body.urgent);
+    if (price === null || !(price > 0)) {
+      return c.json({ success: false, error: 'Не удалось определить цену заказа (укажите styleTier или срочность)' }, 400);
     }
 
     const orderId = `order_${crypto.randomUUID()}`;
