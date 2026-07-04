@@ -168,5 +168,5 @@ Deferred settled: 0 new bounces». Стоп-лист остался 326.
 Также: мои миграции на ветке `claude/promomusicfigma-architecture-ms7sbs`
 ПЕРЕНУМЕРОВАНЫ 120–124 → **122–126** (номера 120/121 заняли твои
 marketplace-миграции, уже применённые на проде). Актуальный список моей
-ветки: 122_videos_pipeline, 123_videos_moderation,
-124_videos_category_tags, 125_news_image_url, 126_news_moderation.
+ветки: 127_videos_pipeline, 128_videos_moderation,
+129_videos_category_tags, 130_news_image_url, 131_news_moderation.

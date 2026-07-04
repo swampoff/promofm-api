@@ -24,3 +24,15 @@ UPDATE videos
 CREATE INDEX IF NOT EXISTS idx_videos_moderation_pending
   ON videos (created_at)
   WHERE moderation_status = 'pending';
+
+-- ── Прод-реконсиляция (2026-07-04, laptop): живая схема опережает миграцию ──
+-- videos на проде УЖЕ имеет обе колонки из более раннего состояния:
+--   moderation_status TEXT DEFAULT 'draft' (НЕ 'pending') → 404 approved + 20 draft, 0 pending
+--   moderated_by      UUID                 (НЕ TEXT)
+-- Поэтому ADD COLUMN IF NOT EXISTS выше = no-op (тип/дефолт не меняет), а
+-- UPDATE ... WHERE ='pending' захватывает 0 строк. Доводим до ветки руками:
+ALTER TABLE videos ALTER COLUMN moderated_by TYPE TEXT USING moderated_by::text;
+ALTER TABLE videos ALTER COLUMN moderation_status SET DEFAULT 'pending';
+-- 404 approved — остаются approved (в эфире). 20 draft — остаются draft
+-- (не отправлены; решение по ним за владельцем — не заливаем ими очередь).
+-- Новые загрузки идут в DEFAULT 'pending' → попадают в admin-очередь.
