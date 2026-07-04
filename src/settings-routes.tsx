@@ -251,4 +251,37 @@ app.delete("/user/:userId/payment-methods/:methodId", requireAuth, requireOwner(
   }
 });
 
+// Save onboarding wizard answers.
+//
+// userId берём из JWT (cookie), НЕ из URL: OnboardingWizard.tsx до фикса
+// слал /user/unknown/onboarding (localStorage 'userId' после B2 никто не
+// пишет), а роута не существовало вовсе — ответы молча терялись
+// (contract-audit 2026-07-02). Кладём в user_settings.data.onboarding.
+app.post("/onboarding", requireAuth, async (c) => {
+  try {
+    const userId = String(c.get('userId') || '');
+    if (!userId) {
+      return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'No user in session');
+    }
+    const body = await c.req.json().catch(() => ({}));
+    // userId из тела не доверяем — источник истины JWT.
+    const { userId: _ignored, ...answers } = body || {};
+
+    const current = (await db.getUserSettings(userId)) || {};
+    const updated = {
+      ...current,
+      onboarding: {
+        ...(current.onboarding || {}),
+        ...answers,
+        completedAt: new Date().toISOString(),
+      },
+    };
+    await db.upsertUserSettings(userId, updated);
+    return c.json({ success: true });
+  } catch (error) {
+    console.error("Error saving onboarding:", error);
+    return apiError(c, 'INTERNAL_ERROR');
+  }
+});
+
 export default app;

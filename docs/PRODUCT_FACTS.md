@@ -1281,6 +1281,124 @@ in-line MANUAL DEPLOY STEPS. Auto-runner is stub.
 
 ---
 
+## DM-жалобы, onboarding, admin-блокировка (contract-audit 2026-07-02)
+
+Полная сверка фронт↔бэк контрактов нашла 8 разрывов «фронт зовёт —
+роута нет». Три закрыты новыми endpoint'ами (остальные — правки URL
+на фронте, см. Promomusicfigma тот же день):
+
+- **POST `/server/api/messaging/reports`** — юзер жалуется на
+  собеседника из messages-page. Пишет в `dm_reports` (migration 022),
+  category ∈ spam|abuse|impersonation|other, анти-флуд 20/24h на
+  reporter'а. Source: `messaging-routes.tsx` (рядом с GET /admin/reports).
+- **POST `/server/api/messaging/admin/reports/:id/resolve`** — админ
+  закрывает жалобу: status → reviewed|rejected|actioned + resolution,
+  проставляет reviewer_id/reviewed_at. До этого AdminDmReports.tsx мог
+  только читать очередь.
+- **POST `/server/api/settings/onboarding`** — ответы onboarding-визарда
+  сохраняются в `user_settings.data.onboarding` (userId из JWT-cookie,
+  НЕ из URL/тела). Раньше визард слал в несуществующий
+  `/settings/user/unknown/onboarding` и данные молча терялись.
+- **POST `/server/api/landing-data/admin/users/:userId/status`** —
+  блокировка/разблокировка юзера из админки. UI-статус 'blocked' ↔
+  enum-значение `'banned'::user_status` (login-гейт `db-client.tsx:641`).
+  До фикса кнопка «заблокировать» в UsersManagement только оптимистично
+  перекрашивала UI — запрос уходил в 404.
+
+## Video promo-pipeline (VideoModeration, добавлен 2026-07-02)
+
+**Решение владельца 2026-07-03: отдельный видео-тракт (таблица `videos`
++ раздел «Видео» у артиста + таб «Видео» в админ-модерации) —
+КАНОНИЧЕН.** Параллельное «схлопывание в publish-флоу» от 2026-07-02
+(редирект `/artist/video → /artist/publish`, убранный таб) отменено и
+откачено — оно ставилось, когда тракт был демкой. Будущим сессиям:
+НЕ схлопывать видео в publish повторно.
+
+Три admin-действия над клипом из `admin/pages/VideoModeration.tsx`.
+Цены подтверждены Никитой 2026-07-02 (совпадают с копирайтом UI).
+Source: `videos-routes.tsx` (хендлеры + константы цен), фулфилмент
+платных — webhook `checkout-routes.tsx` по `metadata.type`.
+Требует **migration 122** (`videos.promoted_until / pipeline /
+newsletter_requested_at / newsletter_sent_at`) — применить ДО рестарта.
+
+- **POST `/api/videos/promoteToNovelty`** — 10 000 ₽. Артисту уходит
+  payment-link (уведомление + SSE); после оплаты webhook
+  (`video_promote`) ставит `promoted_until = NOW()+14d`. GET
+  `/api/videos/newClips` подмешивает такие клипы ПЕРЕД спарсенным
+  чартом (`source: 'promo_music'`) — секция «Новые клипы» на главной.
+- **POST `/api/videos/addToNewsletter`** — бесплатно, мгновенной
+  отправки НЕТ: клип ставится в очередь понедельничного weekly-дайджеста
+  (`radio-digest-routes.tsx /run-weekly`, секция «Новые клипы для
+  эфира», курсор `newsletter_requested_at → newsletter_sent_at`,
+  штамп только при успешной отправке SMTP).
+- **POST `/api/videos/exclusivePitch`** — 15 000 ₽. Payment-link
+  артисту; после оплаты webhook (`video_exclusive`) шлёт именную
+  рассылку по той же базе, что weekly-дайджест (`getWeeklyRecipients`:
+  radio-юзеры + `radio_partner_contacts` минус `curated_2026` и
+  отписки). `editors_count` в ответе = размер этой базы.
+  Idempotency: `pipeline.exclusive.paid_at` — повторный webhook skip.
+
+Загрузка видео артистом (добавлено следом, тот же день): `video-page.tsx`
+теперь POST'ит метаданные link-видео (YouTube/VK) на `POST /api/videos`
+→ строка в `videos` с реальным uuid + email-алерт админу; `upsertVideo`
+(db.tsx) сохраняет `category`/`tags` (**migration 124**) и возвращает
+вставленную строку (раньше ответ содержал фиктивный id, а
+category/tags молча терялись). Ограничения: file-источник НЕ грузит
+файл на сервер (модалка хранит только имя файла, прогресс
+симулированный) — такие видео и черновики остаются локальными;
+base64-превью из FileReader на сервер не шлётся (guard и на фронте,
+и в upsertVideo: >2 КБ URL → '').
+
+Новости артиста (добавлено следом, тот же день): `news-page.tsx`
+раньше жила целиком на localStorage (DataContext) — новости артистов
+не существовали для сервера, хотя обложка честно улетала в
+`/storage/upload`. Теперь: создание/публикация черновика → `POST
+/api/news` (upsert в таблицу `news` c owner-guard'ом — чужой id → 403),
+свой список → новый `GET /api/news/mine`, удаление → новый `DELETE
+/api/news/:id` (только своё). Обложка — `news.image_url` (**migration
+123**), `data:`-URL отбрасываются с обеих сторон. Модерация артист-новостей (добавлено следом, тот же день; продуктовое
+решение Никиты: одобренные — на страницу артиста И в общую ленту):
+- Очередь: `GET /api/news/admin/artist-queue` (таблица `news` + имя
+  артиста из `users`). `NewsModeration.tsx` переведена на неё — раньше
+  страница читала `GET /api/news` (лента `news_public`) и парсила ответ
+  как `{data}` при голом массиве → список был ВСЕГДА пуст, а
+  approve/reject мутировали только локальный стейт.
+- Решение: `POST /api/news/admin/:id/moderate` (`approved`/`rejected`+
+  note, note обязательна при reject; migration 126 —
+  `news.moderation_note/moderated_at/moderated_by` + индексы).
+  Артисту уходит уведомление + SSE; причину отклонения он видит в
+  news-page (`moderation_note` через GET /mine).
+- **approve → общая лента:** строка копируется в `news_public` через
+  существующий `upsertNewsPublic` (`source='artist'`,
+  `status='published'`) — `GET /api/news` подхватывает её как обычную
+  статью, тот же id (детальная `GET /api/news/:id` работает).
+- **Страница артиста:** `GET /api/news/artist/:artistId` (public) —
+  approved-новости; принимает и `users.id`, и `artist_profiles.id`.
+  `ArtistPublicProfile.tsx` рендерит секцию «Новости артиста» (карточки,
+  секция скрыта при нуле новостей).
+
+Обложки/превью (fix 2026-07-02, тот же день): оба пути обложки новости
+(кнопка И drag&drop) идут через общий `processCoverFile` →
+`/storage/upload` (bucket `news-images`); превью видео в
+`video-upload-modal.tsx` тоже грузится в storage (bucket
+`video-thumbnails`) вместо FileReader-base64. Bucket `news-images`
+открыт артистам в `storage-routes.tsx` `ARTIST_WRITABLE_BUCKETS` —
+до этого артистский аплоад обложки новости получал 403 (bucket был
+admin-only с времён, когда новости писали только агенты), но этого
+никто не видел, т.к. новости жили в localStorage.
+
+Модерация видео (добавлено следом, тот же день): очередь стала
+реальной — `GET /api/videos/admin/list` (все видимые видео + artist
+name + pipeline-состояние), решение `POST /api/videos/:id/moderate`
+(`approved`/`rejected`+note, note обязательна при reject; артисту
+уходит настоящее уведомление + SSE). Требует **migration 125**
+(`moderation_status/note/moderated_at/moderated_by`; grandfather-шаг
+помечает все существующие видео `approved`). `VideoModeration.tsx`
+грузит этот список и шлёт решения на бэк; локальный `DataContext`
+остался только как fallback при недоступном бэке.
+
+---
+
 ## Critical column-type cheat sheet (echoed from CLAUDE.md)
 
 Verified columns / types — DO NOT INVENT:

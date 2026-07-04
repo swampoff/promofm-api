@@ -1011,8 +1011,12 @@ app.put('/orders/:id/status', requireAuth, async (c) => {
     //     in_progress и подтвердить completion. Раньше оба могли flip'ить
     //     произвольно — клиент мог сам пометить «completed» и unfairly
     //     зафиксировать commission в пользу продюсера / vice versa.
+    // 2026-07-03 (marketplace merge, write-side): клиент может ОТОЗВАТЬ
+    // свою заявку, пока она pending (аналог cancel из старого engineer-флоу;
+    // денег на pending нет — commission пишется только при completed).
+    // После accepted отзыв клиентом закрыт — исполнитель уже в работе.
     const validTransitions: Record<string, Array<{ to: string; role: 'producer' | 'client' | 'both' }>> = {
-      pending:     [{ to: 'accepted', role: 'producer' }, { to: 'rejected', role: 'producer' }],
+      pending:     [{ to: 'accepted', role: 'producer' }, { to: 'rejected', role: 'both' }],
       accepted:    [{ to: 'in_progress', role: 'producer' }, { to: 'rejected', role: 'producer' }],
       in_progress: [{ to: 'revision', role: 'client' }, { to: 'completed', role: 'producer' }],
       revision:    [{ to: 'in_progress', role: 'producer' }, { to: 'completed', role: 'producer' }],

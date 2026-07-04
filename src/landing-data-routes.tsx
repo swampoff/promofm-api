@@ -2339,3 +2339,44 @@ landing.get("/admin/users", requireAuth, requireAdmin, async (c) => {
     return c.json({ success: false, error: error.message }, 500);
   }
 });
+
+// POST /admin/users/:userId/status — блокировка/разблокировка юзера
+// из админ-кабинета (UsersManagement.tsx handleBlock). До 2026-07-02
+// фронт слал этот запрос на несуществующий /api/admin/users/… — кнопка
+// «заблокировать» лишь оптимистично красила UI.
+//
+// UI оперирует 'blocked'|'active'; в enum user_status блокировка — это
+// 'banned' (login-гейт в db-client.tsx:641, обратный маппинг db.tsx:2022).
+landing.post("/admin/users/:userId/status", requireAuth, requireAdmin, async (c) => {
+  try {
+    const targetId = c.req.param("userId");
+    const body = await c.req.json().catch(() => ({}));
+    const requested = String(body.status || '');
+    if (requested !== 'active' && requested !== 'blocked') {
+      return c.json({ success: false, error: "status must be 'active' or 'blocked'" }, 400);
+    }
+    if (targetId === String(c.get('userId') || '')) {
+      return c.json({ success: false, error: 'Нельзя заблокировать самого себя' }, 400);
+    }
+    const dbStatus = requested === 'blocked' ? 'banned' : 'active';
+    // users.id — uuid, параметр из URL — text → сравнение по id::text
+    const res = await pool.query(
+      `UPDATE users
+          SET status = $1::user_status
+        WHERE id::text = $2
+        RETURNING id, status::text AS status`,
+      [dbStatus, targetId]
+    );
+    if (res.rowCount === 0) {
+      return c.json({ success: false, error: 'User not found' }, 404);
+    }
+    return c.json({
+      success: true,
+      id: String(res.rows[0].id),
+      status: res.rows[0].status === 'banned' ? 'blocked' : res.rows[0].status,
+    });
+  } catch (error: any) {
+    console.error("[admin/users/status] error:", error);
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});

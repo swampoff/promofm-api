@@ -93,11 +93,38 @@ write-side кабинета применяются вместе.
 2. **Статус `delivered` → `in_progress`** (migration 121, оригинал в
    `extra.origStatus`).
 
-## Остаток (laptop, runtime-тест) — write-side кабинета
-Готово из cloud: миграции 120/121 + per-seller комиссия в order-эндпоинте.
-Осталось (нельзя без прода/теста):
-- Engineer-кабинет FE: создание/список/действия услуг и заказов → маркетплейс-
-  эндпоинты (producer_services/service_orders) вместо `/engineer/services|orders`.
-- Роль-гейты FE `role === 'producer'` → `['producer','engineer'].includes(role)`.
-- Проверка цикла на проде (создание → каталог → заказ → выплата 5%).
-- Phase-3 (отдельный PR): drop engineer_services/orders после верификации.
+## Остаток — write-side кабинета
+
+### ✅ Сделано (cloud, 2026-07-03, ветка `claude/promomusicfigma-architecture-ms7sbs`)
+- **Engineer-кабинет FE переведён на маркетплейс** — переписан API-слой
+  `utils/api/engineer-studio.ts` (UI-компоненты почти не тронуты):
+  - услуги: CRUD → producer-studio `/services/create|update|delete|custom`
+    (role-agnostic, owner = JWT userId; sync в общий каталог — автоматом);
+  - публичная витрина: общий каталог `GET /marketplace/services?producerId=…`
+    (мигрированные `eng-svc-*` и новые `svc-*` приходят одинаково);
+  - заказы: `GET /marketplace/orders?role=producer|client` + переходы
+    `PUT /orders/:id/status`. Маппинг статусов для UI: rejected→declined,
+    revision→in_progress; `delivered` не существует.
+  - **Флоу-изменения** (следствие «одной системы»): accept инженера =
+    accepted + сразу in_progress (оплатного ЮКасса-гейта в marketplace-флоу
+    нет); сдача работы = completed (клиентского «Подтвердить приём» нет,
+    ссылка/заметка — в statusMessage); для зависших accepted (мигрированные
+    строки) в кабинете кнопка «Взять в работу».
+- **BE**: клиент может отозвать pending-заявку (`pending → rejected`,
+  role both) — аналог старого cancel, денег на pending нет.
+- **Роль-гейты FE**: проверены — sell-гейтов `role === 'producer'` не
+  нашлось (producer-studio/marketplace эндпоинты role-agnostic;
+  `ServiceOrdersPanel.role` — сторона сделки, не платформенная роль;
+  навигация Suno* уже включает engineer). Менять оказалось нечего.
+- **Известный gap**: сводка `/engineer/earnings` считает только legacy-канал
+  `platform_revenue channel='engineer_order'`; новые marketplace-заказы
+  пишут commission каналом `'service'` — единый earnings-виджет отдельной
+  задачей.
+
+### Осталось (laptop / после верификации)
+- Runtime-цикл на проде: инженер создаёт услугу → в общем каталоге →
+  клиент заказывает → инженер принимает (auto in_progress) → сдаёт
+  (completed) → commission 10% в ledger.
+- Phase-3 (отдельный PR, ТОЛЬКО после верификации): drop
+  engineer_services/engineer_orders + удалить `/engineer/services|orders`
+  эндпоинты (профиль/портфолио/earnings в engineer-routes остаются).
