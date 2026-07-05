@@ -21,7 +21,7 @@ import {
   getProducerSettings, setProducerSettings,
   upsertProducerService, deleteProducerService,
 } from './db.tsx';
-import { getPaymentBalance, upsertPaymentBalance } from './db.tsx';
+import { getPaymentBalance, debitAvailableToPendingAtomic } from './db.tsx';
 import { getDbClient, pool } from "./db-client.tsx";
 import { requireAuth } from './auth-middleware.tsx';
 import { profileLimiter, apiLimiter } from './rate-limiter.tsx';
@@ -1113,18 +1113,16 @@ app.post('/wallet/withdraw', requireAuth, profileLimiter, async (c) => {
     if (!producerId || !amount || !method) return c.json({ success: false, error: 'producerId, amount, method required' }, 400);
     const numAmount = Number(amount);
     if (numAmount <= 0) return c.json({ success: false, error: 'Amount must be positive' }, 400);
-    // Check balance before withdrawal
-    const balance = await getPaymentBalance(producerId);
-    const available = Number(balance?.available || 0);
-    if (available < numAmount) {
+    // Atomic guarded debit: single UPDATE ... WHERE available >= amount closes
+    // the TOCTOU race where two concurrent withdraws both read the same
+    // available balance and each debited it (double-spend). null = недостаточно
+    // средств, списания НЕ было.
+    const newBal = await debitAvailableToPendingAtomic(producerId, numAmount);
+    if (!newBal) {
+      const cur = await getPaymentBalance(producerId);
+      const available = Number(cur?.available || 0);
       return c.json({ success: false, error: `Insufficient balance: ${available} RUB available, requested ${numAmount} RUB` }, 400);
     }
-    // Deduct from balance
-    const bal = balance || { available: 0, pending: 0, total: 0, userId: producerId };
-    bal.available = Number(bal.available) - numAmount;
-    bal.pending = Number(bal.pending || 0) + numAmount;
-    bal.total = bal.available + bal.pending;
-    await upsertPaymentBalance(producerId, bal);
     // row-per-withdrawal (migration 043): атомарный INSERT, race-free.
     const wdId = genId('wd');
     const createdAt = nowIso();
