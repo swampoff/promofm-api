@@ -294,7 +294,7 @@ notifications.post('/campaigns/:campaignId/send', requireAuth, async (c) => {
 });
 
 // Удалить уведомление
-notifications.delete('/:userId/:notificationId', requireAuth, async (c) => {
+notifications.delete('/:userId/:notificationId', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const notificationId = c.req.param('notificationId');
@@ -312,7 +312,7 @@ notifications.delete('/:userId/:notificationId', requireAuth, async (c) => {
 });
 
 // Отметить уведомление как прочитанное
-notifications.put('/:userId/:notificationId/read', requireAuth, async (c) => {
+notifications.put('/:userId/:notificationId/read', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const notificationId = c.req.param('notificationId');
@@ -336,7 +336,7 @@ notifications.put('/:userId/:notificationId/read', requireAuth, async (c) => {
 });
 
 // Получить статистику уведомлений
-notifications.get('/stats/:userId', requireAuth, async (c) => {
+notifications.get('/stats/:userId', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const allNotifications = await db.getNotificationsByUser(userId);

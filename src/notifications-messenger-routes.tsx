@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { requireAuth, requireOwner } from './auth-middleware.tsx';
+import { requireAuth, requireOwner, requireAdmin } from './auth-middleware.tsx';
 import {
   upsertNotification,
   getNotification,
@@ -46,9 +46,13 @@ app.get('/user/:userId', requireAuth, requireOwner('userId'), async (c) => {
 
 /**
  * POST /notifications/send
- * Создать и отправить уведомление
+ * Создать и отправить уведомление.
+ * ADMIN-ONLY: цель (user_id) задаётся в теле запроса, поэтому любой
+ * авторизованный юзер иначе мог бы слать фишинг-уведомления от имени
+ * системы кому угодно. Внутренние вызовы идут через upsertNotification
+ * напрямую (см. /messenger-send), не через этот HTTP-хендлер.
  */
-app.post('/send', requireAuth, async (c) => {
+app.post('/send', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
     const {
@@ -123,20 +127,14 @@ app.put('/:notificationId/read', requireAuth, async (c) => {
   const notificationId = c.req.param('notificationId');
 
   try {
-    // We need the userId to look up the notification.
-    // Try to get it from query param or body.
-    const body = await c.req.json().catch(() => ({}));
-    const userId = body.user_id || c.req.query('user_id') || '';
-
-    // If userId provided, do a direct lookup; otherwise search all notifications is not feasible.
-    // The notification object itself contains user_id, so we need at least one lookup strategy.
-    // Since the old code used notificationId as the full key, and getNotification needs userId,
-    // we require user_id to be passed.
+    // Identity comes from the JWT, never from the request body/query —
+    // otherwise anyone could flip another user's notifications (IDOR).
+    const userId = c.get('userId');
     if (!userId) {
       return c.json({
         success: false,
-        error: 'user_id is required'
-      }, 400);
+        error: 'Unauthorized'
+      }, 401);
     }
 
     const notification = await getNotification(userId, notificationId);
@@ -173,16 +171,18 @@ app.put('/:notificationId/star', requireAuth, async (c) => {
 
   try {
     const body = await c.req.json();
-    const { starred, user_id } = body;
+    const { starred } = body;
 
-    if (!user_id) {
+    // Identity from JWT — not from the body — so you can only star your own.
+    const userId = c.get('userId');
+    if (!userId) {
       return c.json({
         success: false,
-        error: 'user_id is required'
-      }, 400);
+        error: 'Unauthorized'
+      }, 401);
     }
 
-    const notification = await getNotification(user_id, notificationId);
+    const notification = await getNotification(userId, notificationId);
 
     if (!notification) {
       return c.json({
@@ -192,7 +192,7 @@ app.put('/:notificationId/star', requireAuth, async (c) => {
     }
 
     notification.starred = starred;
-    await upsertNotification(user_id, notificationId, notification);
+    await upsertNotification(userId, notificationId, notification);
 
     return c.json({
       success: true,
@@ -215,13 +215,14 @@ app.delete('/:notificationId', requireAuth, async (c) => {
   const notificationId = c.req.param('notificationId');
 
   try {
-    const userId = c.req.query('user_id') || '';
-
+    // Identity from JWT — not from the query string — so you can only
+    // delete your own notifications (IDOR fix).
+    const userId = c.get('userId');
     if (!userId) {
       return c.json({
         success: false,
-        error: 'user_id query param is required'
-      }, 400);
+        error: 'Unauthorized'
+      }, 401);
     }
 
     const notification = await getNotification(userId, notificationId);
@@ -257,7 +258,7 @@ app.delete('/:notificationId', requireAuth, async (c) => {
 /**
  * GET /messenger/conversations/:userId — все разговоры (SQL)
  */
-app.get('/conversations/:userId', requireAuth, async (c) => {
+app.get('/conversations/:userId', requireAuth, requireOwner('userId'), async (c) => {
   const userId = c.req.param('userId');
   try {
     const r = await pool.query(
@@ -296,6 +297,12 @@ app.post('/conversation/create', requireAuth, async (c) => {
     if (!participants || participants.length < 2 || !subject) {
       return c.json({ success: false, error: 'Missing required fields' }, 400);
     }
+    // The creator must be one of the participants — you can't spin up a
+    // conversation between two other users on their behalf.
+    const callerId = c.get('userId');
+    if (!callerId || !participants.includes(callerId)) {
+      return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
+    }
     const conversationId = crypto.randomUUID();
     const now = new Date().toISOString();
     const dataJson = JSON.stringify({ subject, type: type || 'user' });
@@ -325,6 +332,20 @@ app.post('/conversation/create', requireAuth, async (c) => {
 app.get('/messages/:conversationId', requireAuth, async (c) => {
   const conversationId = c.req.param('conversationId');
   try {
+    // Membership gate: only participants may read a conversation's messages.
+    const userId = c.get('userId');
+    const conv = await pool.query(
+      `SELECT participant_ids FROM dm_conversations WHERE id = $1`,
+      [conversationId]
+    );
+    if (conv.rows.length === 0) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    const participantIds: string[] = conv.rows[0].participant_ids || [];
+    if (!userId || !participantIds.includes(userId)) {
+      return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
+    }
+
     const r = await pool.query(
       `SELECT id, conversation_id, sender_id, content, message_type, is_read, read_at, created_at
        FROM dm_messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
@@ -352,9 +373,25 @@ app.get('/messages/:conversationId', requireAuth, async (c) => {
 app.post('/messenger-send', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { conversation_id, from_user_id, message, metadata } = body;
+    const { conversation_id, message, metadata } = body;
+    // Sender is the authenticated user — NEVER trust from_user_id in the
+    // body, otherwise anyone could post messages as another user (spoof).
+    const from_user_id = c.get('userId');
     if (!conversation_id || !from_user_id || !message) {
       return c.json({ success: false, error: 'Missing required fields' }, 400);
+    }
+
+    // Membership gate: the sender must be a participant of the conversation.
+    const memberCheck = await pool.query(
+      `SELECT participant_ids FROM dm_conversations WHERE id = $1`,
+      [conversation_id]
+    );
+    if (memberCheck.rows.length === 0) {
+      return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    const memberIds: string[] = memberCheck.rows[0].participant_ids || [];
+    if (!memberIds.includes(from_user_id)) {
+      return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
     }
 
     // Insert message
@@ -457,6 +494,10 @@ app.put('/conversations/:conversationId/read', requireAuth, async (c) => {
     );
     if (conv.rows.length === 0) {
       return c.json({ success: false, error: 'Conversation not found' }, 404);
+    }
+    const readParticipants: string[] = conv.rows[0].participant_ids || [];
+    if (!userId || !readParticipants.includes(userId)) {
+      return c.json({ success: false, error: 'Access denied: not a participant' }, 403);
     }
 
     await pool.query(
