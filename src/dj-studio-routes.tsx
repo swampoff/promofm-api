@@ -2146,6 +2146,17 @@ app.post('/mixes', requireAuth, requireDjRole, async (c) => {
       await pool.query(`UPDATE dj_mixes SET demo_start_sec = $1 WHERE id = $2`, [demoStartSec, id]).catch(() => {});
     }
 
+    // Fire-and-forget: ставим микс в Promo.check watermark/fingerprint —
+    // зеркало track-upload (закрытие дыры 2026-07-03: миксы были
+    // единственной не-маркируемой сущностью на радио). In-process, без
+    // внутреннего HTTP-хопа (requireAuth без localhost-байпаса). Реальная
+    // инъекция watermark — fingerprinter.py --mix-id на VPS (см. HANDOFF).
+    if (audioUploaded.url) {
+      import('./promo-check-routes.tsx')
+        .then(m => m.queueMixFingerprint(id))
+        .catch(() => {}); // best-effort, загрузка микса не должна падать
+    }
+
     return c.json({
       success: true,
       data: {

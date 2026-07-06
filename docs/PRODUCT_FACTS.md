@@ -288,6 +288,29 @@ publication fee. Source: `tracks-page.tsx:775` (Promomusicfigma) +
    `promo_check_fingerprints` (`fingerprint`, `duration`,
    `status='ready'` или `'error'`).
 
+### DJ-миксы — маркировка (queue-сторона добавлена 2026-07-03)
+
+До 2026-07-03 миксы (`dj_mixes`) были ЕДИНСТВЕННОЙ сущностью на
+радио, которая НЕ ставилась в watermark/fingerprint-пайплайн —
+`dj-studio-routes.tsx` писал микс в БД без вызова promo-check. Закрыто
+частично:
+- **Cloud (эта ветка):** при создании микса зовётся
+  `queueMixFingerprint(mixId)` in-process (fire-and-forget) +
+  `POST /promo-check/process-mix/:mixId` (ручной ретриггер) →
+  pending-строка в `promo_check_fingerprints(mix_id)` + `spawn
+  fingerprinter.py --mix-id`. Migration 127 добавляет `mix_id` в
+  `promo_check_fingerprints`/`promo_check_detections`.
+- **VPS (за laptop, см. HANDOFF §6):** `fingerprinter.py` пока НЕ умеет
+  `--mix-id` — реальная инъекция watermark в mix-файл + запись
+  `promo_check_detections.mix_id` появятся, когда laptop обновит Python.
+  До этого mix-строки просто висят `status='pending'` (вреда нет).
+- **In-process, НЕ через HTTP:** трековый путь дёргает
+  `fetch(127.0.0.1/.../process/:id)` без cookie к `requireAuth`-эндпоинту
+  (localhost-байпаса нет → 401, глотается) — вероятно мёртвый хоп;
+  миксы зовут функцию напрямую, минуя эту проблему. Трековый путь НЕ
+  трогали (нет телеметрии — правило «не чинить рабочее по теории»);
+  для laptop это bonus-находка в HANDOFF §6.
+
 **Следствие:** к моменту, когда радио скачивает трек, файл на
 диске уже содержит watermark. Не «прошивается при скачивании», а
 «уже прошит». Радио получает готовый идентифицируемый файл.

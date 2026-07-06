@@ -202,6 +202,64 @@ app.post("/process/:trackId", requireAuth, async (c) => {
   });
 });
 
+// ─── Trigger fingerprinting for a DJ-mix ──────────────────────────────────────
+//
+// Маркировка/мониторинг миксов (закрытие дыры 2026-07-03): dj_mixes
+// раньше не попадали в watermark-пайплайн. Зеркалит /process/:trackId,
+// но против dj_mixes и с флагом --mix-id. Требует migration 127
+// (promo_check_fingerprints.mix_id) + fingerprinter.py c --mix-id на VPS
+// (спека в HANDOFF). До Python-части — pending-строка висит, вреда нет.
+//
+// Экспортируемая queueMixFingerprint зовётся ЛИБО из этого эндпоинта
+// (ручной/админ-ретриггер), ЛИБО напрямую in-process из dj-studio при
+// создании микса — без внутреннего HTTP-хопа, который требует cookie
+// (requireAuth не имеет localhost-байпаса, поэтому cookieless
+// internal-fetch к /process 401'ил бы).
+export async function queueMixFingerprint(mixId: string): Promise<{ ok: boolean; error?: string }> {
+  const mix = await query<{ audio_url: string | null }>(
+    "SELECT audio_url FROM dj_mixes WHERE id = $1",
+    [mixId]
+  );
+  if (!mix.rows[0]) return { ok: false, error: "Mix not found" };
+  if (!mix.rows[0].audio_url) return { ok: false, error: "Mix has no audio file" };
+
+  // Pending-строка (best-effort: до migration 127 колонки mix_id нет —
+  // INSERT упадёт, но spawn'нутый Python всё равно отработает по dj_mixes).
+  try {
+    await query(
+      `INSERT INTO promo_check_fingerprints (mix_id, fingerprint, watermark_id, duration, status)
+       VALUES ($1, '{}', gen_random_uuid()::text, 0, 'pending')
+       ON CONFLICT (mix_id) WHERE mix_id IS NOT NULL DO UPDATE SET status = 'pending'`,
+      [mixId]
+    );
+  } catch (e) {
+    console.warn("[promo-check] mix pending row skipped (migration 127 not applied?):", String(e));
+  }
+
+  // Python fingerprinter в фоне, детач. Пока fingerprinter.py не умеет
+  // --mix-id (VPS/laptop) — процесс просто молча выйдет, вреда нет.
+  const child = spawn(
+    "python3",
+    ["/opt/promofm-promo-check/fingerprinter.py", "--mix-id", mixId],
+    { detached: true, stdio: "ignore", env: { ...process.env } }
+  );
+  child.unref();
+  return { ok: true };
+}
+
+app.post("/process-mix/:mixId", requireAuth, async (c) => {
+  const { mixId } = c.req.param();
+  const r = await queueMixFingerprint(mixId);
+  if (!r.ok) {
+    return c.json({ error: r.error }, r.error === "Mix not found" ? 404 : 422);
+  }
+  return c.json({
+    status: "processing",
+    message: "Микс поставлен в очередь мониторинга Promo.check",
+    mix_id: mixId,
+  });
+});
+
 // ─── Dashboard summary ────────────────────────────────────────────────────────
 
 app.get("/dashboard", requireAuth, async (c) => {

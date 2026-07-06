@@ -170,3 +170,46 @@ Deferred settled: 0 new bounces». Стоп-лист остался 326.
 marketplace-миграции, уже применённые на проде). Актуальный список моей
 ветки: 122_videos_pipeline, 123_videos_moderation,
 124_videos_category_tags, 125_news_image_url, 126_news_moderation.
+
+---
+
+## 6. Маркировка DJ-миксов (watermark/promo-check) — VPS-часть за тобой
+
+**Контекст:** миксы (`dj_mixes`, id TEXT `mix-<uuid>`) были единственной
+сущностью на радио, которая НЕ ставилась в watermark/fingerprint-
+пайплайн. Cloud закрыл **queue-сторону** (ветка
+`claude/promomusicfigma-architecture-ms7sbs`):
+- `migration 127_promo_check_mix_support.sql` — `mix_id TEXT` в
+  `promo_check_fingerprints` и `promo_check_detections` (+ индексы,
+  track_id → nullable). ⚠️ Эти таблицы созданы прямо на проде, НЕ в
+  миграциях — ALTER'ы guarded по information_schema. **Сверь `\d` перед
+  COMMIT.**
+- `promo-check-routes.tsx`: `queueMixFingerprint(mixId)` (export) +
+  `POST /promo-check/process-mix/:mixId`. Пишет pending-строку и
+  `spawn python3 fingerprinter.py --mix-id <id>`.
+- `dj-studio-routes.tsx`: при создании микса зовёт `queueMixFingerprint`
+  in-process (fire-and-forget).
+
+**Что за тобой (VPS, cloud не может):**
+1. **`fingerprinter.py --mix-id <id>`** — научить скрипт, помимо
+   `--track-id`, брать источник из `dj_mixes` (audio_url), инжектить
+   watermark в тот же файл на диске, и писать эфирные детекты в
+   `promo_check_detections` с `mix_id` (НЕ track_id — там UUID, для
+   `mix-<uuid>` не подходит; migration 127 добавляет TEXT-колонку).
+2. **Верификация:** `\d promo_check_fingerprints` / `\d promo_check_detections`
+   до и после 127; убедиться что `track_id DROP NOT NULL` прошёл (если
+   track_id в PK — сказать cloud, переиграем на отдельную таблицу).
+3. **Дисплей ротаций миксов** для DJ-кабинета (аналог
+   `promo-check-routes GET /stats/:trackId`, но по mix_id) — если нужен;
+   сейчас detections миксов копятся, но UI их не читает.
+
+**Bonus-находка (проверь телеметрией — у cloud её нет):** внутренний
+триггер трекового watermark'а, похоже, МЁРТВ. `track-moderation-routes.tsx:311`
+и `tracks-routes.tsx:150` дёргают `fetch('http://127.0.0.1:3000/…/promo-check/process/:id')`
+БЕЗ cookie, а `/process/:trackId` под `requireAuth` (localhost-байпаса
+НЕТ) → 401, глотается `.catch(()=>{})`. Если треки всё же маркируются —
+значит их реально триггерит что-то на VPS (cron/демон, скан `tracks`),
+а не этот HTTP-хоп. Подтверди чем именно, и: (а) для миксов повесь тот
+же VPS-механизм на `dj_mixes`, (б) мёртвый HTTP-хоп в обоих трековых
+местах можно убрать отдельным PR. Cloud НЕ трогал трековый путь —
+нет телеметрии, работаем по правилу «не чинить рабочее по теории».
