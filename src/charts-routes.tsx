@@ -1173,7 +1173,7 @@ charts.get('/source/:id', async (c) => {
  * Запускает агрегацию данных из внешних источников
  * Можно указать sourceIds для агрегации конкретных источников
  */
-charts.post('/aggregate', requireAdminOrKey, async (c) => {
+charts.post('/aggregate', async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
     const requestedIds: string[] = body.sourceIds || [];
