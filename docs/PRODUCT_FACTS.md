@@ -300,16 +300,26 @@ publication fee. Source: `tracks-page.tsx:775` (Promomusicfigma) +
   pending-строка в `promo_check_fingerprints(mix_id)` + `spawn
   fingerprinter.py --mix-id`. Migration 127 добавляет `mix_id` в
   `promo_check_fingerprints`/`promo_check_detections`.
-- **VPS (за laptop, см. HANDOFF §6):** `fingerprinter.py` пока НЕ умеет
-  `--mix-id` — реальная инъекция watermark в mix-файл + запись
-  `promo_check_detections.mix_id` появятся, когда laptop обновит Python.
-  До этого mix-строки просто висят `status='pending'` (вреда нет).
-- **In-process, НЕ через HTTP:** трековый путь дёргает
-  `fetch(127.0.0.1/.../process/:id)` без cookie к `requireAuth`-эндпоинту
-  (localhost-байпаса нет → 401, глотается) — вероятно мёртвый хоп;
-  миксы зовут функцию напрямую, минуя эту проблему. Трековый путь НЕ
-  трогали (нет телеметрии — правило «не чинить рабочее по теории»);
-  для laptop это bonus-находка в HANDOFF §6.
+- **VPS (за laptop, см. HANDOFF §6):** `fingerprinter.py` строго
+  `--track-id` (mix-режима НЕТ), а `promo_check_fingerprints`/
+  `_detections` на проде — строго `track_id` (ни `mix_id`, ни
+  `content_type`). Т.е. пока migration 127 + mix-режим Python не
+  применены — **detections миксов физически негде хранить** (моё раннее
+  «будут копиться, но UI не читает» — НЕВЕРНО, исправлено laptop'ом
+  2026-07-05). Cloud-обвязка живёт в ветке, не в проде.
+
+**Реальный триггер трекового watermark'а (ПОДТВЕРЖДЁН по коду,
+2026-07-05, память laptop `promofm-watermark-fingerprint-trigger.md`):**
+задуманный первичный хоп `fetch(127.0.0.1/.../process/:id)` из
+`track-moderation-routes.tsx:312` / `tracks-routes.tsx:151` **МЁРТВ**
+(без cookie → 401 на `requireAuth`, глотается). Реально фингерпринтит
+крон **`reconcile-fingerprints.sh` (каждые 15 мин, VPS, не в репо;
+safety-net с 2026-06-24)** — bash→`fingerprinter.py --track-id`, мимо
+401-хопа. Треки маркируются с задержкой до 15 мин. ⚠️ Миксы наследуют
+исходную хрупкость: одиночный `queueMixFingerprint` без mix-бэкстопа =
+микс навсегда без мониторинга при сбое вызова. Блюпринт (схема →
+Python → mix-бэкстоп → gate «детект длинного микса возможен?» →
+дисплей последним) — HANDOFF §6.
 
 **Следствие:** к моменту, когда радио скачивает трек, файл на
 диске уже содержит watermark. Не «прошивается при скачивании», а

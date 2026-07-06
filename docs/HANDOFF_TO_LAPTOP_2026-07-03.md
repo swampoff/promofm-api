@@ -190,26 +190,56 @@ marketplace-миграции, уже применённые на проде). А
 - `dj-studio-routes.tsx`: при создании микса зовёт `queueMixFingerprint`
   in-process (fire-and-forget).
 
-**Что за тобой (VPS, cloud не может):**
-1. **`fingerprinter.py --mix-id <id>`** — научить скрипт, помимо
-   `--track-id`, брать источник из `dj_mixes` (audio_url), инжектить
-   watermark в тот же файл на диске, и писать эфирные детекты в
-   `promo_check_detections` с `mix_id` (НЕ track_id — там UUID, для
-   `mix-<uuid>` не подходит; migration 127 добавляет TEXT-колонку).
-2. **Верификация:** `\d promo_check_fingerprints` / `\d promo_check_detections`
-   до и после 127; убедиться что `track_id DROP NOT NULL` прошёл (если
-   track_id в PK — сказать cloud, переиграем на отдельную таблицу).
-3. **Дисплей ротаций миксов** для DJ-кабинета (аналог
-   `promo-check-routes GET /stats/:trackId`, но по mix_id) — если нужен;
-   сейчас detections миксов копятся, но UI их не читает.
+**Реальный триггер трекового watermark'а — ПОДТВЕРЖДЁН ПО КОДУ (laptop,
+2026-07-05, память `promofm-watermark-fingerprint-trigger.md`):**
+- Задуманный первичный HTTP-хоп (`track-moderation-routes.tsx:312`,
+  `tracks-routes.tsx:151` → `fetch(127.0.0.1/…/process/:id)` без cookie
+  к `requireAuth`-эндпоинту без localhost-байпаса) **МЁРТВ** → 401 в
+  `.catch()`. Это факт, не теория — cloud прочитал верно.
+- Реально фингерпринтит **крон `reconcile-fingerprints.sh` (каждые 15
+  мин, VPS, не в репо)** — его же комментарий: «safety net for the
+  upload-time trigger… added 2026-06-24». Берёт tracks без 'done'-
+  фингерпринта и запускает `fingerprinter.py --track-id` напрямую
+  (bash→python, мимо 401). Треки маркируются с задержкой до 15 мин.
+  Демоны детекта: `promo-check monitor.py` + `promofm-ai-detector`
+  (FastAPI :8085).
+- ⚠️ **Важная поправка cloud'а:** на текущем ПРОДЕ detections миксов
+  НЕГДЕ хранить — `promo_check_fingerprints`, `promo_check_detections`
+  и `fingerprinter.py` строго track_id/`--track-id`, ни `mix_id`, ни
+  `content_type` нигде нет. Моя in-process mix-обвязка живёт в ВЕТКЕ,
+  не в проде. Т.е. пока migration 127 + Python-часть не применены —
+  миксы вообще не входят в пайплайн.
 
-**Bonus-находка (проверь телеметрией — у cloud её нет):** внутренний
-триггер трекового watermark'а, похоже, МЁРТВ. `track-moderation-routes.tsx:311`
-и `tracks-routes.tsx:150` дёргают `fetch('http://127.0.0.1:3000/…/promo-check/process/:id')`
-БЕЗ cookie, а `/process/:trackId` под `requireAuth` (localhost-байпаса
-НЕТ) → 401, глотается `.catch(()=>{})`. Если треки всё же маркируются —
-значит их реально триггерит что-то на VPS (cron/демон, скан `tracks`),
-а не этот HTTP-хоп. Подтверди чем именно, и: (а) для миксов повесь тот
-же VPS-механизм на `dj_mixes`, (б) мёртвый HTTP-хоп в обоих трековых
-местах можно убрать отдельным PR. Cloud НЕ трогал трековый путь —
-нет телеметрии, работаем по правилу «не чинить рабочее по теории».
+**Что за тобой (VPS) — блюпринт для миксов, СТРОГО ПО ПОРЯДКУ:**
+1. **Схема.** Решить: `mix_id`+`content_type` в общих
+   `promo_check_fingerprints`/`_detections` (migration 127 делает
+   `mix_id`-вариант; `content_type` можно добавить, если удобнее
+   дискриминатор) — ИЛИ параллельные `dj_mix_fingerprints`/
+   `dj_mix_detections`. **Выбор за тобой** (untracked-prod-таблицы,
+   нужен `\d`). Migration 127 — заготовка под общий вариант; guarded,
+   сверь `\d` до COMMIT (если `track_id` в PK — `DROP NOT NULL` не
+   пройдёт, скажи cloud → переигрываем на параллельные таблицы).
+2. **Mix-режим в `fingerprinter.py`** (сейчас `--track-id` required):
+   брать источник из `dj_mixes.audio_url`, инжектить watermark в файл,
+   писать детект в выбранную из п.1 таблицу/колонку.
+3. **Mix reconcile-бэкстоп** (⚠️ САМОЕ ВАЖНОЕ, cloud это упустил).
+   Одиночный in-process вызов `queueMixFingerprint` при создании микса
+   = микс НАВСЕГДА без мониторинга, если этот вызов упал — ровно та
+   хрупкость, ради лечения которой 2026-06-24 сделали трековый крон.
+   Миксы наследуют её. Нужен аналог `reconcile-fingerprints.sh` для
+   `dj_mixes` (скан миксов без 'done'-фингерпринта → `fingerprinter.py
+   --mix-id`). Без него п.1–2 работают ненадёжно.
+4. **Проверить, что `monitor.py`/ai-detector вообще матчат длинный
+   DJ-микс в эфире** — это заметно сложнее 3-мин трека; может
+   оказаться, что детекта миксов не будет в принципе. Это GATE: если
+   детект невозможен — п.5 бессмысленен.
+5. **Дисплей ротаций миксов** (`GET /dj/rotations/:mixId` + виджет) —
+   ТОЛЬКО ПОСЛЕ п.4. Строить UI до подтверждённого детекта =
+   гарантированный вечный ноль в кабинете, хуже отсутствия раздела.
+   Рекомендация laptop (принята cloud): делать последним.
+
+**Отдельным PR (не блокер):** мёртвый HTTP-хоп в
+`track-moderation-routes.tsx:312` + `tracks-routes.tsx:151` можно
+удалить — он ничего не триггерит (реальную работу делает крон п.реального
+триггера выше). Cloud НЕ трогал трековый путь (правило «не чинить
+рабочее вслепую»); теперь механизм подтверждён — можно чистить.
