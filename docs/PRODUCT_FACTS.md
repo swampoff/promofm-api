@@ -292,17 +292,35 @@ publication fee. Source: `tracks-page.tsx:775` (Promomusicfigma) +
 диске уже содержит watermark. Не «прошивается при скачивании», а
 «уже прошит». Радио получает готовый идентифицируемый файл.
 
-### Что делает download для радио — только логирование
+### Что делает download для радио (⚠️ ИСПРАВЛЕНО 2026-07-03)
 
-`radio-routes.tsx:1399` `GET /tracks/:id/download`:
-- Проверка `moderation_status IN ('published', 'upcoming')`.
+`radio-routes.tsx` `GET /tracks/:id/download` (+ `/mixes/:id/download`):
+- **Moderation-gate** `moderation_status IN ('approved','published',
+  'upcoming') AND NOT is_hidden`. **ВАЖНО:** до 2026-07-03 на
+  track-пути гейта НЕ БЫЛО ВООБЩЕ — этот раздел описывал
+  несуществующую проверку. Любое авторизованное радио могло скачать
+  любой трек по id (pending/rejected/скрытый). Добавлено в этой
+  сессии; mix-путь был огорожен изначально (`published`-only).
 - Получение `weekly_release_id` (informational) и `stationName`.
-- **INSERT в `track_downloads_by_radio`** (`user_id`, `station_name`,
-  `track_id`, `weekly_release_id`, `ip_addr`, `user_agent`) — это
+- **INSERT в `track_downloads_by_radio` / `mix_downloads_by_radio`** —
   логирование скачивания, НЕ инжекция watermark.
-- `streamTrackAudio(c, track.audio_url, filename)` —
-  `track-download-helper.tsx:191` — простой `createReadStream` +
-  `Readable.toWeb` без модификации содержимого.
+- Отдача файла: `redirect(audio_url, 302)` (не streaming — прошлая
+  версия этого раздела описывала `streamTrackAudio`, которого в
+  текущем коде нет).
+
+### Уведомления при скачивании радио (добавлено 2026-07-03)
+
+До 2026-07-03 их не было вообще (скачивание = лог + redirect, без
+писем/notification). Теперь на **ПЕРВОЕ** скачивание данного трека/микса
+данной станцией (dedup по `(user_id, track_id)` / `(user_id, mix_id)` —
+проверка ДО INSERT, повтор не спамит):
+- **Артисту/DJ**: in-app `upsertNotification` (type `radio_download`) +
+  SSE. Владелец микса резолвится `dj_mixes.dj_id → dj_profiles → user_id`.
+- **Админу** (`info@promofm.ru`): email + Telegram через
+  `email-helper.tsx notifyRadioDownload`.
+- Всё **fire-and-forget** — redirect файла не падает из-за SMTP/SSE-сбоя.
+- Это НЕ уведомление о ротации (то отдельно, при подтверждении отчёта
+  админом — `radio-routes.tsx` rotation-reports).
 
 ### Слушающий сервис и хранилища
 

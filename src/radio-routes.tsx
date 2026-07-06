@@ -1411,10 +1411,28 @@ app.get('/tracks/:id/download', requireAuth, requireRole('radio_station'), async
     const userId = c.get('userId');
     const { pool } = await import('./db-client.tsx');
 
-    const tr = await pool.query(`SELECT id, title, audio_url FROM tracks WHERE id = $1`, [trackId]);
+    const tr = await pool.query(
+      `SELECT id, title, audio_url, user_id, moderation_status, is_hidden FROM tracks WHERE id = $1`,
+      [trackId]
+    );
     if (tr.rows.length === 0) return c.json({ success: false, error: 'Track not found' }, 404);
     const track = tr.rows[0];
     if (!track.audio_url) return c.json({ success: false, error: 'Audio file not available' }, 404);
+
+    // Moderation-gate (2026-07-03): раньше ОТСУТСТВОВАЛ — любое радио
+    // могло скачать ЛЮБОЙ трек по id, включая pending/rejected/скрытый
+    // (PRODUCT_FACTS утверждал что гейт есть — в коде его не было).
+    // Консервативно: пропускаем все правдоподобно-легитимные статусы
+    // (approved/published/upcoming — upcoming = трек из будущего
+    // weekly-пакета), блокируем только явно-плохие (pending/rejected) и
+    // скрытые. Union доковой версии ('published','upcoming') и реальной
+    // ('approved') — чтобы не сломать ни один легитимный download.
+    // ⚠️ laptop: сверить по проду точный набор качаемых статусов и при
+    // желании сузить.
+    const DOWNLOADABLE = ['approved', 'published', 'upcoming'];
+    if (!DOWNLOADABLE.includes(track.moderation_status) || track.is_hidden) {
+      return c.json({ success: false, error: 'Трек не опубликован' }, 403);
+    }
 
     // Get current weekly release id (informational)
     const wr = await pool.query(
@@ -1427,6 +1445,16 @@ app.get('/tracks/:id/download', requireAuth, requireRole('radio_station'), async
     const sp = await pool.query(`SELECT data->>'stationName' as station_name FROM profiles WHERE user_id = $1`, [userId]);
     const stationName = sp.rows[0]?.station_name || null;
 
+    // Первое ли скачивание этого трека этой станцией? Проверяем ДО INSERT
+    // — уведомляем артиста/админа только на первое, чтобы повторная
+    // выгрузка того же трека не спамила. Гонка двух одновременных
+    // скачиваний в худшем случае даёт 2 уведомления — приемлемо.
+    const priorDl = await pool.query(
+      `SELECT 1 FROM track_downloads_by_radio WHERE user_id = $1 AND track_id = $2 LIMIT 1`,
+      [userId, trackId]
+    );
+    const isFirstDownload = priorDl.rows.length === 0;
+
     // Log download
     await pool.query(
       `INSERT INTO track_downloads_by_radio (user_id, station_name, track_id, weekly_release_id, ip_addr, user_agent)
@@ -1435,6 +1463,48 @@ app.get('/tracks/:id/download', requireAuth, requireRole('radio_station'), async
        c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
        c.req.header('user-agent') || '']
     );
+
+    // Уведомления — fire-and-forget: redirect не должен падать из-за
+    // SMTP/notification-сбоя.
+    if (isFirstDownload) {
+      void (async () => {
+        try {
+          if (track.user_id) {
+            const { upsertNotification } = await import('./db.tsx');
+            const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            await upsertNotification(track.user_id, notifId, {
+              type: 'radio_download',
+              title: '📻 Радио скачало ваш трек',
+              message: `«${track.title}» скачала${stationName ? ` радиостанция ${stationName}` : ' радиостанция'} для эфира.`,
+              metadata: { track_id: trackId, station_name: stationName },
+              created_at: new Date().toISOString(),
+              read: false,
+            });
+            const { emitSSE } = await import('./sse-routes.tsx');
+            emitSSE(track.user_id, {
+              type: 'radio_download',
+              data: {
+                title: 'Радио скачало ваш трек',
+                message: `«${track.title}»${stationName ? ` — ${stationName}` : ''}`,
+                trackId, stationName,
+              },
+            });
+          }
+          const { notifyRadioDownload } = await import('./email-helper.tsx');
+          const ownerRow = track.user_id
+            ? await pool.query(`SELECT COALESCE(NULLIF(full_name,''), NULLIF(display_name,''), '') AS name FROM users WHERE id::text = $1 LIMIT 1`, [track.user_id])
+            : { rows: [] as any[] };
+          await notifyRadioDownload({
+            kind: 'track',
+            title: track.title || 'Без названия',
+            ownerName: ownerRow.rows[0]?.name || '',
+            stationName: stationName || '',
+          });
+        } catch (notifyErr) {
+          console.error('[radio track download] notify failed:', notifyErr);
+        }
+      })();
+    }
 
     // Redirect to audio file URL (signed not needed since audio_url is public)
     return c.redirect(track.audio_url, 302);
@@ -1455,7 +1525,7 @@ app.get('/mixes/:id/download', requireAuth, requireRole('radio_station'), async 
     // Moderation-gate: радио качает только published + не-скрытые миксы
     // (тот же принцип что gate в /tracks/:id/download на статус трека).
     const mr = await pool.query(
-      `SELECT id, title, audio_url, moderation_status, is_hidden
+      `SELECT id, title, audio_url, moderation_status, is_hidden, dj_id
          FROM dj_mixes WHERE id = $1 LIMIT 1`,
       [mixId]
     );
@@ -1481,6 +1551,17 @@ app.get('/mixes/:id/download', requireAuth, requireRole('radio_station'), async 
     const sp = await pool.query(`SELECT data->>'stationName' as station_name FROM profiles WHERE user_id = $1`, [userId]);
     const stationName = sp.rows[0]?.station_name || null;
 
+    // Первое ли скачивание этого микса этой станцией (dedup уведомлений).
+    // Best-effort — таблицы может не быть до migration 104.
+    let isFirstDownload = false;
+    try {
+      const priorDl = await pool.query(
+        `SELECT 1 FROM mix_downloads_by_radio WHERE user_id = $1 AND mix_id = $2 LIMIT 1`,
+        [userId, mixId]
+      );
+      isFirstDownload = priorDl.rows.length === 0;
+    } catch { /* нет таблицы — не уведомляем, чтобы не спамить каждый раз */ }
+
     try {
       await pool.query(
         `INSERT INTO mix_downloads_by_radio (user_id, station_name, mix_id, weekly_release_id, ip_addr, user_agent)
@@ -1492,6 +1573,61 @@ app.get('/mixes/:id/download', requireAuth, requireRole('radio_station'), async 
     } catch (logErr) {
       // Таблицы нет до migration 104 — отдаём файл, лог best-effort.
       console.warn('[radio mix download] log skipped:', String(logErr));
+      isFirstDownload = false; // без лога не можем гарантировать «первое» — не уведомляем
+    }
+
+    // Уведомления — fire-and-forget. dj_mixes.dj_id ссылается на
+    // dj_profiles (id ИЛИ user_id) — резолвим в user_id владельца для
+    // notifications/SSE.
+    if (isFirstDownload) {
+      void (async () => {
+        try {
+          let ownerUserId: string | null = null;
+          let ownerName = '';
+          if (mix.dj_id) {
+            const dj = await pool.query(
+              `SELECT user_id FROM dj_profiles WHERE id = $1 OR user_id = $1 LIMIT 1`,
+              [String(mix.dj_id)]
+            );
+            ownerUserId = dj.rows[0]?.user_id || null;
+          }
+          if (ownerUserId) {
+            const u = await pool.query(
+              `SELECT COALESCE(NULLIF(full_name,''), NULLIF(display_name,''), '') AS name FROM users WHERE id::text = $1 LIMIT 1`,
+              [ownerUserId]
+            );
+            ownerName = u.rows[0]?.name || '';
+            const { upsertNotification } = await import('./db.tsx');
+            const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            await upsertNotification(ownerUserId, notifId, {
+              type: 'radio_download',
+              title: '📻 Радио скачало ваш микс',
+              message: `«${mix.title}» скачала${stationName ? ` радиостанция ${stationName}` : ' радиостанция'} для эфира.`,
+              metadata: { mix_id: mixId, station_name: stationName },
+              created_at: new Date().toISOString(),
+              read: false,
+            });
+            const { emitSSE } = await import('./sse-routes.tsx');
+            emitSSE(ownerUserId, {
+              type: 'radio_download',
+              data: {
+                title: 'Радио скачало ваш микс',
+                message: `«${mix.title}»${stationName ? ` — ${stationName}` : ''}`,
+                mixId, stationName,
+              },
+            });
+          }
+          const { notifyRadioDownload } = await import('./email-helper.tsx');
+          await notifyRadioDownload({
+            kind: 'mix',
+            title: mix.title || 'Без названия',
+            ownerName,
+            stationName: stationName || '',
+          });
+        } catch (notifyErr) {
+          console.error('[radio mix download] notify failed:', notifyErr);
+        }
+      })();
     }
 
     return c.redirect(mix.audio_url, 302);

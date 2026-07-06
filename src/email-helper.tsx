@@ -895,3 +895,32 @@ export async function notifyDmReceived(
     html,
   });
 }
+
+// ── Radio download notification (admin side) ──
+//
+// Радиостанция скачала трек/микс из недельного пакета. Зеркалит
+// notifyTrackUpload: письмо на info@promofm.ru + Telegram. Артисту/DJ
+// уведомление шлёт сам роут (upsertNotification + emitSSE) — здесь
+// только admin-канал. Fire-and-forget у caller'а: скачивание не должно
+// падать из-за SMTP/Telegram.
+export async function notifyRadioDownload(data: {
+  kind: 'track' | 'mix';
+  title: string;
+  ownerName?: string;
+  stationName?: string;
+}): Promise<void> {
+  const kindLabel = data.kind === 'mix' ? 'DJ-микс' : 'Трек';
+  const station = data.stationName || 'Радиостанция (без имени профиля)';
+  const owner = data.ownerName || '—';
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #10B981;">Радио скачало ${kindLabel === 'DJ-микс' ? 'микс' : 'трек'}</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      <tr><td style="padding: 8px; color: #999;">${escapeHtml(kindLabel)}:</td><td style="padding: 8px;">${escapeHtml(data.title)}</td></tr>
+      <tr><td style="padding: 8px; color: #999;">Автор:</td><td style="padding: 8px;">${escapeHtml(owner)}</td></tr>
+      <tr><td style="padding: 8px; color: #999;">Радиостанция:</td><td style="padding: 8px;">${escapeHtml(station)}</td></tr>
+    </table>
+    <p style="color:#888;font-size:13px;margin-top:16px;">Скачивание для эфира. Когда станция подтвердит ротацию — артист получит уведомление о ротации отдельно.</p>
+  `);
+  notifyAdminTelegram(`📻 <b>Радио скачало ${stripHtml(kindLabel === 'DJ-микс' ? 'микс' : 'трек')}</b>\n\n${stripHtml(kindLabel)}: <b>${stripHtml(data.title)}</b>\nАвтор: <b>${stripHtml(owner)}</b>\nРадиостанция: <b>${stripHtml(station)}</b>`).catch(() => {});
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Радио скачало: ${escapeHtml(station)} — ${escapeHtml(data.title)}`, html });
+}
