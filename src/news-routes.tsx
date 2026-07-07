@@ -37,6 +37,172 @@ newsRoutes.get("/public", async (c) => {
   return c.redirect(url.pathname + url.search, 301);
 });
 
+// ── Admin-модерация пользовательских новостей (таблица news) ──
+//
+// Раньше админ-таб «Новости» вообще не имел бэкенда: approve/reject были
+// локальным setState + фейковыми тостами («автор получит уведомление» —
+// никто ничего не получал), а список грузился из news_public (уже
+// ОПУБЛИКОВАННЫЕ статьи) со status по умолчанию 'pending'.
+//
+// Реальный контур: пользователь создаёт новость POST /news → таблица news
+// (status='draft'/'pending'); админ видит их здесь; approve → status='approved'
+// + публикация в news_public (лента лендинга) + уведомление автору;
+// reject → status='rejected' + уведомление с причиной.
+
+newsRoutes.get('/admin/list', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { pool } = await import('./db-client.tsx');
+    // image_url — migration 130; обложка нужна админ-карточкам и уходит
+    // в news_public при approve (иначе лента без картинок).
+    const r = await pool.query(
+      `SELECT id, author_id, title, content, summary, category, status,
+              author_name, image_url, created_at, updated_at
+         FROM news
+        ORDER BY created_at DESC
+        LIMIT 500`
+    );
+    return c.json({
+      success: true,
+      data: r.rows.map((n: any) => ({
+        id: n.id,
+        title: n.title,
+        content: n.content,
+        preview: n.summary || (n.content || '').slice(0, 100),
+        coverImage: n.image_url || '',
+        category: n.category || 'general',
+        status: n.status === 'draft' ? 'pending' : (n.status || 'pending'),
+        author: n.author_name || '',
+        authorId: n.author_id,
+        createdAt: n.created_at,
+        updatedAt: n.updated_at,
+      })),
+    });
+  } catch (error) {
+    console.error('[news] admin/list error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+newsRoutes.post('/admin/:id/moderate', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const { action, note } = await c.req.json() as { action: string; note?: string };
+    if (action !== 'approve' && action !== 'reject') {
+      return c.json({ success: false, error: "action должен быть 'approve' или 'reject'" }, 400);
+    }
+    const newStatus = action === 'approve' ? 'approved' : 'rejected';
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `UPDATE news SET status = $2, updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, author_id, title, content, summary, category, author_name, image_url`,
+      [id, newStatus]
+    );
+    if (!r.rowCount) return c.json({ success: false, error: 'Новость не найдена' }, 404);
+    const row = r.rows[0];
+
+    // Причина отклонения — на строке (migration 131), артист видит её в
+    // кабинете через GET /mine. Best-effort: если 131 ещё не применена,
+    // модерация не падает — причина остаётся только в уведомлении.
+    if (action === 'reject' && note) {
+      await pool.query(
+        `UPDATE news SET moderation_note = $2, moderated_at = NOW() WHERE id = $1`,
+        [id, String(note).slice(0, 2000)]
+      ).catch(() => {});
+    }
+
+    // Approve → публикация в news_public (это и есть публичная лента лендинга).
+    if (action === 'approve') {
+      try {
+        await db.upsertNewsPublic({
+          id: row.id,
+          title: row.title,
+          excerpt: row.summary || (row.content || '').slice(0, 200),
+          content: row.content || '',
+          category: row.category || 'industry',
+          source: 'user',
+          authorName: row.author_name || null,
+          imageUrl: row.image_url || null,
+          status: 'published',
+        } as any);
+      } catch (pubErr) {
+        console.error('[news] publish to news_public failed:', pubErr);
+        return c.json({ success: false, error: 'Статус обновлён, но публикация в ленту не удалась' }, 500);
+      }
+    }
+
+    // Уведомление автору — то, что фейковый тост только обещал.
+    if (row.author_id) {
+      try {
+        const notifId = `notif_news_${action}_${Date.now()}`;
+        await db.upsertNotification(row.author_id, notifId, {
+          id: notifId,
+          userId: row.author_id,
+          type: 'info',
+          title: action === 'approve' ? 'Новость опубликована' : 'Новость отклонена',
+          message: action === 'approve'
+            ? `«${row.title}» одобрена и опубликована в ленте.`
+            : `«${row.title}» отклонена.${note ? ` Причина: ${note}` : ''}`,
+          read: false,
+          createdAt: new Date().toISOString(),
+        });
+      } catch { /* уведомление best-effort */ }
+    }
+
+    return c.json({ success: true, id, status: newStatus });
+  } catch (error) {
+    console.error('[news] moderate error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ── Восстановлено 2026-07-07 (выпало при prep/ms7sbs-prod-мерже) ──
+// Свои новости артиста — news-page.tsx server-режим. ДО '/:id'
+// (Hono route ordering). moderation_note — причина отклонения (mig 131).
+newsRoutes.get('/mine', requireAuth, async (c) => {
+  try {
+    const userId = String(c.get('userId') || '');
+    const items = await db.getNewsByUser(userId);
+    return c.json({ success: true, data: items });
+  } catch (error) {
+    console.error('[news] GET /mine error:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
+// Approved-новости артиста для его публичной страницы
+// (ArtistPublicProfile «Новости артиста»). Принимает users.id ИЛИ
+// artist_profiles.id. ДО '/:id'.
+newsRoutes.get('/artist/:artistId', async (c) => {
+  try {
+    const artistId = c.req.param('artistId');
+    const { pool } = await import('./db-client.tsx');
+    const { rows } = await pool.query(
+      `SELECT n.id, n.title, n.summary, n.content, n.image_url, n.created_at
+         FROM news n
+        WHERE n.status = 'approved'
+          AND (n.author_id = $1
+               OR n.author_id = (SELECT ap.user_id FROM artist_profiles ap WHERE ap.id::text = $1 LIMIT 1))
+        ORDER BY n.created_at DESC
+        LIMIT 20`,
+      [String(artistId)]
+    );
+    return c.json({
+      success: true,
+      data: rows.map((r: any) => ({
+        id: String(r.id),
+        title: r.title || '',
+        excerpt: r.summary || (r.content || '').slice(0, 160),
+        coverImage: r.image_url || '',
+        publishedAt: r.created_at,
+      })),
+    });
+  } catch (error) {
+    console.error('[news] GET /artist error:', error);
+    return c.json({ success: true, data: [] });
+  }
+});
+
 newsRoutes.get('/', async (c) => {
   try {
     const category = c.req.query('category');
@@ -63,192 +229,6 @@ newsRoutes.get('/', async (c) => {
   } catch (error) {
     console.error('[news] GET error:', error);
     return c.json([]);
-  }
-});
-
-// Own news of the authenticated artist (таблица news, не news_public).
-// Регистрируется ДО '/:id' — Hono route ordering (см. память проекта).
-// До 2026-07-02 такого роута не было: news-page.tsx жила целиком на
-// localStorage и после подключения POST не могла бы перечитать своё.
-newsRoutes.get('/mine', requireAuth, async (c) => {
-  try {
-    const userId = String(c.get('userId') || '');
-    const items = await db.getNewsByUser(userId);
-    return c.json({ success: true, data: items });
-  } catch (error) {
-    console.error('[news] GET /mine error:', error);
-    return c.json({ success: true, data: [] });
-  }
-});
-
-// ── Артист-новости: модерация + публичная выборка (2026-07-02) ──
-//
-// Продуктовое решение: одобренная новость артиста выходит (а) в общую
-// ленту news_public (копия через upsertNewsPublic, source='artist' —
-// GET '/' подхватывает её без изменений) и (б) на публичную страницу
-// артиста (GET /artist/:artistId ниже). Требует migration 126.
-
-// Очередь модерации для админа (все статусы, фильтрует фронт).
-newsRoutes.get('/admin/artist-queue', requireAuth, requireAdmin, async (c) => {
-  try {
-    const limit = Math.min(parseInt(c.req.query('limit') || '500', 10) || 500, 1000);
-    const { pool } = await import('./db-client.tsx');
-    const { rows } = await pool.query(
-      `SELECT n.id, n.author_id, n.title, n.content, n.summary, n.category,
-              n.status, n.image_url, n.moderation_note, n.created_at,
-              COALESCE(NULLIF(n.author_name, ''), NULLIF(u.full_name, ''), NULLIF(u.display_name, ''), 'Артист') AS artist_name
-         FROM news n
-         LEFT JOIN users u ON u.id::text = n.author_id
-        ORDER BY n.created_at DESC
-        LIMIT $1`,
-      [limit]
-    );
-    return c.json({
-      success: true,
-      data: rows.map((r: any) => ({
-        id: String(r.id),
-        userId: r.author_id ? String(r.author_id) : '',
-        title: r.title || 'Без названия',
-        content: r.content || '',
-        preview: r.summary || (r.content || '').slice(0, 100),
-        coverImage: r.image_url || '',
-        category: r.category || 'general',
-        status: r.status || 'pending',
-        moderationNote: r.moderation_note || '',
-        createdAt: r.created_at,
-        artist: r.artist_name,
-      })),
-    });
-  } catch (error) {
-    console.error('[news] admin/artist-queue error:', error);
-    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
-  }
-});
-
-// Решение админа. approved → копия в news_public (общая лента) +
-// уведомление артисту; rejected → moderation_note + уведомление.
-newsRoutes.post('/admin/:id/moderate', requireAuth, requireAdmin, async (c) => {
-  try {
-    const id = c.req.param('id');
-    const body = await c.req.json().catch(() => ({} as any));
-    const status = String(body.status || '');
-    if (status !== 'approved' && status !== 'rejected') {
-      return c.json({ success: false, error: "status must be 'approved' or 'rejected'" }, 400);
-    }
-    const note = typeof body.note === 'string' ? body.note.trim().slice(0, 2000) : '';
-    if (status === 'rejected' && !note) {
-      return c.json({ success: false, error: 'Причина отклонения обязательна' }, 400);
-    }
-
-    const { pool } = await import('./db-client.tsx');
-    const { rows } = await pool.query(
-      `UPDATE news
-          SET status = $2,
-              moderation_note = NULLIF($3, ''),
-              moderated_at = NOW(),
-              moderated_by = $4,
-              updated_at = NOW()
-        WHERE id = $1
-        RETURNING id, author_id, title, content, summary, category, image_url, author_name`,
-      [String(id), status, note, String(c.get('userEmail') || c.get('userId') || '')]
-    );
-    if (rows.length === 0) return c.json({ success: false, error: 'Article not found' }, 404);
-    const article = rows[0];
-
-    // Имя артиста для ленты/уведомления
-    let artistName = article.author_name || '';
-    if (!artistName && article.author_id) {
-      const u = await pool.query(
-        `SELECT COALESCE(NULLIF(full_name, ''), NULLIF(display_name, ''), '') AS name
-           FROM users WHERE id::text = $1 LIMIT 1`,
-        [String(article.author_id)]
-      );
-      artistName = u.rows[0]?.name || '';
-    }
-
-    if (status === 'approved') {
-      // В общую ленту — тем же механизмом, что и агентские новости.
-      const { upsertNewsPublic } = await import('./db.tsx');
-      await upsertNewsPublic({
-        id: String(article.id),
-        title: article.title || 'Без названия',
-        excerpt: article.summary || (article.content || '').slice(0, 200),
-        content: article.content || '',
-        category: article.category || 'music',
-        tags: [],
-        source: 'artist',
-        imageUrl: article.image_url || null,
-        authorName: artistName || 'Артист',
-        publishedAt: new Date().toISOString(),
-        processedAt: new Date().toISOString(),
-        status: 'published',
-      } as any);
-    }
-
-    if (article.author_id) {
-      try {
-        const { upsertNotification } = await import('./db.tsx');
-        const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        await upsertNotification(String(article.author_id), notifId, {
-          type: status === 'approved' ? 'news_approved' : 'news_rejected',
-          title: status === 'approved' ? '✅ Новость опубликована!' : '❌ Новость отклонена',
-          message: status === 'approved'
-            ? `Ваша новость «${article.title}» прошла модерацию: она в общей ленте и на вашей странице.`
-            : `Ваша новость «${article.title}» не прошла модерацию. Причина: ${note}`,
-          metadata: { news_id: String(article.id) },
-          created_at: new Date().toISOString(),
-          read: false,
-        });
-        const { emitSSE } = await import('./sse-routes.tsx');
-        emitSSE(String(article.author_id), {
-          type: 'notification',
-          data: {
-            title: status === 'approved' ? 'Новость опубликована' : 'Новость отклонена',
-            comment: `«${article.title}»${status === 'rejected' ? ` — ${note}` : ''}`,
-          },
-        });
-      } catch (notifyErr) {
-        console.error('[news] moderate notify failed:', notifyErr);
-      }
-    }
-
-    return c.json({ success: true, id: String(article.id), status });
-  } catch (error) {
-    console.error('[news] moderate error:', error);
-    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
-  }
-});
-
-// Публичная выборка одобренных новостей артиста для его страницы.
-// :artistId принимает и users.id, и artist_profiles.id (страница
-// оперирует artistId, чей смысл исторически плавает).
-newsRoutes.get('/artist/:artistId', async (c) => {
-  try {
-    const artistId = c.req.param('artistId');
-    const { pool } = await import('./db-client.tsx');
-    const { rows } = await pool.query(
-      `SELECT n.id, n.title, n.summary, n.content, n.category, n.image_url, n.created_at
-         FROM news n
-        WHERE n.status = 'approved'
-          AND (n.author_id = $1
-               OR n.author_id = (SELECT ap.user_id FROM artist_profiles ap WHERE ap.id::text = $1 LIMIT 1))
-        ORDER BY n.created_at DESC
-        LIMIT 20`,
-      [String(artistId)]
-    );
-    return c.json({
-      success: true,
-      data: rows.map((r: any) => ({
-        id: String(r.id),
-        title: r.title || '',
-        excerpt: r.summary || (r.content || '').slice(0, 160),
-        coverImage: r.image_url || '',
-        publishedAt: r.created_at,
-      })),
-    });
-  } catch (error) {
-    console.error('[news] GET /artist error:', error);
-    return c.json({ success: true, data: [] });
   }
 });
 
@@ -292,15 +272,16 @@ newsRoutes.post('/', requireAuth, async (c) => {
     const body = await c.req.json();
     const newsId = body.id || `news-${crypto.randomUUID()}`;
 
-    // Owner-guard на upsert: без него артист A мог бы POST'нуть id чужой
-    // новости и перезаписать её (upsertNews апсертит по id вслепую).
+    // Owner-guard (восстановлен 2026-07-07): upsertNews апсертит по id
+    // вслепую — без проверки артист A мог POST'нуть id чужой новости и
+    // перезаписать её.
     if (body.id) {
-      const { data: existing } = await getDbClient()
-        .from('news')
-        .select('author_id')
-        .eq('id', String(body.id))
-        .maybeSingle();
-      if (existing && String(existing.author_id) !== userId) {
+      const { pool } = await import('./db-client.tsx');
+      const existing = await pool.query(
+        `SELECT author_id FROM news WHERE id = $1 LIMIT 1`,
+        [String(body.id)]
+      );
+      if (existing.rows[0] && String(existing.rows[0].author_id) !== userId) {
         return c.json({ success: false, error: 'Not your article' }, 403);
       }
     }
@@ -315,7 +296,8 @@ newsRoutes.post('/', requireAuth, async (c) => {
   }
 });
 
-// Delete own article. news.id и news.author_id — text, кастов не нужно.
+// Удаление своей новости (восстановлено 2026-07-07). id и author_id —
+// text, кастов не нужно.
 newsRoutes.delete('/:id', requireAuth, async (c) => {
   try {
     const userId = String(c.get('userId') || '');

@@ -773,6 +773,43 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
     }
 
     const body = await c.req.json();
+    if (!body.stationId) {
+      return c.json({ success: false, error: 'stationId обязателен' }, 400);
+    }
+
+    // ── Server-side authoritative pricing (решение владельца 2026-07-03) ──
+    // Источник истины цены = слоты станции (radio_ad_slots), которые радио
+    // выставило само: body.timeSlots = массив slot id, бюджет считается на
+    // сервере как SUM(slot.price) × durationDays (контракт задокументирован
+    // в venue-facing каталоге GET /radio-profile/profile/:id/ad-slots).
+    // body.budget ИГНОРИРУЕТСЯ — раньше он принимался как есть, и amount-gate
+    // на /create-session сверял оплату с клиентской цифрой (1₽-кампания
+    // проходила все проверки). Легаси-строки ('any_time', 'morning'…) слотами
+    // не являются → 400.
+    const requestedSlotIds: string[] = Array.isArray(body.timeSlots)
+      ? body.timeSlots.filter((s: any) => typeof s === 'string' && s.trim())
+      : [];
+    if (requestedSlotIds.length === 0) {
+      return c.json({ success: false, error: 'Выберите рекламные слоты станции — цена рассчитывается по ним' }, 400);
+    }
+    const { pool: slotPool } = await import('./db-client.tsx');
+    const slotRes = await slotPool.query(
+      `SELECT id, price FROM radio_ad_slots
+        WHERE radio_id = $1 AND id = ANY($2::text[]) AND status = 'available'`,
+      [String(body.stationId), requestedSlotIds]
+    );
+    if (slotRes.rows.length !== requestedSlotIds.length) {
+      return c.json({ success: false, error: 'Некоторые слоты недоступны или не принадлежат этой станции' }, 400);
+    }
+    const startMs = body.startDate ? new Date(body.startDate).getTime() : Date.now();
+    const endMs = body.endDate ? new Date(body.endDate).getTime() : startMs;
+    const durationDays = Math.max(1, Math.ceil((endMs - startMs) / 86400000));
+    const perDay = slotRes.rows.reduce((s: number, r: any) => s + Number(r.price || 0), 0);
+    const authoritativeBudget = Math.round(perDay * durationDays);
+    if (!(authoritativeBudget > 0)) {
+      return c.json({ success: false, error: 'Цена выбранных слотов не задана станцией' }, 400);
+    }
+
     const now = new Date().toISOString();
     const campaign: VenueAdCampaignRow = {
       id: `camp-${crypto.randomUUID()}`,
@@ -786,12 +823,13 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
       startDate: body.startDate,
       endDate: body.endDate,
       totalPlays: 0,
-      targetPlays: body.targetPlays || 0,
-      budget: body.budget || 0,
+      // Информативная оценка: 1 выход в день на каждый выбранный слот.
+      targetPlays: requestedSlotIds.length * durationDays,
+      budget: authoritativeBudget,
       spent: 0,
       impressions: 0,
       ctr: 0,
-      timeSlots: body.timeSlots || [],
+      timeSlots: requestedSlotIds,
       extra: {},
       createdAt: now,
       updatedAt: now,
@@ -818,7 +856,11 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
         platformFee: splitRadioCampaignAmount(campaign.budget || 0).platformFee,
         stationPayout: splitRadioCampaignAmount(campaign.budget || 0).stationPayout,
         timeSlots: campaign.timeSlots,
-        status: 'pending',
+        // Платная кампания видна радио только ПОСЛЕ оплаты: создаём заявку
+        // как 'pending_payment' (радио её не видит и не может одобрить),
+        // webhook checkout radio_campaign переведёт в 'pending' после
+        // успешной оплаты. Бесплатная (budget<=0) — сразу 'pending'.
+        status: (Number(campaign.budget) || 0) > 0 ? 'pending_payment' : 'pending',
         submittedAt: new Date().toISOString(),
       };
 

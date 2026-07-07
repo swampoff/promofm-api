@@ -206,15 +206,17 @@ app.post("/process/:trackId", requireAuth, async (c) => {
 //
 // Маркировка/мониторинг миксов (закрытие дыры 2026-07-03): dj_mixes
 // раньше не попадали в watermark-пайплайн. Зеркалит /process/:trackId,
-// но против dj_mixes и с флагом --mix-id. Требует migration 127
-// (promo_check_fingerprints.mix_id) + fingerprinter.py c --mix-id на VPS
-// (спека в HANDOFF). До Python-части — pending-строка висит, вреда нет.
+// но против dj_mixes и с флагом --mix-id. Хранение — Decision B
+// (migration 132, применена 2026-07-06): ПАРАЛЛЕЛЬНЫЕ dj_mix_fingerprints /
+// dj_mix_detections + view promo_check_all_fingerprints для matcher'а.
+// Python-часть (fingerprinter.py --mix-id + mix reconcile-бэкстоп) — за
+// laptop, спека в HANDOFF §6. До неё pending-строка висит, вреда нет.
 //
 // Экспортируемая queueMixFingerprint зовётся ЛИБО из этого эндпоинта
 // (ручной/админ-ретриггер), ЛИБО напрямую in-process из dj-studio при
 // создании микса — без внутреннего HTTP-хопа, который требует cookie
 // (requireAuth не имеет localhost-байпаса, поэтому cookieless
-// internal-fetch к /process 401'ил бы).
+// internal-fetch к /process 401'ил бы — тот самый мёртвый трековый хоп).
 export async function queueMixFingerprint(mixId: string): Promise<{ ok: boolean; error?: string }> {
   const mix = await query<{ audio_url: string | null }>(
     "SELECT audio_url FROM dj_mixes WHERE id = $1",
@@ -223,17 +225,18 @@ export async function queueMixFingerprint(mixId: string): Promise<{ ok: boolean;
   if (!mix.rows[0]) return { ok: false, error: "Mix not found" };
   if (!mix.rows[0].audio_url) return { ok: false, error: "Mix has no audio file" };
 
-  // Pending-строка (best-effort: до migration 127 колонки mix_id нет —
-  // INSERT упадёт, но spawn'нутый Python всё равно отработает по dj_mixes).
+  // Pending-строка в dj_mix_fingerprints (mix_id UNIQUE, migration 132).
+  // watermark_id — placeholder-uuid; fingerprinter.py перезапишет через
+  // generate_watermark_id() (namespace не пересекается с трековым).
   try {
     await query(
-      `INSERT INTO promo_check_fingerprints (mix_id, fingerprint, watermark_id, duration, status)
+      `INSERT INTO dj_mix_fingerprints (mix_id, fingerprint, watermark_id, duration, status)
        VALUES ($1, '{}', gen_random_uuid()::text, 0, 'pending')
-       ON CONFLICT (mix_id) WHERE mix_id IS NOT NULL DO UPDATE SET status = 'pending'`,
+       ON CONFLICT (mix_id) DO UPDATE SET status = 'pending'`,
       [mixId]
     );
   } catch (e) {
-    console.warn("[promo-check] mix pending row skipped (migration 127 not applied?):", String(e));
+    console.warn("[promo-check] mix pending row skipped (migration 132 not applied?):", String(e));
   }
 
   // Python fingerprinter в фоне, детач. Пока fingerprinter.py не умеет

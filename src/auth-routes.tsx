@@ -351,6 +351,10 @@ auth.post("/signin", async (c) => {
 
     if (user.status === 'pending') return c.json({ success: false, error: 'Ваш аккаунт на модерации.', accountStatus: 'pending' }, 403);
     if (user.status === 'rejected') return c.json({ success: false, error: 'Ваша заявка отклонена.', accountStatus: 'rejected' }, 403);
+    // 'blocked' ставит админ (POST /admin/users/:id/status, migration 122).
+    // Живые сессии убиты бампом token_version в момент блокировки; этот гейт
+    // закрывает повторный вход по паролю.
+    if (user.status === 'blocked') return c.json({ success: false, error: 'Аккаунт заблокирован администрацией.', accountStatus: 'blocked' }, 403);
 
     // H7: Check if MFA is enabled
     const mfaEnabled = await isMFAEnabled(user.id);
@@ -1178,6 +1182,57 @@ auth.post("/admin/reject-user", requireAuth, requireAdmin, async (c) => {
   }
 });
 
+
+// ──────────────────────────────────────────────────────────────────────
+// POST /auth/admin/users/:id/status — блокировка/разблокировка пользователя
+//
+// Раньше FE (UsersManagement) бил в несуществующий /api/admin/users/:id/status
+// → 404 при фейковом success-тосте: админ был уверен, что заблокировал юзера,
+// а тот продолжал работать. Требует migration 122 ('blocked' в user_status).
+//
+// Блокировка: status='blocked' + token_version+1 → живые JWT умирают
+// НЕМЕДЛЕННО (auth-middleware сверяет tv на каждом запросе), а не при
+// следующем логине. Логин 'blocked' отбивается гейтом в /login.
+// ──────────────────────────────────────────────────────────────────────
+auth.post("/admin/users/:id/status", requireAuth, requireAdmin, async (c) => {
+  try {
+    const targetId = c.req.param('id');
+    const { status } = await c.req.json();
+    if (status !== 'blocked' && status !== 'active') {
+      return c.json({ success: false, error: "status должен быть 'blocked' или 'active'" }, 400);
+    }
+    // Нельзя заблокировать самого себя (misclick-защита; разблокировать себя
+    // тоже бессмысленно — активен раз выполняет запрос).
+    if (String(c.get('userId')) === String(targetId)) {
+      return c.json({ success: false, error: 'Нельзя изменить статус собственного аккаунта' }, 400);
+    }
+    const target = await sql(`SELECT email, role::text FROM users WHERE id::text = $1`, [targetId]);
+    if (target.rows.length === 0) return c.json({ success: false, error: 'Не найден' }, 404);
+    // Нельзя блокировать админов — только вручную через БД.
+    const { isAdminEmail } = await import('./roles.tsx');
+    if (status === 'blocked' && (isAdminEmail(target.rows[0].email) || ['admin', 'superadmin'].includes(target.rows[0].role))) {
+      return c.json({ success: false, error: 'Нельзя заблокировать администратора' }, 403);
+    }
+    const result = status === 'blocked'
+      ? await sql(
+          `UPDATE users SET status = 'blocked'::user_status, token_version = COALESCE(token_version, 1) + 1
+            WHERE id::text = $1 RETURNING email`,
+          [targetId])
+      : await sql(
+          `UPDATE users SET status = 'active'::user_status WHERE id::text = $1 RETURNING email`,
+          [targetId]);
+    if (result.rows.length === 0) return c.json({ success: false, error: 'Не найден' }, 404);
+    logAdminAction(c, {
+      action: status === 'blocked' ? 'user_block' : 'user_unblock',
+      resourceType: 'user', targetId: String(targetId),
+      details: { email: result.rows[0].email },
+    });
+    return c.json({ success: true, status });
+  } catch (error) {
+    console.error('admin users status error:', error);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
 
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/exchange-auto-login — exchange short-lived token for JWT

@@ -168,8 +168,8 @@ Deferred settled: 0 new bounces». Стоп-лист остался 326.
 Также: мои миграции на ветке `claude/promomusicfigma-architecture-ms7sbs`
 ПЕРЕНУМЕРОВАНЫ 120–124 → **122–126** (номера 120/121 заняли твои
 marketplace-миграции, уже применённые на проде). Актуальный список моей
-ветки: 122_videos_pipeline, 123_videos_moderation,
-124_videos_category_tags, 125_news_image_url, 126_news_moderation.
+ветки: 127_videos_pipeline, 128_videos_moderation,
+129_videos_category_tags, 130_news_image_url, 131_news_moderation.
 
 ---
 
@@ -179,14 +179,15 @@ marketplace-миграции, уже применённые на проде). А
 сущностью на радио, которая НЕ ставилась в watermark/fingerprint-
 пайплайн. Cloud закрыл **queue-сторону** (ветка
 `claude/promomusicfigma-architecture-ms7sbs`):
-- `migration 127_promo_check_mix_support.sql` — `mix_id TEXT` в
-  `promo_check_fingerprints` и `promo_check_detections` (+ индексы,
-  track_id → nullable). ⚠️ Эти таблицы созданы прямо на проде, НЕ в
-  миграциях — ALTER'ы guarded по information_schema. **Сверь `\d` перед
-  COMMIT.**
+- **Схема — РЕШЕНО тобой (Decision B, 2026-07-06, migration 132,
+  УЖЕ применена к БД):** параллельные `dj_mix_fingerprints` /
+  `dj_mix_detections` + view `promo_check_all_fingerprints`
+  (content_type-дискриминатор). Моя ранняя заготовка
+  `127_promo_check_mix_support.sql` (общие таблицы + mix_id)
+  **удалена с ветки** — superseded твоим 132.
 - `promo-check-routes.tsx`: `queueMixFingerprint(mixId)` (export) +
-  `POST /promo-check/process-mix/:mixId`. Пишет pending-строку и
-  `spawn python3 fingerprinter.py --mix-id <id>`.
+  `POST /promo-check/process-mix/:mixId`. Пишет pending-строку в
+  `dj_mix_fingerprints` и `spawn python3 fingerprinter.py --mix-id <id>`.
 - `dj-studio-routes.tsx`: при создании микса зовёт `queueMixFingerprint`
   in-process (fire-and-forget).
 
@@ -211,17 +212,15 @@ marketplace-миграции, уже применённые на проде). А
   миксы вообще не входят в пайплайн.
 
 **Что за тобой (VPS) — блюпринт для миксов, СТРОГО ПО ПОРЯДКУ:**
-1. **Схема.** Решить: `mix_id`+`content_type` в общих
-   `promo_check_fingerprints`/`_detections` (migration 127 делает
-   `mix_id`-вариант; `content_type` можно добавить, если удобнее
-   дискриминатор) — ИЛИ параллельные `dj_mix_fingerprints`/
-   `dj_mix_detections`. **Выбор за тобой** (untracked-prod-таблицы,
-   нужен `\d`). Migration 127 — заготовка под общий вариант; guarded,
-   сверь `\d` до COMMIT (если `track_id` в PK — `DROP NOT NULL` не
-   пройдёт, скажи cloud → переигрываем на параллельные таблицы).
+1. **Схема — ✅ ЗАКРЫТО** (Decision B: параллельные таблицы, migration
+   132, применена 2026-07-06; namespace ватермарков не должен
+   пересекаться с трековым — см. коммент в 132 про
+   generate_watermark_id()).
 2. **Mix-режим в `fingerprinter.py`** (сейчас `--track-id` required):
    брать источник из `dj_mixes.audio_url`, инжектить watermark в файл,
-   писать детект в выбранную из п.1 таблицу/колонку.
+   писать fingerprint в `dj_mix_fingerprints`, детекты — в
+   `dj_mix_detections` (matcher читает объединённый view
+   `promo_check_all_fingerprints`).
 3. **Mix reconcile-бэкстоп** (⚠️ САМОЕ ВАЖНОЕ, cloud это упустил).
    Одиночный in-process вызов `queueMixFingerprint` при создании микса
    = микс НАВСЕГДА без мониторинга, если этот вызов упал — ровно та
@@ -243,3 +242,19 @@ marketplace-миграции, уже применённые на проде). А
 удалить — он ничего не триггерит (реальную работу делает крон п.реального
 триггера выше). Cloud НЕ трогал трековый путь (правило «не чинить
 рабочее вслепую»); теперь механизм подтверждён — можно чистить.
+
+---
+
+## 7. News-цикл: восстановление после выборочного prep-мержа (cloud, 2026-07-07)
+
+При подготовке `prep/ms7sbs-prod` часть моего news-контура выпала, а
+FE-откат уехал в main. Восстановлено на ветке поверх ТВОЕГО контракта
+(`/admin/list` + `POST /admin/:id/moderate {action}` — канон, он на
+проде): BE — `GET /mine`, `DELETE /:id` (owner-check), owner-guard на
+upsert по чужому id, `GET /artist/:artistId` (approved для публичной
+страницы артиста), `image_url` в admin/list и в approve→news_public;
+FE — news-page снова server-mode (/mine + POST + DELETE),
+NewsModeration переведена на твои эндпоинты (реальные approve/reject
+вместо локального setState). Деталь: миграции 130 (image_url) и 131
+(news_moderation: moderation_note и пр.) уже на main — новых миграций
+для этого восстановления НЕ требуется.

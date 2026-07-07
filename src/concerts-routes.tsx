@@ -186,6 +186,22 @@ app.get('/:id', requireAuth, async (c) => {
     if (!concert) {
       return c.json({ success: false, error: 'Concert not found' }, 404);
     }
+
+    // Одобренные (в афише) концерты читает любой авторизованный — это
+    // карточка публичной афиши. Черновики/на-модерации/отклонённые/отменённые
+    // — только владелец или админ, иначе 404 (не палим существование и
+    // содержимое чужих неопубликованных событий). Синхронно с публичными
+    // статусами getPublishedConcerts (['approved','published']).
+    const PUBLIC_STATUSES = ['approved', 'published'];
+    if (!PUBLIC_STATUSES.includes(concert.moderation_status)) {
+      const userId = c.get('userId') as string;
+      const role = c.get('userRole') as string;
+      const isAdmin = role === 'admin' || role === 'superadmin';
+      if (!isAdmin && String(concert.user_id) !== String(userId)) {
+        return c.json({ success: false, error: 'Concert not found' }, 404);
+      }
+    }
+
     return c.json({ success: true, data: concert });
   } catch (error) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -225,13 +241,58 @@ app.post('/', requireAuth, async (c) => {
   }
 });
 
+// Форма кабинета (concert-schema) шлёт имена полей banner_url/ticket_url/date/…
+// которые НЕ являются колонками concerts. updateConcert строит
+// SET "<key>"=$n для каждого ключа → сырой body ронял весь UPDATE на
+// несуществующей колонке. Нормализуем в реальные колонки, включая только
+// присутствующие поля (partial update; пустая строка = осознанная очистка).
+function concertFormToColumns(body: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  const set = (col: string, val: any) => { if (val !== undefined) out[col] = val; };
+  set('title', body.title);
+  set('artist_name', body.artist_name ?? body.artist);
+  set('description', body.description);
+  set('city', body.city);
+  set('venue_name', body.venue_name ?? body.venue);
+  set('venue_address', body.venue_address);
+  set('event_date', body.event_date ?? body.date);
+  set('event_time', body.event_time ?? body.time);
+  set('event_type', body.event_type ?? body.type);
+  set('banner_image_url', body.banner_image_url ?? body.banner ?? body.banner_url);
+  set('ticket_price_min', body.ticket_price_min ?? body.ticketPriceFrom);
+  set('ticket_price_max', body.ticket_price_max ?? body.ticketPriceTo);
+  set('ticket_link', body.ticket_link ?? body.ticketLink ?? body.ticket_url);
+  set('ticket_capacity', body.ticket_capacity);
+  return out;
+}
+
+// Ownership guard: возвращает концерт, только если вызывающий — его владелец
+// (concerts.user_id === JWT userId) или админ. Иначе null. 404 отдаётся и на
+// «не найдено», и на «не твой» — чтобы не палить существование чужих записей.
+// Модерация правит концерты своим роутом (concert-moderation) — там свои гейты.
+async function loadOwnedConcert(c: any, concertId: string): Promise<any | null> {
+  const userId = c.get('userId') as string;
+  const role = c.get('userRole') as string;
+  const concert = await typed.getConcertById(concertId);
+  if (!concert) return null;
+  const isAdmin = role === 'admin' || role === 'superadmin';
+  if (!isAdmin && String(concert.user_id) !== String(userId)) return null;
+  return concert;
+}
+
 // PUT /:id — Update concert
 app.put('/:id', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
     const body = await c.req.json();
 
-    const concert = await typed.updateConcert(concertId, body);
+    // IDOR-guard: править можно только свой концерт (или админ).
+    const owned = await loadOwnedConcert(c, concertId);
+    if (!owned) {
+      return c.json({ success: false, error: 'Concert not found' }, 404);
+    }
+
+    const concert = await typed.updateConcert(concertId, concertFormToColumns(body));
     if (!concert) {
       return c.json({ success: false, error: 'Concert not found' }, 404);
     }
@@ -246,6 +307,13 @@ app.put('/:id', requireAuth, async (c) => {
 app.delete('/:id', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
+
+    // IDOR-guard: удалять можно только свой концерт (или админ).
+    const owned = await loadOwnedConcert(c, concertId);
+    if (!owned) {
+      return c.json({ success: false, error: 'Concert not found' }, 404);
+    }
+
     await typed.deleteConcert(concertId);
     return c.json({ success: true, message: 'Concert deleted' });
   } catch (error) {
@@ -257,6 +325,13 @@ app.delete('/:id', requireAuth, async (c) => {
 app.post('/:id/submit', requireAuth, async (c) => {
   try {
     const concertId = c.req.param('id');
+
+    // IDOR-guard: отправлять на модерацию можно только свой концерт (или админ).
+    const owned = await loadOwnedConcert(c, concertId);
+    if (!owned) {
+      return c.json({ success: false, error: 'Concert not found' }, 404);
+    }
+
     const concert = await typed.updateConcert(concertId, {
       moderation_status: 'pending',
     });
@@ -277,7 +352,8 @@ app.post('/:id/promote', requireAuth, async (c) => {
     const body = await c.req.json();
     const cost = body.cost || 100;
 
-    const concert = await typed.getConcertById(concertId);
+    // IDOR-guard: продвигать (за свои коины) можно только свой концерт (или админ).
+    const concert = await loadOwnedConcert(c, concertId);
     if (!concert) {
       return c.json({ success: false, error: 'Concert not found' }, 404);
     }

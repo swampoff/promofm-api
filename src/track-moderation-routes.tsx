@@ -1041,7 +1041,7 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
 app.post('/promote-upcoming', async (c) => {
   const key = c.req.header('X-Internal-Key') || '';
   const expectedKey = process.env.VPS_INTERNAL_KEY || '';
-  if (expectedKey && key !== expectedKey) {
+  if (!expectedKey || key !== expectedKey) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 

@@ -6904,6 +6904,7 @@ export async function updateRadioVenueRequest(
     audioUrl: string; startDate: string; endDate: string; targetPlays: number;
     reviewNotes: string;
   }>,
+  opts?: { requireStatus?: string },
 ): Promise<any | null> {
   const { pool } = await import('./db-client.tsx');
   const fieldMap: Record<string, string> = {
@@ -6923,10 +6924,22 @@ export async function updateRadioVenueRequest(
     sets.push(`${col} = $${vals.length}${tsCols.has(col) ? '::timestamptz' : ''}`);
   }
   if (sets.length === 0) return null;
-  vals.push(radioId, id);
+  vals.push(radioId);
+  const radioIdIdx = vals.length;
+  vals.push(id);
+  const idIdx = vals.length;
+  // requireStatus — атомарный precondition на текущий статус (напр. approve
+  // только из 'pending'). Возвращает null если статус не совпал → хендлер
+  // отдаёт 409/404. Защищает от одобрения неоплаченной 'pending_payment'
+  // заявки даже при известном id.
+  let statusGuard = '';
+  if (opts?.requireStatus) {
+    vals.push(opts.requireStatus);
+    statusGuard = ` AND status = $${vals.length}`;
+  }
   const r = await pool.query(
     `UPDATE radio_venue_requests SET ${sets.join(', ')}, updated_at = NOW()
-      WHERE radio_id = $${vals.length - 1} AND id = $${vals.length}
+      WHERE radio_id = $${radioIdIdx} AND id = $${idIdx}${statusGuard}
       RETURNING id, radio_id, venue_id, venue_name, venue_city, campaign_id, package_type,
                 audio_url, start_date, end_date, target_plays, completed_plays,
                 plays_per_day, duration_days, total_price, platform_fee, station_payout,

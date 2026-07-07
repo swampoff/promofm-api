@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import { getDbClient } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const promotion = new Hono();
 
@@ -927,6 +927,124 @@ promotion.get('/promolab/:artistId', requireAuth, async (c) => {
   } catch (error) {
     console.error('PromoLab list error:', error);
     return c.json(getEmptyResponseWithMeta('promo_lab_experiments', error));
+  }
+});
+
+// ============================================
+// ADMIN: модерация заявок Production360 и PromoLab
+//
+// Пользовательские заявки давно копились в SQL (production_360_requests
+// через /production360/submit; promo_lab_experiments через /promolab/submit),
+// но админ-табы читали localStorage-only DataContext → админ НЕ ВИДЕЛ ни
+// одной реальной заявки и не мог их обработать. Эти эндпоинты — read/manage
+// сторона для админ-кабинета.
+//
+// Production360 = запрос на продюсирование + студийные съёмки + видеовыпуски.
+// PromoLab = экспериментальные промо-заявки (тест трека).
+// ============================================
+
+const ADMIN_MODERATION_STATUSES = ['approved', 'rejected', 'in_progress', 'completed'];
+
+promotion.get('/production360/admin/list', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { pool } = await import('./db-client.tsx');
+    // artist_id хранит userId отправителя (FE шлёт userId) — имя через users.
+    const r = await pool.query(
+      `SELECT p.*, COALESCE(NULLIF(u.full_name, ''), u.email, p.artist_id) AS author_name
+         FROM production_360_requests p
+         LEFT JOIN users u ON u.id::text = p.artist_id
+        ORDER BY p.created_at DESC NULLS LAST
+        LIMIT 500`
+    );
+    return c.json({ success: true, data: r.rows });
+  } catch (error) {
+    console.error('production360 admin/list error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+promotion.post('/production360/admin/:id/status', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const { status, reason } = await c.req.json() as { status: string; reason?: string };
+    if (!ADMIN_MODERATION_STATUSES.includes(status)) {
+      return c.json({ success: false, error: `status должен быть один из: ${ADMIN_MODERATION_STATUSES.join(', ')}` }, 400);
+    }
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `UPDATE production_360_requests SET status = $2, updated_at = NOW()
+        WHERE id = $1 RETURNING id, artist_id, project_title`,
+      [id, status]
+    );
+    if (!r.rowCount) return c.json({ success: false, error: 'Заявка не найдена' }, 404);
+    const row = r.rows[0];
+    try {
+      const { upsertNotification } = await import('./db.tsx');
+      const notifId = `notif_p360_${status}_${Date.now()}`;
+      await upsertNotification(row.artist_id, notifId, {
+        id: notifId, userId: row.artist_id, type: 'info',
+        title: status === 'approved' ? 'Заявка «360°» одобрена'
+             : status === 'rejected' ? 'Заявка «360°» отклонена'
+             : `Заявка «360°»: статус ${status}`,
+        message: `«${row.project_title}»${reason ? ` — ${reason}` : ''}`,
+        read: false, createdAt: new Date().toISOString(),
+      });
+    } catch { /* best-effort */ }
+    return c.json({ success: true, id, status });
+  } catch (error) {
+    console.error('production360 admin/status error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+promotion.get('/promolab/admin/list', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `SELECT p.*, COALESCE(NULLIF(u.full_name, ''), u.email, p.artist_id) AS author_name
+         FROM promo_lab_experiments p
+         LEFT JOIN users u ON u.id::text = p.artist_id
+        ORDER BY p.created_at DESC NULLS LAST
+        LIMIT 500`
+    );
+    return c.json({ success: true, data: r.rows });
+  } catch (error) {
+    console.error('promolab admin/list error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+promotion.post('/promolab/admin/:id/status', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const { status, reason } = await c.req.json() as { status: string; reason?: string };
+    if (!ADMIN_MODERATION_STATUSES.includes(status)) {
+      return c.json({ success: false, error: `status должен быть один из: ${ADMIN_MODERATION_STATUSES.join(', ')}` }, 400);
+    }
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query(
+      `UPDATE promo_lab_experiments SET status = $2, updated_at = NOW()
+        WHERE id = $1 RETURNING id, artist_id, experiment_name`,
+      [id, status]
+    );
+    if (!r.rowCount) return c.json({ success: false, error: 'Заявка не найдена' }, 404);
+    const row = r.rows[0];
+    try {
+      const { upsertNotification } = await import('./db.tsx');
+      const notifId = `notif_promolab_${status}_${Date.now()}`;
+      await upsertNotification(row.artist_id, notifId, {
+        id: notifId, userId: row.artist_id, type: 'info',
+        title: status === 'approved' ? 'Заявка PromoLab одобрена'
+             : status === 'rejected' ? 'Заявка PromoLab отклонена'
+             : `Заявка PromoLab: статус ${status}`,
+        message: `«${row.experiment_name}»${reason ? ` — ${reason}` : ''}`,
+        read: false, createdAt: new Date().toISOString(),
+      });
+    } catch { /* best-effort */ }
+    return c.json({ success: true, id, status });
+  } catch (error) {
+    console.error('promolab admin/status error:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 

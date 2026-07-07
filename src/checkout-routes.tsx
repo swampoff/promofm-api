@@ -351,6 +351,57 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   }
 
 
+  // ─── Fulfill venue_radio_subscription (type='subscription') ───
+  //
+  // /subscribe (venue-radio-routes) создаёт сессию с type='subscription' и
+  // metadata.type='venue_radio_subscription' (БЕЗ itemType). Раньше активация
+  // жила под guard'ом purchase+itemType (см. ниже) и была НЕДОСТИЖИМА →
+  // заведение платило, подписка навсегда pending_payment, stream-token 403:
+  // деньги взяты, доступ не выдан. Теперь активируем на subscription-пути.
+  // Идемпотентность — orderId-keyed (COALESCE(payment_order_id,'') <> $1):
+  // retry с тем же orderId апдейтит 0 строк, реальное продление (новый
+  // orderId) продлевает от max(текущий конец, сейчас).
+  if (
+    session.type === 'subscription' &&
+    session.metadata?.type === 'venue_radio_subscription' &&
+    session.metadata?.subscriptionId
+  ) {
+    try {
+      const { pool: vrPool } = await import('./db-client.tsx');
+      const subId = String(session.metadata.subscriptionId);
+      const r = await vrPool.query(
+        `UPDATE venue_radio_subscriptions
+            SET status = 'active',
+                current_period_start = COALESCE(current_period_start, NOW()),
+                current_period_end = GREATEST(COALESCE(current_period_end, NOW()), NOW()) + INTERVAL '30 days',
+                payment_order_id = $1, payment_gateway = $2,
+                auto_renew = true, updated_at = NOW()
+          WHERE id = $3
+            AND COALESCE(payment_order_id, '') <> $1
+          RETURNING venue_id, plan_id, current_period_end`,
+        [session.orderId, session.gateway, subId]
+      );
+      if (r.rows.length > 0) {
+        log.info({ subscriptionId: subId, venueId: r.rows[0].venue_id, planId: r.rows[0].plan_id, until: r.rows[0].current_period_end, amount: session.amount }, 'venue_radio_subscription_activated');
+        try {
+          const { emitSSE } = await import('./sse-routes.tsx');
+          emitSSE(r.rows[0].venue_id, {
+            type: 'venue_radio_activated',
+            data: {
+              title: 'Подписка ПРОМО.ЭИР активна',
+              message: `Доступ к эфиру до ${new Date(r.rows[0].current_period_end).toLocaleDateString('ru-RU')}`,
+              subscriptionId: subId,
+              planId: r.rows[0].plan_id,
+            },
+          });
+        } catch {}
+      }
+    } catch (err) {
+      log.error({ err, subscriptionId: session.metadata?.subscriptionId, orderId: session.orderId }, 'venue_radio_subscription_activation_error');
+      throw err;
+    }
+  }
+
   // ─── Fulfill marketplace purchase ───
   if (session.type === 'purchase' && session.metadata?.itemType) {
     try {
@@ -504,8 +555,30 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         } else {
           log.info({ campaignId: campaign.id, orderId: session.orderId }, 'radio_campaign_already_created_skip');
         }
+
+        // Оплата прошла → делаем заявку заведения видимой радио. Заявка
+        // (radio_venue_requests) создаётся в venue-routes как
+        // 'pending_payment' и до этого момента НЕ показывается станции и не
+        // может быть одобрена. Идемпотентно: WHERE status='pending_payment'
+        // (webhook retry → 0 строк). id заявки == metadata.campaignId.
+        if (session.metadata.campaignId) {
+          try {
+            const { pool: rvrPool } = await import('./db-client.tsx');
+            const flipped = await rvrPool.query(
+              `UPDATE radio_venue_requests
+                  SET status = 'pending', updated_at = NOW()
+                WHERE id = $1 AND status = 'pending_payment'`,
+              [String(session.metadata.campaignId)]
+            );
+            if (flipped.rowCount) {
+              log.info({ campaignId: session.metadata.campaignId }, 'radio_venue_request_marked_paid');
+            }
+          } catch (rvrErr: any) {
+            log.warn({ campaignId: session.metadata.campaignId, err: rvrErr?.message }, 'radio_venue_request_flip_failed');
+          }
+        }
       }
-    
+
       if (itemType === 'content_order' && session.metadata.contentOrderId) {
         const { pool: coPool } = await import('./db-client.tsx');
         const coid = session.metadata.contentOrderId;
@@ -518,54 +591,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         }
       }
 
-      // ─── Fulfill venue_radio_subscription ───
-      if (itemType === 'venue_radio_subscription' && session.metadata.subscriptionId) {
-        const { pool: vrPool } = await import('./db-client.tsx');
-        const subId = session.metadata.subscriptionId;
-        // Activate for 30 days; extend if already active.
-        //
-        // Idempotency guard: `COALESCE(payment_order_id,'') <> $1`. The outer
-        // claimPaymentSessionForProcessing already dedups naive re-delivery,
-        // but the partial-failure → revertPaymentSessionToPending → gateway
-        // retry path can re-enter this block. Without the guard, every
-        // re-entry would add ANOTHER 30 days (the `+ INTERVAL '30 days'` is an
-        // increment, not an absolute set) — a free month per replay. With it,
-        // a retry carrying the SAME orderId UPDATEs 0 rows; a genuine renewal
-        // (new orderId) still extends. Mirrors the orderId-keyed idempotency
-        // used by the beat/digital/radio handlers above.
-        const r = await vrPool.query(
-          `UPDATE venue_radio_subscriptions
-           SET status = 'active',
-               current_period_start = COALESCE(current_period_start, NOW()),
-               current_period_end = COALESCE(current_period_end, NOW()) + INTERVAL '30 days',
-               payment_order_id = $1, payment_gateway = $2,
-               auto_renew = true, updated_at = NOW()
-           WHERE id = $3
-             AND COALESCE(payment_order_id, '') <> $1
-           RETURNING venue_id, plan_id, current_period_end`,
-          [session.orderId, session.gateway, subId]
-        );
-        if (r.rows.length > 0) {
-          log.info({
-            subscriptionId: subId, venueId: r.rows[0].venue_id, planId: r.rows[0].plan_id,
-            until: r.rows[0].current_period_end, amount: session.amount,
-          }, 'venue_radio_subscription_activated');
-
-          // SSE notify venue
-          try {
-            const { emitSSE } = await import('./sse-routes.tsx');
-            emitSSE(r.rows[0].venue_id, {
-              type: 'venue_radio_activated',
-              data: {
-                title: 'Подписка ПРОМО.ЭИР активна',
-                message: `Доступ к эфиру до ${new Date(r.rows[0].current_period_end).toLocaleDateString('ru-RU')}`,
-                subscriptionId: subId,
-                planId: r.rows[0].plan_id,
-              },
-            });
-          } catch {}
-        }
-      }
+      // venue_radio_subscription активируется на subscription-пути выше
+      // (type='subscription'), НЕ здесь — этот purchase+itemType guard для
+      // неё никогда не срабатывал (сессия создаётся с type='subscription').
 
 
       if (itemType === 'booking_payment' && session.metadata.bookingId) {
@@ -1731,7 +1759,14 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     // (б) идемпотентно для webhook retry
     let payeeId: string | undefined = session.metadata.artistId;
     let payeeName: string | undefined = session.metadata.artistName;
-    if (session.metadata?.itemType === 'engineer_order' && session.metadata?.engineerOrderId) {
+    // FE (EngineerStorefront) шлёт metadata.type='engineer_order', НЕ itemType.
+    // Проверка только itemType (как было) → payee_id=NULL и channel='purchase'
+    // → /engineer/earnings (WHERE channel='engineer_order') вечно 0 строк —
+    // инженер не видел заработок вообще. Принимаем оба ключа.
+    const isEngineerOrder =
+      session.metadata?.itemType === 'engineer_order' ||
+      session.metadata?.type === 'engineer_order';
+    if (isEngineerOrder && session.metadata?.engineerOrderId) {
       try {
         const { pool: rrPool } = await import('./db-client.tsx');
         const r = await rrPool.query(
@@ -1748,7 +1783,12 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
 
     await recordRevenue({
-      channel: session.type === 'purchase' ? (session.metadata.itemType || 'purchase') : session.type,
+      // isEngineerOrder-ветка: без неё channel падал в 'purchase' (см. выше).
+      // Узко только для engineer_order — прочие metadata.type (collab_accept,
+      // banner_publish…) НЕ должны менять channel, их семантика другая.
+      channel: session.type === 'purchase'
+        ? (session.metadata.itemType || (isEngineerOrder ? 'engineer_order' : 'purchase'))
+        : session.type,
       description: session.description,
       grossAmount: session.amount,
       platformRevenue: session.amount * commissionRate,
@@ -2015,6 +2055,23 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         log.error({ err, trackId }, 'track_publish_validation_error');
         return c.json({ success: false, error: 'Не удалось проверить трек' }, 500);
       }
+    }
+
+    // video_publish / concert_publish (+ несуществующие пока video_promote /
+    // video_exclusive) — платёжная сессия этих типов рождается ТОЛЬКО
+    // сервером в publish-routes.tsx `PUT /orders/:id/pay` (amount=order.price,
+    // серверная цена из PRICING; бесплатный тариф оплату вообще минует).
+    // Легальный трафик НИКОГДА не шлёт эти type'ы в клиентский
+    // /checkout/create-session → любой такой вызов = крафт-байпас (за 1₽
+    // опубликовать клип/концерт за 10000/19990/5000/9990). Отклоняем весь
+    // класс: цену/владельца проверять не нужно — этих сессий тут быть не должно.
+    // (Проверено: publish-routes.tsx:664 amount=order.price, :644 free→skip.)
+    if (
+      type === 'purchase' &&
+      ['video_publish', 'concert_publish', 'video_promote', 'video_exclusive'].includes(metadata?.type)
+    ) {
+      log.warn({ userId, metadataType: metadata?.type, amount }, 'publish_type_via_create_session_blocked');
+      return c.json({ success: false, error: 'Оплата этого типа создаётся сервером (через кабинет публикаций), не напрямую' }, 400);
     }
 
     // collab_accept — артист принимает collab-оффер от продюсера с
@@ -2469,15 +2526,11 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
     }
 
     // ── radio_campaign — venue оплачивает рекламную кампанию на радио.
-    // Canonical price = venue_ad_campaigns.budget (создан в
-    // venue-routes.tsx:766+ POST /radio-campaigns с body.budget).
-    //
-    // КАВЕАТ: venue-routes:790 принимает body.budget без серверной
-    // валидации против slot prices. Этот gate закрывает только
-    // DevTools-side tampering на /create-session (amount=1 при
-    // campaign.budget=10000). Полная защита потребует переноса pricing-
-    // расчёта в backend POST /radio-campaigns (отдельный PR), но даже
-    // без этого amount-gate здесь блокирует public attack vector.
+    // Canonical price = venue_ad_campaigns.budget. С 2026-07-03 budget
+    // считается СЕРВЕРОМ в POST /radio-campaigns: SUM(radio_ad_slots.price
+    // выбранных слотов станции) × durationDays — body.budget игнорируется.
+    // Этот gate сверяет оплату с той серверной цифрой (полная цепочка:
+    // слоты станции → серверный бюджет → amount-gate → webhook 10%/90%).
     //
     // Guards (паттерн как у pitching_bundle, track_test_promote):
     //   - metadata.campaignId обязателен
