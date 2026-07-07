@@ -29,3 +29,4 @@ ehthumbs.db
 # secrets — never commit env backups
 .env.bak*
 *.env.bak
+promo-check/.env
