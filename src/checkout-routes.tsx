@@ -703,7 +703,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         await trackTestRequestsStore.set(reqId, testReq);
         log.info({ requestId: reqId, amount: session.amount }, 'track_test_payment_fulfilled');
 
-        // Notify admin about new paid track test
+        // Notify admin about new paid track test. SSE — эфемерный (закрытая
+        // админ-вкладка = сигнал потерян), поэтому дублируем durable
+        // email+TG: деньги взяты, следующий шаг (модерация) за админом.
         try {
           const { emitSSE } = await import('./sse-routes.tsx');
           emitSSE('admin', {
@@ -715,6 +717,14 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             },
           });
         } catch {}
+        import('./email-helper.tsx')
+          .then(m => m.notifyTrackTestPending({
+            trackTitle: session.metadata.trackTitle || testReq.track_title || 'Без названия',
+            artistName: testReq.artist_name || 'Артист',
+            source: 'оплата YooKassa',
+            amount: Number(session.amount) || undefined,
+          }))
+          .catch(() => {});
       }
     } catch (err) {
       log.error({ err }, 'track_test_fulfillment_error');

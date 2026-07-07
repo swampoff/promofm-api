@@ -895,3 +895,75 @@ export async function notifyDmReceived(
     html,
   });
 }
+
+// ── Radio download notification (admin side) ──
+//
+// Радиостанция скачала трек/микс из недельного пакета. Зеркалит
+// notifyTrackUpload: письмо на info@promofm.ru + Telegram. Артисту/DJ
+// уведомление шлёт сам роут (upsertNotification + emitSSE) — здесь
+// только admin-канал. Fire-and-forget у caller'а: скачивание не должно
+// падать из-за SMTP/Telegram.
+export async function notifyRadioDownload(data: {
+  kind: 'track' | 'mix';
+  title: string;
+  ownerName?: string;
+  stationName?: string;
+}): Promise<void> {
+  const kindLabel = data.kind === 'mix' ? 'DJ-микс' : 'Трек';
+  const station = data.stationName || 'Радиостанция (без имени профиля)';
+  const owner = data.ownerName || '—';
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #10B981;">Радио скачало ${kindLabel === 'DJ-микс' ? 'микс' : 'трек'}</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      <tr><td style="padding: 8px; color: #999;">${escapeHtml(kindLabel)}:</td><td style="padding: 8px;">${escapeHtml(data.title)}</td></tr>
+      <tr><td style="padding: 8px; color: #999;">Автор:</td><td style="padding: 8px;">${escapeHtml(owner)}</td></tr>
+      <tr><td style="padding: 8px; color: #999;">Радиостанция:</td><td style="padding: 8px;">${escapeHtml(station)}</td></tr>
+    </table>
+    <p style="color:#888;font-size:13px;margin-top:16px;">Скачивание для эфира. Когда станция подтвердит ротацию — артист получит уведомление о ротации отдельно.</p>
+  `);
+  notifyAdminTelegram(`📻 <b>Радио скачало ${stripHtml(kindLabel === 'DJ-микс' ? 'микс' : 'трек')}</b>\n\n${stripHtml(kindLabel)}: <b>${stripHtml(data.title)}</b>\nАвтор: <b>${stripHtml(owner)}</b>\nРадиостанция: <b>${stripHtml(station)}</b>`).catch(() => {});
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Радио скачало: ${escapeHtml(station)} — ${escapeHtml(data.title)}`, html });
+}
+
+// ─── Track-test (тест трека): чтобы платный тракт не зависал молча ───
+
+/**
+ * Оплаченный (или списанный с подписочной квоты) тест трека ждёт
+ * модерации админа. До 2026-07-07 сигнал был ТОЛЬКО эфемерным SSE
+ * (emitSSE 'admin') — закрытая админ-вкладка = никто не узнал, заявка
+ * висит в payment_succeeded с взятыми деньгами.
+ */
+export async function notifyTrackTestPending(data: { trackTitle: string; artistName: string; source: string; amount?: number }) {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #F59E0B;">Тест трека ждёт модерации</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      <tr><td style="padding: 8px; color: #999;">Трек:</td><td style="padding: 8px;">${escapeHtml(data.trackTitle)}</td></tr>
+      <tr><td style="padding: 8px; color: #999;">Артист:</td><td style="padding: 8px;">${escapeHtml(data.artistName)}</td></tr>
+      <tr><td style="padding: 8px; color: #999;">Оплата:</td><td style="padding: 8px;">${escapeHtml(data.source)}${data.amount ? ` (${data.amount} ₽)` : ''}</td></tr>
+    </table>
+    <p style="color:#888;font-size:13px;margin-top:12px;">Деньги взяты — следующий шаг за админом: модерация → назначение экспертов.</p>
+  `);
+  notifyAdminTelegram(`🎧 <b>Тест трека ждёт модерации</b>\n\nТрек: <b>${stripHtml(data.trackTitle)}</b>\nАртист: <b>${stripHtml(data.artistName)}</b>\nОплата: ${stripHtml(data.source)}${data.amount ? ` (${data.amount} ₽)` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Админка</a>`).catch(() => {});
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Тест трека ждёт модерации: ${escapeHtml(data.artistName)} — ${escapeHtml(data.trackTitle)}`, html });
+}
+
+/**
+ * Digest SLA-свипа: заявки track-test, застрявшие дольше SLA своего
+ * статуса (включая completed без отправленного артисту отчёта).
+ */
+export async function notifyTrackTestStalled(items: Array<{ id: string; trackTitle: string; artistName: string; status: string; hoursStuck: number }>) {
+  if (!items.length) return;
+  const rows = items.map(i =>
+    `<tr><td style="padding:6px;">${escapeHtml(i.trackTitle)}</td><td style="padding:6px;">${escapeHtml(i.artistName)}</td><td style="padding:6px;color:#F87171;">${escapeHtml(i.status)}</td><td style="padding:6px;">${Math.round(i.hoursStuck)} ч</td></tr>`
+  ).join('');
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #EF4444;">Track-test: ${items.length} застрявших заявок</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0; font-size: 13px;">
+      <tr style="color:#999;"><td style="padding:6px;">Трек</td><td style="padding:6px;">Артист</td><td style="padding:6px;">Статус</td><td style="padding:6px;">Висит</td></tr>
+      ${rows}
+    </table>
+    <p style="color:#888;font-size:13px;margin-top:12px;">Каждая строка — оплаченная заявка, по которой следующий шаг просрочен (модерация, эксперты, финализация или отправка отчёта артисту).</p>
+  `);
+  notifyAdminTelegram(`⚠️ <b>Track-test: ${items.length} застрявших заявок</b>\n\n${items.slice(0, 5).map(i => `• ${stripHtml(i.trackTitle)} — ${stripHtml(i.status)} (${Math.round(i.hoursStuck)} ч)`).join('\n')}${items.length > 5 ? `\n…и ещё ${items.length - 5}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Админка</a>`).catch(() => {});
+  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Track-test: ${items.length} застрявших заявок`, html });
+}

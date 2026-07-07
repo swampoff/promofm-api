@@ -1425,6 +1425,123 @@ name + pipeline-состояние), решение `POST /api/videos/:id/modera
 
 ---
 
+## Track-test (тест трека) — реальный флоу и анти-зависание (2026-07-07)
+
+Флоу НАМЕРЕННО полуручной — 3 админ-шага и 1 экспертный:
+`pending_payment → payment_succeeded` (вебхук YooKassa ИЛИ квота
+подписки сразу на /submit) → **админ /moderate approve** →
+`pending_expert_assignment` → **админ /assign-experts** (1–10
+экспертов, `required_expert_count = required_count || N`) →
+`experts_assigned` → эксперты сдают отзывы (`/submit-review`, +50
+коинов) → при `completed_reviews_count >= required_expert_count`
+авто-консолидация → `analysis_generated` → **админ /finalize
+approve** → `completed` → **админ /send-feedback** → отчёт уходит
+артисту (`feedback_sent_date`). Source: `track-test-routes.tsx`.
+
+**Точки молчаливого зависания, найденные 2026-07-07 (по сигналу
+laptop о застрявших тестовых заявках) и закрытые:**
+1. Уведомление эксперту при назначении было **фейком** —
+   `console.log('Notification sent…')` и ничего больше. Эксперт не
+   онлайн в момент назначения = никогда не узнает. → Теперь durable
+   `notifications`-строка + SSE + email эксперту (users по email).
+2. Оплаченный тест сигналил админу ТОЛЬКО эфемерным SSE, а
+   **квота-путь подписки не сигналил вообще** (минует вебхук). →
+   `notifyTrackTestPending` (email info@ + TG) из вебхука И из
+   /submit-квоты.
+3. SLA существовали только как цифры для дашборда
+   (pipeline-engine DEFAULT_SLA) — никто не enforce'ил. → **POST
+   /track-test/sla-sweep** (requireAdminOrKey, advisory-lock 924179,
+   cron 6ч): заявки в нетерминальном статусе старше SLA + `completed`
+   без `feedback_sent_date` >24ч → digest админу (email+TG).
+   Неизвестные легаси-статусы ('pending' из старого сидинга) тоже
+   всплывают (дефолт SLA 72ч).
+4. Осталось БЕЗ авто-фикса (осознанно): завершение требует ВСЕХ
+   `required_expert_count` отзывов — один молчащий эксперт держит
+   заявку в in_review; sweep это ловит (72ч), но переназначение
+   эксперта — ручное решение админа.
+
+Наблюдение laptop «status='pending' + payment_status='completed' +
+эксперты назначены» текущим кодом НЕ воспроизводится (submit создаёт
+pending_payment/payment_succeeded; assign-experts ставит
+experts_assigned) — это артефакты старого кода/тест-сидинга.
+Чистку см. HANDOFF §10.
+
+## ПРОМО.ЭИР embed-плеер (добавлен 2026-07-07)
+
+Кнопка «Embed» на AirLivePage раздаёт iframe-код. До 2026-07-07 он
+указывал на `/air/embed`, который НИКТО не обслуживал (nginx `/air/*`
+→ Icecast/Go, там такого mount'а нет) — пользователи копировали
+вечный 404.
+
+Теперь:
+- **`GET /server/api/air/embed`** (`air-routes.tsx`, public) — отдаёт
+  самодостаточный HTML ~2.4KB: play/pause на Icecast mount
+  `/air/live/promo.fm` (relative — работает на любом домене прода),
+  now-playing поллится с `/server/api/air/now-playing` каждые 15с,
+  ссылка на `promo-music.ru/air-live`. Без React/бандла — iframe
+  лёгкий.
+- Заголовки: `Content-Security-Policy: frame-ancestors *` (страница
+  ОБЯЗАНА открываться в чужом iframe), `Cache-Control: public,
+  max-age=300`. Глобальный `X-Frame-Options: DENY` в `index.ts`
+  (security-headers middleware) имеет exemption ровно для этого пути.
+- FE: `AirLivePage.tsx` embed-код теперь
+  `${config.functionsUrl}/api/air/embed`.
+- ⚠️ **nginx-каверза (laptop):** комментарий в index.ts говорит
+  «nginx also sets these» — если nginx add_header'ит X-Frame-Options
+  на `/server/*`, iframe останется заблокированным несмотря на Node.
+  Нужно исключение для location `/server/api/air/embed` + проверка:
+  `curl -sI https://promo-music.ru/server/api/air/embed | grep -i frame`
+  → X-Frame-Options отсутствует, CSP frame-ancestors * есть.
+
+## Security-посture после батча 2026-07-06 (ветка `claude/security-fixes-2026-07-06`, b4e1977 — НА ПРОДЕ)
+
+⚠️ На момент записи код живёт на ветке, сервис перезапущен с неё,
+PR ещё не смержен в main (см. OPERATIONS_LOG 2026-07-06 — не делать
+`checkout main` на VPS до мержа). После мержа — file:line ниже
+уточнить по main.
+
+Что теперь ПРАВДА в проде:
+
+- **Бан = мгновенный разлогин.** Блокировка юзера бампит
+  `users.token_version` и ревокает его строки в `refresh_tokens` —
+  access-JWT перестаёт проходить проверку, refresh невозможен. Для
+  работоспособности ревока **RLS на `refresh_tokens` ВЫКЛЮЧЕН**
+  (ручное изменение prod-БД). Source: `auth-routes.tsx` +
+  `landing-data-routes.tsx` (ветка b4e1977).
+- **Escrow-кредит ТОЛЬКО при успешном flip.** Auto-complete и admin/resolve
+  кредитуют продюсера только если `rowCount > 0` на статус-UPDATE —
+  повторный вызов не создаёт второй кредит. Source:
+  `collaboration-routes.tsx`.
+- **DM-throttle per-recipient** — лимит считается на получателя,
+  обход мейлбомба через group-UUID закрыт (`messaging-routes.tsx`).
+- **resend-verification не палит базу**: любой email → uniform 200,
+  per-email cooldown (`auth-routes.tsx`).
+- **`GET /promo-check/detections` скоупится на caller'а**:
+  client-supplied `artist_id` игнорируется для не-админов, `track_id`
+  проверяется на ownership (`t.user_id = userId`); админ (роль +
+  `isAdminEmail`) может смотреть любого артиста.
+  Source: `promo-check-routes.tsx` /detections.
+- **Storage**: clamscan fail-loud (упавший антивирус = reject, не
+  silent pass), `GET /storage/list` только под requireAdmin,
+  magic-byte-проверка отклоняет файлы с подделанным расширением
+  (`storage-routes.tsx`).
+- **Stripe-gateway отдаёт реальный статус** платежа (был хардкод
+  `pending`). **TBANK НЕ пропатчен** — там хардкод остался (латентно:
+  рекуррент не в кроне, tbank-карт нет). Source: `gateway-stripe.tsx`.
+- **Concert promote**: `cost > 0` обязателен — бесплатное промо через
+  отрицательный `cost` закрыто (`concerts-routes.tsx`).
+- **Topup coin-guard**: сервер пересчитывает коины по курсу 10 сам,
+  клиентскому количеству не верит (`checkout-routes.tsx`).
+  Контекст: коин-машинерия фактически мертва (6×5000 тест-коинов,
+  0 транзакций за всё время) — поэтому topup понижен 🔴→🟢, а
+  coin_transactions-леджер и deductCoins-гонка осознанно НЕ чинились.
+- `.env` на VPS: права 600.
+
+Известные открытые хвосты: TBANK-gateway pending-хардкод; FE
+`/air/embed` (нужен nginx/Go-роут + решение есть ли реальный
+air-плеер); concert self-approve — Никита сказал «штатно», не баг.
+Полный реестр — у laptop'а: `promofm-open-security-findings.md`.
+
 ## Critical column-type cheat sheet (echoed from CLAUDE.md)
 
 Verified columns / types — DO NOT INVENT:

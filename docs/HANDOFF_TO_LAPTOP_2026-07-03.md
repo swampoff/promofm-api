@@ -170,3 +170,237 @@ Deferred settled: 0 new bounces». Стоп-лист остался 326.
 marketplace-миграции, уже применённые на проде). Актуальный список моей
 ветки: 127_videos_pipeline, 128_videos_moderation,
 129_videos_category_tags, 130_news_image_url, 131_news_moderation.
+
+---
+
+## 6. Маркировка DJ-миксов (watermark/promo-check) — VPS-часть за тобой
+
+**Контекст:** миксы (`dj_mixes`, id TEXT `mix-<uuid>`) были единственной
+сущностью на радио, которая НЕ ставилась в watermark/fingerprint-
+пайплайн. Cloud закрыл **queue-сторону** (ветка
+`claude/promomusicfigma-architecture-ms7sbs`):
+- **Схема — РЕШЕНО тобой (Decision B, 2026-07-06, migration 132,
+  УЖЕ применена к БД):** параллельные `dj_mix_fingerprints` /
+  `dj_mix_detections` + view `promo_check_all_fingerprints`
+  (content_type-дискриминатор). Моя ранняя заготовка
+  `127_promo_check_mix_support.sql` (общие таблицы + mix_id)
+  **удалена с ветки** — superseded твоим 132.
+- `promo-check-routes.tsx`: `queueMixFingerprint(mixId)` (export) +
+  `POST /promo-check/process-mix/:mixId`. Пишет pending-строку в
+  `dj_mix_fingerprints` и `spawn python3 fingerprinter.py --mix-id <id>`.
+- `dj-studio-routes.tsx`: при создании микса зовёт `queueMixFingerprint`
+  in-process (fire-and-forget).
+
+**Реальный триггер трекового watermark'а — ПОДТВЕРЖДЁН ПО КОДУ (laptop,
+2026-07-05, память `promofm-watermark-fingerprint-trigger.md`):**
+- Задуманный первичный HTTP-хоп (`track-moderation-routes.tsx:312`,
+  `tracks-routes.tsx:151` → `fetch(127.0.0.1/…/process/:id)` без cookie
+  к `requireAuth`-эндпоинту без localhost-байпаса) **МЁРТВ** → 401 в
+  `.catch()`. Это факт, не теория — cloud прочитал верно.
+- Реально фингерпринтит **крон `reconcile-fingerprints.sh` (каждые 15
+  мин, VPS, не в репо)** — его же комментарий: «safety net for the
+  upload-time trigger… added 2026-06-24». Берёт tracks без 'done'-
+  фингерпринта и запускает `fingerprinter.py --track-id` напрямую
+  (bash→python, мимо 401). Треки маркируются с задержкой до 15 мин.
+  Демоны детекта: `promo-check monitor.py` + `promofm-ai-detector`
+  (FastAPI :8085).
+- ⚠️ **Важная поправка cloud'а:** на текущем ПРОДЕ detections миксов
+  НЕГДЕ хранить — `promo_check_fingerprints`, `promo_check_detections`
+  и `fingerprinter.py` строго track_id/`--track-id`, ни `mix_id`, ни
+  `content_type` нигде нет. Моя in-process mix-обвязка живёт в ВЕТКЕ,
+  не в проде. Т.е. пока migration 127 + Python-часть не применены —
+  миксы вообще не входят в пайплайн.
+
+**Что за тобой (VPS) — блюпринт для миксов, СТРОГО ПО ПОРЯДКУ:**
+1. **Схема — ✅ ЗАКРЫТО** (Decision B: параллельные таблицы, migration
+   132, применена 2026-07-06; namespace ватермарков не должен
+   пересекаться с трековым — см. коммент в 132 про
+   generate_watermark_id()).
+2. **Mix-режим в `fingerprinter.py`** (сейчас `--track-id` required):
+   брать источник из `dj_mixes.audio_url`, инжектить watermark в файл,
+   писать fingerprint в `dj_mix_fingerprints`, детекты — в
+   `dj_mix_detections` (matcher читает объединённый view
+   `promo_check_all_fingerprints`).
+3. **Mix reconcile-бэкстоп** (⚠️ САМОЕ ВАЖНОЕ, cloud это упустил).
+   Одиночный in-process вызов `queueMixFingerprint` при создании микса
+   = микс НАВСЕГДА без мониторинга, если этот вызов упал — ровно та
+   хрупкость, ради лечения которой 2026-06-24 сделали трековый крон.
+   Миксы наследуют её. Нужен аналог `reconcile-fingerprints.sh` для
+   `dj_mixes` (скан миксов без 'done'-фингерпринта → `fingerprinter.py
+   --mix-id`). Без него п.1–2 работают ненадёжно.
+4. **Проверить, что `monitor.py`/ai-detector вообще матчат длинный
+   DJ-микс в эфире** — это заметно сложнее 3-мин трека; может
+   оказаться, что детекта миксов не будет в принципе. Это GATE: если
+   детект невозможен — п.5 бессмысленен.
+5. **Дисплей ротаций миксов** (`GET /dj/rotations/:mixId` + виджет) —
+   ТОЛЬКО ПОСЛЕ п.4. Строить UI до подтверждённого детекта =
+   гарантированный вечный ноль в кабинете, хуже отсутствия раздела.
+   Рекомендация laptop (принята cloud): делать последним.
+
+**Отдельным PR (не блокер):** мёртвый HTTP-хоп в
+`track-moderation-routes.tsx:312` + `tracks-routes.tsx:151` можно
+удалить — он ничего не триггерит (реальную работу делает крон п.реального
+триггера выше). Cloud НЕ трогал трековый путь (правило «не чинить
+рабочее вслепую»); теперь механизм подтверждён — можно чистить.
+
+---
+
+## 7. News-цикл: восстановление после выборочного prep-мержа (cloud, 2026-07-07)
+
+При подготовке `prep/ms7sbs-prod` часть моего news-контура выпала, а
+FE-откат уехал в main. Восстановлено на ветке поверх ТВОЕГО контракта
+(`/admin/list` + `POST /admin/:id/moderate {action}` — канон, он на
+проде): BE — `GET /mine`, `DELETE /:id` (owner-check), owner-guard на
+upsert по чужому id, `GET /artist/:artistId` (approved для публичной
+страницы артиста), `image_url` в admin/list и в approve→news_public;
+FE — news-page снова server-mode (/mine + POST + DELETE),
+NewsModeration переведена на твои эндпоинты (реальные approve/reject
+вместо локального setState). Деталь: миграции 130 (image_url) и 131
+(news_moderation: moderation_note и пр.) уже на main — новых миграций
+для этого восстановления НЕ требуется.
+
+## 8. Гейт скачивания треков радио — верификация статусов по проду (cloud, 2026-07-07)
+
+`/radio/tracks/:id/download` теперь режет по
+`DOWNLOADABLE = ['approved','published','upcoming']` + `!is_hidden`
+(колонка `tracks.moderation_status`, НЕ `status`). Набор выбран по коду;
+по проду не проверялся. Прогони:
+
+```sql
+-- Какие статусы у треков, которые радио реально скачивали раньше?
+-- Всё, что не в ('approved','published','upcoming') или is_hidden=true —
+-- легитимные скачивания, которые новый гейт теперь отрежет.
+SELECT t.moderation_status, t.is_hidden,
+       COUNT(DISTINCT d.track_id) AS tracks, COUNT(*) AS downloads
+FROM track_downloads_by_radio d
+JOIN tracks t ON t.id = d.track_id
+GROUP BY 1, 2 ORDER BY downloads DESC;
+
+-- Общее распределение статусов (контекст).
+SELECT moderation_status, is_hidden, COUNT(*)
+FROM tracks GROUP BY 1, 2 ORDER BY 3 DESC;
+```
+
+Если в первом запросе всплывёт статус вне тройки (например треки, живущие
+как `'paid'` после вебхука, но до модерации) — расширь `DOWNLOADABLE` в
+`radio-routes.tsx:1440` тем же PR'ом, НЕ откатывай гейт целиком.
+
+## 9. Marketplace phase-3 runbook: снос engineer_services / engineer_orders (cloud, 2026-07-07)
+
+Файл миграции готов: `src/migrations/133_drop_engineer_legacy.sql`
+(в репо лежать безопасно — runner-заглушка). Порядок СТРОГО такой:
+
+**Шаг 1 — runtime-верификация нового цикла на проде** (то, что блокировало
+phase-3): клиент создаёт заказ → инженер accept (`accepted→in_progress`
+без пей-гейта) → deliver (`completed` + «Результат: url — note») →
+проверить строку в `platform_revenue_log`:
+`channel='marketplace_service'`, `payee_id=<userId инженера>`,
+`payout_amount = 0.9 × price`, `status='completed'`. Плюс негативный:
+клиент cancel на `pending` → `rejected`; cancel на `accepted` → 400.
+
+**Шаг 2 — код без legacy-ссылок** (отдельный PR ПОСЛЕ шага 1; могу
+сделать по команде):
+- `engineer-routes.tsx`: выпилить services-CRUD (515–585, 587 public),
+  orders-цикл (656–955), auto-complete (1107+), admin refund (957+),
+  legacy-ветку earnings. **Profile/portfolio (62–390) ОСТАЮТСЯ** — они
+  на engineer_profiles/portfolio, не на сносимых таблицах.
+- `checkout-routes.tsx`: три engineer_order-ветки (~1560 fulfillment,
+  ~1765 payee-lookup, ~2184 amount-gate).
+- ⚠️ Проверь crontab VPS на вызовы `/engineer/orders/auto-complete`
+  ДО выпиливания — если он в кроне, убрать оттуда тем же заходом.
+- FE `engineer-studio.ts` уже на marketplace-эндпоинтах; legacy у него
+  остался только `GET /engineer/earnings` — этот эндпоинт НЕ сносим,
+  он на platform_revenue_log (и с 2026-07-07 считает оба канала:
+  `engineer_order` + `marketplace_service`).
+
+**Шаг 3 — данные и DROP**:
+```bash
+sudo -u postgres pg_dump -d promofm -t engineer_services -t engineer_orders \
+  > ~/backup-engineer-legacy-$(date +%F).sql
+# затем стандартный heredoc BEGIN; \i 133; COMMIT;
+```
+Если в engineer_orders есть незавершённые заказы (`status NOT IN
+('completed','declined','cancelled')`) — СТОП, сначала домигрировать их
+в service_orders или дозакрыть руками, записать в OPERATIONS_LOG.
+
+## 6-бис. Mix-watermark: cloud добил пп. 3 и 5 блюпринта (2026-07-07)
+
+Обновление статуса §6 — за тобой остаются ТОЛЬКО пп. 2 и 4:
+
+- **П. 3 (reconcile-бэкстоп) — ✅ СДЕЛАН, но в Node, не в shell.**
+  `POST /server/api/promo-check/reconcile-mixes` (requireAdminOrKey,
+  advisory-lock 924178 на выделенном клиенте — паттерн radio-digest).
+  Кандидаты: миксы с audio_url без строки в dj_mix_fingerprints ЛИБО
+  застрявшие в pending/error дольше часа (backoff по fingerprinted_at,
+  который queueMixFingerprint теперь бампает на requeue). Батч 20/тик.
+  До миграции 132 отвечает `{success:false, error:'reconcile
+  unavailable'}` с HTTP 200 — cron не орёт.
+  **Твой шаг — одна строка в crontab VPS:**
+  ```
+  */15 * * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" http://127.0.0.1:3000/server/api/promo-check/reconcile-mixes
+  ```
+- **П. 5 (дисплей) — ✅ СДЕЛАН с честным empty-state, «вечный ноль»
+  исключён дизайном.** `GET /server/api/promo-check/mix-detections`
+  (requireAuth; скоуп IDOR-модели /detections: не-админ видит только
+  свои миксы через `dj_id = userId OR dj_id IN (SELECT id::text FROM
+  dj_profiles WHERE user_id = userId)`; админ — ?djUserId). Отдаёт
+  `monitoring[]` (статус маркировки по каждому миксу) + `detections[]`.
+  FE: блок «Ротации в эфире (PROMO.CHECK)» внутри DjRadioPickups —
+  пока детектов нет, показывает СТАТУС («N миксов в очереди на
+  маркировку» / «мониторим, ротаций пока нет»), а не голый ноль;
+  до миграции 132 бэк отвечает пустыми массивами (не 500), блок
+  просто скрыт.
+- **Пп. 2 и 4 — ЗА ТОБОЙ, порядок прежний:** mix-режим в
+  fingerprinter.py (`--mix-id`: источник dj_mixes.audio_url, fingerprint
+  → dj_mix_fingerprints, статус 'done'; детекты monitor.py → 
+  dj_mix_detections через view promo_check_all_fingerprints), затем
+  viability-гейт (матчится ли часовой микс в эфире). Если гейт не
+  пройдёт — фича сносится дёшево: DROP двух таблиц + revert моих
+  коммитов, трековый мир не тронут.
+
+Колонки для pre-flight (все из migration 132, применённой тобой):
+`dj_mix_fingerprints(mix_id, fingerprint, watermark_id, duration,
+status, fingerprinted_at, watermarked_at)`;
+`dj_mix_detections(id, mix_id, station_id, station_name,
+detection_method, confidence, watermark_confirmed, detected_at)`;
+плюс `dj_mixes(id, dj_id, title, audio_url, created_at)`,
+`dj_profiles(id, user_id)`.
+
+## 10. Track-test: анти-зависание платного тракта (cloud, 2026-07-07)
+
+По твоему сигналу о застрявших тестовых заявках. Разбор по коду:
+комбинация «status='pending' + payment_status='completed' + эксперты
+назначены» текущим кодом НЕ производится — это легаси/сидинг-артефакты.
+Но реальные точки молчаливого зависания платного тракта нашлись и
+закрыты (см. PRODUCT_FACTS «Track-test»): фейковое уведомление
+экспертам (был голый console.log), отсутствие durable-сигнала админу
+об оплате (SSE-only; квота-путь вообще без сигнала), не-enforce'нутые
+SLA. Твои шаги:
+
+1. **Crontab (одна строка, раз в 6 часов):**
+   ```
+   0 */6 * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" http://127.0.0.1:3000/server/api/track-test/sla-sweep
+   ```
+2. **Runtime-цикл, который ты предлагал прогнать — да, прогони после
+   деплоя этой ветки,** критерии:
+   - оплата/квота → в течение минуты письмо «Тест трека ждёт
+     модерации» на info@ + TG;
+   - /assign-experts → у каждого эксперта строка в notifications
+     (type='track_test_assigned') + email;
+   - все N отзывов сданы → analysis_generated (авто);
+   - /finalize approve → completed; /send-feedback → артисту SSE +
+     feedback_sent_date проставлен;
+   - POST /sla-sweep руками → {success:true, stalled: K, items:[…]} и
+     digest-письмо, если K>0. Застрявшие тестовые заявки ДОЛЖНЫ
+     всплыть в первом же прогоне.
+3. **Чистка тестовых артефактов** (после того как sweep их покажет):
+   решение за Никитой — либо руками довести до completed, либо
+   ```sql
+   UPDATE track_test_requests SET status='cancelled', updated_at=NOW()
+    WHERE status='pending' AND track_title ILIKE '%test%';  -- сверить список перед прогоном!
+   ```
+   и записать в OPERATIONS_LOG.
+
+Колонки для pre-flight: track_test_requests(id, track_title,
+artist_name, status, payment_status, feedback_sent_date, updated_at);
+users(id, email). Новых миграций НЕТ.

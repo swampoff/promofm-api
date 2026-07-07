@@ -259,6 +259,19 @@ app.post('/submit', requireAuth, async (c) => {
         : `Track test request created: ${requestId} (over-quota or guest, paying ${paymentAmount} RUB)`
     );
 
+    // Квота-путь минует платёжный вебхук (единственное место, где админ
+    // узнавал об оплаченном тесте) → без этого письма подписочные тесты
+    // повисали в payment_succeeded, пока админ случайно не заглянет.
+    if (withinQuota) {
+      import('./email-helper.tsx')
+        .then(m => m.notifyTrackTestPending({
+          trackTitle: track_title || 'Без названия',
+          artistName: artist_name || guest_name || 'Артист',
+          source: `подписочная квота (${quotaState.tier})`,
+        }))
+        .catch(() => {});
+    }
+
     return c.json({
       success: true,
       request_id: requestId,
@@ -587,8 +600,49 @@ app.post('/assign-experts', requireAuth, requireAdmin, async (c) => {
       });
       expertReviews.push(reviewId);
 
-      // Отправить уведомление эксперту
-      console.log(`Notification sent to expert: ${expertEmail}`);
+      // Уведомление эксперту — НАСТОЯЩЕЕ (до 2026-07-07 тут был только
+      // console.log «Notification sent» — эксперт, не бывший онлайн в
+      // момент назначения, не узнавал о нём никогда, и заявка честно
+      // висела до ручного вмешательства). Durable-запись в notifications
+      // + SSE + best-effort email.
+      void (async () => {
+        try {
+          const u = await pool.query(
+            `SELECT id::text AS id FROM users WHERE lower(email) = lower($1) LIMIT 1`,
+            [expertEmail]
+          );
+          const expertUserId = u.rows[0]?.id || null;
+          if (expertUserId) {
+            const { upsertNotification } = await import('./db.tsx');
+            const notifId = `notif_tt_assign_${reviewId.slice(0, 8)}`;
+            await upsertNotification(expertUserId, notifId, {
+              id: notifId,
+              userId: expertUserId,
+              type: 'track_test_assigned',
+              title: '🎧 Вам назначен тест трека',
+              message: `«${request.track_title}» — ${request.artist_name}. Дедлайн отзыва: 72 часа.`,
+              data: { requestId: request_id, reviewId },
+              read: false,
+              createdAt: now,
+            });
+            emitSSE(expertUserId, {
+              type: 'track_test_assigned',
+              data: { requestId: request_id, reviewId, trackTitle: request.track_title },
+            });
+          }
+          const { sendEmail, emailWrapper, escapeHtml } = await import('./email-helper.tsx');
+          await sendEmail({
+            to: expertEmail,
+            subject: `[ПРОМО] Вам назначен тест трека: ${request.track_title}`,
+            html: emailWrapper(`
+              <h2 style="margin: 0 0 16px; color: #7C3AED;">Вам назначен тест трека</h2>
+              <p style="color:#e0e0e0;">«${escapeHtml(request.track_title)}» — ${escapeHtml(request.artist_name || '')}. Оценка ждёт вас в кабинете эксперта, ориентир — 72 часа.</p>
+            `),
+          });
+        } catch (e: any) {
+          console.warn(`[track-test] expert notify failed (${expertEmail}):`, e?.message);
+        }
+      })();
     }
 
     // Обновить заявку. track_test_request_reviews DROPPED migration 053 —
@@ -1742,6 +1796,102 @@ app.get('/quota/:userId', requireAuth, async (c) => {
     });
   } catch (err: any) {
     return c.json({ success: false, error: err?.message || String(err) }, 500);
+  }
+});
+
+// =====================================================
+// SLA-SWEEP: застрявшие заявки не молчат (2026-07-07)
+// =====================================================
+//
+// Каждый нетерминальный статус имеет SLA (зеркало DEFAULT_SLA из
+// pipeline-engine.tsx — там эти же цифры используются только для
+// отображения, enforce'а не было). Заявка, чей updated_at старше SLA
+// своего статуса, попадает в admin-digest (email + TG). Отдельно
+// ловится «completed, но отчёт артисту не отправлен >24ч» — деньги
+// взяты, анализ одобрен, доставка забыта (шаг /send-feedback ручной).
+//
+// Cron VPS (см. MANUAL DEPLOY STEPS): раз в 6 часов
+//   curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" \
+//     http://127.0.0.1:3000/server/api/track-test/sla-sweep
+// Неизвестные/легаси статусы (например 'pending' из старого сидинга)
+// терминальными НЕ считаются → всплывают в digest'е с дефолтным SLA.
+
+const TT_TERMINAL = ['completed', 'rejected', 'cancelled', 'moderation_rejected'];
+const TT_SLA_HOURS: Record<string, number> = {
+  pending_payment: 48,
+  payment_succeeded: 12,
+  pending_moderation: 24,
+  pending_expert_assignment: 24,
+  experts_assigned: 72,
+  in_review: 72,
+  review_in_progress: 72,
+  analysis_generated: 24,
+  pending_admin_review: 24,
+  pending_admin_approval: 24,
+};
+const TT_DEFAULT_SLA_HOURS = 72;
+const TT_SWEEP_LOCK = 924179; // уникален (см. 770451, 924173, 924178)
+
+const TT_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+async function requireAdminOrKeyTT(c: any, next: any) {
+  const internalKey = c.req.header('X-Internal-Key');
+  if (internalKey && TT_INTERNAL_KEY && internalKey === TT_INTERNAL_KEY) {
+    return next();
+  }
+  return requireAuth(c, async () => { await requireAdmin(c, next); });
+}
+
+app.post('/sla-sweep', requireAdminOrKeyTT, async (c) => {
+  const lockClient = await pool.connect();
+  let locked = false;
+  try {
+    const lk = await lockClient.query('SELECT pg_try_advisory_lock($1) AS got', [TT_SWEEP_LOCK]);
+    locked = !!lk.rows[0]?.got;
+    if (!locked) return c.json({ success: true, stalled: 0, skipped: 'locked' });
+
+    const { rows } = await pool.query(
+      `SELECT id, track_title, artist_name, status, payment_status,
+              feedback_sent_date, updated_at,
+              EXTRACT(EPOCH FROM (NOW() - updated_at)) / 3600 AS hours_stuck
+         FROM track_test_requests
+        WHERE (
+                status <> ALL($1)
+                OR (status = 'completed' AND feedback_sent_date IS NULL)
+              )
+          AND updated_at < NOW() - INTERVAL '12 hours'
+        ORDER BY updated_at ASC
+        LIMIT 100`,
+      [TT_TERMINAL]
+    );
+
+    const stalled = rows
+      .map((r: any) => {
+        const hours = Number(r.hours_stuck) || 0;
+        const sla = r.status === 'completed'
+          ? 24 // completed без feedback_sent_date — доставка забыта
+          : (TT_SLA_HOURS[r.status] ?? TT_DEFAULT_SLA_HOURS);
+        return { row: r, hours, sla };
+      })
+      .filter(x => x.hours > x.sla)
+      .map(x => ({
+        id: String(x.row.id),
+        trackTitle: x.row.track_title || 'Без названия',
+        artistName: x.row.artist_name || '',
+        status: x.row.status === 'completed' ? 'completed (отчёт НЕ отправлен)' : String(x.row.status),
+        hoursStuck: x.hours,
+      }));
+
+    if (stalled.length > 0) {
+      const { notifyTrackTestStalled } = await import('./email-helper.tsx');
+      await notifyTrackTestStalled(stalled).catch(() => {});
+    }
+    return c.json({ success: true, checked: rows.length, stalled: stalled.length, items: stalled });
+  } catch (e: any) {
+    console.warn('[track-test] sla-sweep failed:', e?.message);
+    return c.json({ success: false, error: 'sweep unavailable', detail: String(e?.message || e) }, 200);
+  } finally {
+    if (locked) await lockClient.query('SELECT pg_advisory_unlock($1)', [TT_SWEEP_LOCK]).catch(() => {});
+    lockClient.release();
   }
 });
 
