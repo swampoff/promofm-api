@@ -1469,6 +1469,55 @@ name + pipeline-состояние), решение `POST /api/videos/:id/modera
 
 ---
 
+## Security-посture после батча 2026-07-06 (ветка `claude/security-fixes-2026-07-06`, b4e1977 — НА ПРОДЕ)
+
+⚠️ На момент записи код живёт на ветке, сервис перезапущен с неё,
+PR ещё не смержен в main (см. OPERATIONS_LOG 2026-07-06 — не делать
+`checkout main` на VPS до мержа). После мержа — file:line ниже
+уточнить по main.
+
+Что теперь ПРАВДА в проде:
+
+- **Бан = мгновенный разлогин.** Блокировка юзера бампит
+  `users.token_version` и ревокает его строки в `refresh_tokens` —
+  access-JWT перестаёт проходить проверку, refresh невозможен. Для
+  работоспособности ревока **RLS на `refresh_tokens` ВЫКЛЮЧЕН**
+  (ручное изменение prod-БД). Source: `auth-routes.tsx` +
+  `landing-data-routes.tsx` (ветка b4e1977).
+- **Escrow-кредит ТОЛЬКО при успешном flip.** Auto-complete и admin/resolve
+  кредитуют продюсера только если `rowCount > 0` на статус-UPDATE —
+  повторный вызов не создаёт второй кредит. Source:
+  `collaboration-routes.tsx`.
+- **DM-throttle per-recipient** — лимит считается на получателя,
+  обход мейлбомба через group-UUID закрыт (`messaging-routes.tsx`).
+- **resend-verification не палит базу**: любой email → uniform 200,
+  per-email cooldown (`auth-routes.tsx`).
+- **`GET /promo-check/detections` скоупится на caller'а**:
+  client-supplied `artist_id` игнорируется для не-админов, `track_id`
+  проверяется на ownership (`t.user_id = userId`); админ (роль +
+  `isAdminEmail`) может смотреть любого артиста.
+  Source: `promo-check-routes.tsx` /detections.
+- **Storage**: clamscan fail-loud (упавший антивирус = reject, не
+  silent pass), `GET /storage/list` только под requireAdmin,
+  magic-byte-проверка отклоняет файлы с подделанным расширением
+  (`storage-routes.tsx`).
+- **Stripe-gateway отдаёт реальный статус** платежа (был хардкод
+  `pending`). **TBANK НЕ пропатчен** — там хардкод остался (латентно:
+  рекуррент не в кроне, tbank-карт нет). Source: `gateway-stripe.tsx`.
+- **Concert promote**: `cost > 0` обязателен — бесплатное промо через
+  отрицательный `cost` закрыто (`concerts-routes.tsx`).
+- **Topup coin-guard**: сервер пересчитывает коины по курсу 10 сам,
+  клиентскому количеству не верит (`checkout-routes.tsx`).
+  Контекст: коин-машинерия фактически мертва (6×5000 тест-коинов,
+  0 транзакций за всё время) — поэтому topup понижен 🔴→🟢, а
+  coin_transactions-леджер и deductCoins-гонка осознанно НЕ чинились.
+- `.env` на VPS: права 600.
+
+Известные открытые хвосты: TBANK-gateway pending-хардкод; FE
+`/air/embed` (нужен nginx/Go-роут + решение есть ли реальный
+air-плеер); concert self-approve — Никита сказал «штатно», не баг.
+Полный реестр — у laptop'а: `promofm-open-security-findings.md`.
+
 ## Critical column-type cheat sheet (echoed from CLAUDE.md)
 
 Verified columns / types — DO NOT INVENT:

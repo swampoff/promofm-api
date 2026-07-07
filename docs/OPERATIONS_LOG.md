@@ -34,6 +34,56 @@ record of what got executed.
 
 ---
 
+## 2026-07-06 — Security-батч: 10 фиксов задеплоены С ВЕТКИ + RLS off на refresh_tokens + .env 600 (laptop; запись — cloud по отчёту)
+
+- **What:** задеплоен батч из 10 security-фиксов, ветка
+  `claude/security-fixes-2026-07-06`, коммит `b4e1977`. Цикл laptop'а:
+  пред-верификация якорей и RLS → применение на ветке → type-check
+  (0 ошибок) → рестарт → смоук. Состав:
+  1. 🟠 ban-revoke — бан бампит `token_version` + ревокает `refresh_tokens`
+  2. 🟡 escrow rowCount-гвард — кредит продюсеру только при успешном flip
+     (auto-complete + admin/resolve)
+  3. 🟡 DM-throttle per-recipient — мейлбомб через group-UUID закрыт
+  4. 🟡 resend-verification — единый 200 + per-email cooldown
+     (enumeration закрыт)
+  5. 🟢 detections IDOR — `/promo-check/detections` скоупится на caller'а
+     (ownership по artist_id/track_id, admin может смотреть чужое)
+  6. 🟢 storage hardening — clamscan fail-loud, `/list` под requireAdmin,
+     magic-byte reject
+  7. 🟢 gateway-stripe — реальный статус вместо хардкод pending
+  8. 🟢 insertPaymentTx — громкий лог вместо тихого проглатывания
+  9. 🟢 concert promote cost>0 — бесплатное промо через `cost:-50` закрыто
+  10. 🟢 topup coin-guard — серверный пересчёт по курсу 10
+- **Affected (ручные prod-изменения вне git):**
+  - **RLS ВЫКЛЮЧЕН на `refresh_tokens`** — иначе ревок при бане не работал
+    (проверено: работает). Это изменение состояния prod-БД.
+  - `.env` права 644 → 600.
+- **Why:** security-аудит; HIGH — забаненный юзер сохранял живую сессию
+  до истечения JWT.
+- **How:** laptop на VPS; git checkout ветки + systemctl restart.
+- **Verified:** ревок при бане проверен на живой БД; unknown-email на
+  resend-verification → uniform 200; `/list` требует admin; detections
+  без токена → 401; сигнатуры escrow ×2 и topup подтверждены чтением.
+- **⚠️ ОПЕРАЦИОННЫЙ ФЛАГ — сервис крутится С ВЕТКИ, не с main:**
+  - НЕ запускать `git checkout main && git pull` на VPS без мержа PR —
+    рестарт откатит живые security-фиксы.
+  - Нормализация: смержить PR `claude/security-fixes-2026-07-06` на
+    GitHub → на VPS `git checkout main && git pull && systemctl restart
+    promofm-api`.
+- **Follow-ups:**
+  - Осознанно отложено: coin_transactions-леджер + deductCoins-гонка
+    (мёртвая коин-машинерия: 6×5000 тест-коинов, 0 транзакций);
+    gateway-**TBANK** остался с хардкод pending (латентно — рекуррент
+    не в кроне, tbank-карт нет); concert self-approve — штатно по
+    решению Никиты; FE `/air/embed` — нужен nginx/Go-роут + решение,
+    есть ли реальный air-плеер.
+  - Пересечение веток: `claude/security-fixes-2026-07-06` и
+    `claude/promomusicfigma-architecture-ms7sbs` обе трогают
+    `src/promo-check-routes.tsx`, но в разных местах (IDOR в
+    `/detections` vs mix-очередь) — hunks не пересекаются, порядок
+    мержа любой.
+  - Детали у laptop'а в памяти: `promofm-open-security-findings.md`.
+
 ## 2026-07-02 — Артист-рассылка: финал прогона + hard-bounce чистка (laptop; запись — cloud по отчёту)
 
 - **What:** финальный прогон рассылки по артист-базе. 873 отправлено,
