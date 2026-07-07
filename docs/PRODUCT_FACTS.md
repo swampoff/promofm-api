@@ -288,25 +288,42 @@ publication fee. Source: `tracks-page.tsx:775` (Promomusicfigma) +
    `promo_check_fingerprints` (`fingerprint`, `duration`,
    `status='ready'` или `'error'`).
 
-### DJ-миксы — маркировка (queue-сторона добавлена 2026-07-03)
+### DJ-миксы — маркировка (queue 2026-07-03; бэкстоп + read-side 2026-07-07)
 
 До 2026-07-03 миксы (`dj_mixes`) были ЕДИНСТВЕННОЙ сущностью на
 радио, которая НЕ ставилась в watermark/fingerprint-пайплайн —
-`dj-studio-routes.tsx` писал микс в БД без вызова promo-check. Закрыто
-частично:
-- **Cloud (эта ветка):** при создании микса зовётся
-  `queueMixFingerprint(mixId)` in-process (fire-and-forget) +
-  `POST /promo-check/process-mix/:mixId` (ручной ретриггер) →
-  pending-строка в `promo_check_fingerprints(mix_id)` + `spawn
-  fingerprinter.py --mix-id`. Migration 127 добавляет `mix_id` в
-  `promo_check_fingerprints`/`promo_check_detections`.
-- **VPS (за laptop, см. HANDOFF §6):** `fingerprinter.py` строго
-  `--track-id` (mix-режима НЕТ), а `promo_check_fingerprints`/
-  `_detections` на проде — строго `track_id` (ни `mix_id`, ни
-  `content_type`). Т.е. пока migration 127 + mix-режим Python не
-  применены — **detections миксов физически негде хранить** (моё раннее
-  «будут копиться, но UI не читает» — НЕВЕРНО, исправлено laptop'ом
-  2026-07-05). Cloud-обвязка живёт в ветке, не в проде.
+`dj-studio-routes.tsx` писал микс в БД без вызова promo-check.
+
+Хранение — **Decision B (laptop, migration 132, применена к проду
+2026-07-06):** параллельные `dj_mix_fingerprints` / `dj_mix_detections`
+(mix_id text FK→dj_mixes ON DELETE CASCADE) + view
+`promo_check_all_fingerprints` (content_type-дискриминатор для
+matcher'а). НЕ общие таблицы с трековыми — протечка микса в трековый
+контекст структурно невозможна, снос фичи = DROP двух таблиц.
+
+Node-обвязка (`promo-check-routes.tsx`, ветка cloud):
+- **Queue:** `queueMixFingerprint(mixId)` in-process при создании микса
+  (fire-and-forget) + `POST /promo-check/process-mix/:mixId` (ручной
+  ретриггер) → pending-строка в `dj_mix_fingerprints` + `spawn
+  fingerprinter.py --mix-id`. На requeue бампается `fingerprinted_at`
+  (backoff-метка).
+- **Reconcile-бэкстоп (блюпринт п.3):** `POST
+  /promo-check/reconcile-mixes` (requireAdminOrKey, advisory-lock
+  924178, батч 20) — миксы без fingerprint-строки или застрявшие в
+  pending/error >1ч перезапрашиваются. VPS-cron каждые 15 мин
+  (crontab-строка — HANDOFF §6-бис). Закрывает хрупкость «упавший
+  in-process вызов = микс навсегда без мониторинга».
+- **Read-side (п.5, честный empty-state):** `GET
+  /promo-check/mix-detections` (requireAuth, скоуп владельца по
+  IDOR-модели /detections, админ — ?djUserId) → `monitoring[]`
+  (статус маркировки) + `detections[]`. FE: блок «Ротации в эфире»
+  в DjRadioPickups; до данных показывает статус очереди, не ноль;
+  до миграции 132 — пустые массивы, не 500.
+- **VPS (за laptop, HANDOFF §6 пп.2 и 4):** mix-режим в
+  `fingerprinter.py` (сейчас строго `--track-id`) и viability-гейт
+  «матчится ли часовой микс в эфире». Пока п.2 не сделан,
+  pending-строки копятся, бэкстоп их ретраит по часу — вреда нет,
+  детектов тоже нет.
 
 **Реальный триггер трекового watermark'а (ПОДТВЕРЖДЁН по коду,
 2026-07-05, память laptop `promofm-watermark-fingerprint-trigger.md`):**

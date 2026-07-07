@@ -322,3 +322,46 @@ sudo -u postgres pg_dump -d promofm -t engineer_services -t engineer_orders \
 Если в engineer_orders есть незавершённые заказы (`status NOT IN
 ('completed','declined','cancelled')`) — СТОП, сначала домигрировать их
 в service_orders или дозакрыть руками, записать в OPERATIONS_LOG.
+
+## 6-бис. Mix-watermark: cloud добил пп. 3 и 5 блюпринта (2026-07-07)
+
+Обновление статуса §6 — за тобой остаются ТОЛЬКО пп. 2 и 4:
+
+- **П. 3 (reconcile-бэкстоп) — ✅ СДЕЛАН, но в Node, не в shell.**
+  `POST /server/api/promo-check/reconcile-mixes` (requireAdminOrKey,
+  advisory-lock 924178 на выделенном клиенте — паттерн radio-digest).
+  Кандидаты: миксы с audio_url без строки в dj_mix_fingerprints ЛИБО
+  застрявшие в pending/error дольше часа (backoff по fingerprinted_at,
+  который queueMixFingerprint теперь бампает на requeue). Батч 20/тик.
+  До миграции 132 отвечает `{success:false, error:'reconcile
+  unavailable'}` с HTTP 200 — cron не орёт.
+  **Твой шаг — одна строка в crontab VPS:**
+  ```
+  */15 * * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" http://127.0.0.1:3000/server/api/promo-check/reconcile-mixes
+  ```
+- **П. 5 (дисплей) — ✅ СДЕЛАН с честным empty-state, «вечный ноль»
+  исключён дизайном.** `GET /server/api/promo-check/mix-detections`
+  (requireAuth; скоуп IDOR-модели /detections: не-админ видит только
+  свои миксы через `dj_id = userId OR dj_id IN (SELECT id::text FROM
+  dj_profiles WHERE user_id = userId)`; админ — ?djUserId). Отдаёт
+  `monitoring[]` (статус маркировки по каждому миксу) + `detections[]`.
+  FE: блок «Ротации в эфире (PROMO.CHECK)» внутри DjRadioPickups —
+  пока детектов нет, показывает СТАТУС («N миксов в очереди на
+  маркировку» / «мониторим, ротаций пока нет»), а не голый ноль;
+  до миграции 132 бэк отвечает пустыми массивами (не 500), блок
+  просто скрыт.
+- **Пп. 2 и 4 — ЗА ТОБОЙ, порядок прежний:** mix-режим в
+  fingerprinter.py (`--mix-id`: источник dj_mixes.audio_url, fingerprint
+  → dj_mix_fingerprints, статус 'done'; детекты monitor.py → 
+  dj_mix_detections через view promo_check_all_fingerprints), затем
+  viability-гейт (матчится ли часовой микс в эфире). Если гейт не
+  пройдёт — фича сносится дёшево: DROP двух таблиц + revert моих
+  коммитов, трековый мир не тронут.
+
+Колонки для pre-flight (все из migration 132, применённой тобой):
+`dj_mix_fingerprints(mix_id, fingerprint, watermark_id, duration,
+status, fingerprinted_at, watermarked_at)`;
+`dj_mix_detections(id, mix_id, station_id, station_name,
+detection_method, confidence, watermark_confirmed, detected_at)`;
+плюс `dj_mixes(id, dj_id, title, audio_url, created_at)`,
+`dj_profiles(id, user_id)`.

@@ -251,11 +251,13 @@ export async function queueMixFingerprint(mixId: string): Promise<{ ok: boolean;
   // Pending-строка в dj_mix_fingerprints (mix_id UNIQUE, migration 132).
   // watermark_id — placeholder-uuid; fingerprinter.py перезапишет через
   // generate_watermark_id() (namespace не пересекается с трековым).
+  // fingerprinted_at бампается и на requeue — reconcile-mixes читает его
+  // как backoff-метку (stale pending старше часа → повторная попытка).
   try {
     await query(
       `INSERT INTO dj_mix_fingerprints (mix_id, fingerprint, watermark_id, duration, status)
        VALUES ($1, '{}', gen_random_uuid()::text, 0, 'pending')
-       ON CONFLICT (mix_id) DO UPDATE SET status = 'pending'`,
+       ON CONFLICT (mix_id) DO UPDATE SET status = 'pending', fingerprinted_at = NOW()`,
       [mixId]
     );
   } catch (e) {
@@ -284,6 +286,143 @@ app.post("/process-mix/:mixId", requireAuth, async (c) => {
     message: "Микс поставлен в очередь мониторинга Promo.check",
     mix_id: mixId,
   });
+});
+
+// ─── Mix reconcile backstop (blueprint §6 п.3 — «самый недооценённый») ────────
+//
+// Зеркало reconcile-fingerprints.sh для миксов, но в Node, а не в
+// VPS-shell: единственный in-process вызов при создании микса — хрупкий
+// (рестарт сервиса, упавший python, миграция 132 ещё не применена в
+// момент аплоада) — без бэкстопа такой микс навсегда выпадает из
+// мониторинга. Та же дыра, которую 2026-06-24 закрывали для треков.
+//
+// Cron VPS дёргает раз в 15 мин (см. MANUAL DEPLOY STEPS в коммите):
+//   */15 * * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" \
+//     http://127.0.0.1:3000/server/api/promo-check/reconcile-mixes
+// Advisory-lock на выделенном клиенте (паттерн radio-digest) — двойной
+// тик безопасен. Batch 20/тик, backoff: stale-pending младше часа не
+// перезапускаем (иначе на VPS без mix-mode fingerprinter'а плодили бы
+// python-процесс каждые 15 мин по каждому миксу).
+const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || "";
+async function requireAdminOrKey(c: any, next: any) {
+  const internalKey = c.req.header("X-Internal-Key");
+  if (internalKey && ADMIN_INTERNAL_KEY && internalKey === ADMIN_INTERNAL_KEY) {
+    return next();
+  }
+  const { requireAdmin } = await import("./auth-middleware.tsx");
+  return requireAuth(c, async () => { await requireAdmin(c, next); });
+}
+
+const RECONCILE_MIXES_LOCK = 924178; // произвольный, уникален в проекте (см. 770451, 924173)
+
+app.post("/reconcile-mixes", requireAdminOrKey, async (c) => {
+  const lockClient = await pool.connect();
+  let locked = false;
+  try {
+    const lk = await lockClient.query("SELECT pg_try_advisory_lock($1) AS got", [RECONCILE_MIXES_LOCK]);
+    locked = !!lk.rows[0]?.got;
+    if (!locked) {
+      return c.json({ success: true, queued: 0, skipped: "locked" });
+    }
+
+    // Кандидаты: микс с аудио, у которого (а) нет строки fingerprint'а
+    // вовсе, либо (б) строка застряла в pending/error дольше часа.
+    const { rows } = await pool.query(
+      `SELECT m.id
+         FROM dj_mixes m
+         LEFT JOIN dj_mix_fingerprints f ON f.mix_id = m.id
+        WHERE m.audio_url IS NOT NULL AND m.audio_url <> ''
+          AND (f.id IS NULL
+               OR (f.status IN ('pending', 'error')
+                   AND COALESCE(f.fingerprinted_at, '-infinity'::timestamptz) < NOW() - INTERVAL '1 hour'))
+        ORDER BY m.created_at ASC
+        LIMIT 20`
+    );
+
+    let queued = 0;
+    for (const row of rows) {
+      const r = await queueMixFingerprint(String(row.id)).catch(() => ({ ok: false as const }));
+      if (r.ok) queued++;
+    }
+    return c.json({ success: true, checked: rows.length, queued });
+  } catch (e: any) {
+    // migration 132 не применена → LEFT JOIN упадёт; отвечаем честно, не 500-им cron.
+    console.warn("[promo-check] reconcile-mixes failed (migration 132 applied?):", e?.message);
+    return c.json({ success: false, error: "reconcile unavailable", detail: String(e?.message || e) }, 200);
+  } finally {
+    if (locked) await lockClient.query("SELECT pg_advisory_unlock($1)", [RECONCILE_MIXES_LOCK]).catch(() => {});
+    lockClient.release();
+  }
+});
+
+// ─── Mix detections read-side (DJ cabinet) ────────────────────────────────────
+//
+// Скоуп повторяет IDOR-модель /detections (fix 2026-07-06): не-админ
+// видит ТОЛЬКО свои миксы; админ может смотреть любого DJ через ?djUserId.
+// dj_mixes.dj_id на новых строках = JWT userId (dj-studio INSERT), на
+// легаси может быть dj_profiles.id — покрываем оба через подзапрос
+// (id::text — id может быть uuid, сравнение по text безопасно).
+app.get("/mix-detections", requireAuth, async (c) => {
+  const limit = Math.min(Number(c.req.query("limit") || "50"), 200);
+  const userId = c.get("userId") as string;
+  const isAdmin =
+    (c.get("userRole") === "admin" || c.get("userRole") === "superadmin") &&
+    isAdminEmail(c.get("userEmail"));
+  const targetUserId = isAdmin && c.req.query("djUserId") ? String(c.req.query("djUserId")) : userId;
+
+  try {
+    const ownerScope = `(m.dj_id = $1 OR m.dj_id IN (SELECT dp.id::text FROM dj_profiles dp WHERE dp.user_id = $1))`;
+
+    // Статус мониторинга по каждому миксу владельца — честный empty-state
+    // для UI («в очереди» / «мониторится с …»), а не голый ноль.
+    const monitoring = await pool.query(
+      `SELECT m.id AS mix_id, m.title, f.status, f.watermarked_at, f.fingerprinted_at
+         FROM dj_mixes m
+         LEFT JOIN dj_mix_fingerprints f ON f.mix_id = m.id
+        WHERE ${ownerScope} AND m.audio_url IS NOT NULL AND m.audio_url <> ''
+        ORDER BY m.created_at DESC
+        LIMIT 100`,
+      [targetUserId]
+    );
+
+    const detections = await pool.query(
+      `SELECT d.id, d.mix_id, m.title, d.station_name, d.confidence,
+              d.watermark_confirmed, d.detection_method, d.detected_at
+         FROM dj_mix_detections d
+         JOIN dj_mixes m ON m.id = d.mix_id
+        WHERE ${ownerScope}
+        ORDER BY d.detected_at DESC
+        LIMIT ${limit}`,
+      [targetUserId]
+    );
+
+    return c.json({
+      success: true,
+      monitoring: monitoring.rows.map((r: any) => ({
+        mixId: r.mix_id,
+        title: r.title || "",
+        // Нет строки fingerprint'а = ещё не в очереди (бэкстоп подберёт).
+        status: r.status || "queued",
+        watermarkedAt: r.watermarked_at,
+        fingerprintedAt: r.fingerprinted_at,
+      })),
+      detections: detections.rows.map((r: any) => ({
+        id: r.id,
+        mixId: r.mix_id,
+        mixTitle: r.title || "",
+        stationName: r.station_name,
+        confidence: Number(r.confidence) || 0,
+        watermarkConfirmed: !!r.watermark_confirmed,
+        method: r.detection_method || "fingerprint",
+        detectedAt: r.detected_at,
+      })),
+    });
+  } catch (e: any) {
+    // До применения миграции 132 таблиц нет — DJ-кабинет получает пустой
+    // но валидный ответ, а не 500.
+    console.warn("[promo-check] mix-detections unavailable (migration 132 applied?):", e?.message);
+    return c.json({ success: true, monitoring: [], detections: [] });
+  }
 });
 
 // ─── Dashboard summary ────────────────────────────────────────────────────────
