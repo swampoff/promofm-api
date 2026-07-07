@@ -13,8 +13,9 @@ from datetime import datetime, timezone, timedelta
 
 from db import (
     get_monitoring_stations,
-    get_all_fingerprints,
+    get_all_fingerprints_unified,
     insert_detection,
+    insert_mix_detection,
     update_station_scanned,
 )
 from fingerprinter import fingerprint_file, match_fingerprint, get_watermark, get_watermark_matches, audiowmark_available
@@ -29,6 +30,25 @@ SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "300"))  # 5 min between sca
 CHUNK_SECONDS = int(os.environ.get("CHUNK_SECONDS", "30"))
 FINGERPRINT_THRESHOLD = float(os.environ.get("FINGERPRINT_THRESHOLD", "0.35"))
 CONFIDENCE_MIN = float(os.environ.get("CONFIDENCE_MIN", "0.65"))  # min confidence to log
+
+
+def record_detection(content_id, content_type, duration, station_id, station_name,
+                     confidence, detection_method, watermark_confirmed):
+    """Dispatch по content_type (view promo_check_all_fingerprints): трек -> promo_check_detections,
+    микс -> dj_mix_detections с дедуп-окном = длительность микса (>= трекового SCAN_INTERVAL)."""
+    if content_type == "mix":
+        insert_mix_detection(
+            mix_id=content_id, station_id=station_id, station_name=station_name,
+            confidence=confidence, detection_method=detection_method,
+            watermark_confirmed=watermark_confirmed,
+            dedup_window_seconds=max(int(duration or 0), SCAN_INTERVAL),
+        )
+    else:
+        insert_detection(
+            track_id=content_id, station_id=station_id, station_name=station_name,
+            confidence=confidence, detection_method=detection_method,
+            watermark_confirmed=watermark_confirmed,
+        )
 
 
 def capture_stream_chunk(stream_url: str, duration: int) -> str | None:
@@ -82,6 +102,9 @@ def scan_station(station: dict, all_fingerprints: list) -> int:
     station_id = station["station_id"]
     monitoring_id = station["id"]
 
+    _ctype = {f["content_id"]: f.get("content_type", "track") for f in all_fingerprints}
+    _cdur = {f["content_id"]: f.get("duration") for f in all_fingerprints}
+
     log.info(f"Scanning {station_name} ({stream_url[:50]}...)")
     chunk_path = capture_stream_chunk(stream_url, CHUNK_SECONDS)
     if not chunk_path:
@@ -108,8 +131,10 @@ def scan_station(station: dict, all_fingerprints: list) -> int:
                     confidence = min(0.99, confidence + 0.05)
                     log.info(f"Watermark CONFIRMED for track {track_id} on {station_name}")
 
-            insert_detection(
-                track_id=track_id,
+            record_detection(
+                content_id=track_id,
+                content_type=_ctype.get(track_id, "track"),
+                duration=_cdur.get(track_id),
                 station_id=station_id,
                 station_name=station_name,
                 confidence=confidence,
@@ -132,8 +157,10 @@ def scan_station(station: dict, all_fingerprints: list) -> int:
                     wm_hits = get_watermark_matches(chunk_path, known_wm)
             if wm_hits:
                 wtrack, wscore = max(wm_hits, key=lambda x: x[1])
-                insert_detection(
-                    track_id=wtrack,
+                record_detection(
+                    content_id=wtrack,
+                    content_type=_ctype.get(wtrack, "track"),
+                    duration=_cdur.get(wtrack),
                     station_id=station_id,
                     station_name=station_name,
                     confidence=min(0.99, 0.80 + wscore * 0.10),
@@ -185,8 +212,10 @@ def run_once(station_filter: str | None = None):
         log.warning("No active stations to scan")
         return
 
-    all_fingerprints = get_all_fingerprints()
-    log.info(f"Loaded {len(all_fingerprints)} fingerprints from DB")
+    all_fingerprints = get_all_fingerprints_unified()
+    for _fp in all_fingerprints:
+        _fp["track_id"] = _fp["content_id"]  # match_fingerprint/known_wm compat; content_type/duration остаются
+    log.info(f"Loaded {len(all_fingerprints)} fingerprints from DB (tracks+mixes via view)")
 
     total_detections = 0
     for station in stations:
@@ -201,7 +230,9 @@ def run_continuous():
     while True:
         try:
             stations = get_monitoring_stations()
-            all_fingerprints = get_all_fingerprints()
+            all_fingerprints = get_all_fingerprints_unified()
+            for _fp in all_fingerprints:
+                _fp["track_id"] = _fp["content_id"]
 
             for station in stations:
                 if should_scan(station):

@@ -155,17 +155,34 @@ def get_mix_audio_url(mix_id):
 
 
 def insert_mix_detection(mix_id, station_id, station_name, confidence,
-                         detection_method, watermark_confirmed):
-    """Зеркало insert_detection для DJ-миксов -> dj_mix_detections."""
+                         detection_method, watermark_confirmed, dedup_window_seconds=0):
+    """Зеркало insert_detection для DJ-миксов -> dj_mix_detections.
+    dedup_window_seconds>0: пропустить, если тот же (mix_id, station_name) уже
+    детектился в окне — часовой микс в эфире = один факт, не 20 строк (контракт §6-тер п.3)."""
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO dj_mix_detections
-                  (mix_id, station_id, station_name, confidence,
-                   detection_method, watermark_confirmed)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (mix_id, station_id, station_name, confidence,
-                  detection_method, watermark_confirmed))
+            if dedup_window_seconds and dedup_window_seconds > 0:
+                cur.execute("""
+                    INSERT INTO dj_mix_detections
+                      (mix_id, station_id, station_name, confidence,
+                       detection_method, watermark_confirmed)
+                    SELECT %s, %s, %s, %s, %s, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM dj_mix_detections
+                        WHERE mix_id = %s AND station_name = %s
+                          AND detected_at > now() - make_interval(secs => %s)
+                    )
+                """, (mix_id, station_id, station_name, confidence,
+                      detection_method, watermark_confirmed,
+                      mix_id, station_name, int(dedup_window_seconds)))
+            else:
+                cur.execute("""
+                    INSERT INTO dj_mix_detections
+                      (mix_id, station_id, station_name, confidence,
+                       detection_method, watermark_confirmed)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (mix_id, station_id, station_name, confidence,
+                      detection_method, watermark_confirmed))
         conn.commit()
 
 
