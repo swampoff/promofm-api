@@ -216,7 +216,13 @@ app.use('*', async (c, next) => {
 app.use('*', async (c, next) => {
   await next();
   c.header('X-Content-Type-Options', 'nosniff');
-  c.header('X-Frame-Options', 'DENY');
+  // /server/api/air/embed — единственная страница, которая ЖИВЁТ в чужом
+  // iframe (embed-код с AirLivePage); ей DENY нельзя, защита —
+  // frame-ancestors * в самом роуте. nginx-дубль заголовка тоже должен
+  // исключать этот location.
+  if (c.req.path !== '/server/api/air/embed') {
+    c.header('X-Frame-Options', 'DENY');
+  }
   c.header('X-XSS-Protection', '1; mode=block');
   c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
 });

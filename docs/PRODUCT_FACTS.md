@@ -1469,6 +1469,33 @@ name + pipeline-состояние), решение `POST /api/videos/:id/modera
 
 ---
 
+## ПРОМО.ЭИР embed-плеер (добавлен 2026-07-07)
+
+Кнопка «Embed» на AirLivePage раздаёт iframe-код. До 2026-07-07 он
+указывал на `/air/embed`, который НИКТО не обслуживал (nginx `/air/*`
+→ Icecast/Go, там такого mount'а нет) — пользователи копировали
+вечный 404.
+
+Теперь:
+- **`GET /server/api/air/embed`** (`air-routes.tsx`, public) — отдаёт
+  самодостаточный HTML ~2.4KB: play/pause на Icecast mount
+  `/air/live/promo.fm` (relative — работает на любом домене прода),
+  now-playing поллится с `/server/api/air/now-playing` каждые 15с,
+  ссылка на `promo-music.ru/air-live`. Без React/бандла — iframe
+  лёгкий.
+- Заголовки: `Content-Security-Policy: frame-ancestors *` (страница
+  ОБЯЗАНА открываться в чужом iframe), `Cache-Control: public,
+  max-age=300`. Глобальный `X-Frame-Options: DENY` в `index.ts`
+  (security-headers middleware) имеет exemption ровно для этого пути.
+- FE: `AirLivePage.tsx` embed-код теперь
+  `${config.functionsUrl}/api/air/embed`.
+- ⚠️ **nginx-каверза (laptop):** комментарий в index.ts говорит
+  «nginx also sets these» — если nginx add_header'ит X-Frame-Options
+  на `/server/*`, iframe останется заблокированным несмотря на Node.
+  Нужно исключение для location `/server/api/air/embed` + проверка:
+  `curl -sI https://promo-music.ru/server/api/air/embed | grep -i frame`
+  → X-Frame-Options отсутствует, CSP frame-ancestors * есть.
+
 ## Security-посture после батча 2026-07-06 (ветка `claude/security-fixes-2026-07-06`, b4e1977 — НА ПРОДЕ)
 
 ⚠️ На момент записи код живёт на ветке, сервис перезапущен с неё,

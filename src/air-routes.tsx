@@ -54,6 +54,68 @@ app.get("/now-playing", async (c) => {
   }
 });
 
+// Embeddable мини-плеер для сторонних сайтов (iframe 320×160).
+// AirLivePage выдаёт пользователям embed-код с этим URL. Страница
+// обязана открываться в чужом iframe → frame-ancestors * и exemption
+// из глобального X-Frame-Options: DENY (см. index.ts security headers).
+// ВАЖНО (nginx): location /server/api/air/embed не должен add_header
+// X-Frame-Options — иначе iframe заблокирован независимо от Node.
+app.get("/embed", (c) => {
+  c.header("Content-Security-Policy", "frame-ancestors *");
+  c.header("Cache-Control", "public, max-age=300");
+  return c.html(`<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ПРОМО.ЭИР — прямой эфир</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%}
+  body{font:13px/1.4 -apple-system,'Segoe UI',Roboto,Arial,sans-serif;
+    background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);
+    color:#fff;display:flex;align-items:center;padding:14px;gap:14px}
+  #btn{flex:none;width:56px;height:56px;border-radius:50%;border:0;cursor:pointer;
+    background:#e94b8a;color:#fff;font-size:22px;display:flex;
+    align-items:center;justify-content:center;transition:transform .15s}
+  #btn:hover{transform:scale(1.06)}
+  .meta{min-width:0;flex:1}
+  .brand{display:flex;align-items:center;gap:6px;font-weight:700;
+    letter-spacing:.06em;font-size:12px;color:#f7a8c9}
+  .dot{width:7px;height:7px;border-radius:50%;background:#4ade80;
+    animation:pulse 1.6s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  #track{margin-top:5px;font-size:14px;font-weight:600;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis}
+  a{color:#9aa0ff;text-decoration:none;font-size:11px}
+  a:hover{text-decoration:underline}
+</style></head><body>
+<button id="btn" aria-label="Слушать эфир">&#9654;</button>
+<div class="meta">
+  <div class="brand"><span class="dot"></span>ПРОМО.ЭИР &middot; LIVE</div>
+  <div id="track">Прямой эфир promo.fm</div>
+  <a href="https://promo-music.ru/air-live" target="_blank" rel="noopener">promo-music.ru/air-live &rarr;</a>
+</div>
+<script>
+  var a=new Audio('/air/live/promo.fm'),btn=document.getElementById('btn'),
+      tr=document.getElementById('track'),playing=false;
+  a.preload='none';
+  btn.onclick=function(){
+    if(playing){a.pause();a.src='';a.src='/air/live/promo.fm';btn.innerHTML='&#9654;';playing=false;return}
+    a.play().then(function(){btn.innerHTML='&#10074;&#10074;';playing=true})
+      .catch(function(){tr.textContent='Эфир недоступен'});
+  };
+  function poll(){
+    fetch('/server/api/air/now-playing').then(function(r){return r.json()})
+      .then(function(d){
+        var i=d.info||{};
+        var s=(i.artist&&i.title)?i.artist+' — '+i.title:(d.track||'');
+        if(s&&s!=='Silence'&&s!=='Offline')tr.textContent=s;
+      }).catch(function(){});
+  }
+  poll();setInterval(poll,15000);
+</script>
+</body></html>`);
+});
+
 app.get("/history", async (c) => {
   const limit = Math.min(parseInt(c.req.query("limit") || "20"), 100);
   try {
