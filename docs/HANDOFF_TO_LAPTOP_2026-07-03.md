@@ -258,3 +258,67 @@ NewsModeration переведена на твои эндпоинты (реаль
 вместо локального setState). Деталь: миграции 130 (image_url) и 131
 (news_moderation: moderation_note и пр.) уже на main — новых миграций
 для этого восстановления НЕ требуется.
+
+## 8. Гейт скачивания треков радио — верификация статусов по проду (cloud, 2026-07-07)
+
+`/radio/tracks/:id/download` теперь режет по
+`DOWNLOADABLE = ['approved','published','upcoming']` + `!is_hidden`
+(колонка `tracks.moderation_status`, НЕ `status`). Набор выбран по коду;
+по проду не проверялся. Прогони:
+
+```sql
+-- Какие статусы у треков, которые радио реально скачивали раньше?
+-- Всё, что не в ('approved','published','upcoming') или is_hidden=true —
+-- легитимные скачивания, которые новый гейт теперь отрежет.
+SELECT t.moderation_status, t.is_hidden,
+       COUNT(DISTINCT d.track_id) AS tracks, COUNT(*) AS downloads
+FROM track_downloads_by_radio d
+JOIN tracks t ON t.id = d.track_id
+GROUP BY 1, 2 ORDER BY downloads DESC;
+
+-- Общее распределение статусов (контекст).
+SELECT moderation_status, is_hidden, COUNT(*)
+FROM tracks GROUP BY 1, 2 ORDER BY 3 DESC;
+```
+
+Если в первом запросе всплывёт статус вне тройки (например треки, живущие
+как `'paid'` после вебхука, но до модерации) — расширь `DOWNLOADABLE` в
+`radio-routes.tsx:1440` тем же PR'ом, НЕ откатывай гейт целиком.
+
+## 9. Marketplace phase-3 runbook: снос engineer_services / engineer_orders (cloud, 2026-07-07)
+
+Файл миграции готов: `src/migrations/133_drop_engineer_legacy.sql`
+(в репо лежать безопасно — runner-заглушка). Порядок СТРОГО такой:
+
+**Шаг 1 — runtime-верификация нового цикла на проде** (то, что блокировало
+phase-3): клиент создаёт заказ → инженер accept (`accepted→in_progress`
+без пей-гейта) → deliver (`completed` + «Результат: url — note») →
+проверить строку в `platform_revenue_log`:
+`channel='marketplace_service'`, `payee_id=<userId инженера>`,
+`payout_amount = 0.9 × price`, `status='completed'`. Плюс негативный:
+клиент cancel на `pending` → `rejected`; cancel на `accepted` → 400.
+
+**Шаг 2 — код без legacy-ссылок** (отдельный PR ПОСЛЕ шага 1; могу
+сделать по команде):
+- `engineer-routes.tsx`: выпилить services-CRUD (515–585, 587 public),
+  orders-цикл (656–955), auto-complete (1107+), admin refund (957+),
+  legacy-ветку earnings. **Profile/portfolio (62–390) ОСТАЮТСЯ** — они
+  на engineer_profiles/portfolio, не на сносимых таблицах.
+- `checkout-routes.tsx`: три engineer_order-ветки (~1560 fulfillment,
+  ~1765 payee-lookup, ~2184 amount-gate).
+- ⚠️ Проверь crontab VPS на вызовы `/engineer/orders/auto-complete`
+  ДО выпиливания — если он в кроне, убрать оттуда тем же заходом.
+- FE `engineer-studio.ts` уже на marketplace-эндпоинтах; legacy у него
+  остался только `GET /engineer/earnings` — этот эндпоинт НЕ сносим,
+  он на platform_revenue_log (и с 2026-07-07 считает оба канала:
+  `engineer_order` + `marketplace_service`).
+
+**Шаг 3 — данные и DROP**:
+```bash
+sudo -u postgres pg_dump -d promofm -t engineer_services -t engineer_orders \
+  > ~/backup-engineer-legacy-$(date +%F).sql
+# затем стандартный heredoc BEGIN; \i 133; COMMIT;
+```
+Если в engineer_orders есть незавершённые заказы (`status NOT IN
+('completed','declined','cancelled')`) — СТОП, сначала домигрировать их
+в service_orders или дозакрыть руками, записать в OPERATIONS_LOG.

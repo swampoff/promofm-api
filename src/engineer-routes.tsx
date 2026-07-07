@@ -737,6 +737,10 @@ app.get('/orders/incoming', requireAuth, async (c) => {
 app.get('/earnings', requireAuth, async (c) => {
   const g = await requireEngineerRole(c); if (g instanceof Response) return g;
   try {
+    // 'engineer_order' — legacy-оплатный flow (checkout). 'marketplace_service'
+    // — новый цикл service_orders: recordPlatformCommission('service', …)
+    // пишет channel='marketplace_' + type при completed. Без второго канала
+    // заработок по новому циклу в кабинете инженера был невидим.
     const { rows: agg } = await pool.query(
       `SELECT
          COALESCE(SUM(payout_amount), 0)::numeric AS total,
@@ -744,13 +748,13 @@ app.get('/earnings', requireAuth, async (c) => {
                            THEN payout_amount END), 0)::numeric AS month,
          COUNT(*)::int AS count
        FROM platform_revenue_log
-       WHERE payee_id = $1 AND channel = 'engineer_order' AND status = 'completed'`,
+       WHERE payee_id = $1 AND channel IN ('engineer_order', 'marketplace_service') AND status = 'completed'`,
       [g.userId],
     );
     const { rows: recent } = await pool.query(
       `SELECT id, description, payout_amount, gross_amount, created_at, metadata
        FROM platform_revenue_log
-       WHERE payee_id = $1 AND channel = 'engineer_order' AND status = 'completed'
+       WHERE payee_id = $1 AND channel IN ('engineer_order', 'marketplace_service') AND status = 'completed'
        ORDER BY created_at DESC LIMIT 10`,
       [g.userId],
     );
