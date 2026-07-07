@@ -2741,6 +2741,23 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
       }
     }
 
+    // topup — пополнение коин-баланса. Канон-курс 1 ₽ = COINS_PER_RUBLE (=10)
+    // коинов (source-of-truth: coins-routes.tsx COINS_PER_RUBLE). Defensive
+    // copy inline — как DJ_PRICES/venue выше. metadata.coinAmount из клиента
+    // НЕ доверяем: webhook (см. ~стр.108) кредитует
+    // incrementCoinBalanceAtomic(parseInt(metadata.coinAmount)) ДОСЛОВНО, т.е.
+    // {type:'topup',amount:1,metadata:{coinAmount:'1000000'}} = 1 ₽ → 1e6 коинов.
+    // Пересчитываем серверно из amount и ПЕРЕЗАПИСЫВАЕМ metadata.coinAmount
+    // (не ломает UX). metadata — тот же object-reference, что уходит в
+    // createPayment и в session ниже, поэтому мутации достаточно.
+    if (type === 'topup' && metadata && metadata.coinAmount !== undefined && metadata.coinAmount !== null) {
+      const expectedCoins = Math.floor(amount * 10);
+      if (String(metadata.coinAmount) !== String(expectedCoins)) {
+        log.warn({ userId, amount, claimedCoinAmount: metadata.coinAmount, expectedCoins }, 'topup_coin_amount_tampering_rewritten');
+      }
+      metadata.coinAmount = String(expectedCoins);
+    }
+
     if (!returnUrl) {
       return c.json({ success: false, error: 'returnUrl обязателен' }, 400);
     }

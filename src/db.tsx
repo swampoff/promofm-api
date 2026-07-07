@@ -1746,7 +1746,27 @@ export async function insertPaymentTx(tx: {
     status: tx.status || 'completed',
     created_at: tx.createdAt || new Date().toISOString(),
   }, { onConflict: 'id' });
-  if (error) console.error('[db] insertPaymentTx:', error);
+  if (error) {
+    // Аудит-строка payment_txns потеряна. Деньги уже проведены (это
+    // history-таблица), поэтому НЕ бросаем — иначе сломаем webhook и
+    // gateway начнёт ретраить успешный платёж. Вместо тихого
+    // console.error логируем ГРОМКО и структурированно + шлём ops-алерт
+    // для ручной реконсиляции.
+    const { createLogger } = await import('./logger.tsx');
+    createLogger('db').error(
+      { txId: tx.id, orderId: tx.orderId, userId: tx.userId, amount: tx.amount, category: tx.category, gateway: tx.gateway, error },
+      'insertPaymentTx_failed',
+    );
+    try {
+      const { emitSSE } = await import('./sse-routes.tsx');
+      emitSSE('admin', {
+        type: 'payment_tx_audit_failed',
+        data: { txId: tx.id, orderId: tx.orderId, userId: tx.userId, amount: tx.amount, category: tx.category, gateway: tx.gateway },
+      });
+    } catch (alertErr) {
+      console.error('[db] insertPaymentTx alert emit failed:', alertErr);
+    }
+  }
 }
 
 export async function getPaymentTxsByUser(userId: string, filters?: {

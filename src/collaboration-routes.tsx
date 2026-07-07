@@ -477,6 +477,22 @@ app.post('/offers/auto-complete', async (c) => {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        const upd = await client.query(
+          `UPDATE collab_offers
+              SET payment_status = 'released',
+                  released_at    = NOW(),
+                  status         = 'completed',
+                  completed_at   = NOW(),
+                  updated_at     = NOW()
+            WHERE id = $1
+              AND payment_status = 'escrow_held'
+            RETURNING id`,
+          [row.id]
+        );
+        if (!upd.rowCount) {
+          await client.query('ROLLBACK');
+          continue;
+        }
         await client.query(
           `INSERT INTO payment_balances (user_id, available, pending, total, updated_at)
            VALUES ($1, $2::numeric, 0, $2::numeric, NOW())
@@ -485,17 +501,6 @@ app.post('/offers/auto-complete', async (c) => {
                  total      = payment_balances.total     + EXCLUDED.available,
                  updated_at = NOW()`,
           [row.producer_id, Number(row.price)]
-        );
-        await client.query(
-          `UPDATE collab_offers
-              SET payment_status = 'released',
-                  released_at    = NOW(),
-                  status         = 'completed',
-                  completed_at   = NOW(),
-                  updated_at     = NOW()
-            WHERE id = $1
-              AND payment_status = 'escrow_held'`,
-          [row.id]
         );
         await client.query('COMMIT');
         released++;
@@ -553,6 +558,21 @@ app.post('/admin/offers/:id/resolve', requireAuth, requireAdmin, async (c) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      const upd = await client.query(
+        `UPDATE collab_offers
+            SET payment_status = $2,
+                ${timestampCol} = NOW(),
+                status         = $3,
+                updated_at     = NOW()
+          WHERE id = $1
+            AND payment_status = 'escrow_held'
+          RETURNING id`,
+        [offerId, newPaymentStatus, resolution === 'release_to_producer' ? 'completed' : 'cancelled']
+      );
+      if (!upd.rowCount) {
+        await client.query('ROLLBACK');
+        return c.json({ success: false, error: 'Escrow already resolved or wrong state' }, 409);
+      }
       await client.query(
         `INSERT INTO payment_balances (user_id, available, pending, total, updated_at)
          VALUES ($1, $2::numeric, 0, $2::numeric, NOW())
@@ -561,16 +581,6 @@ app.post('/admin/offers/:id/resolve', requireAuth, requireAdmin, async (c) => {
                total      = payment_balances.total     + EXCLUDED.available,
                updated_at = NOW()`,
         [recipientId, price]
-      );
-      await client.query(
-        `UPDATE collab_offers
-            SET payment_status = $2,
-                ${timestampCol} = NOW(),
-                status         = $3,
-                updated_at     = NOW()
-          WHERE id = $1
-            AND payment_status = 'escrow_held'`,
-        [offerId, newPaymentStatus, resolution === 'release_to_producer' ? 'completed' : 'cancelled']
       );
       await client.query('COMMIT');
     } catch (txErr) {

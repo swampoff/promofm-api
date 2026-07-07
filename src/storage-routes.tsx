@@ -210,6 +210,19 @@ storage.post('/upload', requireAuth, async (c) => {
     const fileType: any = await import("file-type");
     const fromBuf = fileType.fileTypeFromBuffer || fileType.fromBuffer || fileType.default?.fromBuffer;
     const detectedType = fromBuf ? await fromBuf(fileData) : null;
+    // Magic bytes undetectable (detectedType===null) for a bucket that
+    // pins a concrete MIME whitelist. file-type couldn't recognize the
+    // content, so we CANNOT trust the extension/declared type — reject
+    // rather than fall through and store an unverified payload. '*'
+    // buckets (anything-goes) are intentionally exempt.
+    if (!detectedType && bucketConfig.allowedMimeTypes.length > 0 && !bucketConfig.allowedMimeTypes.includes('*')) {
+      console.warn('[storage] Magic bytes undetectable for restricted bucket:', {
+        claimed:  file.type,
+        filename: file.name,
+        bucket:   bucketName,
+      });
+      return c.json({ success: false, error: 'File content does not match declared type' }, 400);
+    }
     if (detectedType && bucketConfig.allowedMimeTypes.length > 0 && !bucketConfig.allowedMimeTypes.includes('*')) {
       // Normalize MIME subtype → file extension. `audio/mpeg` → `mp3`,
       // `audio/x-wav` → `wav`, `audio/x-m4a` → `m4a` etc. file-type's
@@ -281,6 +294,22 @@ storage.post('/upload', requireAuth, async (c) => {
           // clamscan ran past the timeout — log loudly but DON'T block the
           // upload. Otherwise a slow disk locks artists out of publishing.
           console.warn('[storage] ClamAV timed out after', scanTimeoutMs, 'ms — accepting upload anyway:', filename);
+        } else if (scanResult.error) {
+          // spawnSync failed to even run clamscan (binary missing → ENOENT,
+          // EACCES, etc.). This branch used to be silently skipped: status
+          // is null, no exception is thrown, so NONE of the guards above
+          // fired and the upload proceeded UNSCANNED without a trace.
+          // Scan is best-effort (fail-open), but this MUST be loud so ops
+          // notices the scanner is down instead of it failing invisibly.
+          console.error('[storage] ClamAV scan UNAVAILABLE — upload accepted UNSCANNED:', {
+            filename,
+            code:    (scanResult.error as any)?.code,
+            message: (scanResult.error as Error).message,
+          });
+        } else if (scanResult.status !== 0) {
+          // Any other non-zero, non-virus exit (e.g. clamscan internal error
+          // code 2). Don't block, but surface it.
+          console.warn('[storage] ClamAV returned status', scanResult.status, '— accepting upload:', filename, scanResult.stderr?.trim());
         }
       }
     } catch (e) {
@@ -379,7 +408,7 @@ storage.post('/signed-url', requireAuth, async (c) => {
 });
 
 // List files in bucket
-storage.get('/list/:bucket', requireAuth, async (c) => {
+storage.get('/list/:bucket', requireAuth, requireAdmin, async (c) => {
   try {
     const bucket = c.req.param('bucket');
     const path = c.req.query('path') || '';
