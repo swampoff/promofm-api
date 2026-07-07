@@ -365,3 +365,42 @@ status, fingerprinted_at, watermarked_at)`;
 detection_method, confidence, watermark_confirmed, detected_at)`;
 плюс `dj_mixes(id, dj_id, title, audio_url, created_at)`,
 `dj_profiles(id, user_id)`.
+
+## 10. Track-test: анти-зависание платного тракта (cloud, 2026-07-07)
+
+По твоему сигналу о застрявших тестовых заявках. Разбор по коду:
+комбинация «status='pending' + payment_status='completed' + эксперты
+назначены» текущим кодом НЕ производится — это легаси/сидинг-артефакты.
+Но реальные точки молчаливого зависания платного тракта нашлись и
+закрыты (см. PRODUCT_FACTS «Track-test»): фейковое уведомление
+экспертам (был голый console.log), отсутствие durable-сигнала админу
+об оплате (SSE-only; квота-путь вообще без сигнала), не-enforce'нутые
+SLA. Твои шаги:
+
+1. **Crontab (одна строка, раз в 6 часов):**
+   ```
+   0 */6 * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" http://127.0.0.1:3000/server/api/track-test/sla-sweep
+   ```
+2. **Runtime-цикл, который ты предлагал прогнать — да, прогони после
+   деплоя этой ветки,** критерии:
+   - оплата/квота → в течение минуты письмо «Тест трека ждёт
+     модерации» на info@ + TG;
+   - /assign-experts → у каждого эксперта строка в notifications
+     (type='track_test_assigned') + email;
+   - все N отзывов сданы → analysis_generated (авто);
+   - /finalize approve → completed; /send-feedback → артисту SSE +
+     feedback_sent_date проставлен;
+   - POST /sla-sweep руками → {success:true, stalled: K, items:[…]} и
+     digest-письмо, если K>0. Застрявшие тестовые заявки ДОЛЖНЫ
+     всплыть в первом же прогоне.
+3. **Чистка тестовых артефактов** (после того как sweep их покажет):
+   решение за Никитой — либо руками довести до completed, либо
+   ```sql
+   UPDATE track_test_requests SET status='cancelled', updated_at=NOW()
+    WHERE status='pending' AND track_title ILIKE '%test%';  -- сверить список перед прогоном!
+   ```
+   и записать в OPERATIONS_LOG.
+
+Колонки для pre-flight: track_test_requests(id, track_title,
+artist_name, status, payment_status, feedback_sent_date, updated_at);
+users(id, email). Новых миграций НЕТ.

@@ -1486,6 +1486,47 @@ name + pipeline-состояние), решение `POST /api/videos/:id/modera
 
 ---
 
+## Track-test (тест трека) — реальный флоу и анти-зависание (2026-07-07)
+
+Флоу НАМЕРЕННО полуручной — 3 админ-шага и 1 экспертный:
+`pending_payment → payment_succeeded` (вебхук YooKassa ИЛИ квота
+подписки сразу на /submit) → **админ /moderate approve** →
+`pending_expert_assignment` → **админ /assign-experts** (1–10
+экспертов, `required_expert_count = required_count || N`) →
+`experts_assigned` → эксперты сдают отзывы (`/submit-review`, +50
+коинов) → при `completed_reviews_count >= required_expert_count`
+авто-консолидация → `analysis_generated` → **админ /finalize
+approve** → `completed` → **админ /send-feedback** → отчёт уходит
+артисту (`feedback_sent_date`). Source: `track-test-routes.tsx`.
+
+**Точки молчаливого зависания, найденные 2026-07-07 (по сигналу
+laptop о застрявших тестовых заявках) и закрытые:**
+1. Уведомление эксперту при назначении было **фейком** —
+   `console.log('Notification sent…')` и ничего больше. Эксперт не
+   онлайн в момент назначения = никогда не узнает. → Теперь durable
+   `notifications`-строка + SSE + email эксперту (users по email).
+2. Оплаченный тест сигналил админу ТОЛЬКО эфемерным SSE, а
+   **квота-путь подписки не сигналил вообще** (минует вебхук). →
+   `notifyTrackTestPending` (email info@ + TG) из вебхука И из
+   /submit-квоты.
+3. SLA существовали только как цифры для дашборда
+   (pipeline-engine DEFAULT_SLA) — никто не enforce'ил. → **POST
+   /track-test/sla-sweep** (requireAdminOrKey, advisory-lock 924179,
+   cron 6ч): заявки в нетерминальном статусе старше SLA + `completed`
+   без `feedback_sent_date` >24ч → digest админу (email+TG).
+   Неизвестные легаси-статусы ('pending' из старого сидинга) тоже
+   всплывают (дефолт SLA 72ч).
+4. Осталось БЕЗ авто-фикса (осознанно): завершение требует ВСЕХ
+   `required_expert_count` отзывов — один молчащий эксперт держит
+   заявку в in_review; sweep это ловит (72ч), но переназначение
+   эксперта — ручное решение админа.
+
+Наблюдение laptop «status='pending' + payment_status='completed' +
+эксперты назначены» текущим кодом НЕ воспроизводится (submit создаёт
+pending_payment/payment_succeeded; assign-experts ставит
+experts_assigned) — это артефакты старого кода/тест-сидинга.
+Чистку см. HANDOFF §10.
+
 ## ПРОМО.ЭИР embed-плеер (добавлен 2026-07-07)
 
 Кнопка «Embed» на AirLivePage раздаёт iframe-код. До 2026-07-07 он
