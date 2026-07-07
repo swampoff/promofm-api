@@ -2,7 +2,8 @@
  * DJ MIX MODERATION ROUTES — зеркало track-moderation-routes.tsx для DJ-миксов.
  *
  * Стейты: pending → approved → published / rejected. Все миксы публикуются
- * за полную цену MIX_PUBLICATION_PRICE (5000 ₽). После апрува микс
+ * за полную цену MIX_PUBLICATION_PRICE (7000 ₽, выровнена с треками
+ * решением Никиты 2026-07-07; до этого 5000 ₽). После апрува микс
  * требует оплаты, попадает в "Новинки недели" после payment_completed
  * (см. landing-data-routes.tsx /tracks/new UNION).
  *
@@ -24,7 +25,7 @@ import crypto from 'crypto';
 
 const app = new Hono();
 
-const MIX_PUBLICATION_PRICE = 5000; // зеркало tracks PUBLICATION_PRICE
+const MIX_PUBLICATION_PRICE = 7000; // зеркало tracks PUBLICATION_PRICE (7000, выровнено 2026-07-07)
 
 // GET /pending-dj-mixes — список миксов на модерации (admin)
 app.get('/pending-dj-mixes', requireAuth, requireAdmin, async (c) => {

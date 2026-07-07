@@ -193,7 +193,14 @@ Public:
 
 **Source:** `src/track-moderation-routes.tsx`.
 
-- `PUBLICATION_PRICE = 5000` ₽ (line 26)
+- `PUBLICATION_PRICE = 7000` ₽ (track-moderation-routes.tsx:27; в
+  этом файле ранее стояло устаревшее «5000» — из-за таких хвостов
+  2026-07-07 админка показывала артисту не ту цену)
+- `MIX_PUBLICATION_PRICE = 7000` ₽ (dj-mix-moderation-routes.tsx:27;
+  выровнена с треками решением Никиты 2026-07-07, до этого 5000).
+  ⚠️ Grandfathering: цена штампуется в `dj_mixes.payment_amount` при
+  АПРУВЕ, checkout-гейт сверяет с ней — миксы, одобренные до
+  повышения и ещё не оплаченные, легитимно платят свои 5000.
 - **«Первый трек бесплатно» — ОТКЛЮЧЕНО** (URGENT business
   decision 2026-05-31, commits `7d0a5ea` + `aedec9e`). Акция
   отменена немедленно после инцидента с артистом «Deafness»

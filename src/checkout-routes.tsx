@@ -1990,7 +1990,8 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
     }
     // dj_mix_publish: те же три защиты что у трека артиста.
     // Mix должен быть owned + moderation_status='approved' (после админ-апрува,
-    // ждёт оплаты). Amount = data.payment_amount или 5000 ₽ дефолт — клиент
+    // ждёт оплаты). Amount = data.payment_amount (штампуется при апруве) или
+    // 7000 ₽ дефолт (= MIX_PUBLICATION_PRICE; выровнено с треками 2026-07-07) — клиент
     // не может занизить через DevTools.
     if (type === 'purchase' && metadata?.type === 'dj_mix_publish') {
       const mixId = metadata?.mixId;
@@ -2014,7 +2015,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         if (mix.moderation_status !== 'approved') {
           return c.json({ success: false, error: `Микс должен быть одобрен модератором (текущий статус: ${mix.moderation_status})` }, 400);
         }
-        const expected = Number(mix.payment_amount) || 5000;
+        const expected = Number(mix.payment_amount) || 7000;
         if (Math.abs(amount - expected) > 0.01) {
           log.warn({ userId, mixId, expected, received: amount }, 'dj_mix_publish_amount_tampering_blocked');
           return c.json({ success: false, error: 'Сумма не соответствует цене публикации микса' }, 400);
