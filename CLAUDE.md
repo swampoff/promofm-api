@@ -11,6 +11,10 @@ context the user can't repeat in chat every time:
 2. **[docs/PRODUCT_FACTS.md](docs/PRODUCT_FACTS.md)** — verified
    reality of how features actually work in code. Don't paraphrase
    from memory — cite the file:line from here.
+3. **GitHub Issues с меткой `cloud`** (repo swampoff/promofm-api) —
+   задачи, поставленные laptop-сессией; плюс комментарии к своим
+   открытым `laptop`-задачам (ответы лэптопа). Протокол —
+   [docs/TASK_PROTOCOL.md](docs/TASK_PROTOCOL.md).
 
 When you make a manual prod intervention (or the user tells you
 about one) — append to OPERATIONS_LOG.md in the same PR. When you
