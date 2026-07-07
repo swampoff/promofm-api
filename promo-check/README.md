@@ -1,46 +1,37 @@
-# promo-check — Python-пайплайн watermark/fingerprint/airplay
+# promo-check — PromoFM radio-airplay watermark/fingerprint (VPS Python)
 
-**Статус: посадочное место (2026-07-07). Файлы ещё НЕ импортированы.**
+Мониторит эфир радиостанций, фингерпринтит 30с-чанки, матчит против БД → детекты
+ротаций: треки → `promo_check_detections`, DJ-миксы → `dj_mix_detections`.
 
-Канон после импорта: source of truth — ЭТА директория в git;
-на VPS код живёт в `/opt/promofm-promo-check/` и обновляется тем же
-циклом, что и API: push → ssh pull → restart сервисов.
+## Файлы
+- `monitor.py` — сервис `promo-check.service`: непрерывный скан станций (SCAN_INTERVAL=300с).
+- `fingerprinter.py` — `--track-id` / `--mix-id`: watermark + Chromaprint-отпечаток.
+- `db.py` — слой БД. **DSN из env/`.env`, НЕ в коде** (см. Секреты).
+- `reconcile-fingerprints.sh` / `reconcile-mix-fingerprints.sh` — cron /15мин: досев отпечатков.
+- `extract_cover.py`, `promo-check.service`, `requirements.txt`.
 
-## Зачем
+## Деплой — ВЫБОР: symlink
+`/opt/promofm-promo-check` → **symlink** на `/opt/promofm-api/promo-check`.
+Деплой API (`git pull` / `reset --hard`) обновляет Python-файлы автоматически.
+После изменения `monitor.py`/`db.py`:
+```
+systemctl restart promo-check.service   # перечитать monitor.py
+```
+reconcile-cron'ы подхватывают новый `fingerprinter.py` сразу (без рестарта).
+(Почему symlink, а не copy: единственный источник, нет второй точки рассинхрона.)
 
-`monitor.py`, `db.py`, `fingerprinter.py`, `reconcile-fingerprints.sh`
-исторически жили ТОЛЬКО на VPS без версионирования (флаг laptop
-2026-07-07). Любая правка = невосстановимый риск (.bak — не история).
-Все остальные интеграции (Node-очередь, reconcile-бэкстоп, read-side,
-миграция 132) уже в git — Python-часть была единственной дырой.
+## Секреты
+`DB_DSN` (пароль Postgres) — в **gitignored** `promo-check/.env`
+(`DB_DSN=postgresql://…`, `chmod 600`). `db.py._load_db_dsn()` читает env ИЛИ этот `.env`.
+В git — только код, без пароля. `.env` переживает `git reset --hard` (gitignored).
 
-## Состав (после импорта laptop'ом)
+## Крон (root)
+```
+*/15 * * * * /opt/promofm-promo-check/reconcile-fingerprints.sh      # треки
+*/15 * * * * /opt/promofm-promo-check/reconcile-mix-fingerprints.sh  # миксы
+```
 
-| Файл | Роль | VPS-путь |
-|---|---|---|
-| `fingerprinter.py` | watermark + fingerprint (`--track-id` / `--mix-id`) | `/opt/promofm-promo-check/fingerprinter.py` |
-| `monitor.py` | скан эфиров, матчинг, запись детектов | `/opt/promofm-promo-check/monitor.py` |
-| `db.py` | подключение к Postgres | `/opt/promofm-promo-check/db.py` |
-| `reconcile-fingerprints.sh` | трековый reconcile-cron (15 мин) | путь по crontab |
-
-## Правила импорта (laptop)
-
-1. **НИКАКИХ секретов в git.** Если `db.py` содержит DSN/пароль —
-   перед коммитом заменить на `os.environ['DATABASE_URL']` (или
-   чтение `/opt/promofm-api/.env`). Проверить и `monitor.py`
-   (ключи стримов? токены?). Секрет в истории git = ротация.
-2. Импортировать файлы КАК ЕСТЬ (минус секреты) отдельным коммитом
-   «import as-is from VPS», и только СЛЕДУЮЩИМ коммитом — mix-дифф
-   monitor.py (HANDOFF §6-тер). Иначе в истории не видно, что
-   изменилось против прода.
-3. На VPS после мержа: заменить `/opt/promofm-promo-check/*.py` на
-   symlink'и в чекаут репо ИЛИ добавить копирование в deploy-шаг —
-   на твой вкус, записать выбор сюда.
-4. `.bak`-файлы в git не тащить.
-
-## Связанные точки в Node (уже в git)
-
-- `src/promo-check-routes.tsx` — очередь (queueTrackFingerprint /
-  queueMixFingerprint), reconcile-mixes, read-side mix-detections
-- `src/migrations/132_dj_mix_fingerprints_detections.sql` — схема миксов
-- HANDOFF §6/§6-бис/§6-тер — блюпринт и контракт monitor.py
+## Mix-detection (контракт §6-тер) — ЗАКРЫТО 2026-07-08 (laptop)
+`monitor.py`: loader → view `promo_check_all_fingerprints` (треки+миксы) + `record_detection()`
+dispatch по `content_type`. `db.py`: `insert_mix_detection` + `dedup_window_seconds`
+(окно = длительность микса). Гейт «Night» пройден (self-match → `dj_mix_detections`).

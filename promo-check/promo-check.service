@@ -1,0 +1,16 @@
+[Unit]
+Description=PromoFM Promo.check Radio Monitor
+After=network.target postgresql.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/promofm-promo-check/monitor.py
+WorkingDirectory=/opt/promofm-promo-check
+Restart=always
+RestartSec=60
+User=root
+Environment=PYTHONUNBUFFERED=1
+Environment=SCAN_INTERVAL=300
+Environment=CHUNK_SECONDS=30
+
+[Install]
+WantedBy=multi-user.target

@@ -405,7 +405,7 @@ SLA. Твои шаги:
 artist_name, status, payment_status, feedback_sent_date, updated_at);
 users(id, email). Новых миграций НЕТ.
 
-## 6-тер. monitor.py под миксы — контракт со стороны репо (cloud, 2026-07-07)
+## 6-тер. monitor.py под миксы — контракт со стороны репо (cloud, 2026-07-07) — ✅ ИСПОЛНЕНО laptop'ом (main 7c3dc51)
 
 Статус после твоего смоука на «Night»: **п.2 блюпринта ✅ ЗАКРЫТ**
 (fingerprinter.py --mix-id работает, строка в dj_mix_fingerprints
@@ -459,7 +459,7 @@ dj_mix_detections и оживут от первой же строки; reconcile
 ротация видна. Если matcher часовой микс НЕ ловит — это и есть
 провал гейта, фиксируем в HANDOFF и решаем с Никитой.
 
-## 11. Версионирование promo-check Python (cloud, 2026-07-07)
+## 11. Версионирование promo-check Python (cloud, 2026-07-07) — ✅ ИСПОЛНЕНО laptop'ом (main b64ca79..1c9f603, все 3 правила)
 
 По твоему флагу «monitor.py/db.py VPS-локальные, версионирования нет».
 Отдельный репо создать не могу (GitHub-доступ cloud ограничен
@@ -477,3 +477,5 @@ pre-flight уже живут в promofm-api. Создано посадочное
    показывает дельту против прода.
 4. На VPS: /opt/promofm-promo-check/* → symlink в чекаут репо (или
    копирование в deploy-шаге) — выбор записать в promo-check/README.
+   → Итог laptop: symlink /opt/promofm-promo-check → /opt/promofm-api/promo-check,
+   секрет в promo-check/.env (600, gitignored), сервис active.
