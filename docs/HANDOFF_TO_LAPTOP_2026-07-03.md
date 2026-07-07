@@ -479,3 +479,59 @@ pre-flight уже живут в promofm-api. Создано посадочное
    копирование в deploy-шаге) — выбор записать в promo-check/README.
    → Итог laptop: symlink /opt/promofm-promo-check → /opt/promofm-api/promo-check,
    секрет в promo-check/.env (600, gitignored), сервис active.
+
+## 12. Карта ревью остатка ветки ms7sbs (cloud, 2026-07-07) — для B
+
+Обе ветки смержены со свежим main (BE cef5d6a, FE b6e5a1c), tsc/vite
+зелёные. Конфликт promo-check/README решён в пользу твоего (мой был
+placeholder'ом). Твои cherry-pick'и цен (8b15117/cadf303 на FE main)
+merge пережил без дублей. Дельта — 6 фич, по убыванию риска:
+
+**1. Radio download: гейт + уведомления** (BE 70d0fca; FE не нужен)
+Риск: ГЛАВНЫЙ — гейт может отрезать легитимные скачивания.
+- SQL-верификация ДО деплоя: §8 (track_downloads_by_radio ×
+  moderation_status). Если всплывут статусы вне
+  ['approved','published','upcoming'] — расширить DOWNLOADABLE.
+- Runtime: скачивание published-трека радио → 200 + артисту
+  notification + info@ письмо; pending-трека → 403.
+
+**2. Track-test анти-зависание** (BE a4a95e9)
+- Runtime-чеклист §10. Крон sla-sweep (0 */6). D-пункт (полный цикл
+  с реальным платежом) — за Никитой, не блокер мержа.
+- ⚠️ /assign-experts теперь шлёт email экспертам — на тестовых
+  прогонах используй свои адреса, не реальных экспертов.
+
+**3. Mix pricing 5000→7000** (BE 2d88b10; FE уже на main)
+- Grandfathering: `SELECT id, payment_amount FROM dj_mixes WHERE
+  moderation_status='approved' AND payment_amount=5000` — эти платят
+  по-старому (гейт сверяет со строкой). Решение Никиты: оставить или
+  UPDATE до 7000.
+- Runtime: новый апрув → payment_amount=7000; оплата 5000 нового →
+  400.
+
+**4. Mix-мониторинг Node-сторона** (BE 16ffa87+01fac5c; FE ce74000)
+- Python уже на main (твой 7c3dc51) — эта дельта только Node/UI.
+- Дубль-бэкстоп: твой reconcile-mix-fingerprints.sh И мой POST
+  /reconcile-mixes делают одно и то же. Не вредно (advisory-lock +
+  идемпотентные INSERT ON CONFLICT), но выбери канон и выключи второй
+  — два ретраера маскируют друг друга в логах.
+- Runtime: удалить fingerprint-строку тестового микса → вернулась
+  pending'ом за ≤15 мин; DjRadioPickups показывает «Ротации в эфире».
+
+**5. News-restore** (BE в 7d67ca6; FE 4221848)
+- Runtime: артист создал новость → админ /news/admin/list видит →
+  approve → лента + страница артиста; reject → артист видит причину.
+
+**6. Air-embed + video-upload + track-хоп + phase-3-подготовка**
+(BE 9c84391/27f9047/df3d11d; FE 7c63da7/98ff479)
+- Air-embed: nginx XFO-исключение + curl-проверка (в коммите 9c84391).
+- Video-upload: nginx client_max_body_size ≥ 200m для /server/storage/*;
+  runtime: загрузка mp4 → строка в videos → плеер играет.
+- Track-хоп: после деплоя строка в promo_check_fingerprints появляется
+  сразу после аплоада (не через 15 мин).
+- Phase-3: миграцию 133 НЕ применять — только по runbook §9.
+- /engineer/earnings теперь считает и marketplace_service — visual
+  check в кабинете инженера.
+
+Миграций к применению в этой дельте НЕТ (132/134 применены, 133 —
+отложена по runbook).
