@@ -404,3 +404,57 @@ SLA. Твои шаги:
 Колонки для pre-flight: track_test_requests(id, track_title,
 artist_name, status, payment_status, feedback_sent_date, updated_at);
 users(id, email). Новых миграций НЕТ.
+
+## 6-тер. monitor.py под миксы — контракт со стороны репо (cloud, 2026-07-07)
+
+Статус после твоего смоука на «Night»: **п.2 блюпринта ✅ ЗАКРЫТ**
+(fingerprinter.py --mix-id работает, строка в dj_mix_fingerprints
+status='done', файл замаркирован). Осталась одна код-правка —
+monitor.py — и viability-гейт (п.4). Дифф пишешь ты (файл только на
+VPS), вот точный контракт, чтобы он лёг в схему 132 без итераций:
+
+**1. Загрузчик fingerprint'ов** — вместо SELECT из
+promo_check_fingerprints читать view:
+```sql
+SELECT content_type, content_id, watermark_id, fingerprint, duration
+  FROM promo_check_all_fingerprints
+ WHERE status = 'done'
+```
+`content_type` ('track'|'mix') хранить рядом с каждым отпечатком в
+in-memory индексе — он решает, куда писать попадание.
+`content_id` — text в ОБОИХ случаях (track_id::text | mix_id).
+
+**2. Запись детекта** — dispatch по content_type:
+- 'track' → как сейчас, INSERT в promo_check_detections
+  (track_id = content_id, uuid-shaped строка — pg скастует).
+- 'mix' → INSERT в dj_mix_detections:
+```sql
+INSERT INTO dj_mix_detections
+  (mix_id, station_id, station_name, detection_method, confidence, watermark_confirmed)
+VALUES (%s, %s, %s, %s, %s, %s)
+```
+  Колонки (migration 132): mix_id text NOT NULL (FK dj_mixes, БЕЗ
+  каста); station_id uuid NULLABLE (можно NULL, если под рукой только
+  station_name — в отличие от promo_check_monitoring тут NOT NULL нет);
+  station_name text NOT NULL; detection_method text (default
+  'fingerprint', для watermark-попадания пиши 'watermark');
+  confidence double precision NOT NULL (0..1, та же семантика, что у
+  треков — read-side показывает `Math.round(confidence*100)%`);
+  watermark_confirmed boolean (true при подтверждённой ватермарке —
+  UI тогда рисует «✓ ватермарка» вместо процента);
+  id/detected_at — дефолты, НЕ передавать.
+
+**3. Дедуп-окно** — зеркаль трековое поведение (какое окно у треков —
+у тебя в monitor.py; для миксов имеет смысл окно НЕ МЕНЬШЕ трекового:
+часовой микс в эфире = один прослушиваемый факт, не 20 детектов).
+
+**4. Ничего в Node трогать не нужно** — read-side
+(GET /promo-check/mix-detections) и DJ-виджет уже читают
+dj_mix_detections и оживут от первой же строки; reconcile-mixes
+уже перезапрашивает застрявшие.
+
+**Проверка результата (viability-гейт п.4 этим же прогоном):**
+крутани «Night» в тестовом эфире → строка в dj_mix_detections
+появляется, у DJ в кабинете (DjRadioPickups → «Ротации в эфире»)
+ротация видна. Если matcher часовой микс НЕ ловит — это и есть
+провал гейта, фиксируем в HANDOFF и решаем с Никитой.
