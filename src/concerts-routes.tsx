@@ -351,6 +351,9 @@ app.post('/:id/promote', requireAuth, async (c) => {
     const userId = c.get('userId');
     const body = await c.req.json();
     const cost = body.cost || 100;
+    if (!Number.isInteger(cost) || cost <= 0) {
+      return c.json({ success: false, error: 'Invalid cost' }, 400);
+    }
 
     // IDOR-guard: продвигать (за свои коины) можно только свой концерт (или админ).
     const concert = await loadOwnedConcert(c, concertId);
@@ -359,7 +362,10 @@ app.post('/:id/promote', requireAuth, async (c) => {
     }
 
     const result = await typed.deductCoins(userId, cost, `Промо концерта "${concert.title}"`);
-    if (result && 'error' in result) {
+    if (!result) {
+      return c.json({ success: false, error: 'Не удалось списать коины' }, 400);
+    }
+    if ('error' in result) {
       return c.json({ success: false, error: result.error, balance: result.balance }, 400);
     }
 

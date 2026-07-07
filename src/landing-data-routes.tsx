@@ -2370,6 +2370,24 @@ landing.post("/admin/users/:userId/status", requireAuth, requireAdmin, async (c)
     if (res.rowCount === 0) {
       return c.json({ success: false, error: 'User not found' }, 404);
     }
+    // При бане инвалидируем активные сессии: бампаем token_version
+    // (requireAuth сверяет его в access-токене) и ревокаем refresh-токены,
+    // иначе забаненный держит доступ до истечения access/refresh-TTL.
+    if (dbStatus === 'banned') {
+      await pool.query(
+        `UPDATE users
+            SET token_version = COALESCE(token_version, 1) + 1
+          WHERE id::text = $1`,
+        [targetId]
+      );
+      await pool.query(
+        `UPDATE refresh_tokens
+            SET revoked_at = NOW()
+          WHERE user_id::text = $1
+            AND revoked_at IS NULL`,
+        [targetId]
+      );
+    }
     return c.json({
       success: true,
       id: String(res.rows[0].id),

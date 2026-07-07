@@ -8,6 +8,7 @@ import { spawn } from "child_process";
 import { pool } from "./db-client.tsx";
 import { requireAuth, requireOwner, requireRole } from "./auth-middleware.tsx";
 import { getRadioProfile } from "./db.tsx";
+import { isAdminEmail } from "./roles.tsx";
 
 const app = new Hono();
 
@@ -127,13 +128,26 @@ app.get("/detections", requireAuth, async (c) => {
   `;
   const params: string[] = [];
 
+  // IDOR fix 2026-07-06: airplay feed must be scoped to the caller. Client-supplied
+  // artist_id is ignored for non-admins; track_id is checked for ownership.
+  const userId = c.get("userId") as string;
+  const isAdmin =
+    (c.get("userRole") === "admin" || c.get("userRole") === "superadmin") &&
+    isAdminEmail(c.get("userEmail"));
+
   if (trackId) {
     sql += ` WHERE d.track_id = $${params.length + 1}`;
     params.push(trackId);
-  } else if (artistId) {
-    // Audit 2026-06-04: artist_id query param is the caller's userId → user_id.
+    if (!isAdmin) {
+      // Only expose detections for a track the caller owns.
+      sql += ` AND t.user_id = $${params.length + 1}`;
+      params.push(userId);
+    }
+  } else {
+    // Own feed by default; admins may inspect any artist via artist_id.
+    const targetUserId = isAdmin && artistId ? artistId : userId;
     sql += ` WHERE t.user_id = $${params.length + 1}`;
-    params.push(artistId);
+    params.push(targetUserId);
   }
 
   sql += ` ORDER BY d.detected_at DESC LIMIT ${limit}`;

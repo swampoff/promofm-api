@@ -917,21 +917,54 @@ auth.post("/verify-email-confirm", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/resend-verification-by-email
 // ──────────────────────────────────────────────────────────────────────
+// Per-email cooldown, same rationale as request-reset (see above): the
+// IP-based authLimiter doesn't stop "mailbomb a specific inbox via many IPs".
+const VERIFY_EMAIL_COOLDOWN_MS = 60_000;
+const recentVerifySends = new Map<string, number>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, t] of recentVerifySends) {
+    if (now - t > VERIFY_EMAIL_COOLDOWN_MS * 5) recentVerifySends.delete(k);
+  }
+}, VERIFY_EMAIL_COOLDOWN_MS).unref?.();
+
+// Same fake-success response for every case (not-found / already-verified /
+// cooldown / success) — never leak whether the email exists or its verify state.
+const VERIFY_EMAIL_GENERIC_MSG = "Если аккаунт с таким email существует и не подтверждён, мы отправили письмо.";
+
 auth.post("/resend-verification-by-email", async (c) => {
   try {
     const { email } = await c.req.json();
     if (!email) return c.json({ success: false, error: "Email обязателен" }, 400);
 
+    const emailKey = String(email).toLowerCase().trim();
+
+    // Same fake-success response for cooldown as for "not found" — never leak
+    // whether the email exists or its verification state.
+    const lastSent = recentVerifySends.get(emailKey);
+    if (lastSent && Date.now() - lastSent < VERIFY_EMAIL_COOLDOWN_MS) {
+      return c.json({ success: true, message: VERIFY_EMAIL_GENERIC_MSG });
+    }
+
     const result = await sql(`SELECT id, email, is_email_verified, full_name FROM users WHERE email = $1`, [email]);
-    if (result.rows.length === 0) return c.json({ success: true, message: "Если аккаунт существует, письмо отправлено" });
+    if (result.rows.length === 0) {
+      // Mark cooldown anyway, so probing for valid emails via timing is harder.
+      recentVerifySends.set(emailKey, Date.now());
+      return c.json({ success: true, message: VERIFY_EMAIL_GENERIC_MSG });
+    }
     const user = result.rows[0];
-    if (user.is_email_verified) return c.json({ success: false, error: "Email уже подтверждён." }, 400);
+    if (user.is_email_verified) {
+      // Don't reveal that the account exists and is already verified.
+      recentVerifySends.set(emailKey, Date.now());
+      return c.json({ success: true, message: VERIFY_EMAIL_GENERIC_MSG });
+    }
 
     const verificationToken = crypto.randomUUID();
     await vpsStoreToken(user.id, verificationToken, "email_verify", 24);
     const profile = await vpsGetProfile(user.id);
     await sendVerificationEmail(email, profile?.name || user.full_name || email.split("@")[0], verificationToken);
-    return c.json({ success: true, message: "Письмо отправлено" });
+    recentVerifySends.set(emailKey, Date.now());
+    return c.json({ success: true, message: VERIFY_EMAIL_GENERIC_MSG });
   } catch (error) {
     return c.json({ success: false, error: "Internal server error" }, 500);
   }

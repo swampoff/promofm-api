@@ -261,11 +261,18 @@ export class StripeGateway implements PaymentGateway {
       throw new Error(data.error?.message || `Stripe recurring error ${response.status}`);
     }
 
+    // off-session PaymentIntent с confirm:true резолвится синхронно — отдаём
+    // РЕАЛЬНЫЙ статус, а не хардкод 'pending'. Без этого вызывающий не отличал
+    // успех от отказа карты и продлевал подписку всегда (фантом-выручка).
+    const mapped: 'pending' | 'succeeded' | 'canceled' =
+      data.status === 'succeeded' ? 'succeeded'
+      : data.status === 'canceled' ? 'canceled'
+      : 'pending'; // requires_action / requires_payment_method / processing → pending
     return {
       sessionId: data.id,
       confirmationUrl: '', // No redirect for off-session
       gateway: 'stripe',
-      status: 'pending',
+      status: mapped,
     };
   }
 }
