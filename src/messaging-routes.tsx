@@ -127,6 +127,20 @@ async function ensureDmEmailThrottleSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_dm_email_throttle_last_sent
       ON dm_email_throttle (last_sent_at);
   `);
+  // Per-RECIPIENT throttle (независимо от conversation_id). Защита от
+  // мейлбомба: атакующий плодит свежие group-UUID, обходя
+  // (user_id, conversation_id)-дедуп; ключ по одному user_id гарантирует
+  // не более 1 письма за окно на получателя по ЛЮБОЙ переписке.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS dm_email_recipient_throttle (
+      user_id      TEXT        NOT NULL PRIMARY KEY,
+      last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_dm_email_recipient_throttle_last_sent
+      ON dm_email_recipient_throttle (last_sent_at);
+  `);
   _dmEmailThrottleReady = true;
 }
 
@@ -684,9 +698,10 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
     }
 
     // E-mail-канал DM. Шлём НЕ-админу с throttle'ом 1 письмо на
-    // (recipient, conversation) в час через dm_email_throttle
-    // (миграция 106). Атомарный UPSERT с WHERE-фильтром — если ряд
-    // обновился (новый или старше часа), RETURNING возвращает строку,
+    // recipient (user_id) за 5 минут через dm_email_recipient_throttle
+    // — НЕЗАВИСИМО от conversation_id (анти-мейлбомб: свежие group-UUID
+    // больше не обходят дедуп). Атомарный UPSERT с WHERE-фильтром — если
+    // ряд обновился (новый или старше окна), RETURNING возвращает строку,
     // шлём email. Если NULL — throttle сработал, skip.
     //
     // Защита от спама встроена в SQL: race-condition-free, не нужны
@@ -713,16 +728,20 @@ app.post('/messages/:conversationId', requireAuth, async (c) => {
           if (!row?.email) continue;
           if (row.role === 'admin' || row.role === 'superadmin') continue;
 
+          // Throttle keyed на ОДНОМ recipient user_id, НЕЗАВИСИМО от
+          // conversation_id: сколько бы свежих group-UUID ни создавали,
+          // одному получателю не уйдёт >1 письма за окно (анти-мейлбомб).
+          // Атомарный UPSERT с WHERE — race-condition-free, без локов.
           const throttle = await pool.query(
-            `INSERT INTO dm_email_throttle (user_id, conversation_id, last_sent_at)
-             VALUES ($1, $2, NOW())
-             ON CONFLICT (user_id, conversation_id) DO UPDATE
+            `INSERT INTO dm_email_recipient_throttle (user_id, last_sent_at)
+             VALUES ($1, NOW())
+             ON CONFLICT (user_id) DO UPDATE
                 SET last_sent_at = NOW()
-              WHERE dm_email_throttle.last_sent_at < NOW() - INTERVAL '1 hour'
+              WHERE dm_email_recipient_throttle.last_sent_at < NOW() - INTERVAL '5 minutes'
              RETURNING last_sent_at`,
-            [otherId, conversationId],
+            [otherId],
           );
-          if (throttle.rows.length === 0) continue; // в пределах часа уже слали
+          if (throttle.rows.length === 0) continue; // недавно уже слали этому получателю (любая переписка)
 
           const { notifyDmReceived } = await import('./email-helper.tsx');
           void notifyDmReceived(row.email, row.full_name || '', senderName || '', preview, link);
