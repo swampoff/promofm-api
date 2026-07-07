@@ -165,19 +165,20 @@ app.get("/stations", requireAuth, async (c) => {
 
 // ─── Trigger fingerprinting for a track ───────────────────────────────────────
 
-app.post("/process/:trackId", requireAuth, async (c) => {
-  const { trackId } = c.req.param();
-
+// Экспортируется для in-process вызова из upload-флоу (tracks-routes,
+// track-moderation-routes). Раньше они дёргали этот эндпоинт внутренним
+// HTTP-фетчем без cookie → вечный 401 (requireAuth не имеет
+// localhost-байпаса), и единственным реальным триггером оставался
+// reconcile-fingerprints.sh (15-мин cron, бэкстоп с 2026-06-24).
+// In-process вызов возвращает мгновенную постановку в мониторинг;
+// cron остаётся страховкой на случай падения этого пути.
+export async function queueTrackFingerprint(trackId: string): Promise<{ ok: boolean; error?: string }> {
   const track = await query<{ audio_url: string }>(
     "SELECT audio_url FROM tracks WHERE id = $1",
     [trackId]
   );
-  if (!track.rows[0]) {
-    return c.json({ error: "Track not found" }, 404);
-  }
-  if (!track.rows[0].audio_url) {
-    return c.json({ error: "Track has no audio file" }, 422);
-  }
+  if (!track.rows[0]) return { ok: false, error: "Track not found" };
+  if (!track.rows[0].audio_url) return { ok: false, error: "Track has no audio file" };
 
   // Mark as pending
   await query(
@@ -194,7 +195,15 @@ app.post("/process/:trackId", requireAuth, async (c) => {
     { detached: true, stdio: "ignore", env: { ...process.env } }
   );
   child.unref();
+  return { ok: true };
+}
 
+app.post("/process/:trackId", requireAuth, async (c) => {
+  const { trackId } = c.req.param();
+  const r = await queueTrackFingerprint(trackId);
+  if (!r.ok) {
+    return c.json({ error: r.error }, r.error === "Track not found" ? 404 : 422);
+  }
   return c.json({
     status: "processing",
     message: "Трек поставлен в очередь мониторинга Promo.check",

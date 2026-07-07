@@ -146,9 +146,13 @@ tracksRoutes.post('/', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Failed to create track' }, 500);
     }
 
-    // Fire-and-forget: trigger Promo.check fingerprinting in background
+    // Fire-and-forget: trigger Promo.check fingerprinting in background.
+    // In-process (2026-07-07): прежний внутренний HTTP-фетч был мёртв
+    // (cookieless → requireAuth 401), реальным триггером оставался только
+    // reconcile-fingerprints.sh (15-мин cron). Cron остаётся бэкстопом.
     if (track.audio_url) {
-      fetch(`http://127.0.0.1:3000/server/api/promo-check/process/${track.id}`, { method: 'POST' })
+      import('./promo-check-routes.tsx')
+        .then(m => m.queueTrackFingerprint(track.id))
         .catch(() => {}); // non-blocking
     }
 

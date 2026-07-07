@@ -302,14 +302,14 @@ app.post('/submitTrack', requireAuth, async (c) => {
     }
 
     // Fire-and-forget: queue Promo.check fingerprint + watermark for
-    // radio-airplay monitoring. The artist's "Мои треки" + home stats
-    // panel reads from promo_check_detections to show real rotation
-    // counts — without this trigger, tracks uploaded via submitTrack
-    // (which is THE form artists use, TrackUploadPage) never enter the
-    // monitoring pipeline. The /api/tracks endpoint already triggers
-    // this; we mirror it here.
+    // radio-airplay monitoring. In-process (2026-07-07): прежний
+    // внутренний HTTP-фетч на /promo-check/process был мёртв — без
+    // cookie requireAuth всегда отвечал 401, и треки попадали в
+    // мониторинг только через reconcile-fingerprints.sh (15-мин cron).
+    // Cron остаётся бэкстопом.
     if (audioUrl) {
-      fetch(`http://127.0.0.1:3000/server/api/promo-check/process/${track.id}`, { method: 'POST' })
+      import('./promo-check-routes.tsx')
+        .then(m => m.queueTrackFingerprint(track.id))
         .catch(() => {}); // non-blocking, monitoring is best-effort
     }
 
