@@ -410,11 +410,36 @@ seoRoutes.get('/prerender/*', async (c) => {
     // ─── Individual news article ───
     if (path.startsWith('/news/') && path.length > 6) {
       const newsId = decodeURIComponent(path.slice(6));
-      const { rows } = await pool.query(
-        `SELECT * FROM news WHERE id = $1 AND status = 'published'`, [newsId]
+      // ОСНОВНОЙ источник статей — news_public (лента, 2000+ URL в
+      // sitemap). До 2026-07-08 ветка читала только legacy-таблицу news →
+      // боты получали пустую SPA-оболочку по КАЖДОМУ sitemap-URL статьи
+      // (подтверждено curl'ом с YandexBot-UA), новости не индексировались.
+      // news остаётся фолбэком для старых id.
+      let a: any = null;
+      const pub = await pool.query(
+        `SELECT id, data, created_at FROM news_public WHERE id = $1`, [newsId]
       );
-      if (rows[0]) {
-        const a = rows[0];
+      if (pub.rows[0]) {
+        const d = pub.rows[0].data || {};
+        if (!d.status || d.status === 'published') {
+          a = {
+            title: d.title,
+            summary: d.excerpt || d.summary,
+            content: d.content,
+            author_name: d.authorName || d.author_name,
+            published_at: d.publishedAt || d.published_at || pub.rows[0].created_at,
+            created_at: pub.rows[0].created_at,
+            image_url: d.imageUrl || d.image_url,
+          };
+        }
+      }
+      if (!a) {
+        const { rows } = await pool.query(
+          `SELECT * FROM news WHERE id = $1 AND status = 'published'`, [newsId]
+        );
+        a = rows[0] || null;
+      }
+      if (a) {
         const title = a.title || 'Новость';
         const desc = stripHtml(a.summary || a.content || '').slice(0, 300);
         const author = a.author_name || 'Редакция';
@@ -437,14 +462,21 @@ seoRoutes.get('/prerender/*', async (c) => {
 
     // ─── News listing ───
     if (path === '/news') {
-      const { rows } = await pool.query(
-        `SELECT id, title, summary, author_name, published_at, category FROM news WHERE status = 'published' ORDER BY published_at DESC LIMIT 30`
+      // Тот же фикс, что у статьи: лента живёт в news_public, не в news.
+      const { rows: pubRows } = await pool.query(
+        `SELECT id, data, created_at FROM news_public ORDER BY created_at DESC LIMIT 60`
       );
+      const items = pubRows
+        .map((r: any) => ({ id: r.id, d: r.data || {}, created_at: r.created_at }))
+        .filter((x: any) => !x.d.status || x.d.status === 'published')
+        .slice(0, 30);
       let body = `<h1>Новости музыки</h1><p>${esc(PAGE_META['/news'].desc)}</p>`;
-      if (rows.length > 0) {
+      if (items.length > 0) {
         body += '<ul>';
-        for (const n of rows) {
-          body += `<li><a href="${DOMAIN}/news/${esc(n.id)}">${esc(n.title)}</a> — <time datetime="${n.published_at || ''}">${fmtDate(n.published_at)}</time>${n.author_name ? ` · ${esc(n.author_name)}` : ''}</li>`;
+        for (const n of items) {
+          const pub = n.d.publishedAt || n.d.published_at || n.created_at || '';
+          const author = n.d.authorName || n.d.author_name || '';
+          body += `<li><a href="${DOMAIN}/news/${esc(n.id)}">${esc(n.d.title || 'Новость')}</a> — <time datetime="${pub}">${fmtDate(pub)}</time>${author ? ` · ${esc(author)}` : ''}</li>`;
         }
         body += '</ul>';
       }
