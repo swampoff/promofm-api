@@ -5,8 +5,10 @@ Renders SPA pages via Playwright and saves static HTML snapshots.
 Run via cron every 6 hours or after deploy.
 """
 import asyncio
+import json
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 PAGES = [
@@ -24,6 +26,24 @@ PAGES = [
 DOMAIN = "https://promo-music.ru"
 OUTPUT_DIR = Path("/var/www/promofm/prerender")
 TIMEOUT = 30000
+NEWS_LIMIT = 40  # свежие статьи в снапшоты (Яндекс слабо рендерит JS,
+                 # без снапшота бот видит пустую SPA-оболочку)
+
+
+def fetch_news_paths(limit=NEWS_LIMIT):
+    """Свежие published-новости -> ["/news/<id>", ...]. Ошибка сети не
+    роняет прогон статики: возвращаем пустой список."""
+    try:
+        req = urllib.request.Request(
+            f"{DOMAIN}/server/api/news?limit={limit}",
+            headers={"User-Agent": "PromoFM-Prerender/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            items = json.load(r)
+        return [f"/news/{i['id']}" for i in items if i.get("id")][:limit]
+    except Exception as e:
+        print(f"  WARN news list fetch failed: {e}")
+        return []
 
 
 def path_to_filename(path):
@@ -84,10 +104,11 @@ async def main():
         )
         page = await context.new_page()
 
+        all_pages = PAGES + fetch_news_paths()
         success = 0
-        total = len(PAGES)
+        total = len(all_pages)
 
-        for path in PAGES:
+        for path in all_pages:
             url = f"{DOMAIN}{path}"
             output_path = OUTPUT_DIR / path_to_filename(path)
             if await render_page(page, url, output_path):

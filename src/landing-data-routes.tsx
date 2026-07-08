@@ -834,8 +834,10 @@ landing.post("/releases/archive-past", async (c) => {
 
 /** Normalize news item fields for frontend compatibility */
 
-// Auto-ping search engines after news publish (IndexNow + Yandex)
-async function pingSitemapAsync(newsId?: string) {
+// Auto-ping search engines after news publish (IndexNow + Yandex).
+// Экспорт: news-routes.tsx зовёт при approve артист-новости — без этого
+// пинговались только редакционные новости из landing-data admin.
+export async function pingSitemapAsync(newsId?: string) {
   const INDEXNOW_KEY = 'be3b1945c60d606211ccb819caebe3fb';
   const urls = ['https://promo-music.ru/sitemap.xml'];
   if (newsId) urls.push(`https://promo-music.ru/news/${newsId}`);

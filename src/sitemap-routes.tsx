@@ -237,7 +237,11 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
       xml += `    <lastmod>${lastmod}</lastmod>\n`;
       xml += `    <changefreq>weekly</changefreq>\n`;
       xml += `    <priority>0.8</priority>\n`;
-      if (title && pubDate) {
+      // Google News sitemap-спека: news:news только для материалов
+      // последних 2 суток; на старых статьях тег бесполезен и даёт
+      // предупреждения в Search Console. Обычный <url> остаётся у всех.
+      const isFresh = pubDate && (Date.now() - new Date(pubDate).getTime()) < 48 * 3600 * 1000;
+      if (title && pubDate && isFresh) {
         xml += `    <news:news>\n`;
         xml += `      <news:publication>\n`;
         xml += `        <news:name>ПРОМО.МУЗЫКА</news:name>\n`;

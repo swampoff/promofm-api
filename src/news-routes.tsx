@@ -129,6 +129,11 @@ newsRoutes.post('/admin/:id/moderate', requireAuth, requireAdmin, async (c) => {
         console.error('[news] publish to news_public failed:', pubErr);
         return c.json({ success: false, error: 'Статус обновлён, но публикация в ленту не удалась' }, 500);
       }
+      // IndexNow + Yandex-ping — иначе одобренная артист-новость ждёт
+      // планового обхода sitemap вместо мгновенной индексации.
+      import('./landing-data-routes.tsx')
+        .then(m => m.pingSitemapAsync(String(row.id)))
+        .catch(() => {});
     }
 
     // Уведомление автору — то, что фейковый тост только обещал.
