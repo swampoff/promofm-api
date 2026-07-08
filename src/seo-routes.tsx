@@ -413,25 +413,22 @@ seoRoutes.get('/prerender/*', async (c) => {
       // ОСНОВНОЙ источник статей — news_public (лента, 2000+ URL в
       // sitemap). До 2026-07-08 ветка читала только legacy-таблицу news →
       // боты получали пустую SPA-оболочку по КАЖДОМУ sitemap-URL статьи
-      // (подтверждено curl'ом с YandexBot-UA), новости не индексировались.
-      // news остаётся фолбэком для старых id.
+      // (подтверждено curl'ом с YandexBot-UA). news — фолбэк для старых id.
+      // ⚠️ news_public — НАТИВНЫЕ колонки с миграции 077 (без data jsonb!)
+      // — поэтому строго через typed-хелпер db.tsx, не сырой SELECT.
       let a: any = null;
-      const pub = await pool.query(
-        `SELECT id, data, created_at FROM news_public WHERE id = $1`, [newsId]
-      );
-      if (pub.rows[0]) {
-        const d = pub.rows[0].data || {};
-        if (!d.status || d.status === 'published') {
-          a = {
-            title: d.title,
-            summary: d.excerpt || d.summary,
-            content: d.content,
-            author_name: d.authorName || d.author_name,
-            published_at: d.publishedAt || d.published_at || pub.rows[0].created_at,
-            created_at: pub.rows[0].created_at,
-            image_url: d.imageUrl || d.image_url,
-          };
-        }
+      const { getNewsPublic } = await import('./db.tsx');
+      const pubRow = await getNewsPublic(newsId).catch(() => null);
+      if (pubRow && pubRow.status === 'published') {
+        a = {
+          title: pubRow.title,
+          summary: pubRow.excerpt,
+          content: pubRow.content,
+          author_name: pubRow.authorName,
+          published_at: pubRow.publishedAt || pubRow.createdAt,
+          created_at: pubRow.createdAt,
+          image_url: pubRow.imageUrl,
+        };
       }
       if (!a) {
         const { rows } = await pool.query(
@@ -462,21 +459,16 @@ seoRoutes.get('/prerender/*', async (c) => {
 
     // ─── News listing ───
     if (path === '/news') {
-      // Тот же фикс, что у статьи: лента живёт в news_public, не в news.
-      const { rows: pubRows } = await pool.query(
-        `SELECT id, data, created_at FROM news_public ORDER BY created_at DESC LIMIT 60`
-      );
-      const items = pubRows
-        .map((r: any) => ({ id: r.id, d: r.data || {}, created_at: r.created_at }))
-        .filter((x: any) => !x.d.status || x.d.status === 'published')
-        .slice(0, 30);
+      // Тот же фикс, что у статьи: лента живёт в news_public (нативные
+      // колонки, typed-хелпер), не в legacy news.
+      const { listNewsPublic } = await import('./db.tsx');
+      const items = await listNewsPublic({ status: 'published', limit: 30 }).catch(() => []);
       let body = `<h1>Новости музыки</h1><p>${esc(PAGE_META['/news'].desc)}</p>`;
       if (items.length > 0) {
         body += '<ul>';
         for (const n of items) {
-          const pub = n.d.publishedAt || n.d.published_at || n.created_at || '';
-          const author = n.d.authorName || n.d.author_name || '';
-          body += `<li><a href="${DOMAIN}/news/${esc(n.id)}">${esc(n.d.title || 'Новость')}</a> — <time datetime="${pub}">${fmtDate(pub)}</time>${author ? ` · ${esc(author)}` : ''}</li>`;
+          const pub = n.publishedAt || n.createdAt || '';
+          body += `<li><a href="${DOMAIN}/news/${esc(n.id)}">${esc(n.title || 'Новость')}</a> — <time datetime="${pub}">${fmtDate(pub)}</time>${n.authorName ? ` · ${esc(n.authorName)}` : ''}</li>`;
         }
         body += '</ul>';
       }
