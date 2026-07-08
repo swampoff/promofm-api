@@ -149,4 +149,43 @@ newsAgent.delete('/clear', requireAdminOrKey, async (c) => {
   }
 });
 
+/**
+ * POST /generate-article — одна АВТОРСКАЯ статья (article-agent.tsx):
+ * ротация 7 аудиторий по дню, внутри — первая неиспользованная тема.
+ * Body (опц.): { audience, topicSlug } — ручной запуск конкретной темы.
+ * Cron VPS (раз в день):
+ *   0 9 * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" http://127.0.0.1:3000/server/api/news-agent/generate-article
+ * Advisory-lock 924180 — двойной тик публикует одну статью, не две.
+ */
+newsAgent.post('/generate-article', requireAdminOrKey, async (c) => {
+  const { pool } = await import('./db-client.tsx');
+  const lockClient = await pool.connect();
+  let locked = false;
+  try {
+    const lk = await lockClient.query('SELECT pg_try_advisory_lock(924180) AS got');
+    locked = !!lk.rows[0]?.got;
+    if (!locked) return c.json({ success: true, skipped: 'locked' });
+
+    const body = await c.req.json().catch(() => ({}));
+    const { generateDailyArticle } = await import('./article-agent.tsx');
+    const r = await generateDailyArticle(body?.audience, body?.topicSlug);
+    return c.json({ success: r.ok, ...r });
+  } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  } finally {
+    if (locked) await lockClient.query('SELECT pg_advisory_unlock(924180)').catch(() => {});
+    lockClient.release();
+  }
+});
+
+/** GET /article-topics — остаток банка тем по аудиториям. */
+newsAgent.get('/article-topics', requireAdminOrKey, async (c) => {
+  try {
+    const { articleTopicsStatus } = await import('./article-agent.tsx');
+    return c.json({ success: true, audiences: await articleTopicsStatus() });
+  } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 export default newsAgent;
