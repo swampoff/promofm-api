@@ -153,8 +153,10 @@ newsAgent.delete('/clear', requireAdminOrKey, async (c) => {
  * POST /generate-article — одна АВТОРСКАЯ статья (article-agent.tsx):
  * ротация 7 аудиторий по дню, внутри — первая неиспользованная тема.
  * Body (опц.): { audience, topicSlug } — ручной запуск конкретной темы.
- * Cron VPS (раз в день):
- *   0 9 * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" http://127.0.0.1:3000/server/api/news-agent/generate-article
+ * Cron VPS (ДВА раза в день — решение Никиты 2026-07-08):
+ *   0 10 * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" http://127.0.0.1:3000/server/api/news-agent/generate-article
+ *   0 18 * * * curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" http://127.0.0.1:3000/server/api/news-agent/generate-article
+ * Ротация по числу опубликованных — два тика дают две РАЗНЫЕ аудитории.
  * Advisory-lock 924180 — двойной тик публикует одну статью, не две.
  */
 newsAgent.post('/generate-article', requireAdminOrKey, async (c) => {
