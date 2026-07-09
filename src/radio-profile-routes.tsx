@@ -311,11 +311,13 @@ async function ownsRadioProfile(c: any, radioId: string): Promise<boolean> {
   const role = String(c.get('userRole') || '');
   if (role === 'admin' || role === 'superadmin') return true;
   if (!userId) return false;
-  const r = await pool.query(
-    `SELECT 1 FROM radio_profiles WHERE id::text = $1 AND user_id = $2 LIMIT 1`,
-    [radioId, userId],
-  );
-  return r.rows.length > 0;
+  // INC-R3 (2026-07-09): radioId в этих роутах — это userId владельца, строка
+  // radio_profiles ключуется по user_id (getRadioProfile / upsertRadioProfile,
+  // onConflict user_id), а не по PK id. Старая проверка `id::text = radioId`
+  // проходила только для строк с id == user_id (одна на всю базу) и запирала
+  // кабинет всем новым станциям: профиль создаётся первым PUT, который сам же
+  // отбивался этим гейтом. Владение — совпадение radioId с собственным userId.
+  return radioId === userId;
 }
 
 // Атомарно обновить и native колонку (для маркетплейса / cross-cabinet),
