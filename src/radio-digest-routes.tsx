@@ -347,14 +347,19 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
     locked = !!lk.rows[0]?.got;
     if (!locked) return c.json({ success: true, sent: 0, skipped: 'locked' });
 
+    // FIX 2026-07-10: friday.js с 2026-06-13 даёт трекам уникальные user_id
+    // (не 'system-friday') — старый фильтр не находил НИЧЕГО, дайджест был пуст.
+    // Источник истины «Новинок недели» — свежий published weekly_release.
     const { rows: tracks } = await client.query(
-      `SELECT id, title, artist_name, genre, audio_url, cover_url
-         FROM tracks
-        WHERE moderation_status = 'published'
-          AND user_id = 'system-friday'
-          AND radio_weekly_digest_sent_at IS NULL
-          AND created_at >= NOW() - ($1 || ' days')::interval
-        ORDER BY created_at ASC
+      `SELECT t.id, t.title, t.artist_name, t.genre, t.audio_url, t.cover_url
+         FROM weekly_releases w
+        CROSS JOIN LATERAL unnest(w.track_ids) WITH ORDINALITY AS u(tid, ord)
+         JOIN tracks t ON t.id = u.tid
+        WHERE w.is_published
+          AND w.release_date >= NOW() - ($1 || ' days')::interval
+          AND t.moderation_status = 'published'
+          AND t.radio_weekly_digest_sent_at IS NULL
+        ORDER BY w.release_date DESC, u.ord ASC
         LIMIT 100`,
       [String(WEEKLY_WINDOW_DAYS)]
     );
