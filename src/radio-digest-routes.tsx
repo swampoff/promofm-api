@@ -352,14 +352,17 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
     // Источник истины «Новинок недели» — свежий published weekly_release.
     const { rows: tracks } = await client.query(
       `SELECT t.id, t.title, t.artist_name, t.genre, t.audio_url, t.cover_url
-         FROM weekly_releases w
+         FROM (SELECT track_ids, release_date
+                 FROM weekly_releases
+                WHERE is_published
+                ORDER BY release_date DESC
+                LIMIT 1) w
         CROSS JOIN LATERAL unnest(w.track_ids) WITH ORDINALITY AS u(tid, ord)
          JOIN tracks t ON t.id = u.tid
-        WHERE w.is_published
-          AND w.release_date >= NOW() - ($1 || ' days')::interval
+        WHERE w.release_date >= NOW() - ($1 || ' days')::interval
           AND t.moderation_status = 'published'
           AND t.radio_weekly_digest_sent_at IS NULL
-        ORDER BY w.release_date DESC, u.ord ASC
+        ORDER BY u.ord ASC
         LIMIT 100`,
       [String(WEEKLY_WINDOW_DAYS)]
     );
