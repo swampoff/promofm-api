@@ -248,6 +248,9 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0a0a1a;padding:32px 16px;">
   <table align="center" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;margin:0 auto;background:#14142a;border-radius:18px;overflow:hidden;">
     <tr>
+      <td style="padding:0;"><a href="${releasesUrl}" style="text-decoration:none;"><img src="${SITE_URL}/banners/novinki-nedeli.jpg" alt="Новинки недели promo.music — скачать" style="width:100%;height:auto;display:block;border:0;" /></a></td>
+    </tr>
+    <tr>
       <td style="padding:30px 40px 26px;background:linear-gradient(135deg,#FF577F 0%,#7C3AED 100%);">
         <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
           <td align="left" style="vertical-align:middle;"><img src="${SITE_URL}/logo.png" alt="ПРОМО.МУЗЫКА" height="36" style="height:36px;display:block;border:0;" /></td>
@@ -381,7 +384,11 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
       return c.json({ success: true, sent: 0, message: 'no pending friday tracks this week' });
     }
 
-    const recipients = await getWeeklyRecipients(client);
+    // ?test=<email> — превью одному получателю, БЕЗ штампов курсоров/last_sent_at
+    const testEmail = (c.req.query('test') || '').trim() || null;
+    const recipients = testEmail
+      ? [{ email: testEmail, name: 'ТЕСТ-превью' }]
+      : await getWeeklyRecipients(client);
     if (recipients.length === 0) {
       return c.json({ success: true, sent: 0, message: 'no radio recipients' });
     }
@@ -411,7 +418,7 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
           return;
         }
 
-        if (tracks.length > 0) {
+        if (!testEmail && tracks.length > 0) {
           const ids = tracks.map((t: any) => t.id);
           await client.query(
             `UPDATE tracks SET radio_weekly_digest_sent_at = NOW() WHERE id = ANY($1::uuid[])`,
@@ -419,7 +426,7 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
           );
         }
 
-        if (promoVideos.length > 0) {
+        if (!testEmail && promoVideos.length > 0) {
           // videos.id — uuid; сравниваем по ::text (id пришли SELECT'ом выше)
           await client.query(
             `UPDATE videos SET newsletter_sent_at = NOW() WHERE id::text = ANY($1::text[])`,
@@ -436,7 +443,7 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
           const okEmails = recipients
             .map(r => r.email.toLowerCase())
             .filter(e => !failedEmails.has(e));
-          if (okEmails.length > 0) {
+          if (!testEmail && okEmails.length > 0) {
             await client.query(
               `UPDATE radio_partner_contacts
                   SET last_sent_at = NOW(), send_count = send_count + 1
