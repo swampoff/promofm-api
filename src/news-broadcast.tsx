@@ -412,7 +412,9 @@ app.post('/concerts', async (c) => {
     const dayNum = dateObj.getDate();
     const monthName = monthNames[dateObj.getMonth()];
 
-    lines.push(`${dayNum} ${monthName}, ${dayName}:`);
+    if (!Number.isNaN(dateObj.getTime())) {
+      lines.push(`${dayNum} ${monthName}, ${dayName}:`);
+    }
     for (const item of items.slice(0, 3)) {
       const artist = item.artist || item.title?.split(' — ')[0] || 'Концерт';
       const venue = item.venue || '';
