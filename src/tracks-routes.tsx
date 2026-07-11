@@ -434,9 +434,12 @@ tracksRoutes.post('/genre-backfill', requireAdminOrKeyTracks, async (c) => {
     // трек получает маркер (даже при ответе «неизвестно») и выходит из
     // скоупа — иначе батч зациклился бы на одних и тех же 25 строках,
     // а remaining никогда не дошёл бы до 0.
+    // FIX 2026-07-11: friday.js с 13.06 даёт трекам уникальные user_id —
+    // 'system-friday' ловил только легаси. Friday-импорт = членство в weekly_releases.
     const scope = `genre_source IS NULL
                    AND (genre IS NULL OR genre = ''
-                        OR (user_id = 'system-friday' AND genre = 'Pop'))`;
+                        OR (genre = 'Pop' AND (user_id = 'system-friday'
+                             OR id IN (SELECT unnest(track_ids) FROM weekly_releases))))`;
     const { rows } = await pool.query(
       `SELECT id, artist_name, title, genre FROM tracks
         WHERE ${scope}

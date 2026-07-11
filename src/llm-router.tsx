@@ -11,6 +11,7 @@
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+import { ProxyAgent } from 'undici';
 export interface LLMMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
@@ -92,6 +93,10 @@ function detectProvider(forceProvider?: 'openrouter' | 'anthropic'): ProviderInf
 // ─── OpenRouter Call ──────────────────────────────────────────────────────────
 
 async function callOpenRouter(req: LLMRequest, apiKey: string): Promise<LLMResponse> {
+  // RU-VPS: openrouter.ai гео-блочит прямые запросы (403 security policy) —
+  // ходим через форвард-прокси Soul FM, если задан OPENROUTER_PROXY.
+  const proxyUrl = process.env.OPENROUTER_PROXY;
+  const dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
   const model = req.model || DEFAULT_MODEL;
   const messages: LLMMessage[] = [];
 
@@ -106,6 +111,7 @@ async function callOpenRouter(req: LLMRequest, apiKey: string): Promise<LLMRespo
   const start = Date.now();
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    ...(dispatcher ? { dispatcher } : {}),
     signal: AbortSignal.timeout(20000),
     method: 'POST',
     headers: {
