@@ -157,6 +157,10 @@ async function callOpenRouter(req: LLMRequest, apiKey: string): Promise<LLMRespo
 // ─── Anthropic Direct Call ────────────────────────────────────────────────────
 
 async function callAnthropicDirect(req: LLMRequest, apiKey: string): Promise<LLMResponse> {
+  // RU-VPS: api.anthropic.com напрямую недоступен («Request not allowed») —
+  // через тот же форвард-прокси, что и OpenRouter.
+  const proxyUrl = process.env.ANTHROPIC_PROXY || process.env.OPENROUTER_PROXY;
+  const dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
   const orModel = req.model || DEFAULT_MODEL;
   const model = toAnthropicModel(orModel);
 
@@ -182,7 +186,8 @@ async function callAnthropicDirect(req: LLMRequest, apiKey: string): Promise<LLM
   if (system) body.system = system;
   if (req.temperature !== undefined) body.temperature = req.temperature;
 
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+  const response = await (dispatcher ? (undiciFetch as unknown as typeof fetch) : fetch)('https://api.anthropic.com/v1/messages', {
+    ...(dispatcher ? { dispatcher } : {}) as {},
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -229,6 +234,12 @@ async function callAnthropicDirect(req: LLMRequest, apiKey: string): Promise<LLM
  * });
  * console.log(res.text, res.provider, res.model, `${res.latencyMs}ms`);
  */
+function toAnthropicModel(model?: string): string {
+  if (model && OPENROUTER_TO_ANTHROPIC[model]) return OPENROUTER_TO_ANTHROPIC[model];
+  if (model && model.startsWith('anthropic/')) return model.replace('anthropic/', '');
+  return 'claude-haiku-4-5-20251001';
+}
+
 export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
   const tag = req.tag || 'llm';
   const info = detectProvider(req.forceProvider);
@@ -242,7 +253,15 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
   let result: LLMResponse;
 
   if (info.provider === 'openrouter') {
-    result = await callOpenRouter(req, info.apiKey);
+    try {
+      result = await callOpenRouter(req, info.apiKey);
+    } catch (e: any) {
+      // 402 (нет кредитов) / 403 (гео-блок) → второй шанс через Anthropic напрямую
+      const anthropicKey = process.env.ANTHROPIC_API_KEY;
+      if (!anthropicKey) throw e;
+      console.warn(`[${tag}] openrouter failed (${String(e?.message || e).slice(0, 80)}) → fallback anthropic`);
+      result = await callAnthropicDirect({ ...req, model: toAnthropicModel(req.model) }, anthropicKey);
+    }
   } else {
     result = await callAnthropicDirect(req, info.apiKey);
   }
