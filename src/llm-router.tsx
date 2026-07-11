@@ -11,7 +11,7 @@
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-import { ProxyAgent } from 'undici';
+import { ProxyAgent, fetch as undiciFetch } from 'undici';
 export interface LLMMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
@@ -110,8 +110,10 @@ async function callOpenRouter(req: LLMRequest, apiKey: string): Promise<LLMRespo
 
   const start = Date.now();
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    ...(dispatcher ? { dispatcher } : {}),
+  // Глобальный fetch Node отвергает чужой dispatcher («fetch failed») —
+  // при прокси используем fetch из пакета undici, он свой ProxyAgent понимает.
+  const response = await (dispatcher ? (undiciFetch as unknown as typeof fetch) : fetch)('https://openrouter.ai/api/v1/chat/completions', {
+    ...(dispatcher ? { dispatcher } : {}) as {},
     signal: AbortSignal.timeout(20000),
     method: 'POST',
     headers: {
