@@ -1739,3 +1739,45 @@ sitemap-URL отдавал боту 4KB SPA-оболочку. Новости н�
   IndexNow+Yandex-ping через pingSitemapAsync.
 - Пополнение банка тем = править массивы AUDIENCES (чистые данные,
   без логики).
+
+## Genre-detect — определение стиля трека (добавлен 2026-07-11)
+
+**Инцидент-повод:** рассылка 09.07 — ВСЕ треки «Pop», включая U2 и
+Beyoncé. Корень: `friday.js` при пустом/нечитаемом ID3-теге ставил
+дефолт `'Pop'` (3 места в `getMetadata`). Дефолты заменены на `''` —
+принцип фичи: **не угадали → жанр честно ПУСТОЙ, никогда не 'Pop'**.
+
+**Каскад** (`src/genre-detect.tsx`):
+1. **Tier 1 — ID3-тег** → **Tier 2 — нормализация к канону**:
+   27 жанров, `CANON_GENRES` = копия списка формы загрузки
+   (Promomusicfigma `track-upload-page.tsx` GENRES — менять синхронно).
+   Понимает ID3v1-коды («(17)»→Rock), ru/en-синонимы («рэп»→Hip-Hop,
+   «шансон»→Folk), поджанры→родитель (trap→Hip-Hop, metal→Rock,
+   lofi→Electronic), мульти-жанры («Rock; Pop»→первый распознанный).
+   «Other»/«Unknown» → null.
+2. **Tier 3 — LLM** (`detectGenreLLM`): quickLLM по «артист — название»,
+   tag `genre-detect`, maxTokens 8; ответ строго валидируется по канону
+   (не из списка / «Unknown» → null).
+3. Аудио-ML (по мотивам ADDinc/style_music, Denis-Mukhanov) — **бэклог
+   tier-4** в promo-check python, не реализовано.
+
+**Где срабатывает:**
+- Загрузка трека без жанра: fire-and-forget `enrichTrackGenre` в
+  `tracks-routes.tsx` POST / и `track-moderation-routes.tsx`
+  /submitTrack. Guard `WHERE genre IS NULL OR genre=''` — ручной ввод
+  артиста не перетирается.
+- **POST /server/api/tracks/genre-backfill** (`tracks-routes.tsx`) —
+  разовый прогон по хвосту: пустые жанры + system-friday 'Pop'
+  (заражённый дефолт, тегу не доверяем — сразу LLM). requireAdmin или
+  X-Internal-Key; advisory-lock **924181**; батч 25/тик, дёргать до
+  `remaining=0`.
+
+**tracks.genre_source** (миграция `135_tracks_genre_source.sql`,
+НЕ автоприменяется): 'tag' | 'llm' (загрузка) | 'backfill-llm' |
+'backfill-unknown' (backfill); NULL = не проходил через genre-detect.
+Backfill маркирует КАЖДЫЙ проверенный трек (иначе батч зациклится);
+при «неизвестно» заражённый friday-'Pop' очищается в `''`.
+
+**После завершения backfill** обязательно перегнать
+`friday.js sync-library` — `radio_library` копирует genre из tracks
+и иначе останется с 'Pop'.

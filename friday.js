@@ -122,7 +122,7 @@ function getMetadata(filePath) {
   const out = runCapture('ffprobe', [
     '-v', 'quiet', '-print_format', 'json', '-show_format', filePath,
   ]);
-  if (!out) return { title: '', artist: '', album: '', genre: 'Pop', duration: 0 };
+  if (!out) return { title: '', artist: '', album: '', genre: '', duration: 0 };
   try {
     const data = JSON.parse(out);
     const tags = data.format?.tags || {};
@@ -130,11 +130,11 @@ function getMetadata(filePath) {
       title: tags.title || tags.TITLE || '',
       artist: tags.artist || tags.ARTIST || '',
       album: tags.album || tags.ALBUM || '',
-      genre: tags.genre || tags.GENRE || 'Pop',
+      genre: tags.genre || tags.GENRE || '',  // пусто = неизвестно; backfill дожмёт LLM'ом (инцидент «U2=Pop» 09.07)
       duration: Math.round(parseFloat(data.format?.duration) || 0),
     };
   } catch {
-    return { title: '', artist: '', album: '', genre: 'Pop', duration: 0 };
+    return { title: '', artist: '', album: '', genre: '', duration: 0 };
   }
 }
 
