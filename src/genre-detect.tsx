@@ -30,7 +30,7 @@ async function geminiQuick(system: string, user: string): Promise<string | null>
   const key = process.env.GEMINI_API_KEY;
   if (!base || !key) return null;
   const model = process.env.GEMINI_TEXT_MODEL || 'gemini-2.5-flash-lite';
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       const r = await fetch(`${base}/v1beta/models/${model}:generateContent?key=${key}`, {
         method: 'POST',
@@ -42,7 +42,10 @@ async function geminiQuick(system: string, user: string): Promise<string | null>
           generationConfig: { maxOutputTokens: 200, temperature: 0 },
         }),
       });
-      if (r.status === 503 || r.status === 429) { await new Promise(s => setTimeout(s, 1500)); continue; }
+      if (r.status === 503 || r.status === 429) {
+        // free-tier: ~20 req/min — ждём окно квоты, цикл сам запейсится
+        await new Promise(s => setTimeout(s, 16000 + attempt * 5000)); continue;
+      }
       if (!r.ok) return null;
       const d: any = await r.json();
       const text = d?.candidates?.[0]?.content?.parts?.[0]?.text;
