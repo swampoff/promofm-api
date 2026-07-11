@@ -234,12 +234,6 @@ async function callAnthropicDirect(req: LLMRequest, apiKey: string): Promise<LLM
  * });
  * console.log(res.text, res.provider, res.model, `${res.latencyMs}ms`);
  */
-function toAnthropicModel(model?: string): string {
-  if (model && OPENROUTER_TO_ANTHROPIC[model]) return OPENROUTER_TO_ANTHROPIC[model];
-  if (model && model.startsWith('anthropic/')) return model.replace('anthropic/', '');
-  return 'claude-haiku-4-5-20251001';
-}
-
 export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
   const tag = req.tag || 'llm';
   const info = detectProvider(req.forceProvider);
@@ -260,7 +254,7 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
       const anthropicKey = process.env.ANTHROPIC_API_KEY;
       if (!anthropicKey) throw e;
       console.warn(`[${tag}] openrouter failed (${String(e?.message || e).slice(0, 80)}) → fallback anthropic`);
-      result = await callAnthropicDirect({ ...req, model: toAnthropicModel(req.model) }, anthropicKey);
+      result = await callAnthropicDirect({ ...req, model: req.model ? toAnthropicModel(req.model) : 'claude-haiku-4-5-20251001' }, anthropicKey);
     }
   } else {
     result = await callAnthropicDirect(req, info.apiKey);
