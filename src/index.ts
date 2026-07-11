@@ -3,7 +3,7 @@
  * Entry point for the VPS-hosted backend.
  */
 import 'dotenv/config';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'fs';
 import path from 'node:path';
 // Security: validate critical env vars at startup
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
@@ -295,7 +295,6 @@ function serveStaticFromUploads(
     return c.text('Forbidden', 403);
   }
   if (!existsSync(filePath)) return c.text('Not found', 404);
-  const file = readFileSync(filePath);
   let mime = defaultMime;
   if (mimeByExt) {
     const ext = filename.split('.').pop()?.toLowerCase() || '';
@@ -305,7 +304,37 @@ function serveStaticFromUploads(
   c.header('Accept-Ranges', 'bytes');
   c.header('Cache-Control', 'public, max-age=31536000');
   c.header('Access-Control-Allow-Origin', '*');
-  return c.body(file);
+
+  // HTTP Range (перемотка аудио в плеере): раньше заголовок Accept-Ranges
+  // объявлялся, но Range игнорировался — браузер не мог сикнуть, админ
+  // не перематывал треки на модерации. Отдаём честные 206/416 и читаем
+  // с диска только запрошенный срез (не весь файл в память).
+  const size = statSync(filePath).size;
+  const range = c.req.header('range');
+  if (range) {
+    const rm = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+    if (rm && (rm[1] !== '' || rm[2] !== '')) {
+      const start = rm[1] !== '' ? parseInt(rm[1], 10) : Math.max(0, size - parseInt(rm[2], 10));
+      const end = rm[1] !== '' && rm[2] !== '' ? Math.min(parseInt(rm[2], 10), size - 1) : size - 1;
+      if (start >= size || start > end) {
+        c.header('Content-Range', `bytes */${size}`);
+        return c.body(null, 416);
+      }
+      const len = end - start + 1;
+      const fd = openSync(filePath, 'r');
+      try {
+        const buf = Buffer.alloc(len);
+        readSync(fd, buf, 0, len, start);
+        c.header('Content-Range', `bytes ${start}-${end}/${size}`);
+        c.header('Content-Length', String(len));
+        return c.body(buf, 206);
+      } finally {
+        closeSync(fd);
+      }
+    }
+  }
+  c.header('Content-Length', String(size));
+  return c.body(readFileSync(filePath));
 }
 
 app.get('/server/uploads/tracks/*', async (c) =>
