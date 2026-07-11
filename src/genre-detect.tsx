@@ -20,6 +20,37 @@
  */
 
 import { quickLLM } from './llm-router.tsx';
+
+// Gemini через прокси Soul FM (:8088) — основной путь Tier-3 на RU-VPS:
+// OpenRouter требует кредитов (402), а Gemini-квота уже кормит подкасты/TTS.
+// Паттерн вызова = engine.mjs:316 (podcast). Ошибка/503 → один ретрай → null
+// → вызывающий код падает на quickLLM (OpenRouter), если тот доступен.
+async function geminiQuick(system: string, user: string): Promise<string | null> {
+  const base = process.env.GEMINI_PROXY_URL;
+  const key = process.env.GEMINI_API_KEY;
+  if (!base || !key) return null;
+  const model = process.env.GEMINI_TEXT_MODEL || 'gemini-2.5-flash-lite';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(`${base}/v1beta/models/${model}:generateContent?key=${key}`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(15000),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: system }] },
+          contents: [{ role: 'user', parts: [{ text: user }] }],
+          generationConfig: { maxOutputTokens: 200, temperature: 0 },
+        }),
+      });
+      if (r.status === 503 || r.status === 429) { await new Promise(s => setTimeout(s, 1500)); continue; }
+      if (!r.ok) return null;
+      const d: any = await r.json();
+      const text = d?.candidates?.[0]?.content?.parts?.[0]?.text;
+      return typeof text === 'string' && text.trim() ? text : null;
+    } catch { /* сеть/таймаут — ретрай */ }
+  }
+  return null;
+}
 import { pool } from './db-client.tsx';
 
 // Канон = GENRES формы загрузки (Promomusicfigma track-upload-page.tsx).
@@ -150,11 +181,9 @@ export async function detectGenreLLM(artist: string, title: string): Promise<str
   const t = (title || '').trim();
   if (!a && !t) return null;
   try {
-    const raw = await quickLLM(
-      `Ты — музыкальный классификатор. Определи жанр трека и ответь РОВНО ОДНИМ словом из списка (без пояснений): ${CANON_GENRES.join(', ')}. Если уверенности нет — ответь Unknown.`,
-      `${a} — ${t}`,
-      { maxTokens: 8, tag: 'genre-detect' }
-    );
+    const sys = `Ты — музыкальный классификатор. Определи жанр трека и ответь РОВНО ОДНИМ словом из списка (без пояснений): ${CANON_GENRES.join(', ')}. Если уверенности нет — ответь Unknown.`;
+    const raw = (await geminiQuick(sys, `${a} — ${t}`))
+      ?? await quickLLM(sys, `${a} — ${t}`, { maxTokens: 8, tag: 'genre-detect' });
     const cleaned = String(raw || '').trim().replace(/[."'\n].*$/s, '');
     if (/^unknown$/i.test(cleaned)) return null;
     return normalizeGenre(cleaned);
