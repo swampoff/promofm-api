@@ -313,6 +313,13 @@ app.post('/submitTrack', requireAuth, async (c) => {
         .catch(() => {}); // non-blocking, monitoring is best-effort
     }
 
+    // Fire-and-forget: жанр, если не указан (каскад тег→LLM).
+    if (!body.genre) {
+      import('./genre-detect.tsx')
+        .then(m => m.enrichTrackGenre(track.id, body.artist || '', body.title || ''))
+        .catch(() => {});
+    }
+
     // Email notification to admin
     notifyTrackUpload({
       title: body.title || '',

@@ -152,6 +152,14 @@ tracksRoutes.post('/', requireAuth, async (c) => {
         .catch(() => {}); // non-blocking
     }
 
+    // Fire-and-forget: жанр, если артист его не указал (ID3-тег сюда не
+    // доходит — FE шлёт body.genre; каскад тег→LLM в genre-detect.tsx).
+    if (!track.genre) {
+      import('./genre-detect.tsx')
+        .then(m => m.enrichTrackGenre(track.id, track.artist_name || '', track.title || ''))
+        .catch(() => {});
+    }
+
     // Fire-and-forget: AI-detector verdict (audio file → /analyze on :8085).
     // Result lands in track_moderation.ai_check_status + data->aiCheckResult.
     // ~15s analyzer runtime, must NOT block the artist's upload response.
@@ -389,6 +397,94 @@ tracksRoutes.get('/:id/download', requireAuth, async (c) => {
   } catch (error) {
     console.error('[tracks/download] error:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ─── Genre backfill (инцидент «U2 = Pop», рассылка 09.07) ───────────
+//
+// friday.js при пустом ID3-теге ставил дефолт 'Pop' → вся пятничная
+// библиотека (user_id='system-friday') ушла в рассылку как Pop.
+// Backfill: пустые жанры + подозрительные system-friday 'Pop' →
+// каскад genre-detect (LLM по «артист — название», строгая валидация
+// по канону). Требует миграцию 135 (tracks.genre_source) ДО рестарта.
+// Батч 25/тик — дёргать до remaining=0:
+//   curl -s -X POST -H "X-Internal-Key: $VPS_INTERNAL_KEY" \
+//     http://127.0.0.1:3000/server/api/tracks/genre-backfill
+// После завершения перегнать friday.js sync-library (radio_library
+// копирует genre из tracks). Advisory-lock 924181.
+const TRACKS_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+async function requireAdminOrKeyTracks(c: any, next: any) {
+  const internalKey = c.req.header('X-Internal-Key');
+  if (internalKey && TRACKS_INTERNAL_KEY && internalKey === TRACKS_INTERNAL_KEY) {
+    return next();
+  }
+  const { requireAdmin } = await import('./auth-middleware.tsx');
+  return requireAuth(c, async () => { await requireAdmin(c, next); });
+}
+
+tracksRoutes.post('/genre-backfill', requireAdminOrKeyTracks, async (c) => {
+  const lockClient = await pool.connect();
+  let locked = false;
+  try {
+    const lk = await lockClient.query('SELECT pg_try_advisory_lock(924181) AS got');
+    locked = !!lk.rows[0]?.got;
+    if (!locked) return c.json({ success: true, skipped: 'locked' });
+
+    // genre_source IS NULL = «ещё не перепроверен». Каждый проверенный
+    // трек получает маркер (даже при ответе «неизвестно») и выходит из
+    // скоупа — иначе батч зациклился бы на одних и тех же 25 строках,
+    // а remaining никогда не дошёл бы до 0.
+    const scope = `genre_source IS NULL
+                   AND (genre IS NULL OR genre = ''
+                        OR (user_id = 'system-friday' AND genre = 'Pop'))`;
+    const { rows } = await pool.query(
+      `SELECT id, artist_name, title, genre FROM tracks
+        WHERE ${scope}
+        ORDER BY created_at DESC
+        LIMIT 25`
+    );
+
+    const { detectGenreLLM } = await import('./genre-detect.tsx');
+    let updated = 0;
+    const changes: Array<{ id: string; artist: string; title: string; genre: string }> = [];
+    for (const t of rows) {
+      // system-friday 'Pop' — заражённый дефолт, тег не доверяем: сразу LLM.
+      const g = await detectGenreLLM(t.artist_name || '', t.title || '');
+      if (!g) {
+        // Честное «неизвестно»: заражённый friday-'Pop' очищаем (лучше
+        // пусто, чем уверенная ошибка в рассылке), пустой оставляем пустым.
+        await pool.query(
+          `UPDATE tracks SET genre = CASE WHEN user_id = 'system-friday' AND genre = 'Pop' THEN '' ELSE genre END,
+                             genre_source = 'backfill-unknown'
+            WHERE id = $1`, [t.id]
+        );
+        continue;
+      }
+      await pool.query(
+        `UPDATE tracks SET genre = $2, genre_source = 'backfill-llm' WHERE id = $1`,
+        [t.id, g]
+      );
+      if (g !== t.genre) {
+        updated++;
+        changes.push({ id: t.id, artist: t.artist_name || '', title: t.title || '', genre: g });
+      }
+    }
+
+    const remain = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM tracks WHERE ${scope}`
+    );
+    return c.json({
+      success: true,
+      checked: rows.length,
+      updated,
+      remaining: remain.rows[0]?.cnt ?? 0,
+      changes,
+    });
+  } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  } finally {
+    if (locked) await lockClient.query('SELECT pg_advisory_unlock(924181)').catch(() => {});
+    lockClient.release();
   }
 });
 
