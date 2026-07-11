@@ -35,7 +35,7 @@ async function geminiQuick(system: string, user: string): Promise<string | null>
       const r = await fetch(`${base}/v1beta/models/${model}:generateContent?key=${key}`, {
         method: 'POST',
         signal: AbortSignal.timeout(15000),
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-proxy-key': process.env.GEMINI_PROXY_KEY || '' },
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: system }] },
           contents: [{ role: 'user', parts: [{ text: user }] }],
