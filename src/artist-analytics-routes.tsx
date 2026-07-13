@@ -413,6 +413,10 @@ app.get('/home/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
     // JOIN by track_id; rp.track_id and tracks.id are both uuid → no cast.
     // Filter by tracks.user_id (text) = $1 (text from URL). Manual-confirmed
     // only — pending/rejected pickups don't count as real rotations.
+    // source='auto' — витринный декор friday.js/daily-radio-growth, НЕ
+    // реальный эфир: в кабинет артиста не показываем (инцидент 2026-07-13,
+    // «80 ротаций на Русском Радио» у артиста без единого реального эфира).
+    // IS DISTINCT FROM — легаси-строки с source NULL остаются видны.
     let radioRotations = 0;
     let radioStationsCount = 0;
     try {
@@ -422,7 +426,8 @@ app.get('/home/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
            COUNT(DISTINCT rp.station_name)::int        AS stations
          FROM track_radio_pickups rp
          JOIN tracks t ON t.id = rp.track_id
-         WHERE t.user_id = $1 AND rp.report_status = 'confirmed'`,
+         WHERE t.user_id = $1 AND rp.report_status = 'confirmed'
+           AND rp.source IS DISTINCT FROM 'auto'`,
         [artistId],
       );
       radioRotations     = Number(rows[0]?.rotations ?? 0);
@@ -521,6 +526,10 @@ app.get('/radio-details/:artistId', requireAuth, requireOwner('artistId'), async
   try {
     // Run the three aggregations in parallel — all read the same small
     // confirmed-pickups set for this artist's tracks.
+    // source='auto' исключён: это витринный декор friday.js/daily-radio-
+    // growth, не отчёты станций — кабинет подписывает блок «По отчётам
+    // радиостанций», фикция здесь недопустима (инцидент 2026-07-13).
+    // IS DISTINCT FROM — легаси-строки с source NULL остаются видны.
     const [byStationRes, byCityRes, perTrackRes] = await Promise.all([
       // By station: each station the artist rotates on, with how many
       // distinct cities and total rotations.
@@ -531,6 +540,7 @@ app.get('/radio-details/:artistId', requireAuth, requireOwner('artistId'), async
            FROM track_radio_pickups rp
            JOIN tracks t ON t.id = rp.track_id
           WHERE t.user_id = $1 AND rp.report_status = 'confirmed'
+            AND rp.source IS DISTINCT FROM 'auto'
           GROUP BY rp.station_name
           ORDER BY total_rotations DESC, rp.station_name ASC`,
         [artistId],
@@ -544,6 +554,7 @@ app.get('/radio-details/:artistId', requireAuth, requireOwner('artistId'), async
            FROM track_radio_pickups rp
            JOIN tracks t ON t.id = rp.track_id
           WHERE t.user_id = $1 AND rp.report_status = 'confirmed'
+            AND rp.source IS DISTINCT FROM 'auto'
           GROUP BY COALESCE(NULLIF(rp.city, ''), '(не указан)')
           ORDER BY total_rotations DESC, city ASC`,
         [artistId],
@@ -558,6 +569,7 @@ app.get('/radio-details/:artistId', requireAuth, requireOwner('artistId'), async
            FROM track_radio_pickups rp
            JOIN tracks t ON t.id = rp.track_id
           WHERE t.user_id = $1 AND rp.report_status = 'confirmed'
+            AND rp.source IS DISTINCT FROM 'auto'
           ORDER BY t.title ASC, rp.rotation_count DESC`,
         [artistId],
       ),

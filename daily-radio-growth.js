@@ -10,6 +10,12 @@
  * НЕ трогает треки с реальным эфиром (source partner/radio_cabinet/manual или
  * fingerprint-детект) — у них своя правда, фейковую ротацию к ним не мешаем.
  *
+ * НЕ трогает треки реальных пользователей (tracks.user_id есть в users) —
+ * promote-upcoming инжектит оплаченные артист-треки в weekly_release, и до
+ * 2026-07-13 генератор качал ИМ фейковые ротации, которые кабинет показывал
+ * как «подтверждённые по отчётам радиостанций» (инцидент DJ Альберт, 80 рот.).
+ * Декор — только для синтетических friday-кабинетов без users-строки.
+ *
  * Потолок MAX_STATIONS станций на трек → рост плавно выходит на плато.
  * Идемпотентно: ON CONFLICT (track_id, station_name, city) DO NOTHING.
  *
@@ -50,7 +56,13 @@ const ADD_MIN = 1, ADD_MAX = 2;
     `SELECT DISTINCT track_id::text AS tid FROM track_radio_pickups
        WHERE track_id = ANY($1::uuid[]) AND source IN ('partner','radio_cabinet','manual')
      UNION
-     SELECT DISTINCT track_id::text FROM promo_check_detections WHERE track_id = ANY($1::uuid[])`, [tids]);
+     SELECT DISTINCT track_id::text FROM promo_check_detections WHERE track_id = ANY($1::uuid[])
+     UNION
+     -- треки реальных зарегистрированных пользователей: u.id uuid,
+     -- t.user_id text → каст uuid-стороны (см. CLAUDE.md cast rules)
+     SELECT DISTINCT t.id::text FROM tracks t
+       JOIN users u ON u.id::text = t.user_id
+      WHERE t.id = ANY($1::uuid[])`, [tids]);
   const realSet = new Set(real.rows.map((r) => r.tid));
   const promo = tids.filter((t) => !realSet.has(t));
 
