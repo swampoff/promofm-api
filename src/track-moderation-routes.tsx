@@ -1270,6 +1270,12 @@ app.post('/send-payment-reminders', async (c) => {
       WHERE t.moderation_status = 'approved'
         AND t.created_at < NOW() - ($1::int || ' days')::interval
         AND t.user_id IS NOT NULL AND t.user_id::text NOT LIKE 'sys-%%'
+        -- Напоминаем ТОЛЬКО за реально неоплаченные и НЕ legacy (оплачены на
+        -- старом promo.fm): без этих фильтров спамили «оплатите» владельцам
+        -- оплаченных и 5628 архивных треков (жалоба kalashnikovpromo 2026-07-13).
+        AND COALESCE(t.is_legacy, false) = false
+        AND COALESCE(t.payment_completed, false) = false
+        AND COALESCE(t.is_paid, false) = false
         AND COALESCE(t.last_payment_reminder_at, '1970-01-01'::timestamptz)
             < NOW() - ($2::int || ' days')::interval
       ORDER BY t.created_at ASC
