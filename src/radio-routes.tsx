@@ -1534,13 +1534,61 @@ app.post('/rotations/report', requireAuth, requireRole('radio_station'), async (
       finalStationName = sp.rows[0]?.station_name || sp.rows[0]?.full_name || 'Радиостанция';
     }
 
+    // Download-gate (2026-07-13): отчёт станции, которая реально скачала
+    // трек через кабинет (track_downloads_by_radio), подтверждается сразу
+    // и виден артисту без модерации; без скачивания — pending, как раньше.
+    const dl = await pool.query(
+      `SELECT 1 FROM track_downloads_by_radio WHERE track_id = $1 AND user_id = $2 LIMIT 1`,
+      [trackId, userId]
+    );
+    const autoConfirm = dl.rows.length > 0;
+
+    // Повторный эфир той же станции в том же городе агрегируется в ту же
+    // строку (+rotation_count, свежий aired_at) — раньше второй отчёт падал
+    // об uq_trp_track_station_city. confirmed не понижается; source
+    // становится radio_self_report (реальный отчёт вытесняет декор).
     const insRes = await pool.query(
       `INSERT INTO track_radio_pickups (track_id, station_name, city, region, country, picked_up_at, source, rotation_count, aired_at, report_status, submitted_by_user_id)
-        VALUES ($1, $2, $3, $4, 'Россия', NOW(), 'radio_self_report', $5, $6, 'pending', $7) RETURNING id`,
-      [trackId, finalStationName, city || null, region || null, rc, airedAt, userId]
+        VALUES ($1, $2, $3, $4, 'Россия', NOW(), 'radio_self_report', $5, $6, $7, $8)
+        ON CONFLICT (track_id, station_name, city) DO UPDATE SET
+          rotation_count = track_radio_pickups.rotation_count + EXCLUDED.rotation_count,
+          aired_at = GREATEST(COALESCE(track_radio_pickups.aired_at, EXCLUDED.aired_at), EXCLUDED.aired_at),
+          report_status = CASE
+            WHEN track_radio_pickups.report_status = 'confirmed' OR EXCLUDED.report_status = 'confirmed'
+            THEN 'confirmed' ELSE EXCLUDED.report_status END,
+          source = EXCLUDED.source,
+          submitted_by_user_id = EXCLUDED.submitted_by_user_id
+        RETURNING id, report_status`,
+      [trackId, finalStationName, city || null, region || null, rc, airedAt, autoConfirm ? 'confirmed' : 'pending', userId]
     );
+    const finalStatus = insRes.rows[0].report_status as string;
 
-    return c.json({ success: true, data: { reportId: insRes.rows[0].id, status: 'pending', message: 'Отчёт отправлен на модерацию' } });
+    // Живое уведомление артисту о подтверждённом эфире (best-effort).
+    if (finalStatus === 'confirmed' && trackCheck.rows[0].user_id) {
+      try {
+        const { emitSSE } = await import('./sse-routes.tsx');
+        emitSSE(String(trackCheck.rows[0].user_id), {
+          type: 'radio_rotation_confirmed',
+          data: {
+            title: 'Ваш трек в эфире',
+            message: `«${trackCheck.rows[0].title}» прозвучал: ${finalStationName}${city ? ', ' + city : ''}`,
+            trackId,
+            link: '/artist',
+          },
+        });
+      } catch {}
+    }
+
+    return c.json({
+      success: true,
+      data: {
+        reportId: insRes.rows[0].id,
+        status: finalStatus,
+        message: finalStatus === 'confirmed'
+          ? 'Эфир засчитан и уже отображается в кабинете артиста'
+          : 'Отчёт отправлен на модерацию',
+      },
+    });
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
   }
