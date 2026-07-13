@@ -94,6 +94,15 @@ interface EmailOptions {
  * Send email: SMTP first, then Resend HTTP API fallback
  */
 export async function sendEmail(opts: EmailOptions): Promise<boolean> {
+  // Плейсхолдер-адреса VK-логина (vk<id>@promo-music.ru) и прочие адреса
+  // нашего же домена: реальных ящиков на promo-music.ru нет, reg.ru MX
+  // отвечает 451 и письма сутками висят в очереди postfix. Внутренняя
+  // админ-почта живёт на info@promofm.ru (другой домен). Скипаем молча
+  // наружу, с warn в лог (2026-07-13).
+  if (/@promo-music\.ru\s*>?\s*$/i.test(opts.to.trim())) {
+    console.warn('[Email] skip placeholder recipient:', opts.to);
+    return false;
+  }
   // Try SMTP first (localhost Postfix works without auth)
   {
     try {
