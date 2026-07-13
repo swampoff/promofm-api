@@ -505,13 +505,16 @@ tracksRoutes.get('/radio-stats/all', async (c) => {
     // на ВСЕ треки всех артистов (competitor analytics leak). Удалён —
     // пустой результат значит "у этого юзера нет треков с pickups",
     // возвращаем пустой объект (не leak'аем чужие данные).
+    // source='auto' (декор friday.js/daily-radio-growth) в кабинет не
+    // считаем — только реальные пикапы (инцидент 2026-07-13).
     const result = await pool.query(`
       SELECT
         t.id as track_id,
         COUNT(DISTINCT trp.station_name) as radio_count,
         COUNT(DISTINCT trp.city) as city_count
       FROM tracks t
-      LEFT JOIN track_radio_pickups trp ON trp.track_id = t.id
+      LEFT JOIN track_radio_pickups trp
+        ON trp.track_id = t.id AND trp.source IS DISTINCT FROM 'auto'
       WHERE t.user_id = $1
       GROUP BY t.id
       HAVING COUNT(DISTINCT trp.station_name) > 0
