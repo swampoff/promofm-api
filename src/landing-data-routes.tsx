@@ -1110,7 +1110,7 @@ landing.get('/radio-partners', async (c) => {
     const { pool: lpPool } = await import('./db-client.tsx');
     const rp = await lpPool.query(
       `SELECT user_id, station_name, description, frequency, city, country,
-              formats, COALESCE(listeners_count, listeners, 0) AS audience_size,
+              formats, COALESCE(listeners_count, 0) AS audience_size,
               logo_url, created_at, data
          FROM radio_profiles`
     );
