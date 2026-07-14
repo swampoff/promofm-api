@@ -212,13 +212,20 @@ app.get('/:id', requireAuth, async (c) => {
 app.post('/', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
+    const userRole = c.get('userRole') as string | undefined;
     const body = await c.req.json();
 
     const concert = await typed.insertConcert({
       ...body,
       user_id: userId,
       artist_name: body.artist || body.artist_name || '',
-      moderation_status: body.status || 'draft',
+      // Self-approve hole (зеркало BLOCKER A на треках, найдено 2026-07-13):
+      // body.status='approved' от любого юзера публиковал концерт в афишу
+      // мимо модерации (PUBLIC_STATUSES=['approved','published']). Forced
+      // 'draft' для всех, кроме admin; модерация — concert-moderation-routes.
+      moderation_status: (userRole === 'admin' || userRole === 'superadmin')
+        ? (body.status || 'draft')
+        : 'draft',
     });
 
     if (!concert) {
