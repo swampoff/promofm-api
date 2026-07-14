@@ -1598,6 +1598,13 @@ PR ещё не смержен в main (см. OPERATIONS_LOG 2026-07-06 — не 
   рекуррент не в кроне, tbank-карт нет). Source: `gateway-stripe.tsx`.
 - **Concert promote**: `cost > 0` обязателен — бесплатное промо через
   отрицательный `cost` закрыто (`concerts-routes.tsx`).
+- **Concert self-approve закрыт** (2026-07-14, PR #306, НА ПРОДЕ):
+  `POST /concerts` форсит `moderation_status='draft'` для всех, кроме
+  admin/superadmin — артист больше НЕ публикует концерт в афишу мимо
+  модерации через `{status:'approved'}`. Проходит через
+  concert-moderation-routes. **Решение изменено**: раньше (см. ниже)
+  Никита считал self-approve «штатно»; 2026-07-14 подтвердил — концерты
+  модерируются как треки. Source: `concerts-routes.tsx` POST /.
 - **Topup coin-guard**: сервер пересчитывает коины по курсу 10 сам,
   клиентскому количеству не верит (`checkout-routes.tsx`).
   Контекст: коин-машинерия фактически мертва (6×5000 тест-коинов,
@@ -1607,8 +1614,22 @@ PR ещё не смержен в main (см. OPERATIONS_LOG 2026-07-06 — не 
 
 Известные открытые хвосты: TBANK-gateway pending-хардкод; FE
 `/air/embed` (нужен nginx/Go-роут + решение есть ли реальный
-air-плеер); concert self-approve — Никита сказал «штатно», не баг.
+air-плеер). (Concert self-approve БЫЛ помечен «штатно», но 2026-07-14
+Никита пересмотрел → закрыт, PR #306, см. выше.)
 Полный реестр — у laptop'а: `promofm-open-security-findings.md`.
+
+### Сверка security-списка лэптопа с HEAD (2026-07-14)
+
+Пять находок (topup 1₽ / бан-сессия / self-approve афиши / escrow-гонка
+/ DM-мейлбомб) проверены на текущем HEAD (b4e1977 в истории):
+- **topup 1₽** — ✅ закрыт (сервер пересчитывает коины, `checkout-routes.tsx:2765`).
+- **бан-сессия** — ✅ закрыт (`token_version`-гейт, `auth-middleware.tsx:38-42`).
+- **escrow-гонка** — ✅ закрыт (conditional-UPDATE `WHERE payment_status='escrow_held'`
+  + `rowCount`-проверка в обоих путях: auto-complete крон и admin/resolve,
+  `collaboration-routes.tsx`).
+- **DM-мейлбомб** — ✅ закрыт (throttle per-recipient user_id, 5-мин окно,
+  атомарный UPSERT, `messaging-routes.tsx:733`).
+- **self-approve концертов** — был ЖИВ → закрыт PR #306 (см. выше).
 
 ## Critical column-type cheat sheet (echoed from CLAUDE.md)
 

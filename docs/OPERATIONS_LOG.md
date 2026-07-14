@@ -34,6 +34,39 @@ record of what got executed.
 
 ---
 
+## 2026-07-14 — Сетевые сервисы уведены с root на promofm + очистка почтовой очереди (laptop; запись — cloud по отчёту)
+
+- **What:** 8 сетевых systemd-сервисов переведены с `User=root` на
+  `User=/Group=promofm` + `NoNewPrivileges`. 0 рестартов сверх
+  необходимого, эфир не прерывался.
+- **Affected:** `promofm-api` (:3000, главная RCE-поверхность за nginx),
+  `promofm-stream` (:8086), `promofm-autodj` (:8087),
+  `podcast-engine`/`discovery` (:7080), `ai-detector` (:8085),
+  `voice-bot`, `promo-check`. `.env`-секреты всех — `promofm:600`.
+- **Why:** RCE в любом из них давал root. Теперь даёт непривилегированного
+  `promofm`.
+- **How:** drop-in `10-user.conf` с `User=/Group=promofm` +
+  `NoNewPrivileges` (vendor-юниты НЕ тронуты — откат = удалить drop-in).
+  Каждый сервис поднят с авто-откатом на root при неудаче старта.
+- **Осознанно под root** (не поверхность инъекции, рут нужен для функции):
+  `watchdog` (делает `systemctl restart` радио-сервисов),
+  `security-agent` (`ss`/kill-chain/firewall против атак —
+  де-привилегирование его обезоружит).
+- **Verified:** все 8 подтверждены живыми под promofm; авто-откат ни разу
+  не сработал.
+- **Follow-ups:** откат при регрессе = `rm` drop-in'а + `daemon-reload` +
+  restart. `promofm-poster` — dead ещё до этой сессии (venv удалён, unit
+  disabled, 7 дней не стартовал; SEO-функцию делает рабочий крон). Возвращён
+  в `inactive`, кандидат на удаление при уборке.
+
+### Попутно — почтовая очередь
+- **What:** postfix-очередь 220 застрявших писем → 0.
+- **How:** вычищены мёртвые на reg.ru-ящики (недоставляемые адреса).
+- **Follow-ups:** связано с decision-needed про разделение транзакционной
+  почты и рассылок (единственный отправитель `noreply@promo-music.ru`).
+
+---
+
 ## 2026-07-06 — Security-батч: 10 фиксов задеплоены С ВЕТКИ + RLS off на refresh_tokens + .env 600 (laptop; запись — cloud по отчёту)
 
 - **What:** задеплоен батч из 10 security-фиксов, ветка
