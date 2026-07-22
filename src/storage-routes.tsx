@@ -272,7 +272,7 @@ storage.post('/upload', requireAuth, async (c) => {
     // fileData already declared above (magic bytes check)
     // ClamAV virus scan (if available)
     try {
-      const tmpPath = join('/tmp', 'upload_scan_' + Date.now() + '_' + filename);
+      const tmpPath = join('/tmp', 'upload_scan_' + Date.now() + '_' + filename.replace(/\//g, '_'));
       const { writeFileSync, unlinkSync } = await import('fs');
       writeFileSync(tmpPath, fileData);
       // ClamAV scan timeout. Default 30s is too tight for big audio /
