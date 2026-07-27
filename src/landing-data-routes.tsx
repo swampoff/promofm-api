@@ -815,6 +815,66 @@ landing.get("/releases/upcoming", async (c) => {
 });
 
 
+// GET /releases/archive?offset=0&limit=4 — прошлые «Новинки недели».
+// Владелец (2026-07-27): треки с главной НИКОГДА не удаляются — свежая
+// неделя показывает 10, остальные раскрываются кнопкой «Предыдущие недели».
+// Все weekly_releases живут в БД вечно; здесь — только чтение с пагинацией.
+landing.get('/releases/archive', async (c) => {
+  try {
+    const offset = Math.max(0, parseInt(c.req.query('offset') || '0', 10) || 0);
+    const limit = Math.min(10, Math.max(1, parseInt(c.req.query('limit') || '4', 10) || 4));
+    const { pool } = await import('./db-client.tsx');
+
+    const totalQ = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM weekly_releases
+        WHERE is_published
+          AND id <> (SELECT id FROM weekly_releases WHERE is_published ORDER BY release_date DESC LIMIT 1)`
+    );
+    const total = totalQ.rows[0]?.cnt ?? 0;
+
+    const rel = await pool.query(
+      `SELECT id, title, release_date, week_number, year, track_ids
+         FROM weekly_releases
+        WHERE is_published
+          AND id <> (SELECT id FROM weekly_releases WHERE is_published ORDER BY release_date DESC LIMIT 1)
+        ORDER BY release_date DESC
+        OFFSET $1 LIMIT $2`,
+      [offset, limit]
+    );
+
+    const releases = [];
+    for (const w of rel.rows) {
+      const tr = await pool.query(
+        `SELECT t.id, t.title, t.artist_name, t.cover_url, t.audio_url, t.artist_id, t.payment_completed, u.ord
+           FROM unnest($1::uuid[]) WITH ORDINALITY AS u(tid, ord)
+           JOIN tracks t ON t.id = u.tid
+          ORDER BY u.ord`,
+        [w.track_ids]
+      );
+      releases.push({
+        id: w.id,
+        title: w.title,
+        releaseDate: w.release_date,
+        tracks: tr.rows.map((t: any, i: number) => ({
+          id: t.id,
+          position: i + 1,
+          title: t.title,
+          artist: t.artist_name,
+          artistId: t.artist_id,
+          coverUrl: t.cover_url || '',
+          previewUrl: t.audio_url || '',
+          isOurArtist: !!t.payment_completed,
+        })),
+      });
+    }
+
+    return c.json({ success: true, data: { total, offset, limit, releases } });
+  } catch (error: any) {
+    console.error('[releases/archive] failed:', error?.message || error);
+    return c.json({ success: false, error: 'internal error' }, 500);
+  }
+});
+
 // Auto-archive past upcoming releases (called by cron daily)
 landing.post("/releases/archive-past", async (c) => {
   const key = c.req.header("x-internal-key");
