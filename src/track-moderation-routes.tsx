@@ -1063,8 +1063,13 @@ app.post('/promote-upcoming', async (c) => {
       `SELECT id, title, artist_name, user_id, audio_url
          FROM tracks
         WHERE moderation_status = 'upcoming'
-          AND upcoming_until IS NOT NULL
-          AND upcoming_until <= $1::timestamptz`,
+          AND (
+            (upcoming_until IS NOT NULL AND upcoming_until <= $1::timestamptz)
+            -- Страховка: upcoming без даты (аплоад не проставил upcoming_until)
+            -- раньше зависал НАВСЕГДА — крон его не видел (кейс Rina Shakti
+            -- 2026-07-27, + трек с 29 мая). 48ч в «скоро» — и публикуем.
+            OR (upcoming_until IS NULL AND created_at < $1::timestamptz - interval '48 hours')
+          )`,
       [now.toISOString()]
     );
 
