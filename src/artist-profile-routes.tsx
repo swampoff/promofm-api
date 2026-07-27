@@ -320,6 +320,24 @@ app.get('/profile/:artistId', async (c) => {
           // and the live radio-airplay footprint — both feed the public
           // profile hero. Missing/zero → the page hides them, never fakes.
           if (apRow.cover_url) normalized.coverUrl = apRow.cover_url as string;
+          // Та же болезнь, что у cover: KV-копия профиля не знает про
+          // аватар/жанры/сайт, записанные в canonical SQL-колонки другими
+          // флоу (upload аватара, PUT формы). Строка таблицы выигрывает —
+          // иначе форма «сбрасывается» и артист заполняет её по кругу.
+          if (apRow.avatar_url) normalized.avatarUrl = apRow.avatar_url as string;
+          {
+            const rowGenres: string[] = (Array.isArray(apRow.sub_genres) && apRow.sub_genres.length > 0)
+              ? (apRow.sub_genres as string[])
+              : (apRow.genre ? [apRow.genre as string] : []);
+            if (rowGenres.length > 0 && (!Array.isArray(normalized.genres) || normalized.genres.length === 0)) {
+              normalized.genres = rowGenres;
+            }
+          }
+          if (apRow.website && !normalized.website) normalized.website = apRow.website as string;
+          if (apRow.social_links && typeof apRow.social_links === 'object'
+              && Object.values(normalized.socials ?? {}).every((v) => !v)) {
+            normalized.socials = apRow.social_links as Record<string, string>;
+          }
           const reach = await computeRadioReach(String(apRow.id));
           normalized.radioStations = reach.radioStations;
           normalized.radioCities   = reach.radioCities;
