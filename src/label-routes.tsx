@@ -372,7 +372,17 @@ app.get('/roster', requireAuth, async (c) => {
            WHEN ap.label_id = $1 THEN 'linked'
            ELSE 'unknown'
          END              AS kind,
-         ap.created_at    AS joined_at
+         ap.created_at    AS joined_at,
+         (SELECT COUNT(*)::int FROM tracks t WHERE t.artist_id = ap.id) AS tracks_count,
+         (SELECT COUNT(*)::int FROM tracks t WHERE t.artist_id = ap.id AND t.moderation_status = 'published') AS published_count,
+         (SELECT COALESCE(SUM(rp.rotation_count), 0)::int
+            FROM track_radio_pickups rp JOIN tracks t ON t.id = rp.track_id
+           WHERE t.artist_id = ap.id AND rp.report_status = 'confirmed'
+             AND rp.source IS DISTINCT FROM 'auto') AS radio_rotations,
+         (SELECT COUNT(DISTINCT rp.station_name)::int
+            FROM track_radio_pickups rp JOIN tracks t ON t.id = rp.track_id
+           WHERE t.artist_id = ap.id AND rp.report_status = 'confirmed'
+             AND rp.source IS DISTINCT FROM 'auto') AS radio_stations
        FROM artist_profiles ap
        WHERE ap.managed_by_label_id = $1 OR ap.label_id = $1
        ORDER BY ap.created_at DESC`,
@@ -1204,8 +1214,26 @@ app.get('/analytics/overview', requireAuth, async (c) => {
       [gate.labelId]
     );
 
+    // Радио-след ростера: подтверждённые ротации (source='auto' — витринный
+    // декор, не считаем). Раньше лейбл-кабинет НЕ показывал радио вовсе —
+    // «нет статистики, а треки качали радио» (кейс clubtop 2026-07-27).
+    const radio = await pool.query(
+      `SELECT
+         COALESCE(SUM(rp.rotation_count), 0)::int AS rotations,
+         COUNT(DISTINCT rp.station_name)::int     AS stations,
+         COUNT(DISTINCT rp.city)::int             AS cities
+       FROM track_radio_pickups rp
+       JOIN tracks t ON t.id = rp.track_id
+       JOIN artist_profiles ap ON ap.id = t.artist_id
+       WHERE (ap.managed_by_label_id = $1 OR ap.label_id = $1)
+         AND rp.report_status = 'confirmed'
+         AND rp.source IS DISTINCT FROM 'auto'`,
+      [gate.labelId]
+    );
+
     const row = cnt.rows[0] || {};
     const trRow = tr.rows[0] || {};
+    const radioRow = radio.rows[0] || {};
     return c.json({
       success: true,
       overview: {
@@ -1216,6 +1244,9 @@ app.get('/analytics/overview', requireAuth, async (c) => {
         totalFollowers: Number(row.total_followers) || 0,
         totalTracks: Number(trRow.total_tracks) || 0,
         publishedTracks: Number(trRow.published_tracks) || 0,
+        radioRotations: Number(radioRow.rotations) || 0,
+        radioStations: Number(radioRow.stations) || 0,
+        radioCities: Number(radioRow.cities) || 0,
         topArtists: top.rows,
       },
     });
