@@ -1157,6 +1157,93 @@ app.get('/releases', requireAuth, async (c) => {
 });
 
 /**
+ * GET /label/analytics/artist/:artistProfileId — ДЕТАЛИЗАЦИЯ радио по артисту.
+ * Владелец лейбла (2026-07-30): «как посмотреть статистику каждого артиста?» —
+ * агрегатов «13 ротаций · 4 станц.» мало, нужно видеть КАКИЕ станции, города и
+ * когда. Отдаём разбивку по станциям (города + даты) и по трекам.
+ */
+app.get('/analytics/artist/:artistProfileId', requireAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const gate = await requireLabelRole(c);
+    if (gate instanceof Response) return gate;
+    if (!gate.labelId) return c.json({ success: false, error: 'Профиль лейбла не заполнен' }, 400);
+
+    const artistProfileId = c.req.param('artistProfileId');
+
+    // Ownership: артист обязан быть в ростере ЭТОГО лейбла (иначе чужая аналитика).
+    const own = await pool.query(
+      `SELECT id, artist_name FROM artist_profiles
+        WHERE id::text = $1 AND (managed_by_label_id = $2 OR label_id = $2) LIMIT 1`,
+      [artistProfileId, gate.labelId]
+    );
+    if (own.rows.length === 0) {
+      return c.json({ success: false, error: 'Артист не найден в вашем ростере' }, 404);
+    }
+    const artistName = own.rows[0].artist_name;
+
+    // По станциям: города + окно дат + сумма ротаций. Только подтверждённые,
+    // без source='auto' (витринный декор — в кабинет не показываем).
+    const byStation = await pool.query(
+      `SELECT rp.station_name,
+              COALESCE(SUM(rp.rotation_count), 0)::int      AS rotations,
+              COUNT(DISTINCT rp.city)::int                  AS cities_count,
+              ARRAY_AGG(DISTINCT rp.city) FILTER (WHERE rp.city IS NOT NULL) AS cities,
+              MIN(rp.picked_up_at)::date                    AS first_pickup,
+              MAX(rp.picked_up_at)::date                    AS last_pickup,
+              COUNT(DISTINCT rp.track_id)::int              AS tracks_count
+         FROM track_radio_pickups rp
+         JOIN tracks t ON t.id = rp.track_id
+        WHERE t.artist_id = $1
+          AND rp.report_status = 'confirmed'
+          AND rp.source IS DISTINCT FROM 'auto'
+        GROUP BY rp.station_name
+        ORDER BY rotations DESC, rp.station_name`,
+      [artistProfileId]
+    );
+
+    // По трекам артиста: сколько станций/городов/ротаций у каждого.
+    const byTrack = await pool.query(
+      `SELECT t.id, t.title, t.moderation_status, t.plays_count, t.cover_url,
+              COALESCE(SUM(rp.rotation_count), 0)::int AS rotations,
+              COUNT(DISTINCT rp.station_name)::int     AS stations,
+              COUNT(DISTINCT rp.city)::int             AS cities
+         FROM tracks t
+         LEFT JOIN track_radio_pickups rp
+                ON rp.track_id = t.id
+               AND rp.report_status = 'confirmed'
+               AND rp.source IS DISTINCT FROM 'auto'
+        WHERE t.artist_id = $1
+        GROUP BY t.id, t.title, t.moderation_status, t.plays_count, t.cover_url
+        ORDER BY rotations DESC, t.created_at DESC`,
+      [artistProfileId]
+    );
+
+    const totals = byStation.rows.reduce(
+      (acc: any, r: any) => ({ rotations: acc.rotations + Number(r.rotations || 0) }),
+      { rotations: 0 }
+    );
+    const allCities = new Set<string>();
+    for (const r of byStation.rows) for (const city of (r.cities || [])) allCities.add(String(city));
+
+    return c.json({
+      success: true,
+      artist: { id: artistProfileId, name: artistName },
+      totals: {
+        rotations: totals.rotations,
+        stations: byStation.rows.length,
+        cities: allCities.size,
+        tracks: byTrack.rows.length,
+      },
+      stations: byStation.rows,
+      tracks: byTrack.rows,
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+/**
  * GET /label/analytics/overview — aggregated counters across the entire
  * roster. Sums plays/likes/followers from artist_profiles + tracks for any
  * artist where managed_by_label_id OR label_id = this label.
