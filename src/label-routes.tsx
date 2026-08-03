@@ -379,6 +379,13 @@ app.get('/roster', requireAuth, async (c) => {
             FROM track_radio_pickups rp JOIN tracks t ON t.id = rp.track_id
            WHERE t.artist_id = ap.id AND rp.report_status = 'confirmed'
              AND rp.source IS DISTINCT FROM 'auto') AS radio_rotations,
+         (SELECT COALESCE(SUM(rp.rotation_count), 0)::int
+            FROM track_radio_pickups rp JOIN tracks t ON t.id = rp.track_id
+           WHERE t.artist_id = ap.id AND rp.report_status = 'confirmed'
+             AND rp.source IS DISTINCT FROM 'auto'
+             AND EXISTS (SELECT 1 FROM promo_check_detections d
+                          WHERE d.track_id = rp.track_id AND d.station_name = rp.station_name)
+         ) AS radio_rotations_verified,
          (SELECT COUNT(DISTINCT rp.station_name)::int
             FROM track_radio_pickups rp JOIN tracks t ON t.id = rp.track_id
            WHERE t.artist_id = ap.id AND rp.report_status = 'confirmed'
@@ -1191,7 +1198,16 @@ app.get('/analytics/artist/:artistProfileId', requireAuth, async (c) => {
               ARRAY_AGG(DISTINCT rp.city) FILTER (WHERE rp.city IS NOT NULL) AS cities,
               MIN(rp.picked_up_at)::date                    AS first_pickup,
               MAX(rp.picked_up_at)::date                    AS last_pickup,
-              COUNT(DISTINCT rp.track_id)::int              AS tracks_count
+              COUNT(DISTINCT rp.track_id)::int              AS tracks_count,
+              -- Подтверждение эфиром: есть ли детекция фингерпринта по этому
+              -- треку на этой станции. Считаем на лету — как только ПРОМО.CHECK
+              -- поймает трек, статус сам станет «подтверждён» (инцидент
+              -- 2026-08-03: партнёрские заявки показывались как факт эфира).
+              BOOL_OR(EXISTS (
+                SELECT 1 FROM promo_check_detections d
+                 WHERE d.track_id = rp.track_id AND d.station_name = rp.station_name
+              ))                                            AS airplay_verified,
+              BOOL_OR(rp.source = 'radio_cabinet')          AS from_station_cabinet
          FROM track_radio_pickups rp
          JOIN tracks t ON t.id = rp.track_id
         WHERE t.artist_id = $1
@@ -1207,7 +1223,10 @@ app.get('/analytics/artist/:artistProfileId', requireAuth, async (c) => {
       `SELECT t.id, t.title, t.moderation_status, t.plays_count, t.cover_url,
               COALESCE(SUM(rp.rotation_count), 0)::int AS rotations,
               COUNT(DISTINCT rp.station_name)::int     AS stations,
-              COUNT(DISTINCT rp.city)::int             AS cities
+              COUNT(DISTINCT rp.city)::int             AS cities,
+              COALESCE(SUM(rp.rotation_count) FILTER (WHERE EXISTS (
+                SELECT 1 FROM promo_check_detections d
+                 WHERE d.track_id = rp.track_id AND d.station_name = rp.station_name)), 0)::int AS rotations_verified
          FROM tracks t
          LEFT JOIN track_radio_pickups rp
                 ON rp.track_id = t.id
@@ -1220,8 +1239,12 @@ app.get('/analytics/artist/:artistProfileId', requireAuth, async (c) => {
     );
 
     const totals = byStation.rows.reduce(
-      (acc: any, r: any) => ({ rotations: acc.rotations + Number(r.rotations || 0) }),
-      { rotations: 0 }
+      (acc: any, r: any) => ({
+        rotations: acc.rotations + Number(r.rotations || 0),
+        rotationsVerified: acc.rotationsVerified + (r.airplay_verified ? Number(r.rotations || 0) : 0),
+        stationsVerified: acc.stationsVerified + (r.airplay_verified ? 1 : 0),
+      }),
+      { rotations: 0, rotationsVerified: 0, stationsVerified: 0 }
     );
     const allCities = new Set<string>();
     for (const r of byStation.rows) for (const city of (r.cities || [])) allCities.add(String(city));
@@ -1231,7 +1254,10 @@ app.get('/analytics/artist/:artistProfileId', requireAuth, async (c) => {
       artist: { id: artistProfileId, name: artistName },
       totals: {
         rotations: totals.rotations,
+        rotationsVerified: totals.rotationsVerified,
+        rotationsDeclared: totals.rotations - totals.rotationsVerified,
         stations: byStation.rows.length,
+        stationsVerified: totals.stationsVerified,
         cities: allCities.size,
         tracks: byTrack.rows.length,
       },
@@ -1308,7 +1334,10 @@ app.get('/analytics/overview', requireAuth, async (c) => {
       `SELECT
          COALESCE(SUM(rp.rotation_count), 0)::int AS rotations,
          COUNT(DISTINCT rp.station_name)::int     AS stations,
-         COUNT(DISTINCT rp.city)::int             AS cities
+         COUNT(DISTINCT rp.city)::int             AS cities,
+         COALESCE(SUM(rp.rotation_count) FILTER (WHERE EXISTS (
+           SELECT 1 FROM promo_check_detections d
+            WHERE d.track_id = rp.track_id AND d.station_name = rp.station_name)), 0)::int AS rotations_verified
        FROM track_radio_pickups rp
        JOIN tracks t ON t.id = rp.track_id
        JOIN artist_profiles ap ON ap.id = t.artist_id
@@ -1332,6 +1361,8 @@ app.get('/analytics/overview', requireAuth, async (c) => {
         totalTracks: Number(trRow.total_tracks) || 0,
         publishedTracks: Number(trRow.published_tracks) || 0,
         radioRotations: Number(radioRow.rotations) || 0,
+        radioRotationsVerified: Number(radioRow.rotations_verified) || 0,
+        radioRotationsDeclared: (Number(radioRow.rotations) || 0) - (Number(radioRow.rotations_verified) || 0),
         radioStations: Number(radioRow.stations) || 0,
         radioCities: Number(radioRow.cities) || 0,
         topArtists: top.rows,
