@@ -536,7 +536,12 @@ app.get('/radio-details/:artistId', requireAuth, requireOwner('artistId'), async
       pool.query(
         `SELECT rp.station_name,
                 COUNT(DISTINCT rp.city) FILTER (WHERE rp.city IS NOT NULL AND rp.city <> '')::int AS city_count,
-                COALESCE(SUM(rp.rotation_count), 0)::int AS total_rotations
+                COALESCE(SUM(rp.rotation_count), 0)::int AS total_rotations,
+                -- Подтверждение эфиром (ПРОМО.CHECK). Инцидент 2026-08-03:
+                -- блок назывался «Подтверждённые ротации», хотя данные были
+                -- заявками станций без фингерпринт-детекций.
+                BOOL_OR(EXISTS (SELECT 1 FROM promo_check_detections d
+                          WHERE d.track_id = rp.track_id AND d.station_name = rp.station_name)) AS airplay_verified
            FROM track_radio_pickups rp
            JOIN tracks t ON t.id = rp.track_id
           WHERE t.user_id = $1 AND rp.report_status = 'confirmed'
@@ -565,7 +570,9 @@ app.get('/radio-details/:artistId', requireAuth, requireOwner('artistId'), async
         `SELECT t.id AS track_id, t.title,
                 rp.station_name,
                 COALESCE(NULLIF(rp.city, ''), NULL) AS city,
-                COALESCE(rp.rotation_count, 0)::int AS rotation_count
+                COALESCE(rp.rotation_count, 0)::int AS rotation_count,
+                EXISTS (SELECT 1 FROM promo_check_detections d
+                          WHERE d.track_id = rp.track_id AND d.station_name = rp.station_name) AS airplay_verified
            FROM track_radio_pickups rp
            JOIN tracks t ON t.id = rp.track_id
           WHERE t.user_id = $1 AND rp.report_status = 'confirmed'
