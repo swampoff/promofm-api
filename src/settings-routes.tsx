@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { settingsLimiter } from './rate-limiter.tsx';
 import { apiError } from './error-codes.tsx';
 import * as db from "./db.tsx";
 import { requireAuth, requireOwner } from './auth-middleware.tsx';
@@ -77,7 +78,7 @@ app.get("/user/:userId", requireAuth, requireOwner('userId'), async (c) => {
 });
 
 // Update user settings
-app.put("/user/:userId", requireAuth, requireOwner('userId'), async (c) => {
+app.put("/user/:userId", requireAuth, requireOwner('userId'), settingsLimiter, async (c) => {
   try {
     const userId = c.req.param("userId");
     const body = await c.req.json();
@@ -198,7 +199,7 @@ app.get("/user/:userId/payment-methods", requireAuth, requireOwner('userId'), as
 });
 
 // Add payment method
-app.post("/user/:userId/payment-methods", requireAuth, requireOwner('userId'), async (c) => {
+app.post("/user/:userId/payment-methods", requireAuth, requireOwner('userId'), settingsLimiter, async (c) => {
   try {
     const userId = c.req.param("userId");
     const body = await c.req.json();
