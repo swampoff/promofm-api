@@ -78,7 +78,7 @@ app.get("/user/:userId", requireAuth, requireOwner('userId'), async (c) => {
 });
 
 // Update user settings
-app.put("/user/:userId", requireAuth, requireOwner('userId'), settingsLimiter, async (c) => {
+app.put("/user/:userId", settingsLimiter, requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param("userId");
     const body = await c.req.json();
@@ -199,7 +199,7 @@ app.get("/user/:userId/payment-methods", requireAuth, requireOwner('userId'), as
 });
 
 // Add payment method
-app.post("/user/:userId/payment-methods", requireAuth, requireOwner('userId'), settingsLimiter, async (c) => {
+app.post("/user/:userId/payment-methods", settingsLimiter, requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param("userId");
     const body = await c.req.json();
