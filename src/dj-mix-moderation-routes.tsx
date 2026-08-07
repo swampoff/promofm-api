@@ -2,7 +2,7 @@
  * DJ MIX MODERATION ROUTES — зеркало track-moderation-routes.tsx для DJ-миксов.
  *
  * Стейты: pending → approved → published / rejected. Все миксы публикуются
- * за полную цену MIX_PUBLICATION_PRICE (7000 ₽, выровнена с треками
+ * за полную цену getPublicationPrice() (7000 ₽, выровнена с треками
  * решением Никиты 2026-07-07; до этого 5000 ₽). После апрува микс
  * требует оплаты, попадает в "Новинки недели" после payment_completed
  * (см. landing-data-routes.tsx /tracks/new UNION).
@@ -25,7 +25,10 @@ import crypto from 'crypto';
 
 const app = new Hono();
 
-const MIX_PUBLICATION_PRICE = 10000; // зеркало tracks PUBLICATION_PRICE (10 000 ₽, поднято 2026-08-07)
+import { getPublicationPrice } from './pricing.tsx';
+// Зеркало цены треков (см. pricing.tsx): до 01.09.2026 — 7 000 ₽, после — 10 000 ₽.
+// Вызываем в момент использования, а не на старте модуля: иначе переход
+// 1 сентября не сработает, пока сервис не перезапустят.
 
 // GET /pending-dj-mixes — список миксов на модерации (admin)
 app.get('/pending-dj-mixes', requireAuth, requireAdmin, async (c) => {
@@ -147,7 +150,7 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
     const djId = String(mix.dj_id || '');
 
     if (action === 'approve') {
-      // Все миксы публикуются за полную цену MIX_PUBLICATION_PRICE.
+      // Все миксы публикуются за полную цену getPublicationPrice().
       // Native cols (migration 046): больше никакого data jsonb merge.
       await pool.query(
         `UPDATE dj_mixes
@@ -164,19 +167,19 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
         [
           moderator_notes || 'Микс одобрен',
           now,
-          MIX_PUBLICATION_PRICE,
+          getPublicationPrice(),
           pendingMixId,
         ]
       );
 
-      console.log(`[dj-mix-moderation] Mix ${pendingMixId} approved. Awaiting payment ${MIX_PUBLICATION_PRICE} RUB.`);
+      console.log(`[dj-mix-moderation] Mix ${pendingMixId} approved. Awaiting payment ${getPublicationPrice()} RUB.`);
 
       // Audit B-8: forensic trail кто одобрил микс.
       logAdminAction(c, {
         action: 'dj_mix_moderation_approve',
         resourceType: 'dj_mix',
         targetId: String(pendingMixId),
-        details: { title: mix.title, djId, price: MIX_PUBLICATION_PRICE },
+        details: { title: mix.title, djId, price: getPublicationPrice() },
       });
 
       // Email DJ (fallback chain: users.email → cabinet-stored email)
@@ -188,7 +191,7 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
 
       if (djEmail) {
         const emailSubject = `Микс одобрен — ${mix.title}`;
-        const statusBlock = `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>${MIX_PUBLICATION_PRICE.toLocaleString('ru-RU')} ₽</strong></p>`;
+        const statusBlock = `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>${getPublicationPrice().toLocaleString('ru-RU')} ₽</strong></p>`;
         const ctaButton = '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/dj/mixes" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#8B5CF6,#7C3AED);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>';
 
         const emailHtml =
@@ -213,7 +216,7 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
 
       // In-app notification (DJ bell + admin SSE)
       const notifTitle = `Микс «${mix.title}» одобрен!`;
-      const notifMessage = `Микс «${mix.title}» одобрен. Для публикации оплатите ${MIX_PUBLICATION_PRICE.toLocaleString('ru-RU')} ₽.`;
+      const notifMessage = `Микс «${mix.title}» одобрен. Для публикации оплатите ${getPublicationPrice().toLocaleString('ru-RU')} ₽.`;
 
       notifyCrossCabinet({
         targetUserId: djId,
@@ -244,7 +247,7 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
         message: 'Микс одобрен. Ожидает оплаты.',
         mixId: pendingMixId,
         paymentRequired: true,
-        paymentAmount: MIX_PUBLICATION_PRICE,
+        paymentAmount: getPublicationPrice(),
       });
     }
 

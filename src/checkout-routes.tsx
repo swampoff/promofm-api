@@ -35,7 +35,7 @@ const MAX_PAYMENT_AMOUNT_RUB = 1_000_000;
 
 // Fallback when track has no per-track price set.
 // Must match PUBLICATION_PRICE in track-moderation-routes.tsx.
-const DEFAULT_TRACK_PUBLICATION_PRICE_RUB = 10000;
+import { getPublicationPrice } from './pricing.tsx';
 
 const log = createLogger("checkout");
 
@@ -2057,7 +2057,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         const expected =
           Number(nativeAmount) ||
           Number(legacyAmount) ||
-          DEFAULT_TRACK_PUBLICATION_PRICE_RUB;
+          getPublicationPrice();
         if (Math.abs(amount - expected) > 0.01) {
           log.warn({ userId, trackId, expected, received: amount }, 'track_publish_amount_tampering_blocked');
           return c.json({ success: false, error: 'Сумма не соответствует цене публикации' }, 400);

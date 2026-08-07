@@ -24,7 +24,10 @@ const GENRES = [
   'Soul', 'Funk', 'Disco', 'Gospel', 'Latin', 'World'
 ];
 
-const PUBLICATION_PRICE = 10000; // 10 000 ₽ за публикацию трека (владелец 2026-08-07: подняли с 7000 — вложения в инфраструктуру, подписки, рассылка по заведениям, новостной пост)
+// Цена публикации живёт в pricing.tsx: до 01.09.2026 — 7 000 ₽, после — 10 000 ₽.
+// Значение фиксируется в треке при одобрении, поэтому обещанная старая цена
+// сохраняется даже если оплата пройдёт после перехода.
+import { getPublicationPrice } from './pricing.tsx';
 const AI_DETECTOR_URL = 'http://127.0.0.1:8085';
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/var/www/promofm/uploads';
 
@@ -405,7 +408,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
     // State guard. This endpoint moderates fresh submissions only — without
     // this check a stale admin tab can click «Одобрить» on a row that has
     // already paid and re-advanced; the write happily downgrades status to
-    // 'approved' and resets data.payment_amount back to PUBLICATION_PRICE
+    // 'approved' and resets data.payment_amount back to getPublicationPrice()
     // (5000), undoing the payment record. See production incident with
     // Nadezhda's track e77b1053 — payment_amount went 1 → 5000 and status
     // upcoming → approved because of exactly this path.
@@ -438,7 +441,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
     const markAsAi = is_ai_track === true || detectorSaysAi;
 
     if (action === 'approve') {
-      // Все треки публикуются за полную цену PUBLICATION_PRICE.
+      // Все треки публикуются за полную цену getPublicationPrice().
       // Native cols — единственный источник правды (см. KV-mandate,
       // CLAUDE.md). is_ai_track маппится на native is_ai_generated
       // (migration 062). overall_score → ai_score. ai_flagged +
@@ -457,7 +460,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         ai_flagged: markAsAi,
         ai_category: markAsAi ? 'ai_music' : 'original',
         requires_payment: true,
-        payment_amount: PUBLICATION_PRICE,
+        payment_amount: getPublicationPrice(),
         first_track_free_applied: false,
         payment_completed: false,
         paid_at: null,
@@ -465,14 +468,14 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         approved_for_release_at: null,
       });
 
-      console.log(`[moderation] Track ${pendingTrackId} approved. Awaiting payment ${PUBLICATION_PRICE} RUB.` + aiWarning);
+      console.log(`[moderation] Track ${pendingTrackId} approved. Awaiting payment ${getPublicationPrice()} RUB.` + aiWarning);
 
       // Audit B-8: forensic trail кто одобрил.
       logAdminAction(c, {
         action: 'track_moderation_approve',
         resourceType: 'track',
         targetId: String(pendingTrackId),
-        details: { title: track.title, artist: track.artist_name, price: PUBLICATION_PRICE, isAi: is_ai_track === true },
+        details: { title: track.title, artist: track.artist_name, price: getPublicationPrice(), isAi: is_ai_track === true },
       });
 
       // Notify artist: email + in-app
@@ -508,7 +511,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<p>Благодарим вас за доверие и за то, что отправили свой трек на платформу Промо.Музыка. Нам действительно ценно, что вы делитесь своим творчеством с нами.</p>'
             + '<p>В процессе модерации наша система анализа <strong>Promo.Check</strong> определила, что композиция <strong>«' + escapeHtml(track.title) + '»</strong> с высокой вероятностью (около ' + aiPercent + '%) была создана с использованием технологий искусственного интеллекта.</p>'
             + '<p>Готовы предложить вам размещение трека в нашем специальном разделе, посвященном AI-контенту.</p>'
-            + '<p style="padding:16px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:4px;"><strong>Стоимость размещения составляет ' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' рублей.</strong></p>'
+            + '<p style="padding:16px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:4px;"><strong>Стоимость размещения составляет ' + getPublicationPrice().toLocaleString('ru-RU') + ' рублей.</strong></p>'
             + '<p>Если вам откликается это предложение, мы будем рады продолжить сотрудничество.</p>'
             + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий модератора: ' + escapeHtml(moderator_notes) + '</p>' : '')
             + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/login" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#F59E0B,#D97706);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Разместить в AI-каталоге</a></p>'
@@ -524,7 +527,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         } else {
           // Normal track — paid approval email.
           emailSubject = 'Трек одобрен — ' + track.title;
-          const statusBlock = '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + PUBLICATION_PRICE.toLocaleString('ru-RU') + ' ₽</strong></p>';
+          const statusBlock = '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + getPublicationPrice().toLocaleString('ru-RU') + ' ₽</strong></p>';
           const ctaButton = '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/artist/tracks" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>';
 
           emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
@@ -563,8 +566,8 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           ? `«${track.title}» определён как AI-трек`
           : `Трек «${track.title}» одобрен!`;
         const notifMessage = is_ai_track
-          ? `Композиция «${track.title}» определена как AI-трек. Предлагаем размещение в разделе AI-музыки за ${PUBLICATION_PRICE.toLocaleString('ru-RU')} руб.`
-          : `Трек «${track.title}» одобрен. Для публикации оплатите ${PUBLICATION_PRICE.toLocaleString('ru-RU')} ₽.`;
+          ? `Композиция «${track.title}» определена как AI-трек. Предлагаем размещение в разделе AI-музыки за ${getPublicationPrice().toLocaleString('ru-RU')} руб.`
+          : `Трек «${track.title}» одобрен. Для публикации оплатите ${getPublicationPrice().toLocaleString('ru-RU')} ₽.`;
 
         // Cross-cabinet event (admin → artist surface). Writes to the
         // cross_cabinet_notifications table and emits SSE — keeps
@@ -606,7 +609,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           : 'Трек одобрен. Ожидает оплаты.',
         trackId: pendingTrackId,
         paymentRequired: true,
-        paymentAmount: PUBLICATION_PRICE,
+        paymentAmount: getPublicationPrice(),
         aiFlagged: is_ai_track === true || (track.ai_score && track.ai_score > 60) || false,
         aiScore: track.ai_score || null,
         isAiTrack: is_ai_track === true || false,
@@ -791,7 +794,7 @@ app.post('/batchModeration', requireAuth, requireAdmin, async (c) => {
           ai_flagged: batchIsAi || track.ai_flagged === true,
           ai_category: batchIsAi ? 'ai_music' : (track.ai_category || 'original'),
           requires_payment: true,
-          payment_amount: PUBLICATION_PRICE,
+          payment_amount: getPublicationPrice(),
           first_track_free_applied: false,
           payment_completed: false,
           paid_at: null,
