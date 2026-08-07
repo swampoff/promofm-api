@@ -617,11 +617,28 @@ SEO-ПРАВИЛА:
         }),
       });
       if (!resp.ok) {
-        console.log(`[news-agent] Gemini API error for ${source.id}: ${await resp.text()}`);
-        return [];
+        // Квота Gemini кончилась (free-tier) — новости молча переставали
+        // извлекаться со ВСЕХ источников: «No news extracted», эфир без
+        // новостных блоков (инцидент 2026-08-07). Уходим на llm-router:
+        // он сам выберет OpenRouter, а при отказе — оплаченный Anthropic.
+        const geminiErr = (await resp.text()).slice(0, 160);
+        console.log(`[news-agent] Gemini недоступен для ${source.id} (${geminiErr}) → фолбэк на llm-router`);
+        try {
+          const { quickLLM } = await import('./llm-router.tsx');
+          llmContent = await quickLLM(
+            systemPrompt,
+            `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}`,
+            { maxTokens: 8000, tag: 'news-agent' },
+          );
+          console.log(`[news-agent] фолбэк отработал для ${source.id}: ${llmContent?.length || 0} символов`);
+        } catch (e: any) {
+          console.log(`[news-agent] фолбэк тоже упал для ${source.id}: ${e?.message || e}`);
+          return [];
+        }
+      } else {
+        const data: any = await resp.json();
+        llmContent = data.candidates?.[0]?.content?.parts?.[0]?.text;
       }
-      const data: any = await resp.json();
-      llmContent = data.candidates?.[0]?.content?.parts?.[0]?.text;
     } else {
       // OpenRouter fallback
       const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -643,11 +660,23 @@ SEO-ПРАВИЛА:
         }),
       });
       if (!resp.ok) {
-        console.log(`[news-agent] LLM error for ${source.id}: ${await resp.text()}`);
-        return [];
+        const orErr = (await resp.text()).slice(0, 160);
+        console.log(`[news-agent] OpenRouter недоступен для ${source.id} (${orErr}) → фолбэк на llm-router`);
+        try {
+          const { quickLLM } = await import('./llm-router.tsx');
+          llmContent = await quickLLM(
+            systemPrompt,
+            `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}`,
+            { maxTokens: 8000, tag: 'news-agent' },
+          );
+        } catch (e: any) {
+          console.log(`[news-agent] фолбэк тоже упал для ${source.id}: ${e?.message || e}`);
+          return [];
+        }
+      } else {
+        const data: any = await resp.json();
+        llmContent = data.choices?.[0]?.message?.content;
       }
-      const data: any = await resp.json();
-      llmContent = data.choices?.[0]?.message?.content;
     }
 
     const rawContent = llmContent;
