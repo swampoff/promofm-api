@@ -625,10 +625,14 @@ SEO-ПРАВИЛА:
         console.log(`[news-agent] Gemini недоступен для ${source.id} (${geminiErr}) → фолбэк на llm-router`);
         try {
           const { quickLLM } = await import('./llm-router.tsx');
+          // Экономия: в фолбэк шлём урезанную страницу и просим меньше вывода.
+          // Полный текст (часто 50-150 КБ) сжигал платный лимит за один прогон,
+          // а новости лежат в начале страницы — хвост это меню и подвал.
+          const trimmed = pageText.slice(0, 12000);
           llmContent = await quickLLM(
             systemPrompt,
-            `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}`,
-            { maxTokens: 8000, tag: 'news-agent' },
+            `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${trimmed}`,
+            { maxTokens: 3000, tag: 'news-agent' },
           );
           console.log(`[news-agent] фолбэк отработал для ${source.id}: ${llmContent?.length || 0} символов`);
         } catch (e: any) {
@@ -666,8 +670,8 @@ SEO-ПРАВИЛА:
           const { quickLLM } = await import('./llm-router.tsx');
           llmContent = await quickLLM(
             systemPrompt,
-            `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText}`,
-            { maxTokens: 8000, tag: 'news-agent' },
+            `Источник: "${source.name}" (${source.url})\n\nТекст страницы:\n${pageText.slice(0, 12000)}`,
+            { maxTokens: 3000, tag: 'news-agent' },
           );
         } catch (e: any) {
           console.log(`[news-agent] фолбэк тоже упал для ${source.id}: ${e?.message || e}`);
