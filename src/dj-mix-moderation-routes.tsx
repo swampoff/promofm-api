@@ -25,7 +25,7 @@ import crypto from 'crypto';
 
 const app = new Hono();
 
-const MIX_PUBLICATION_PRICE = 7000; // зеркало tracks PUBLICATION_PRICE (7000, выровнено 2026-07-07)
+const MIX_PUBLICATION_PRICE = 10000; // зеркало tracks PUBLICATION_PRICE (10 000 ₽, поднято 2026-08-07)
 
 // GET /pending-dj-mixes — список миксов на модерации (admin)
 app.get('/pending-dj-mixes', requireAuth, requireAdmin, async (c) => {
