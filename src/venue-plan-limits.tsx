@@ -100,7 +100,7 @@ export const VENUE_PLAN_LIMITS: Record<VenuePlanId, VenuePlanLimits> = {
  *   subscriptionStatus       subscriptionPlan         → effective plan
  *   ----------------------   ---------------------    -------------------
  *   'trial' (any plan)                                → 'business'
- *   'expired'   / 'cancelled' / 'inactive'            → 'free'
+ *   'expired'/'cancelled'/'inactive'/'pending_card'    → 'free'
  *   'active'                  business/network/etc.   → that plan
  *   'active'                  start (default)         → 'start'
  *   undefined / unrecognised                          → 'free' (safe)
@@ -118,7 +118,11 @@ export function getEffectiveVenuePlan(profile: any): VenuePlanId {
   const status = String(profile.subscriptionStatus || 'active').toLowerCase();
   const plan = String(profile.subscriptionPlan || 'start').toLowerCase();
 
-  if (status === 'expired' || status === 'cancelled' || status === 'inactive') {
+  // 'pending_card' — заведение зарегистрировалось, но карту ещё не привязало.
+  // Доступа нет вовсе: пробные 2 недели начинаются с момента привязки
+  // (владелец 2026-08-07). Без явной ветки статус проваливался в
+  // «использовать заявленный план» и выдавал 'start' авансом.
+  if (status === 'expired' || status === 'cancelled' || status === 'inactive' || status === 'pending_card') {
     return 'free';
   }
 
