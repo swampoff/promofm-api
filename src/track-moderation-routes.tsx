@@ -434,11 +434,18 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
     // эфир без пометки, а AI-чарт (читает is_ai_generated) оставался пуст.
     // Теперь вердикт детектора равноправен с галочкой: помечаем, если
     // модератор отметил ИЛИ детектор уверен.
-    const detectorSaysAi =
+    // ⚠️ Метку ИИ ставит ТОЛЬКО человек (галочка модератора is_ai_track).
+    // 2026-08-07: попытка метить по вердикту детектора обернулась ложными
+    // обвинениями — 42 живых артиста получили ярлык «сгенерировано ИИ»
+    // (включая Paul McCartney и Zaz с баллом 75). Детектор ошибается, а цена
+    // ошибки — репутация артиста, поэтому его вердикт теперь ТОЛЬКО подсказка
+    // модератору (ai_flagged = «проверь»), а не основание для публичной метки.
+    const markAsAi = is_ai_track === true;
+    // Подозрение детектора: попадает в админку как сигнал к проверке, но
+    // на витрину не выводится и в AI-чарт не отправляет.
+    const detectorSuspects =
       track.ai_verdict === 'highly_likely_ai' ||
-      track.ai_verdict === 'likely_ai' ||
-      (typeof track.ai_score === 'number' && track.ai_score > 60);
-    const markAsAi = is_ai_track === true || detectorSaysAi;
+      (typeof track.ai_score === 'number' && track.ai_score >= 75);
 
     if (action === 'approve') {
       // Все треки публикуются за полную цену getPublicationPrice().
@@ -457,7 +464,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         is_hidden: true,
         is_ai_generated: markAsAi,
         ai_score: overall_score || track.ai_score || null,
-        ai_flagged: markAsAi,
+        ai_flagged: markAsAi || detectorSuspects,
         ai_category: markAsAi ? 'ai_music' : 'original',
         requires_payment: true,
         payment_amount: getPublicationPrice(),
@@ -781,18 +788,20 @@ app.post('/batchModeration', requireAuth, requireAdmin, async (c) => {
       if (action === 'approve') {
         // Пакетное одобрение раньше НЕ трогало ИИ-поля вовсе: трек уходил в
         // эфир без маркировки даже при уверенном вердикте детектора.
-        const batchIsAi =
+        // Метку ИИ автоматически НЕ ставим (см. комментарий выше): сохраняем
+        // только то, что уже было проставлено человеком.
+        const batchIsAi = false;
+        const batchSuspects =
           track.ai_verdict === 'highly_likely_ai' ||
-          track.ai_verdict === 'likely_ai' ||
-          (typeof track.ai_score === 'number' && track.ai_score > 60);
+          (typeof track.ai_score === 'number' && track.ai_score >= 75);
         // Все треки публикуются за полную цену. Native cols only.
         await typed.updateTrack(trackId, {
           moderation_status: 'approved',
           moderated_at: now,
           is_hidden: true,
-          is_ai_generated: batchIsAi || track.is_ai_generated === true,
-          ai_flagged: batchIsAi || track.ai_flagged === true,
-          ai_category: batchIsAi ? 'ai_music' : (track.ai_category || 'original'),
+          is_ai_generated: track.is_ai_generated === true,
+          ai_flagged: batchSuspects || track.ai_flagged === true,
+          ai_category: track.is_ai_generated === true ? 'ai_music' : (track.ai_category || 'original'),
           requires_payment: true,
           payment_amount: getPublicationPrice(),
           first_track_free_applied: false,
