@@ -424,6 +424,19 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
 
     const now = new Date().toISOString();
 
+    // Маркировка ИИ. Владелец 2026-08-07: «даже одобренные ИИ-треки должны
+    // маркироваться как ИИ-сгенерированные». Раньше is_ai_generated брался
+    // ТОЛЬКО из ручной галочки модератора (is_ai_track) — её не ставили, и
+    // 46 треков с вердиктом детектора highly_likely_ai/likely_ai уходили в
+    // эфир без пометки, а AI-чарт (читает is_ai_generated) оставался пуст.
+    // Теперь вердикт детектора равноправен с галочкой: помечаем, если
+    // модератор отметил ИЛИ детектор уверен.
+    const detectorSaysAi =
+      track.ai_verdict === 'highly_likely_ai' ||
+      track.ai_verdict === 'likely_ai' ||
+      (typeof track.ai_score === 'number' && track.ai_score > 60);
+    const markAsAi = is_ai_track === true || detectorSaysAi;
+
     if (action === 'approve') {
       // Все треки публикуются за полную цену PUBLICATION_PRICE.
       // Native cols — единственный источник правды (см. KV-mandate,
@@ -439,10 +452,10 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         moderation_comment: moderator_notes || 'Трек одобрен',
         moderated_at: now,
         is_hidden: true,
-        is_ai_generated: is_ai_track === true || false,
-        ai_score: overall_score || null,
-        ai_flagged: is_ai_track === true || (track.ai_score && track.ai_score > 60) || false,
-        ai_category: is_ai_track ? 'ai_music' : 'original',
+        is_ai_generated: markAsAi,
+        ai_score: overall_score || track.ai_score || null,
+        ai_flagged: markAsAi,
+        ai_category: markAsAi ? 'ai_music' : 'original',
         requires_payment: true,
         payment_amount: PUBLICATION_PRICE,
         first_track_free_applied: false,
@@ -763,11 +776,20 @@ app.post('/batchModeration', requireAuth, requireAdmin, async (c) => {
       }
 
       if (action === 'approve') {
+        // Пакетное одобрение раньше НЕ трогало ИИ-поля вовсе: трек уходил в
+        // эфир без маркировки даже при уверенном вердикте детектора.
+        const batchIsAi =
+          track.ai_verdict === 'highly_likely_ai' ||
+          track.ai_verdict === 'likely_ai' ||
+          (typeof track.ai_score === 'number' && track.ai_score > 60);
         // Все треки публикуются за полную цену. Native cols only.
         await typed.updateTrack(trackId, {
           moderation_status: 'approved',
           moderated_at: now,
           is_hidden: true,
+          is_ai_generated: batchIsAi || track.is_ai_generated === true,
+          ai_flagged: batchIsAi || track.ai_flagged === true,
+          ai_category: batchIsAi ? 'ai_music' : (track.ai_category || 'original'),
           requires_payment: true,
           payment_amount: PUBLICATION_PRICE,
           first_track_free_applied: false,
