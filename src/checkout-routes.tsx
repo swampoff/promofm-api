@@ -379,6 +379,16 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           updatedAt: new Date().toISOString(),
         });
         log.info({ venueUserId, until }, 'venue_trial_started_after_card');
+        import('./email-helper.tsx')
+          .then((m: any) => m.notifyAdminNewVenue?.({
+            venueName: prof.venueName || prof.name || '',
+            city: prof.city,
+            venueType: prof.venueType,
+            email: prof.email,
+            userId: venueUserId,
+            stage: 'card_attached',
+          }))
+          .catch((e: any) => log.warn({ err: e?.message }, 'venue_card_admin_notify_failed'));
       }
     } catch (e: any) {
       log.error({ err: e?.message, venueUserId }, 'venue_card_attach_trial_failed');

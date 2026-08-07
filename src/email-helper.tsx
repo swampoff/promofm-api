@@ -263,6 +263,43 @@ export async function notifyArtistRequest(data: { artistName: string; trackTitle
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Заявка: ${escapeHtml(data.artistName)} — ${escapeHtml(data.trackTitle)}`, html });
 }
 
+/**
+ * Новое заведение подключилось. Владелец 2026-08-07: «почему не приходят
+ * оповещения о том что подключаются заведения?» — раньше уведомление было
+ * заглушкой (console.info), письма не уходили вовсе.
+ */
+export async function notifyAdminNewVenue(data: {
+  venueName: string; city?: string; email?: string; venueType?: string;
+  userId: string; stage: 'registered' | 'card_attached';
+}) {
+  const isCard = data.stage === 'card_attached';
+  const title = isCard ? 'Заведение привязало карту — ждёт утверждения' : 'Новое заведение зарегистрировалось';
+  const color = isCard ? '#10B981' : '#7C3AED';
+  const html = emailWrapper(`
+    <h2 style="margin:0 0 16px;color:#fff;font-size:20px;">${title}</h2>
+    <table style="width:100%;border-collapse:collapse;color:#e0e0e0;font-size:15px;">
+      <tr><td style="padding:6px 0;color:#999;">Заведение:</td><td><strong style="color:#fff;">${escapeHtml(data.venueName || 'без названия')}</strong></td></tr>
+      ${data.city ? `<tr><td style="padding:6px 0;color:#999;">Город:</td><td>${escapeHtml(data.city)}</td></tr>` : ''}
+      ${data.venueType ? `<tr><td style="padding:6px 0;color:#999;">Тип:</td><td>${escapeHtml(data.venueType)}</td></tr>` : ''}
+      ${data.email ? `<tr><td style="padding:6px 0;color:#999;">Контакт:</td><td>${escapeHtml(data.email)}</td></tr>` : ''}
+      <tr><td style="padding:6px 0;color:#999;">ID:</td><td style="font-size:12px;color:#888;">${escapeHtml(data.userId)}</td></tr>
+    </table>
+    <p style="margin:18px 0 8px;color:#cfcfe0;">
+      ${isCard
+        ? 'Карта привязана, проверочный рубль возвращён. Заведение ждёт утверждения администратором, чтобы получить эфир.'
+        : 'Заведение создало профиль. Эфир не выдан: сначала привязка карты, затем утверждение.'}
+    </p>
+    <p style="text-align:center;margin:24px 0 8px;">
+      <a href="${SITE_URL}/ctrl-pm7k2f" style="display:inline-block;padding:13px 30px;background:linear-gradient(135deg,#FF577F 0%,#7C3AED 100%);color:#fff;text-decoration:none;border-radius:8px;font-weight:700;">Открыть админку</a>
+    </p>
+  `);
+  await sendEmail({
+    to: ADMIN_EMAIL,
+    subject: `[ПРОМО] ${isCard ? 'Ждёт утверждения' : 'Новое заведение'}: ${escapeHtml(data.venueName || 'без названия')}`,
+    html,
+  });
+}
+
 export async function notifyVenueRequest(data: { venueName: string; venueCity?: string; packageType?: string; totalPrice?: number; stationName?: string; stationId: string; }) {
   const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: #7C3AED;">Заявка заведения</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Заведение:</td><td>${escapeHtml(data.venueName)}</td></tr>${data.venueCity ? `<tr><td style="padding: 8px;">Город:</td><td>${escapeHtml(data.venueCity)}</td></tr>` : ''}${data.totalPrice ? `<tr><td style="padding: 8px;">Сумма:</td><td>${escapeHtml(String(data.totalPrice))}</td></tr>` : ''}<tr><td style="padding: 8px;">Станция:</td><td>${escapeHtml(data.stationName || data.stationId)}</td></tr></table></div>`;
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Заведение: ${escapeHtml(data.venueName)}`, html });

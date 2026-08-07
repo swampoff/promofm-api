@@ -105,6 +105,18 @@ app.get('/profile', requireAuth, async (c) => {
         updatedAt: new Date().toISOString(),
       };
       await upsertVenueProfile(userId, defaultProfile);
+      // Уведомляем админа: раньше о новых заведениях никто не узнавал
+      // (владелец 2026-08-07). Не блокируем ответ клиенту.
+      import('./email-helper.tsx')
+        .then((m: any) => m.notifyAdminNewVenue?.({
+          venueName: defaultProfile.venueName || defaultProfile.name || '',
+          city: defaultProfile.city,
+          venueType: defaultProfile.venueType,
+          email: defaultProfile.email,
+          userId,
+          stage: 'registered',
+        }))
+        .catch((e: any) => console.error('[venue] admin notify failed:', e?.message || e));
       return c.json({
         ...defaultProfile,
         effectivePlan: getEffectiveVenuePlan(defaultProfile),

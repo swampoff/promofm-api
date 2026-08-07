@@ -752,11 +752,24 @@ app.post('/pair', async (c) => {
 // or the in-app inbox in a follow-up.
 // ──────────────────────────────────────────────────────────────────
 async function notifyAdminNewRequest(profile: any, requestRow: any) {
+  // Была заглушка: писала в консоль, письма не уходили — админ не видел заявок
+  // (владелец 2026-08-07). Теперь реальное письмо на info@.
   console.info('[venue-station] new request', {
     venueId: profile.id,
     venueName: profile.venueName || profile.name,
     requestId: requestRow.id,
   });
+  try {
+    const { notifyVenueRequest } = await import('./email-helper.tsx');
+    await notifyVenueRequest({
+      venueName: profile.venueName || profile.name || 'заведение',
+      venueCity: profile.city,
+      stationId: String(requestRow.id),
+      stationName: requestRow.station_name || requestRow.stationName,
+    });
+  } catch (e: any) {
+    console.error('[venue-station] admin email failed:', e?.message || e);
+  }
 }
 
 export default app;
