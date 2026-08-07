@@ -187,6 +187,57 @@ app.post('/subscribe', requireAuth, async (c) => {
 // ──────────────────────────────────────────────────────────────────
 // POST /cancel — flip status to 'cancelled' (stream runs to period end)
 // ──────────────────────────────────────────────────────────────────
+/**
+ * POST /attach-card — привязка карты для старта бесплатных 2 недель.
+ *
+ * Владелец 2026-08-07: «заведение обязано привязывать карту». Раньше триал
+ * выдавался просто статусом, карты не было, и крон trial_auto_charge не мог
+ * ничего списать по окончании.
+ *
+ * Механика: проверочный платёж 1 ₽ с savePaymentMethod. После успеха вебхук
+ * сохраняет payment_method_id, включает триал на 14 дней и ВОЗВРАЩАЕТ рубль.
+ */
+app.post('/attach-card', requireAuth, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const profile = await loadVenueProfile(userId);
+    if (!profile) {
+      return c.json({ success: false, error: 'Профиль заведения не найден' }, 404);
+    }
+
+    const { getGateway } = await import('./payment-gateway.tsx');
+    const gateway = getGateway('yookassa');
+    const orderId = crypto.randomUUID();
+
+    const result = await gateway.createPayment({
+      orderId,
+      amount: 1,
+      currency: 'RUB',
+      description: `Привязка карты для пробного периода — ${profile.venueName || 'заведение'} (1 ₽ вернётся автоматически)`,
+      returnUrl: 'https://promo-music.ru/venue/subscription?card=attached',
+      userId,
+      gateway: 'yookassa',
+      type: 'venue_subscription',
+      savePaymentMethod: true,
+      metadata: {
+        type: 'venue_card_attach',
+        userId,
+        venueId: String(profile.id || ''),
+      },
+    });
+
+    return c.json({
+      success: true,
+      confirmationUrl: result.confirmationUrl,
+      orderId,
+      note: 'Списываем 1 ₽ для проверки карты и сразу возвращаем. Пробный период включится после подтверждения.',
+    });
+  } catch (error: any) {
+    console.error('[venue-billing] attach-card failed:', error?.message || error);
+    return c.json({ success: false, error: 'Не удалось начать привязку карты' }, 500);
+  }
+});
+
 app.post('/cancel', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);

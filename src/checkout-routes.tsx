@@ -361,6 +361,44 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // Идемпотентность — orderId-keyed (COALESCE(payment_order_id,'') <> $1):
   // retry с тем же orderId апдейтит 0 строк, реальное продление (новый
   // orderId) продлевает от max(текущий конец, сейчас).
+  // Привязка карты заведением (1 ₽): включаем пробные 2 недели и возвращаем рубль.
+  // Карта уже сохранена общим блоком savePaymentMethod выше.
+  if (session.metadata?.type === 'venue_card_attach') {
+    const venueUserId = String(session.metadata.userId || session.userId || '');
+    try {
+      const { getVenueProfile, upsertVenueProfile } = await import('./db.tsx');
+      const prof: any = await getVenueProfile(venueUserId);
+      if (prof && prof.subscriptionStatus !== 'active') {
+        const until = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+        await upsertVenueProfile(venueUserId, {
+          ...prof,
+          subscriptionStatus: 'trial',
+          trial_expires_at: until,
+          subscriptionExpiresAt: until,
+          cardAttachedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+        log.info({ venueUserId, until }, 'venue_trial_started_after_card');
+      }
+    } catch (e: any) {
+      log.error({ err: e?.message, venueUserId }, 'venue_card_attach_trial_failed');
+    }
+    // Возврат проверочного рубля — не блокируем ответ вебхука.
+    try {
+      const { getGateway } = await import('./payment-gateway.tsx');
+      const gw: any = getGateway('yookassa');
+      if (typeof gw.refund === 'function' && webhook.sessionId) {
+        gw.refund(webhook.sessionId, 1, {
+          description: 'Возврат проверочного платежа за привязку карты',
+          idempotenceKey: `refund-attach-${session.orderId}`,
+        }).then(() => log.info({ orderId: session.orderId }, 'venue_card_attach_refunded'))
+          .catch((e: any) => log.warn({ err: e?.message }, 'venue_card_attach_refund_failed'));
+      }
+    } catch (e: any) {
+      log.warn({ err: e?.message }, 'venue_card_attach_refund_skipped');
+    }
+  }
+
   if (
     session.type === 'subscription' &&
     session.metadata?.type === 'venue_radio_subscription' &&
