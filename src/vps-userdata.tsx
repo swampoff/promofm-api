@@ -135,7 +135,28 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
     if (artistName) {
       const genre = (data.genre as string) || (Array.isArray(data.genres) && data.genres.length > 0 ? (data.genres as string[])[0] : null);
       const subGenres = Array.isArray(data.genres) ? (data.genres as string[]) : (data.genre ? [data.genre as string] : []);
-      const slug = artistName.toLowerCase().replace(/[^a-zа-яё0-9]+/gi, '-').replace(/^-|-$/g, '');
+      // Уникальный slug. Инцидент 2026-08-07: slug строился только из имени,
+      // и при совпадении (два «Александра», два «Дмитрия») INSERT падал на
+      // artist_profiles_slug_key → вся регистрация откатывалась. За 30 дней
+      // так потеряли 23 попытки регистрации живых людей. Теперь при занятом
+      // slug добавляем суффикс: александр, александр-2, александр-3…
+      const baseSlug = artistName.toLowerCase().replace(/[^a-zа-яё0-9]+/gi, '-').replace(/^-|-$/g, '') || 'artist';
+      let slug = baseSlug;
+      try {
+        for (let attempt = 0; attempt < 12; attempt++) {
+          const taken = await rlsQuery(
+            `SELECT 1 FROM artist_profiles WHERE slug = $1 AND user_id <> $2 LIMIT 1`,
+            [slug, userId],
+          );
+          if (!taken?.rows?.length) break;
+          slug = `${baseSlug}-${attempt + 2}`;
+        }
+      } catch (e: any) {
+        // Проверка не удалась — не роняем регистрацию, берём заведомо
+        // свободный slug с хвостом из userId.
+        console.warn('[vps-userdata] slug uniqueness check failed:', e?.message || e);
+        slug = `${baseSlug}-${String(userId).slice(0, 8)}`;
+      }
       const socials = data.socials || data.socialLinks || {};
       const streamingLinks: Record<string, string> = {};
       if (typeof socials === 'object' && socials !== null) {
