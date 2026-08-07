@@ -1,0 +1,20 @@
+# Тяжёлое и генерируемое: в репозиторий не идёт
+venv/
+node_modules/
+__pycache__/
+*.pyc
+*.bak
+*.bak.*
+.env
+# рантайм-данные сервисов
+queue/
+dj-queue/
+*.log
+play_history.json
+metadata.json
+shuffle_queue.json
+advisor_state.json
+used-items.json
+discovery-cache.json
+posted_events.json
+history.json

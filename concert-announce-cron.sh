@@ -10,7 +10,7 @@ INTERNAL_KEY="${VPS_INTERNAL_KEY:?VPS_INTERNAL_KEY required — set in /opt/prom
 API="http://localhost:3000/server/api/broadcast/concerts"
 
 # Массив ведущих для ротации
-AUTHORS=("DJ Den" "Сандра" "Лиана" "Макс" "Стелла")
+AUTHORS=("Сандра" "Лиана" "Макс" "Стелла" "Марк")
 AUTHOR_IDX=$(( $(date +%j) % ${#AUTHORS[@]} ))
 AUTHOR="${AUTHORS[$AUTHOR_IDX]}"
 
