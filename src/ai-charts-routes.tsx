@@ -278,7 +278,7 @@ app.post('/manual-update', requireAdminOrKey, async (c) => {
 });
 
 // Compose PROMO.AI chart from all sources (weighted by plays + likes).
-async function rebuildCompositeChart() {
+export async function rebuildCompositeChart() {
   // Refresh internal source first (pulls fresh data from tracks)
   try { await refreshInternalAiSource(); } catch (e) { console.warn('[ai-charts] internal refresh failed:', e); }
   const allEntries: any[] = [];

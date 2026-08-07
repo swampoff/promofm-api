@@ -477,6 +477,16 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
 
       console.log(`[moderation] Track ${pendingTrackId} approved. Awaiting payment ${getPublicationPrice()} RUB.` + aiWarning);
 
+      // Отмечен как ИИ — сразу отправляем в чарт ИИ-музыки, не дожидаясь крона.
+      // Владелец 2026-08-07: «маркируется ии и идёт в чарт ии, не только новинки
+      // недели». В «Новинки недели» трек попадает своим обычным путём.
+      if (markAsAi) {
+        import('./ai-charts-routes.tsx')
+          .then((m: any) => m.rebuildCompositeChart?.())
+          .then(() => console.log(`[moderation] AI-чарт пересобран после одобрения ${pendingTrackId}`))
+          .catch((e: any) => console.warn('[moderation] пересборка AI-чарта не удалась:', e?.message || e));
+      }
+
       // Audit B-8: forensic trail кто одобрил.
       logAdminAction(c, {
         action: 'track_moderation_approve',
