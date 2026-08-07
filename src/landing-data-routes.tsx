@@ -329,6 +329,7 @@ landing.get('/new-releases', async (c) => {
            t.id, t.title, t.artist_name, t.genre, t.duration,
            t.audio_url, t.cover_url, t.likes_count, t.plays_count, t.created_at,
            t.yandex_music_url, t.spotify_url, t.apple_music_url, t.youtube_url, t.vk_music_url,
+           t.is_ai_generated, t.ai_tool,
            COALESCE(ap2.slug, ap.slug) AS artist_slug,
            COALESCE(ap2.is_verified, ap.is_verified) AS is_verified
          FROM tracks t
@@ -377,6 +378,10 @@ landing.get('/new-releases', async (c) => {
       playsCount: t.plays_count || 0,
       stationsCount: pickupsMap[t.id]?.stationsCount || 0,
       broadcastCitiesCount: pickupsMap[t.id]?.broadcastCitiesCount || 0,
+      // Маркировка ИИ (владелец 2026-08-07): одобренные ИИ-треки обязаны быть
+      // помечены и на витрине, а не только в админке.
+      isAiGenerated: t.is_ai_generated === true,
+      aiTool: t.ai_tool || null,
       stations: pickupsMap[t.id]?.stations || [],
       // Streaming-сервисы (migration 095) — null если артист не заполнил.
       // Player на лендинге рендерит кнопку только для непустых.
