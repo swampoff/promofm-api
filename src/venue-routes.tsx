@@ -94,7 +94,12 @@ app.get('/profile', requireAuth, async (c) => {
         workingHours: null,
         status: 'active',
         verified: false,
-        subscriptionStatus: 'trial',
+        // Пробные 2 недели включаются ТОЛЬКО после привязки карты
+        // (POST /venue-billing/attach-card → вебхук ставит 'trial').
+        // Владелец 2026-08-07: «заведение обязано привязывать карту».
+        // 'pending_card' не распознаётся getEffectiveVenuePlan → план 'free',
+        // эфир не выдаётся авансом. Действующие 'trial' не трогаем.
+        subscriptionStatus: 'pending_card',
         subscriptionPlan: 'start',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -137,7 +142,12 @@ app.put('/profile', requireAuth, async (c) => {
       profile = applyInitialTrial({
         id: `venue-${userId}`,
         userId,
-        subscriptionStatus: 'trial',
+        // Пробные 2 недели включаются ТОЛЬКО после привязки карты
+        // (POST /venue-billing/attach-card → вебхук ставит 'trial').
+        // Владелец 2026-08-07: «заведение обязано привязывать карту».
+        // 'pending_card' не распознаётся getEffectiveVenuePlan → план 'free',
+        // эфир не выдаётся авансом. Действующие 'trial' не трогаем.
+        subscriptionStatus: 'pending_card',
         subscriptionPlan: 'start',
         createdAt: new Date().toISOString(),
       });
