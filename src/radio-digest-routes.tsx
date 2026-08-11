@@ -20,6 +20,7 @@
  */
 
 import { Hono } from 'hono';
+import { existsSync } from 'node:fs';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { sendEmail, escapeHtml } from './email-helper.tsx';
@@ -30,6 +31,10 @@ const radioDigest = new Hono();
 const DIGEST_RECIPIENT = 'info@promofm.ru';
 const PER_RUN = 2;                       // сколько треков уходит за один запуск (= в день)
 const SITE_URL = 'https://promo-music.ru';
+
+// Баннер шапки дайджеста. Лежит рядом с остальными баннерами сайта.
+const DIGEST_BANNER_FILE = 'novinki-nedeli.jpg';
+const DIGEST_BANNER_PATH = `/var/www/promofm/html/banners/${DIGEST_BANNER_FILE}`;
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 const DIGEST_LOCK = 720107;              // ключ advisory-lock, уникальный для daily info@-крона
 const WEEKLY_LOCK = 720108;              // ОТДЕЛЬНЫЙ ключ для понедельничного weekly-крона
@@ -252,13 +257,27 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
   // вводить логин и пароль. Слушать и смотреть подборку можно без входа,
   // вход нужен только для скачивания (учёт выдач по станциям).
   const releasesUrl = `${SITE_URL}/novinki-nedeli`;
+
+  // Шапка-баннер. Жалоба владельца 2026-08-11: в письме станциям сверху висел
+  // значок «?» — файл /banners/novinki-nedeli.jpg отдавал 404, его на сервере
+  // не было никогда. Битая картинка в шапке письма хуже её отсутствия, поэтому
+  // вставляем строку с баннером ТОЛЬКО если файл реально лежит на диске.
+  // Ниже идёт градиентный заголовок, он рисуется стилями и виден всегда.
+  let bannerRow = '';
+  try {
+    if (existsSync(DIGEST_BANNER_PATH)) {
+      bannerRow = `<tr>
+      <td style="padding:0;"><a href="${releasesUrl}" style="text-decoration:none;"><img src="${SITE_URL}/banners/${DIGEST_BANNER_FILE}" alt="Новинки недели promo.music" style="width:100%;height:auto;display:block;border:0;" /></a></td>
+    </tr>`;
+    } else {
+      console.warn(`[radio-digest] баннер отсутствует: ${DIGEST_BANNER_PATH} — письмо уйдёт без шапки`);
+    }
+  } catch { /* без баннера письмо остаётся корректным */ }
   // {{name}} подставляет smtpSendBatch на каждого получателя (имя станции).
   return `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0a0a1a;padding:32px 16px;">
   <table align="center" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;margin:0 auto;background:#14142a;border-radius:18px;overflow:hidden;">
-    <tr>
-      <td style="padding:0;"><a href="${releasesUrl}" style="text-decoration:none;"><img src="${SITE_URL}/banners/novinki-nedeli.jpg" alt="Новинки недели promo.music — скачать" style="width:100%;height:auto;display:block;border:0;" /></a></td>
-    </tr>
+    ${bannerRow}
     <tr>
       <td style="padding:30px 40px 26px;background:linear-gradient(135deg,#FF577F 0%,#7C3AED 100%);">
         <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
