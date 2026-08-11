@@ -309,6 +309,36 @@ tracksRoutes.delete('/:id', requireAuth, profileLimiter, async (c) => {
 // Track must be in 'upcoming' or 'published' state (publicly live).
 // Other states (paid waiting admin gate, rejected, draft) are not
 // downloadable even by verified accounts.
+/**
+ * Человеческий ответ на отказ в скачивании. Инцидент 2026-08-11: владелец
+ * нажал «Скачать» в письме и получил голый JSON, да ещё в битой кодировке.
+ * Из письма кликают браузером, поэтому при Accept: text/html отдаём страницу
+ * с объяснением и ссылками, а не машинный ответ.
+ */
+function downloadDeniedPage(c: any, opts: { title: string; message: string; showLogin?: boolean }) {
+  const wantsHtml = String(c.req.header('accept') || '').includes('text/html');
+  if (!wantsHtml) return null;
+  const html = `<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${opts.title} — ПРОМО.МУЗЫКА</title>
+<style>
+ body{margin:0;background:#0a0a1a;color:#e6e6f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+      display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+ .card{max-width:520px;background:#14142a;border:1px solid rgba(255,255,255,.1);border-radius:18px;padding:32px;text-align:center}
+ h1{font-size:22px;margin:0 0 12px;color:#fff}
+ p{font-size:15px;line-height:1.6;color:#c8c8d8;margin:0 0 20px}
+ a.btn{display:inline-block;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px;margin:6px}
+ .primary{background:linear-gradient(135deg,#FF577F,#7C3AED);color:#fff}
+ .ghost{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#e6e6f0}
+</style></head><body><div class="card">
+ <h1>${opts.title}</h1>
+ <p>${opts.message}</p>
+ ${opts.showLogin ? `<a class="btn primary" href="https://promo-music.ru/login">Войти в кабинет</a>` : ''}
+ <a class="btn ghost" href="https://promo-music.ru/novinki-nedeli">Слушать новинки</a>
+</div></body></html>`;
+  return c.html(html, 403);
+}
+
 tracksRoutes.get('/:id/download', requireAuth, async (c) => {
   try {
     const trackId = c.req.param('id');
@@ -319,6 +349,12 @@ tracksRoutes.get('/:id/download', requireAuth, async (c) => {
     const role: string = c.get('userRole') || '';
 
     if (role !== 'radio_station' && role !== 'venue') {
+      const page = downloadDeniedPage(c, {
+        title: 'Скачивание доступно радиостанциям и заведениям',
+        message: 'Файлы забирают партнёры платформы: радиостанции и заведения с подтверждённым аккаунтом. Слушать подборку может кто угодно и без входа.',
+        showLogin: true,
+      });
+      if (page) return page;
       return c.json({
         success: false,
         error: 'Скачивать треки могут только радиостанции и заведения',
@@ -342,6 +378,11 @@ tracksRoutes.get('/:id/download', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Профиль не найден' }, 404);
     }
     if (!profile.is_verified) {
+      const page = downloadDeniedPage(c, {
+        title: 'Аккаунт ещё не подтверждён',
+        message: 'Администратор проверяет заявку вашей станции. Как только аккаунт подтвердят, скачивание откроется. Обычно это занимает несколько часов.',
+      });
+      if (page) return page;
       return c.json({
         success: false,
         error: 'Аккаунт не верифицирован администратором. Скачивание недоступно.',

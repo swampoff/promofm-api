@@ -187,6 +187,18 @@ app.use('*', honoLogger());
 app.use('*', rlsMiddleware());
 
 // CORS
+// Кодировка в JSON-ответах. Инцидент 2026-08-11: владелец нажал «Скачать» в
+// письме и увидел «Р РЋР С"Р В°Р РЋ...» — Hono отдавал application/json без
+// charset, и браузер читал UTF-8 как Windows-1251. Русские тексты ошибок
+// превращались в мусор. Проставляем charset для всех JSON-ответов.
+app.use('/*', async (c, next) => {
+  await next();
+  const ct = c.res.headers.get('content-type');
+  if (ct && ct.startsWith('application/json') && !/charset/i.test(ct)) {
+    c.res.headers.set('content-type', 'application/json; charset=utf-8');
+  }
+});
+
 app.use('/*', cors({
   origin: ['https://promo-music.ru', 'https://www.promo-music.ru', 'https://admin.promo-music.ru', 'https://promofm.org', 'https://www.promofm.org'],
   // Audit B-6 (2026-05-31): X-Internal-Key убран из allowHeaders. Cron
