@@ -372,7 +372,13 @@ tracksRoutes.get('/:id/download', htmlDenialFallback, requireAuth, async (c) => 
     // @ts-ignore — same as above.
     const role: string = c.get('userRole') || '';
 
-    if (role !== 'radio_station' && role !== 'venue') {
+    // Владелец 2026-08-11: админам скачивание открыто, чтобы проверять файлы
+    // по ссылке из письма без учётки радио. Их выдачи НЕ пишутся в
+    // track_downloads_by_* — статистика эфиров и выдач должна оставаться
+    // данными партнёров (см. инцидент с недостоверными ротациями 2026-08-03).
+    const isAdmin = role === 'admin';
+
+    if (!isAdmin && role !== 'radio_station' && role !== 'venue') {
       const page = downloadDeniedPage(c, {
         title: 'Скачивание доступно радиостанциям и заведениям',
         message: 'Файлы забирают партнёры платформы: радиостанции и заведения с подтверждённым аккаунтом. Слушать подборку может кто угодно и без входа.',
@@ -385,7 +391,9 @@ tracksRoutes.get('/:id/download', htmlDenialFallback, requireAuth, async (c) => 
       }, 403);
     }
 
-    // Profile + is_verified check.
+    // Profile + is_verified check (у админа профиля партнёра нет).
+    let profile: any = {};
+    if (!isAdmin) {
     const profileTable = role === 'radio_station' ? 'radio_profiles' : 'venue_profiles';
     const profileRes = await pool.query(
       `SELECT is_verified,
@@ -397,7 +405,7 @@ tracksRoutes.get('/:id/download', htmlDenialFallback, requireAuth, async (c) => 
         LIMIT 1`,
       [userId]
     );
-    const profile = profileRes.rows[0];
+    profile = profileRes.rows[0];
     if (!profile) {
       return c.json({ success: false, error: 'Профиль не найден' }, 404);
     }
@@ -411,6 +419,7 @@ tracksRoutes.get('/:id/download', htmlDenialFallback, requireAuth, async (c) => 
         success: false,
         error: 'Аккаунт не верифицирован администратором. Скачивание недоступно.',
       }, 403);
+    }
     }
 
     // Track lookup + state check.
@@ -437,7 +446,9 @@ tracksRoutes.get('/:id/download', htmlDenialFallback, requireAuth, async (c) => 
     const ipAddr = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '';
     const userAgent = c.req.header('user-agent') || '';
 
-    if (role === 'radio_station') {
+    if (isAdmin) {
+      console.log(`[tracks/download] ADMIN userId=${userId} trackId=${trackId} — в статистику выдач не пишем`);
+    } else if (role === 'radio_station') {
       await pool.query(
         `INSERT INTO track_downloads_by_radio
            (user_id, station_name, track_id, city, weekly_release_id, ip_addr, user_agent)
