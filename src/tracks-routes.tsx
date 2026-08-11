@@ -350,7 +350,7 @@ tracksRoutes.get('/:id/download', requireAuth, async (c) => {
 
     // Track lookup + state check.
     const trackRes = await pool.query(
-      `SELECT id, title, audio_url, moderation_status
+      `SELECT id, title, artist_name, audio_url, moderation_status
          FROM tracks
         WHERE id = $1`,
       [trackId]
@@ -393,6 +393,45 @@ tracksRoutes.get('/:id/download', requireAuth, async (c) => {
       `city=${profile.city || '?'} -> ${track.audio_url}`
     );
 
+    // Отдаём файл сами, а не редиректом на audio_url. Жалоба радиостанции
+    // 2026-08-11: «скачивается без названия трека» — на диске имена
+    // технические, кириллица при загрузке терялась
+    // («_________________97100179.wav»). Теперь имя человеческое:
+    // «Артист - Название.mp3» (ASCII-версия + RFC 5987 для кириллицы).
+    try {
+      const rel = String(track.audio_url).replace(/^https?:\/\/[^/]+/, '');
+      const decoded = decodeURIComponent(rel);
+      const diskName = decoded.split('/').pop() || '';
+      const ext = (decoded.match(/\.([a-z0-9]{2,5})$/i)?.[1] || 'mp3').toLowerCase();
+      const { existsSync, statSync, createReadStream } = await import('node:fs');
+      const { join, resolve } = await import('node:path');
+      const uploadsRoot = process.env.UPLOADS_DIR || '/var/www/promofm/uploads';
+      const subdir = decoded.includes('/track-audio/') ? 'track-audio' : 'tracks';
+
+      let filePath = '';
+      for (const base of [
+        join(uploadsRoot, subdir, 'uploads'),
+        join(uploadsRoot, subdir),
+        '/opt/promofm-api/uploads/tracks',
+      ]) {
+        const candidate = resolve(base, diskName);
+        if (candidate.startsWith(resolve(base)) && existsSync(candidate)) { filePath = candidate; break; }
+      }
+
+      if (filePath) {
+        const clean = (x: string) => String(x || '').replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim();
+        const nice = `${clean(track.artist_name) || 'Artist'} - ${clean(track.title) || 'Track'}.${ext}`;
+        const ascii = nice.replace(/[^\x20-\x7E]/g, '_');
+        c.header('Content-Type', ext === 'wav' ? 'audio/wav' : 'audio/mpeg');
+        c.header('Content-Length', String(statSync(filePath).size));
+        c.header('Content-Disposition',
+          `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(nice)}`);
+        return c.body(createReadStream(filePath) as any);
+      }
+    } catch (e: any) {
+      console.warn('[tracks/download] stream failed, fallback to redirect:', e?.message || e);
+    }
+    // Файл не найден на диске — старое поведение как запасной путь.
     return c.redirect(track.audio_url, 302);
   } catch (error) {
     console.error('[tracks/download] error:', error);
@@ -421,67 +460,6 @@ async function requireAdminOrKeyTracks(c: any, next: any) {
   const { requireAdmin } = await import('./auth-middleware.tsx');
   return requireAuth(c, async () => { await requireAdmin(c, next); });
 }
-
-/**
- * GET /:trackId/download — скачивание трека с человекочитаемым именем.
- *
- * Жалоба радиостанции (2026-08-11): «нажимаешь слушать, трек скачивается,
- * причём без названия». В письме-дайджесте кнопка вела прямо на mp3, браузер
- * его качал, а имя файла на диске техническое (кириллица при загрузке
- * терялась: «_________________97100179.wav»). Теперь отдаём файл с
- * Content-Disposition и именем «Артист - Название.mp3».
- *
- * Публичный: радиостанции получают ссылку письмом и не должны логиниться.
- */
-tracksRoutes.get('/:trackId/download', async (c) => {
-  try {
-    const trackId = c.req.param('trackId');
-    if (!/^[0-9a-f-]{36}$/i.test(trackId)) return c.text('Bad id', 400);
-
-    const { rows } = await pool.query(
-      `SELECT title, artist_name, audio_url FROM tracks
-        WHERE id = $1 AND moderation_status IN ('published','approved') AND audio_url <> ''
-        LIMIT 1`,
-      [trackId],
-    );
-    if (!rows.length) return c.text('Not found', 404);
-    const t = rows[0];
-
-    const rel = String(t.audio_url).replace(/^https?:\/\/[^/]+/, '');
-    const decoded = decodeURIComponent(rel);
-    const ext = (decoded.match(/\.([a-z0-9]{2,5})$/i)?.[1] || 'mp3').toLowerCase();
-
-    const diskName = decoded.split('/').pop() || '';
-    const uploadsRoot = process.env.UPLOADS_DIR || '/var/www/promofm/uploads';
-    const subdir = decoded.includes('/track-audio/') ? 'track-audio' : 'tracks';
-    const { existsSync, statSync, createReadStream } = await import('node:fs');
-    const { join, resolve } = await import('node:path');
-
-    let filePath = '';
-    for (const base of [join(uploadsRoot, subdir, 'uploads'), join(uploadsRoot, subdir), '/opt/promofm-api/uploads/tracks']) {
-      const candidate = resolve(base, diskName);
-      if (candidate.startsWith(resolve(base)) && existsSync(candidate)) { filePath = candidate; break; }
-    }
-    if (!filePath) return c.text('File missing', 404);
-
-    // Человекочитаемое имя: «Артист - Название.mp3». ASCII-версия для старых
-    // клиентов + RFC 5987 filename* для кириллицы.
-    const clean = (x: string) => String(x || '').replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim();
-    const nice = `${clean(t.artist_name) || 'Artist'} - ${clean(t.title) || 'Track'}.${ext}`;
-    const ascii = nice.replace(/[^\x20-\x7E]/g, '_');
-
-    const size = statSync(filePath).size;
-    c.header('Content-Type', ext === 'wav' ? 'audio/wav' : 'audio/mpeg');
-    c.header('Content-Length', String(size));
-    c.header('Content-Disposition',
-      `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(nice)}`);
-    c.header('Cache-Control', 'public, max-age=3600');
-    return c.body(createReadStream(filePath) as any);
-  } catch (e: any) {
-    console.error('[tracks/download] failed:', e?.message || e);
-    return c.text('Server error', 500);
-  }
-});
 
 tracksRoutes.post('/genre-backfill', requireAdminOrKeyTracks, async (c) => {
   const lockClient = await pool.connect();
