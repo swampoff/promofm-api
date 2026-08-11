@@ -59,7 +59,7 @@ function digestHtml(tracks: DigestTrack[]): string {
       <p style="margin:0 0 16px;">
         <b>${i + 1}) ${escapeHtml(t.artist_name || 'Unknown Artist')} — ${escapeHtml(t.title || 'Без названия')}</b><br>
         ${t.genre ? `Жанр: ${escapeHtml(String(t.genre))}<br>` : ''}
-        ${listen ? `Слушать/скачать: <a href="${escapeHtml(listen)}">${escapeHtml(listen)}</a>` : ''}
+        Слушать: <a href="${SITE_URL}/novinki-nedeli">${SITE_URL}/novinki-nedeli</a>
       </p>`;
   }).join('');
   return `
@@ -179,7 +179,12 @@ function absUrl(path: string | null): string {
 
 function weeklyTrackCard(t: WeeklyTrack, i: number): string {
   const cover = absUrl(t.cover_url);
-  const listen = t.audio_url ? absUrl(t.audio_url) : `${SITE_URL}/radio/weekly-releases`;
+  // Жалоба радиостанции 2026-08-11: «нажимаешь слушать, трек скачивается».
+  // Ссылка вела прямо на mp3, браузер его качал. Теперь «Слушать» ведёт на
+  // публичную страницу новинок с плеером (логин не нужен), а скачивание
+  // вынесено отдельной кнопкой на защищённый эндпоинт с учётом выдач.
+  const listen = `${SITE_URL}/novinki-nedeli`;
+  const download = `${SITE_URL}/server/api/tracks/${t.id}/download`;
   const coverCell = cover
     ? `<img src="${escapeHtml(cover)}" width="64" height="64" alt="" style="border-radius:10px;display:block;" />`
     : `<div style="width:64px;height:64px;border-radius:10px;background:${COVER_GRADIENTS[i % COVER_GRADIENTS.length]};text-align:center;line-height:64px;color:#fff;font-size:24px;font-weight:700;">&#9834;</div>`;
@@ -196,7 +201,8 @@ function weeklyTrackCard(t: WeeklyTrack, i: number): string {
               ${genreChip}
             </td>
             <td width="104" align="right" style="padding:14px;vertical-align:middle;">
-              <a href="${escapeHtml(listen)}" style="display:inline-block;padding:9px 18px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#fff;text-decoration:none;border-radius:8px;font-size:13px;font-weight:600;">&#9654; Слушать</a>
+              <a href="${escapeHtml(listen)}" style="display:inline-block;padding:9px 16px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#fff;text-decoration:none;border-radius:8px;font-size:13px;font-weight:600;">&#9654; Слушать</a>
+              <a href="${escapeHtml(download)}" style="display:inline-block;margin-top:6px;padding:9px 16px;background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.35);color:#6EE7B7;text-decoration:none;border-radius:8px;font-size:13px;font-weight:600;">&#8681; Скачать</a>
             </td>
           </tr>
         </table>`;
@@ -242,7 +248,10 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
     </td></tr>
     <tr><td style="padding:8px 28px 4px;">${videos.map((v, i) => weeklyVideoCard(v, i)).join('')}</td></tr>`
     : '';
-  const releasesUrl = `${SITE_URL}/radio/weekly-releases`;
+  // Публичная страница: станции жаловались, что из письма приходится заново
+  // вводить логин и пароль. Слушать и смотреть подборку можно без входа,
+  // вход нужен только для скачивания (учёт выдач по станциям).
+  const releasesUrl = `${SITE_URL}/novinki-nedeli`;
   // {{name}} подставляет smtpSendBatch на каждого получателя (имя станции).
   return `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0a0a1a;padding:32px 16px;">
@@ -270,7 +279,7 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
     <tr><td align="center" style="padding:18px 40px 8px;">
       <a href="${releasesUrl}" style="display:inline-block;padding:15px 38px;background:linear-gradient(135deg,#FF577F 0%,#7C3AED 100%);color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:16px;">Открыть все новинки недели</a>
     </td></tr>
-    <tr><td align="center" style="padding:4px 40px 24px;color:#8a8aa0;font-size:13px;">В каталоге — полный список релизов с фильтрами по жанру, темпу и настроению.</td></tr>
+    <tr><td align="center" style="padding:4px 40px 24px;color:#8a8aa0;font-size:13px;">Слушать можно сразу, без входа в кабинет. Вход нужен только для скачивания файлов.</td></tr>
     <tr><td style="padding:24px 40px 30px;border-top:1px solid #2a2a45;text-align:center;">
       <img src="${SITE_URL}/logo.png" alt="ПРОМО.МУЗЫКА" height="30" style="height:30px;margin-bottom:12px;border:0;" />
       <p style="margin:0 0 6px;color:#c8c8d8;font-size:13px;font-weight:600;">Команда ПРОМО.МУЗЫКА</p>
