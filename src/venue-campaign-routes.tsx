@@ -34,18 +34,20 @@ async function requireAdminOrKey(c: any, next: any) {
 function campaignHtml(): string {
   const b = (t: string) => `<p style="margin:0 0 12px;color:#e6e6f0;font-size:15px;line-height:1.65;">${t}</p>`;
   return `
-<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0a0a1a;padding:28px 14px;">
-  <table align="center" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;margin:0 auto;background:#14142a;border-radius:18px;overflow:hidden;">
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0a0a1a;padding:20px 10px;">
+  <!-- Ширина 100% с ограничением max-width: жёсткое width="600" резало письмо
+       на телефонах (жалоба владельца 2026-08-11 со скриншота Яндекс.Почты). -->
+  <table align="center" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;margin:0 auto;background:#14142a;border-radius:18px;overflow:hidden;">
     <tr><td style="padding:0;">
       <a href="${SITE_URL}/promo-air" style="text-decoration:none;">
-        <img src="${SITE_URL}/banners/promo-air-restaurants.jpg" alt="promo.air — собственное радио для вашего ресторана" style="width:100%;height:auto;display:block;border:0;" />
+        <img src="${SITE_URL}/banners/promo-air-restaurants.jpg" alt="promo.air — собственное радио для вашего ресторана" width="600" style="width:100%;max-width:100%;height:auto;display:block;border:0;" />
       </a>
     </td></tr>
-    <tr><td style="padding:28px 38px 8px;">
+    <tr><td style="padding:24px 22px 8px;">
       <p style="margin:0 0 16px;color:#fff;font-size:17px;">Здравствуйте, <strong>{{name}}</strong>!</p>
       ${b('<strong style="color:#fff;">Promo.air от ПРОМО.МУЗЫКА</strong> — единая система для ресторанов и кафе, которая объединяет музыку, эфир и коммуникации с гостями.')}
       ${b('Вместо обычного фонового плейлиста у вас работает собственный эфир заведения:')}
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:14px 0 18px;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;margin:14px 0 18px;">
         ${[
           ['&#127925;', 'постоянно новая музыка, которая не надоедает гостям и персоналу'],
           ['&#127897;', 'ведущие, рубрики и голосовые программы'],
@@ -70,7 +72,7 @@ function campaignHtml(): string {
       </p>
       <p style="text-align:center;margin:0 0 6px;color:#9a9ab0;font-size:13px;">promo-music.ru</p>
     </td></tr>
-    <tr><td style="padding:20px 38px 26px;border-top:1px solid rgba(255,255,255,.08);">
+    <tr><td style="padding:18px 22px 24px;border-top:1px solid rgba(255,255,255,.08);">
       <p style="margin:0;color:#7c7c95;font-size:12px;line-height:1.6;">
         Вы получили это письмо как заведение из открытых источников. Если тема неактуальна, отпишитесь ссылкой ниже, и мы больше не побеспокоим.
       </p>
