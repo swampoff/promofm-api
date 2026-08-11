@@ -318,6 +318,10 @@ tracksRoutes.delete('/:id', requireAuth, profileLimiter, async (c) => {
 function downloadDeniedPage(c: any, opts: { title: string; message: string; showLogin?: boolean }) {
   const wantsHtml = String(c.req.header('accept') || '').includes('text/html');
   if (!wantsHtml) return null;
+  return downloadDeniedHtml(c, { ...opts, status: 403 });
+}
+
+function downloadDeniedHtml(c: any, opts: { status: number; title: string; message: string; showLogin?: boolean }) {
   const html = `<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${opts.title} — ПРОМО.МУЗЫКА</title>
@@ -336,10 +340,30 @@ function downloadDeniedPage(c: any, opts: { title: string; message: string; show
  ${opts.showLogin ? `<a class="btn primary" href="https://promo-music.ru/login">Войти в кабинет</a>` : ''}
  <a class="btn ghost" href="https://promo-music.ru/novinki-nedeli">Слушать новинки</a>
 </div></body></html>`;
-  return c.html(html, 403);
+  return c.html(html, opts.status as any);
 }
 
-tracksRoutes.get('/:id/download', requireAuth, async (c) => {
+/**
+ * Перехват отказа для кликов из письма. requireAuth отбивает запрос ДО
+ * обработчика (401 JSON), поэтому страницу-объяснение сюда не подставить
+ * изнутри. Обёртка смотрит на ответ и подменяет машинный отказ страницей,
+ * если запрос пришёл из браузера.
+ */
+async function htmlDenialFallback(c: any, next: any) {
+  await next();
+  const wantsHtml = String(c.req.header('accept') || '').includes('text/html');
+  const ct = c.res.headers.get('content-type') || '';
+  if (!wantsHtml || !ct.startsWith('application/json')) return;
+  if (c.res.status !== 401) return;
+  c.res = downloadDeniedHtml(c, {
+    status: 401,
+    title: 'Нужно войти в кабинет',
+    message: 'Скачивание доступно радиостанциям и заведениям — файлы выдаём под учётной записью, чтобы вести учёт выдач. Войдите и нажмите ссылку из письма снова. Слушать подборку можно без входа.',
+    showLogin: true,
+  });
+}
+
+tracksRoutes.get('/:id/download', htmlDenialFallback, requireAuth, async (c) => {
   try {
     const trackId = c.req.param('id');
     // @ts-ignore — Hono context isn't typed for these custom keys but
