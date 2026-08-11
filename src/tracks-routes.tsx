@@ -8,8 +8,8 @@ import * as typed from './db-typed.tsx';
 import { getDbClient, pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { safeErrorMessage } from './security.tsx';
-import { requireAuth } from './auth-middleware.tsx';
-import { profileLimiter } from './rate-limiter.tsx';
+import { requireAuth, optionalAuth } from './auth-middleware.tsx';
+import { profileLimiter, playLimiter } from './rate-limiter.tsx';
 import { logUserAction } from './audit-helper.tsx';
 import { scheduleAiCheck } from './ai-check.tsx';
 import { notifyTrackUpload } from './email-helper.tsx';
@@ -362,6 +362,71 @@ async function htmlDenialFallback(c: any, next: any) {
     showLogin: true,
   });
 }
+
+/**
+ * POST /:id/play — учёт прослушивания.
+ *
+ * Жалоба Александра Черниченко 2026-08-11: «не работает статистика трека».
+ * plays_count не рос никогда: инкремента не было ни в одном месте кода.
+ * Плеер зовёт этот эндпоинт после 15 секунд реального воспроизведения,
+ * а не по клику — клик это ещё не прослушивание.
+ *
+ * Защита от накрутки: одно засчитанное событие на пару (IP, трек) за 30
+ * минут. Повтор внутри окна отдаёт counted:false и НЕ трогает счётчик,
+ * чтобы витрина и чарты не наполнялись фикцией — см. историю с
+ * недостоверными ротациями 2026-08-03. IP хранится только хэшем.
+ */
+tracksRoutes.post('/:id/play', playLimiter, optionalAuth, async (c) => {
+  try {
+    const trackId = c.req.param('id');
+    if (!/^[0-9a-f-]{36}$/i.test(trackId)) {
+      return c.json({ success: false, error: 'Некорректный id трека' }, 400);
+    }
+
+    const exists = await pool.query(
+      `SELECT id FROM tracks WHERE id = $1 AND moderation_status IN ('published','upcoming')`,
+      [trackId],
+    );
+    if (!exists.rows.length) {
+      return c.json({ success: false, error: 'Трек не найден' }, 404);
+    }
+
+    const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
+      || c.req.header('x-real-ip') || 'unknown';
+    const { createHash } = await import('node:crypto');
+    const ipHash = createHash('sha256')
+      .update(`${ip}|${process.env.PLAY_HASH_SALT || process.env.JWT_SECRET || 'promofm'}`)
+      .digest('hex').slice(0, 32);
+
+    const dup = await pool.query(
+      `SELECT 1 FROM track_plays
+        WHERE track_id = $1 AND ip_hash = $2 AND played_at > now() - interval '30 minutes'
+        LIMIT 1`,
+      [trackId, ipHash],
+    );
+    if (dup.rows.length) {
+      return c.json({ success: true, counted: false, reason: 'duplicate' });
+    }
+
+    // @ts-ignore — optionalAuth кладёт userId, если сессия есть.
+    const userId: string | undefined = c.get('userId') || undefined;
+    const source = String((await c.req.json().catch(() => ({})))?.source || 'site').slice(0, 32);
+
+    await pool.query(
+      `INSERT INTO track_plays (track_id, user_id, ip_hash, source) VALUES ($1, $2, $3, $4)`,
+      [trackId, userId || null, ipHash, source],
+    );
+    await pool.query(
+      `UPDATE tracks SET plays_count = COALESCE(plays_count, 0) + 1 WHERE id = $1`,
+      [trackId],
+    );
+
+    return c.json({ success: true, counted: true });
+  } catch (err) {
+    console.error('[tracks/play] failed:', err);
+    return c.json({ success: false, error: 'Не удалось учесть прослушивание' }, 500);
+  }
+});
 
 tracksRoutes.get('/:id/download', htmlDenialFallback, requireAuth, async (c) => {
   try {

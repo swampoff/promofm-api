@@ -140,12 +140,40 @@ app.get('/overview/:artistId', requireAuth, requireOwner('artistId'), async (c) 
 
 // GET /timeline/:artistId — historical time series not yet tracked.
 app.get('/timeline/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
-  return c.json({
-    success: true,
-    timeline: [],
-    period: c.req.query('period') || 'month',
-    message: 'Historical timeline data is not yet available',
-  });
+  // Раньше отдавал пустой массив: событий прослушивания не существовало.
+  // С 2026-08-11 они пишутся в track_plays (жалоба Черниченко на мёртвую
+  // статистику), поэтому строим реальный ряд по дням. Дни без прослушиваний
+  // не выпадают из ряда, иначе график врёт формой.
+  const artistId = c.req.param('artistId');
+  const period = c.req.query('period') || 'month';
+  const days = period === 'week' ? 7 : period === 'year' ? 365 : 30;
+
+  try {
+    const result = await pool.query(
+      `SELECT d::date AS day, COALESCE(p.cnt, 0) AS plays
+         FROM generate_series(now()::date - ($2::int - 1), now()::date, interval '1 day') AS d
+         LEFT JOIN (
+           SELECT tp.played_at::date AS day, COUNT(*) AS cnt
+             FROM track_plays tp
+             JOIN tracks t ON t.id = tp.track_id
+            WHERE t.user_id = $1
+              AND tp.played_at >= now()::date - ($2::int - 1)
+            GROUP BY 1
+         ) p ON p.day = d::date
+        ORDER BY d`,
+      [artistId, days],
+    );
+
+    const timeline = result.rows.map((row: any) => ({
+      date: row.day instanceof Date ? row.day.toISOString().slice(0, 10) : String(row.day).slice(0, 10),
+      plays: Number(row.plays) || 0,
+    }));
+
+    return c.json({ success: true, timeline, period });
+  } catch (err) {
+    console.error('[artist-analytics] /timeline failed:', err);
+    return c.json({ success: false, error: String(err) }, 500);
+  }
 });
 
 // GET /tracks/:artistId
