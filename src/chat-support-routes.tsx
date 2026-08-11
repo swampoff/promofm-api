@@ -29,6 +29,7 @@
  */
 
 import { Hono } from 'hono';
+import { notifyAdminChatMessage } from './email-helper.tsx';
 import crypto from 'crypto';
 import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
@@ -235,6 +236,17 @@ app.post('/:sessionId/messages', async (c) => {
       [sessionId, session.guest_name, text]
     );
     const msg = ins.rows[0];
+
+    // Сигнал о том, что в чате ждут ответа. У тикетов уведомление было с
+    // самого начала, у чата не было вовсе: сообщения гостей копились молча
+    // (Александр Черниченко написал 2026-08-08 и остался без ответа).
+    // Троттлинг внутри helper'а: не чаще раза в 15 минут на сессию.
+    notifyAdminChatMessage({
+      sessionId,
+      body: text,
+      senderName: session.guest_name || undefined,
+      contact: session.guest_email || undefined,
+    }).catch(() => { /* уведомление не должно ломать чат */ });
 
     // Первое сообщение в сессии? (только что вставленную строку тоже считаем)
     let isFirstMessage = false;

@@ -1013,3 +1013,36 @@ export async function notifyTrackTestStalled(items: Array<{ id: string; trackTit
   notifyAdminTelegram(`⚠️ <b>Track-test: ${items.length} застрявших заявок</b>\n\n${items.slice(0, 5).map(i => `• ${stripHtml(i.trackTitle)} — ${stripHtml(i.status)} (${Math.round(i.hoursStuck)} ч)`).join('\n')}${items.length > 5 ? `\n…и ещё ${items.length - 5}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Админка</a>`).catch(() => {});
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Track-test: ${items.length} застрявших заявок`, html });
 }
+
+/**
+ * Сообщение в чат поддержки. Троттлинг на сессию: длинный диалог не должен
+ * превращаться в поток писем — сигнала «в чате ждут» достаточно одного
+ * раз в 15 минут.
+ */
+const chatNotifiedAt = new Map<string, number>();
+
+export async function notifyAdminChatMessage(data: {
+  sessionId: string; body: string; senderName?: string; contact?: string;
+}) {
+  const last = chatNotifiedAt.get(data.sessionId) || 0;
+  if (Date.now() - last < 15 * 60 * 1000) return;
+  chatNotifiedAt.set(data.sessionId, Date.now());
+
+  const html = emailWrapper(`
+    <h2 style="margin:0 0 16px;color:#fff;font-size:20px;">Сообщение в чате поддержки</h2>
+    <table style="width:100%;border-collapse:collapse;color:#e0e0e0;font-size:15px;">
+      <tr><td style="padding:6px 0;color:#999;width:110px;">От кого:</td><td><strong style="color:#fff;">${escapeHtml(data.senderName || 'Гость')}</strong></td></tr>
+      ${data.contact ? `<tr><td style="padding:6px 0;color:#999;">Контакт:</td><td>${escapeHtml(data.contact)}</td></tr>` : ''}
+    </table>
+    <div style="margin:18px 0;padding:14px;background:rgba(255,255,255,.05);border-left:3px solid #10B981;border-radius:6px;color:#cfcfe0;white-space:pre-wrap;">${escapeHtml(data.body.slice(0, 700))}</div>
+    <p style="margin:0;color:#999;font-size:13px;">Человек ждёт ответа в чате на сайте.</p>
+    <p style="text-align:center;margin:24px 0 8px;">
+      <a href="${SITE_URL}/ctrl-pm7k2f" style="display:inline-block;padding:13px 30px;background:linear-gradient(135deg,#FF577F 0%,#7C3AED 100%);color:#fff;text-decoration:none;border-radius:8px;font-weight:700;">Открыть чат</a>
+    </p>
+  `);
+  await sendEmail({
+    to: ADMIN_EMAIL,
+    subject: `[ПРОМО] Чат: ${escapeHtml((data.senderName || 'Гость'))} ждёт ответа`,
+    html,
+  });
+}
