@@ -356,6 +356,34 @@ def normalize_key(artist: str, title: str) -> str:
     return f"{a}|||{t}"
 
 
+# Нейросетевые проекты, которых не должно быть в чарте.
+#
+# Владелец 2026-08-13: «убери везде трек Шадэ, Мот и т.д., это нейронка».
+# Такие проекты реально попадают в Яндекс и на радио (Шадэ был #1 у
+# Яндекса), поэтому парсеры тянут их честно — фильтруем на нашей стороне.
+#
+# Матчим по ПОДСТРОКЕ: у разных источников артист пишется по-разному, а
+# проект выпустит следующий трек и снова пролезет.
+#
+# ВНИМАНИЕ: список ведём вручную, по решению владельца. Автоматически по
+# вердикту ИИ-детектора сюда НИЧЕГО не добавляем — он даёт ложные
+# срабатывания на живых артистах (инцидент 2026-08-07).
+AI_BLOCKED = [
+    {"artist": "by индия", "note": "нейросетевой проект (Шадэ)"},
+]
+
+
+def is_ai_blocked(artist: str, title: str) -> str | None:
+    a = (artist or "").lower()
+    t = (title or "").lower()
+    for rule in AI_BLOCKED:
+        if rule.get("artist") and rule["artist"] in a:
+            return rule["note"]
+        if rule.get("title") and rule["title"] in t:
+            return rule["note"]
+    return None
+
+
 def build_chart(sources: dict[str, list[dict]], prev_chart: list[dict] | None = None) -> list[dict]:
     """Build unified PromoFM chart from all sources with weighted scoring."""
     scores: dict[str, dict] = {}
@@ -366,6 +394,10 @@ def build_chart(sources: dict[str, list[dict]], prev_chart: list[dict] | None = 
 
         for t in tracks:
             if not t.get("artist") or not t.get("title"):
+                continue
+            blocked = is_ai_blocked(t["artist"], t["title"])
+            if blocked:
+                log.info(f"  Исключён: {t['artist']} — {t['title']} ({blocked})")
                 continue
             key = normalize_key(t["artist"], t["title"])
 
