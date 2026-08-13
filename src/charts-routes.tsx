@@ -1290,6 +1290,38 @@ const CHART_DEMOTED_TRACKS: Record<string, number> = {
   'sqwoz bab|||купер': 0,           // убрать
 };
 
+/**
+ * Нейросетевые проекты, которых не должно быть в чарте.
+ *
+ * Владелец 2026-08-13: «убери везде трек Шадэ, Мот и т.д., это нейронка».
+ * Такие проекты реально попадают в Яндекс и на радио, поэтому парсеры
+ * тянут их честно — фильтровать надо на нашей стороне, иначе крон вернёт
+ * их при следующей пересборке.
+ *
+ * Матчим по ПОДСТРОКЕ в артисте или названии, а не по точной паре: у
+ * разных источников артист пишется по-разному, а проект выпустит
+ * следующий трек и снова пролезет.
+ *
+ * ⚠️ Список ведём вручную, по решению владельца. Автоматически по вердикту
+ * ИИ-детектора сюда НИЧЕГО не добавляем: он даёт ложные срабатывания на
+ * живых артистах (инцидент 2026-08-07, пострадали Подиум, Заботина,
+ * Маккартни и другие).
+ */
+const CHART_AI_BLOCKED: { artist?: string; title?: string; note: string }[] = [
+  { artist: 'by индия', note: 'нейросетевой проект (Шадэ)' },
+];
+
+function isAiBlocked(artist: string, title: string): string | null {
+  const a = (artist || '').toLowerCase();
+  const t = (title || '').toLowerCase();
+  for (const rule of CHART_AI_BLOCKED) {
+    const artistHit = rule.artist ? a.includes(rule.artist) : false;
+    const titleHit  = rule.title  ? t.includes(rule.title)  : false;
+    if (artistHit || titleHit) return rule.note;
+  }
+  return null;
+}
+
 async function buildPromoFMChart(): Promise<PromoFMChartEntry[]> {
   // 1. Собираем все треки из внешних чартов (радио + Яндекс)
   const trackScores: Record<string, {
@@ -1387,6 +1419,11 @@ async function buildPromoFMChart(): Promise<PromoFMChartEntry[]> {
     const penalty = CHART_DEMOTED_TRACKS[key];
     if (penalty !== undefined) {
       trackScores[key].score *= penalty; // 0 = removed
+    }
+    const blocked = isAiBlocked(trackScores[key].artist, trackScores[key].title);
+    if (blocked) {
+      console.log(`[charts] исключён: ${trackScores[key].artist} — ${trackScores[key].title} (${blocked})`);
+      trackScores[key].score = 0;
     }
   }
 
