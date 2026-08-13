@@ -11,6 +11,7 @@ from pathlib import Path
 
 PAGES = [
     "/",
+    "/advertising",
     "/news",
     "/charts",
     "/concerts",
