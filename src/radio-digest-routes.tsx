@@ -33,7 +33,10 @@ const PER_RUN = 2;                       // сколько треков уход
 const SITE_URL = 'https://promo-music.ru';
 
 // Баннер шапки дайджеста. Лежит рядом с остальными баннерами сайта.
-const DIGEST_BANNER_FILE = 'novinki-nedeli.jpg';
+// Владелец 2026-08-14: постоянная обложка «Новинки недели». Квадратная,
+// с нарисованной кнопкой «Скачать» — заменяет прежний сгенерированный
+// баннер 1200×600.
+const DIGEST_BANNER_FILE = 'novinki-nedeli-cover.jpg';
 const DIGEST_BANNER_PATH = `/var/www/promofm/html/banners/${DIGEST_BANNER_FILE}`;
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 const DIGEST_LOCK = 720107;              // ключ advisory-lock, уникальный для daily info@-крона
