@@ -1559,6 +1559,40 @@ charts.post('/aggregate-promofm', requireAdminOrKey, async (c) => {
  * GET /promofm
  * Сводный чарт PromoFM (кэшированный)
  */
+/**
+ * GET /billboard — Billboard Hot 100, вся сотня.
+ *
+ * Владелец 2026-08-14: «добавим на главную чарт Billboard HOT 100, куда
+ * будем парсить всю сотню каждую неделю».
+ *
+ * Данные кладёт `billboard-agent.py` (крон), здесь только отдача. Сам
+ * агент отказывается перезаписывать чарт, если разобрал меньше 90
+ * позиций — вёрстка Billboard меняется, и лучше отдать прошлую неделю,
+ * чем огрызок.
+ */
+charts.get('/billboard', async (c) => {
+  try {
+    const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '100', 10) || 100));
+    const data: any = await getPlatformStats('chart:billboard_hot100');
+    if (!data?.entries?.length) {
+      return c.json({ success: true, data: { entries: [], chartDate: null, source: 'Billboard Hot 100' } });
+    }
+    return c.json({
+      success: true,
+      data: {
+        source: data.source || 'Billboard Hot 100',
+        chartDate: data.chartDate || null,
+        updatedAt: data.fetchedAt || null,
+        total: data.entries.length,
+        entries: data.entries.slice(0, limit),
+      },
+    });
+  } catch (err: any) {
+    console.error('[charts/billboard] failed:', err?.message || err);
+    return c.json({ success: false, error: 'Не удалось получить чарт' }, 500);
+  }
+});
+
 charts.get('/promofm', async (c) => {
   try {
     const limit = parseInt(c.req.query('limit') || '50');
