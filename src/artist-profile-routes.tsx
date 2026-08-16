@@ -44,6 +44,10 @@ interface ArtistProfile {
    * identity is shown (sidebar avatar, track "Исполнитель", etc.).
    */
   artistName: string;
+  /** Читаемый адрес профиля. Нужен фронту для canonical-ссылки:
+   *  страница открывается и по slug, и по UUID, без canonical поисковики
+   *  считают их разными и дробят вес между дублями. */
+  slug?: string;
   bio: string;
   avatarUrl: string;
   coverUrl: string;
@@ -169,6 +173,7 @@ function makeProfile(overrides: Partial<ArtistProfile> & { id: string; email: st
   return {
     username: '',
     artistName: '',
+    slug: undefined,
     bio: '',
     avatarUrl: '',
     coverUrl: '',
@@ -444,6 +449,7 @@ app.get('/profile/:artistId', async (c) => {
           email: apRow.data?.email || '',
           fullName: apRow.artist_name || '',
           artistName: apRow.artist_name || '',
+          slug: apRow.slug || undefined,
           bio: apRow.bio || '',
           avatarUrl: apRow.avatar_url || '',
           coverUrl: apRow.cover_url || apRow.data?.coverUrl || '',
