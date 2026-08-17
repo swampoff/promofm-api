@@ -480,11 +480,15 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
       // Отмечен как ИИ — сразу отправляем в чарт ИИ-музыки, не дожидаясь крона.
       // Владелец 2026-08-07: «маркируется ии и идёт в чарт ии, не только новинки
       // недели». В «Новинки недели» трек попадает своим обычным путём.
+      // ⚠️ Здесь пересобирать чарт БЕСПОЛЕЗНО, хотя раньше так и делали:
+      // ИИ-чарт берёт только moderation_status='published', а трек сейчас
+      // 'approved' и не оплачен. Пересборка отрабатывала честно и не
+      // включала ничего — из-за этого внутренний источник ai_charts был
+      // пуст при 14 помеченных треках (проверено 2026-08-17).
+      // Настоящее место пересборки — момент перехода в published, ниже в
+      // /promote-upcoming.
       if (markAsAi) {
-        import('./ai-charts-routes.tsx')
-          .then((m: any) => m.rebuildCompositeChart?.())
-          .then(() => console.log(`[moderation] AI-чарт пересобран после одобрения ${pendingTrackId}`))
-          .catch((e: any) => console.warn('[moderation] пересборка AI-чарта не удалась:', e?.message || e));
+        console.log(`[moderation] Трек ${pendingTrackId} помечен как ИИ. В ИИ-чарт попадёт после оплаты и публикации.`);
       }
 
       // Audit B-8: forensic trail кто одобрил.
@@ -1192,6 +1196,19 @@ app.post('/promote-upcoming', async (c) => {
       }
 
       promoted++;
+    }
+
+    // ИИ-чарт пересобираем ЗДЕСЬ: трек только что стал published, а
+    // внутренний источник ai_charts отбирает именно по этому статусу.
+    // Раньше пересборка висела на модерации и потому не срабатывала никогда.
+    if (promoted > 0) {
+      try {
+        const m: any = await import('./ai-charts-routes.tsx');
+        await m.rebuildCompositeChart?.();
+        console.log(`[promote-upcoming] ИИ-чарт пересобран после публикации ${promoted} трек(ов)`);
+      } catch (e: any) {
+        console.warn('[promote-upcoming] пересборка ИИ-чарта не удалась:', e?.message || e);
+      }
     }
 
     // ── Mixes: тот же flow — upcoming с истёкшим upcoming_until → published ──
