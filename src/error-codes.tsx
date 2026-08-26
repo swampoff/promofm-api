@@ -57,7 +57,10 @@ export type ErrorCode = keyof typeof ERROR_CODES;
  *        return apiError(c, 'NOT_FOUND', 'Трек не найден')
  */
 export function apiError(c: any, code: ErrorCode, customMessage?: string) {
-  const err = ERROR_CODES[code];
+  // Опечатка в коде не должна превращать аккуратный 400 в краш 500:
+  // раньше ERROR_CODES[неизвестный] === undefined и обращение к .message падало.
+  const err = ERROR_CODES[code] ?? ERROR_CODES.INTERNAL_ERROR;
+  if (!ERROR_CODES[code]) console.error(`[apiError] неизвестный код ошибки: ${code}`);
   return c.json(
     {
       success: false,
