@@ -9,7 +9,10 @@ import sys
 import time
 from pathlib import Path
 
-PAGES = [
+# Русские страницы + их английские версии. Боты, приходящие на /en/*,
+# должны получать такой же отрендеренный HTML, иначе английская версия
+# индексируется как пустой SPA-каркас.
+RU_PAGES = [
     "/",
     "/advertising",
     "/news",
@@ -21,6 +24,10 @@ PAGES = [
     "/contact",
     "/marketplace",
 ]
+
+EN_PAGES = ["/en" + ("" if p == "/" else p) for p in RU_PAGES]
+
+PAGES = RU_PAGES + EN_PAGES
 
 DOMAIN = "https://promo-music.ru"
 OUTPUT_DIR = Path("/var/www/promofm/prerender")

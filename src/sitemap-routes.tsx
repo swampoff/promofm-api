@@ -16,6 +16,26 @@ async function requireAdminOrKey(c: any, next: any) {
 const sitemapRoutes = new Hono();
 const DOMAIN = 'https://promo-music.ru';
 
+/**
+ * Страницы, у которых есть английская версия на /en.
+ *
+ * Список ручной, а не «все STATIC_PAGES», потому что часть страниц
+ * существует ради русских поисковых запросов («/pesnya-na-radio»,
+ * «/muzyka-dlya-zavedeniya»): их английские копии конкурировали бы сами
+ * с собой и разбавляли индекс. Здесь только то, что осмысленно искать
+ * по-английски.
+ */
+const EN_PAGES = new Set<string>([
+  '/', '/about', '/pricing', '/charts', '/concerts', '/news', '/faq',
+  '/contact', '/marketplace', '/djs', '/distribution', '/advertising',
+  '/for-artists', '/for-djs', '/for-producers', '/for-engineers',
+  '/for-labels', '/for-venues', '/for-business', '/for-media',
+  '/for-bloggers', '/for-tv', '/promo-air', '/promo-lab', '/promo-guide',
+  '/radio-stations', '/airplay-monitoring', '/promotion', '/partners',
+  '/careers', '/investors', '/privacy', '/offer', '/user-agreement',
+  '/consent', '/docs', '/support-info', '/ai-discoverability',
+]);
+
 // ─── All 39 static public routes ───
 const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   // Homepage
@@ -207,16 +227,41 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n`;
     xml += `        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9"\n`;
+    xml += `        xmlns:xhtml="http://www.w3.org/1999/xhtml"\n`;
     xml += `        xmlns:video="http://www.google.com/schemas/sitemap-video/1.1">\n`;
 
     // ── Static pages ──
+    //
+    // У страниц, переведённых на английский, выводим пару hreflang и
+    // отдельную запись для /en. Односторонняя ссылка Google не
+    // засчитывает: обе версии должны указывать друг на друга и на себя.
+    const alternates = (loc: string) =>
+      `    <xhtml:link rel="alternate" hreflang="ru" href="${DOMAIN}${loc}"/>\n` +
+      `    <xhtml:link rel="alternate" hreflang="en" href="${DOMAIN}/en${loc === '/' ? '' : loc}"/>\n` +
+      `    <xhtml:link rel="alternate" hreflang="x-default" href="${DOMAIN}${loc}"/>\n`;
+
     for (const p of STATIC_PAGES) {
+      const localised = EN_PAGES.has(p.loc);
       xml += `  <url>\n`;
       xml += `    <loc>${DOMAIN}${p.loc}</loc>\n`;
       xml += `    <lastmod>${today}</lastmod>\n`;
       xml += `    <changefreq>${p.changefreq}</changefreq>\n`;
       xml += `    <priority>${p.priority}</priority>\n`;
+      if (localised) xml += alternates(p.loc);
       xml += `  </url>\n`;
+
+      if (localised) {
+        // Английская версия чуть ниже приоритетом: она моложе и
+        // адресована меньшей аудитории, а русская остаётся основной.
+        const enPriority = Math.max(0.1, Number(p.priority) - 0.1).toFixed(1);
+        xml += `  <url>\n`;
+        xml += `    <loc>${DOMAIN}/en${p.loc === '/' ? '' : p.loc}</loc>\n`;
+        xml += `    <lastmod>${today}</lastmod>\n`;
+        xml += `    <changefreq>${p.changefreq}</changefreq>\n`;
+        xml += `    <priority>${enPriority}</priority>\n`;
+        xml += alternates(p.loc);
+        xml += `  </url>\n`;
+      }
     }
 
     // ── News articles ──

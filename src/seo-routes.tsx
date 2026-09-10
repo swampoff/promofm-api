@@ -401,12 +401,44 @@ const PRODUCT_PAGES: Record<string, { meta: { title: string; desc: string; type:
   },
 };
 
+/** Каталог снимков, которые раз в 6 часов пишет scripts/prerender.py. */
+const PRERENDER_SNAPSHOTS = '/var/www/promofm/prerender';
+
+/**
+ * Английская версия: боту отдаём снимок реальной страницы /en/*.
+ *
+ * Шаблоны ниже в этом файле собирают HTML по-русски — на английском URL
+ * это дало бы Google русский контент под hreflang="en" и обесценило бы
+ * перевод. Снимок делает Playwright уже после применения словаря, то
+ * есть содержит настоящий английский текст.
+ *
+ * Если снимка ещё нет (страница вне списка prerender.py), возвращаем
+ * null и падаем в общий русский рендер — это хуже, но лучше пустоты.
+ */
+async function readEnglishSnapshot(path: string): Promise<string | null> {
+  if (path !== '/en' && !path.startsWith('/en/')) return null;
+  const rest = path.slice(3).replace(/^\//, '');
+  const file = rest ? `en_${rest.replace(/\//g, '_')}.html` : 'en.html';
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const nodePath = await import('node:path');
+    // basename-guard: путь приходит из URL, наружу из каталога снимков выходить нельзя.
+    const safe = nodePath.join(PRERENDER_SNAPSHOTS, nodePath.basename(file));
+    return await readFile(safe, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
 // ─── GET /prerender/* — SSR for bots ───
 seoRoutes.get('/prerender/*', async (c) => {
   const rawParam = c.req.path.replace(/\/server\/prerender/, '') || '/';
   const path = rawParam.startsWith('/') ? rawParam : '/' + rawParam;
 
   try {
+    const englishSnapshot = await readEnglishSnapshot(path);
+    if (englishSnapshot) return c.html(englishSnapshot);
+
     // ─── Individual news article ───
     if (path.startsWith('/news/') && path.length > 6) {
       const newsId = decodeURIComponent(path.slice(6));
