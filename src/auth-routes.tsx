@@ -11,7 +11,7 @@ import { Pool } from 'pg';
 import { upsertNotification } from './db.tsx';
 import { logAdminAction } from './audit-helper.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsStoreToken, vpsGetToken, vpsUseToken } from './vps-userdata.tsx';
-import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendVenueRadioWelcomeEmail, sendActivationEmail, sendProfileVerifiedEmail, sendProfileVerificationRejectedEmail } from "./email-helper.tsx";
+import { notifyNewUser, sendPasswordResetEmail, sendVerificationEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendVenueRadioWelcomeEmail, sendActivationEmail, sendProfileVerifiedEmail, sendProfileVerificationRejectedEmail, normalizeLocale, localeForEmail } from "./email-helper.tsx";
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { isValidRole } from './roles.tsx';
 import {
@@ -164,6 +164,9 @@ auth.post("/signup", async (c) => {
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
     const { email, password, name, role, consentPersonalData, consentNewsletter, captchaToken, applicationDetails } = body;
+    // Язык интерфейса, с которого пришла регистрация: на нём человек
+    // читал форму, на нём же должны прийти письма.
+    const userLocale = normalizeLocale(body.locale);
     // H6: reCAPTCHA v3 verification (skipped if not configured)
     const captchaResult = await verifyCaptcha(captchaToken, 'signup');
     if (!captchaResult.ok) return c.json({ success: false, error: captchaResult.error || 'Проверка CAPTCHA не пройдена' }, 403);
@@ -210,9 +213,9 @@ auth.post("/signup", async (c) => {
     let userId: string;
     try {
       const result = await sql(
-        `INSERT INTO users (email, password_hash, username, full_name, role, status, is_email_verified, consent_personal_data, consent_newsletter, consent_at)
-         VALUES ($1, $2, $3, $4, $5::user_role, $6::user_status, false, $7, $8, now()) RETURNING id`,
-        [email, passwordHash, username, userName, userRole, accountStatus, !!consentPersonalData, !!consentNewsletter]
+        `INSERT INTO users (email, password_hash, username, full_name, role, status, is_email_verified, consent_personal_data, consent_newsletter, consent_at, locale)
+         VALUES ($1, $2, $3, $4, $5::user_role, $6::user_status, false, $7, $8, now(), $9) RETURNING id`,
+        [email, passwordHash, username, userName, userRole, accountStatus, !!consentPersonalData, !!consentNewsletter, userLocale]
       );
       userId = result.rows[0].id;
     } catch (err: any) {
@@ -261,7 +264,7 @@ auth.post("/signup", async (c) => {
 
     const verificationToken = crypto.randomUUID();
     await vpsStoreToken(userId, verificationToken, "email_verify", 24);
-    sendVerificationEmail(email, userName, verificationToken).catch((e) => log.warn({ err: e, email }, "verification_email_failed"));
+    sendVerificationEmail(email, userName, verificationToken, userLocale).catch((e) => log.warn({ err: e, email }, "verification_email_failed"));
 
     // Venue-specific welcome — fires alongside the standard
     // verification email so the new venue understands the 14-day trial
@@ -747,7 +750,7 @@ auth.post("/request-reset", async (c) => {
     await vpsStoreToken(user.id, resetToken, "password_reset", 1);
 
     const profile = await vpsGetProfile(user.id);
-    await sendPasswordResetEmail(email, profile?.name || user.full_name || email.split("@")[0], resetToken);
+    await sendPasswordResetEmail(email, profile?.name || user.full_name || email.split("@")[0], resetToken, await localeForEmail(email));
     recentResetSends.set(emailKey, Date.now());
     log.info({ email }, 'password_reset_sent');
     return c.json({ success: true, message: "Если аккаунт с таким email существует, мы отправили письмо." });

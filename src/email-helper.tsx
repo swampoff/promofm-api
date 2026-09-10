@@ -161,7 +161,13 @@ export async function sendEmail(opts: EmailOptions): Promise<boolean> {
 
 // ── Email Templates ──
 
-export const emailWrapper = (content: string) => `
+export const emailWrapper = (content: string, locale: 'ru' | 'en' = 'ru') => {
+  const brand = locale === 'en' ? 'PROMO.MUSIC' : 'ПРОМО.МУЗЫКА';
+  const team = locale === 'en' ? 'The PROMO.MUSIC team' : 'Команда ПРОМО.Музыка';
+  const tagline = locale === 'en'
+    ? `&copy; ${new Date().getFullYear()} PROMO.MUSIC — music promotion platform`
+    : `&copy; ${new Date().getFullYear()} ПРОМО.МУЗЫКА — платформа продвижения музыки`;
+  return `
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
@@ -170,15 +176,15 @@ export const emailWrapper = (content: string) => `
     <tr><td align="center">
       <table width="600" cellpadding="0" cellspacing="0" style="background: #1a1a2e; border-radius: 16px; overflow: hidden;">
         <tr><td style="padding: 32px 40px; background: linear-gradient(135deg, #FF577F 0%, #7C3AED 100%);">
-          <h1 style="margin: 0; color: #fff; font-size: 24px; font-weight: 700;">ПРОМО.МУЗЫКА</h1>
+          <h1 style="margin: 0; color: #fff; font-size: 24px; font-weight: 700;">${brand}</h1>
         </td></tr>
         <tr><td style="padding: 32px 40px; color: #e0e0e0; font-size: 16px; line-height: 1.6;">
           ${content}
         </td></tr>
         <tr><td style="padding: 24px 40px 32px; color: #666; font-size: 12px; border-top: 1px solid #2a2a3e; text-align: center;">
-          <img src="${SITE_URL}/logo.png" alt="ПРОМО.МУЗЫКА" style="height: 34px; margin-bottom: 10px;" />
-          <p style="margin: 0 0 10px; color: #e0e0e0; font-size: 14px; font-weight: 600;">Команда ПРОМО.Музыка</p>
-          <p style="margin: 0;">&copy; ${new Date().getFullYear()} ПРОМО.МУЗЫКА — платформа продвижения музыки</p>
+          <img src="${SITE_URL}/logo.png" alt="${brand}" style="height: 34px; margin-bottom: 10px;" />
+          <p style="margin: 0 0 10px; color: #e0e0e0; font-size: 14px; font-weight: 600;">${team}</p>
+          <p style="margin: 0;">${tagline}</p>
           <p style="margin: 4px 0 0;"><a href="${SITE_URL}" style="color: #FF577F; text-decoration: none;">promo-music.ru</a></p>
         </td></tr>
       </table>
@@ -186,11 +192,61 @@ export const emailWrapper = (content: string) => `
   </table>
 </body>
 </html>`;
+};
 
 const buttonStyle = 'display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #FF577F 0%, #7C3AED 100%); color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px;';
 
-export async function sendPasswordResetEmail(email: string, name: string, token: string): Promise<boolean> {
+// ── Язык транзакционных писем ──
+//
+// Берётся из users.locale, который проставляется при регистрации по
+// языку интерфейса (см. миграцию 137). Существующая колонка
+// users.language для этого не годится: она про язык ТРЕКА и стоит в 'en'
+// у 3407 из 3409 аккаунтов — по ней все русские артисты получили бы
+// английские письма.
+//
+// Локализованы письма, которые получает любой новый пользователь:
+// верификация email, сброс пароля и активация перенесённого кабинета.
+// Остальные шаблоны (модерация, венью-трейлы) остаются русскими до
+// появления англоязычных пользователей в этих сценариях.
+export type EmailLocale = 'ru' | 'en';
+
+export function normalizeLocale(value?: string | null): EmailLocale {
+  return String(value || '').toLowerCase().startsWith('en') ? 'en' : 'ru';
+}
+
+/** Локаль пользователя по email — для писем, инициированных не им самим. */
+export async function localeForEmail(email: string): Promise<EmailLocale> {
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const r = await pool.query('SELECT locale FROM users WHERE lower(email) = lower($1) LIMIT 1', [email]);
+    return normalizeLocale(r.rows[0]?.locale);
+  } catch {
+    return 'ru';
+  }
+}
+
+export async function sendPasswordResetEmail(
+  email: string,
+  name: string,
+  token: string,
+  locale: EmailLocale = 'ru',
+): Promise<boolean> {
   const resetUrl = `${SITE_URL}/reset-password?token=${token}`;
+
+  if (locale === 'en') {
+    const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Password reset</h2>
+    <p>Hello, <strong>${escapeHtml(name)}</strong>!</p>
+    <p>You asked to reset the password for your PROMO.MUSIC account.</p>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${resetUrl}" style="${buttonStyle}">Reset password</a>
+    </p>
+    <p style="color: #999; font-size: 14px;">The link is valid for one hour.</p>
+    <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">If the button doesn't work: ${resetUrl}</p>
+  `, locale);
+    return sendEmail({ to: email, subject: 'Password reset — PROMO.MUSIC', html });
+  }
+
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Сброс пароля</h2>
     <p>Здравствуйте, <strong>${escapeHtml(name)}</strong>!</p>
@@ -221,8 +277,28 @@ export async function sendActivationEmail(email: string, name: string, token: st
   return sendEmail({ to: email, subject: 'Ваш кабинет на ПРОМО.МУЗЫКА — активируйте', html });
 }
 
-export async function sendVerificationEmail(email: string, name: string, token: string): Promise<boolean> {
+export async function sendVerificationEmail(
+  email: string,
+  name: string,
+  token: string,
+  locale: EmailLocale = 'ru',
+): Promise<boolean> {
   const verifyUrl = `${API_BASE}/auth/verify-email-page?token=${token}`;
+
+  if (locale === 'en') {
+    const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Confirm your email</h2>
+    <p>Hello, <strong>${escapeHtml(name)}</strong>!</p>
+    <p>Thank you for signing up to PROMO.MUSIC. Please confirm your email address.</p>
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${verifyUrl}" style="${buttonStyle}">Confirm email</a>
+    </p>
+    <p style="color: #999; font-size: 14px;">The link is valid for 24 hours.</p>
+    <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">If the button doesn't work: ${verifyUrl}</p>
+  `, locale);
+    return sendEmail({ to: email, subject: 'Confirm your email — PROMO.MUSIC', html });
+  }
+
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Подтвердите ваш email</h2>
     <p>Здравствуйте, <strong>${escapeHtml(name)}</strong>!</p>
