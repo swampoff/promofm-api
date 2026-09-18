@@ -330,6 +330,40 @@ auth.post("/signin", async (c) => {
 
     const user = result.rows[0];
 
+    // Импортированные аккаунты (радиостанции и артисты из старой базы)
+    // заведены без пароля: регистрации не было, подтверждать почту им
+    // никто не предлагал. Раньше такой вход упирался в «Email не
+    // подтверждён. Проверьте почту» — в письмо, которого не существует,
+    // и человек кружил между формой входа и пустым ящиком. Отправляем
+    // ссылку на установку пароля (она же подтверждает email — см.
+    // /reset-password) и говорим об этом прямо.
+    if (!user.password_hash) {
+      const emailKey = String(email).toLowerCase().trim();
+      const lastSent = recentResetSends.get(emailKey);
+      // Тот же cooldown, что у /request-reset: перебор логина не должен
+      // превращаться в рассылку писем на чужой адрес.
+      if (!lastSent || Date.now() - lastSent >= RESET_EMAIL_COOLDOWN_MS) {
+        recentResetSends.set(emailKey, Date.now());
+        try {
+          const setupToken = crypto.randomUUID();
+          await vpsStoreToken(user.id, setupToken, "password_reset", 24 * 7);
+          await sendActivationEmail(
+            user.email,
+            user.full_name || user.username || String(user.email).split("@")[0],
+            setupToken,
+          );
+          log.info({ userId: user.id }, 'password_setup_link_sent_on_login');
+        } catch (err) {
+          log.warn({ err, userId: user.id }, 'password_setup_link_failed');
+        }
+      }
+      return c.json({
+        success: false,
+        error: "У этого аккаунта ещё нет пароля — он создан при переносе базы. Мы отправили на вашу почту ссылку, чтобы задать пароль.",
+        requiresPasswordSetup: true,
+      }, 401);
+    }
+
     if (!user.is_email_verified) {
       return c.json({ success: false, error: "Email не подтверждён. Проверьте почту.", requiresVerification: true }, 401);
     }
