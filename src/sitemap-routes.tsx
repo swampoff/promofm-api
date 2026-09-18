@@ -25,15 +25,13 @@ const DOMAIN = 'https://promo-music.ru';
  * с собой и разбавляли индекс. Здесь только то, что осмысленно искать
  * по-английски.
  */
-const EN_PAGES = new Set<string>([
-  '/', '/about', '/pricing', '/charts', '/concerts', '/news', '/faq',
-  '/contact', '/marketplace', '/djs', '/distribution', '/advertising',
-  '/for-artists', '/for-djs', '/for-producers', '/for-engineers',
-  '/for-labels', '/for-venues', '/for-business', '/for-media',
-  '/for-bloggers', '/for-tv', '/promo-air', '/promo-lab', '/promo-guide',
-  '/radio-stations', '/airplay-monitoring', '/promotion', '/partners',
-  '/careers', '/investors', '/privacy', '/offer', '/user-agreement',
-  '/consent', '/docs', '/support-info', '/ai-discoverability',
+const EN_PAGES_EXCLUDED = new Set<string>([
+  // Не отдаём в английский sitemap то, что не является страницей для
+  // поиска: личные разделы кабинета и шаг оплаты. Английские версии у
+  // них есть, но индексировать там нечего.
+  '/dashboard', '/dashboard/tracks', '/dashboard/videos', '/dashboard/concerts',
+  '/dashboard/analytics', '/dashboard/promotion', '/dashboard/settings',
+  '/messages', '/checkout', '/login', '/register', '/forgot-password', '/pg/',
 ]);
 
 // ─── All 39 static public routes ───
@@ -188,6 +186,12 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   { loc: '/blog/how-we-review', changefreq: 'monthly', priority: '0.6' },
   { loc: '/blog/radio-formats', changefreq: 'monthly', priority: '0.6' },
 ];
+
+// EN_PAGES строится из самого списка страниц: сайт переведён целиком, и
+// вторая копия списка означала бы, что её однажды забудут обновить.
+const EN_PAGES = new Set<string>(
+  STATIC_PAGES.map((p) => p.loc).filter((loc) => !EN_PAGES_EXCLUDED.has(loc)),
+);
 
 function escapeXml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
