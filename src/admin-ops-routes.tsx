@@ -180,4 +180,40 @@ app.post('/db-integrity-check', requireAuth, requireAdmin, async (c) => {
   }
 });
 
+
+/**
+ * GET /pending-counts — числа для красных кружков в левом меню админки.
+ * Раньше бейджи «Модерация» и «Публикации» были ЗАШИТЫ нулём и не загорались
+ * никогда: новый клип приезжал молча, админ узнавал о нём случайно (19.09.2026).
+ * Один запрос вместо четырёх: считаем скалярными подзапросами.
+ */
+app.get('/pending-counts', requireAuth, requireAdmin, async (c) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        (SELECT count(*) FROM tracks   WHERE moderation_status = 'pending')                   AS tracks,
+        (SELECT count(*) FROM videos   WHERE moderation_status = 'pending')                   AS videos,
+        (SELECT count(*) FROM concerts WHERE moderation_status = 'pending')                   AS concerts,
+        (SELECT count(*) FROM dj_mixes WHERE moderation_status = 'pending')                   AS mixes,
+        (SELECT count(*) FROM publish_orders WHERE status IN ('pending_review','in_review'))  AS publish,
+        (SELECT count(*) FROM content_orders WHERE status IN ('new','pending'))               AS content_orders
+    `);
+    const r = rows[0] || {};
+    const n = (v: any) => Number(v || 0);
+    const moderation = n(r.tracks) + n(r.videos) + n(r.concerts) + n(r.mixes);
+    return c.json({
+      success: true,
+      counts: {
+        moderation,
+        publish: n(r.publish),
+        contentOrders: n(r.content_orders),
+        byType: { tracks: n(r.tracks), videos: n(r.videos), concerts: n(r.concerts), mixes: n(r.mixes) },
+      },
+    });
+  } catch (error: any) {
+    console.error('pending-counts error:', error?.message);
+    return c.json({ success: false, error: 'Internal error' }, 500);
+  }
+});
+
 export default app;
