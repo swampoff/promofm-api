@@ -5,7 +5,7 @@ import { safeErrorMessage } from './security.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { getPlatformStats, setPlatformStats } from './db.tsx';
-import { notifyVideoUpload } from './email-helper.tsx';
+import { notifyVideoUpload, sendEmail, escapeHtml } from './email-helper.tsx';
 
 const videosRoutes = new Hono();
 
@@ -866,6 +866,49 @@ videosRoutes.post('/:id/moderate', requireAuth, requireAdmin, async (c) => {
         });
       } catch (notifyErr) {
         console.error('[videos] moderate notify failed:', notifyErr);
+      }
+
+      // Письмо артисту. Раньше решение модератора жило только внутри
+      // платформы: уведомление в колокольчике было, письма не было вовсе -
+      // артист узнавал об одобрении, только если сам зашёл в кабинет.
+      try {
+        const u = await pool.query(
+          'SELECT email, COALESCE(NULLIF(full_name, \'\'), NULLIF(display_name, \'\'), \'артист\') AS name FROM users WHERE id::text = $1',
+          [String(video.user_id)]
+        );
+        const to = u.rows[0]?.email;
+        const isPlaceholder = typeof to === 'string' && to.endsWith('@promo-music.ru');
+        if (to && !isPlaceholder) {
+          const title = escapeHtml(String(video.title || 'Без названия'));
+          const head = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
+            + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
+            + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
+            + '<p style="margin:8px 0 0;color:#888;font-size:13px;">Платформа для музыкантов и лейблов</p></div><div style="padding:32px;">';
+          const foot = '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p></div>'
+            + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
+            + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
+            + '<p style="margin:0 0 8px;">info@promofm.ru · Москва, Россия</p>'
+            + '<p style="margin:0;color:#555;">Вы получили это письмо, так как загрузили клип на модерацию</p></div></div>';
+          const cta = '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/artist/video" style="display:inline-block;padding:12px 32px;background:#FF577F;color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Открыть мои клипы</a></p>';
+
+          const subject = status === 'approved' ? `Клип одобрен — ${video.title}` : `Клип отклонён — ${video.title}`;
+          const html = status === 'approved'
+            ? head + '<p>Добрый день!</p><p>Мы посмотрели ваш клип и с радостью сообщаем, что он прошёл модерацию.</p>'
+                + `<p>Клип <strong>«${title}»</strong> одобрен к размещению на Промо.Музыка.</p>`
+                + (note ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ${escapeHtml(note)}</p>` : '')
+                + '<p>Спасибо за ваше творчество и доверие к платформе.</p>' + cta + foot
+            : head + '<p>Добрый день!</p>'
+                + `<p>К сожалению, клип <strong>«${title}»</strong> не прошёл модерацию.</p>`
+                + `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #EF4444;border-radius:4px;">Причина: ${escapeHtml(note)}</p>`
+                + '<p>Вы можете устранить замечания и отправить клип повторно.</p>' + cta + foot;
+
+          const ok = await sendEmail({ to, subject, html });
+          console.log(`[videos] письмо о модерации (${status}) -> ${to}: ${ok ? 'отправлено' : 'НЕ отправлено'}`);
+        } else {
+          console.log(`[videos] письмо не отправлено: ${isPlaceholder ? 'плейсхолдерный email (вход через VK)' : 'email не найден'}`);
+        }
+      } catch (mailErr: any) {
+        console.error('[videos] ошибка письма о модерации:', mailErr?.message);
       }
     }
 
