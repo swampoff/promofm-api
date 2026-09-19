@@ -28,6 +28,16 @@ import { createLogger } from "./logger.tsx";
 const log = createLogger("auth");
 
 const PARTNER_ROLES = ['radio_station', 'radio', 'venue'];
+/**
+ * Роли, которые регистрируются ТОЛЬКО по электронной почте.
+ *
+ * VK не отдаёт адрес — аккаунту достаётся плейсхолдер
+ * vk<id>@promo-music.ru, на который физически нельзя написать. Для
+ * бизнес-ролей это неприемлемо: им уходят счета, договорные письма и
+ * результат проверки заявки. Список шире PARTNER_ROLES: лейбл почту
+ * иметь обязан, но админского одобрения при регистрации не требует.
+ */
+const EMAIL_ONLY_ROLES = ['radio_station', 'radio', 'venue', 'label'];
 const MAX_FAILED_ATTEMPTS = 5;
 const JWT_SECRET = process.env.JWT_SECRET!;
 const JWT_EXPIRES_IN = '24h'; // STOPGAP 2026-06-03 — откат на '2h' после доставки silent-refresh (#96 + AuthContext global-net). См. PR/OPERATIONS_LOG.
@@ -542,6 +552,14 @@ auth.post("/vk-callback", async (c) => {
     }
 
     // 4. New user
+    if (EMAIL_ONLY_ROLES.includes(vkRequestedRole || '')) {
+      log.warn({ role: vkRequestedRole, vkUserId }, 'vk_signup_email_only_role_rejected');
+      return c.json({
+        success: false,
+        error: "Радиостанции, заведения и лейблы регистрируются только по электронной почте.",
+      }, 400);
+    }
+
     const userEmail = email || `vk${vkUserId}@promo-music.ru`;
     const passwordHash = await bcrypt.hash(crypto.randomUUID() + crypto.randomUUID(), 12);
     const vkRole = (vkRequestedRole && vkRequestedRole !== "admin" && vkRequestedRole !== "superadmin") ? vkRequestedRole : "artist";
