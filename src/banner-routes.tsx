@@ -174,6 +174,12 @@ app.post('/', requireAuth, async (c) => {
       duration_days: durationDays,
       price: pricing.finalPrice,
       user_id: userId,
+      // start_date в БД NOT NULL: без него INSERT падал и создание баннера
+      // не работало ВООБЩЕ (в т.ч. платные заказы) — ловилось как
+      // «Failed to create banner» 500. Реальные даты показа проставит
+      // активация (manual-activate / оплата), здесь просто валидная заглушка.
+      start_date: new Date().toISOString(),
+      end_date: new Date(Date.now() + durationDays * 86400000).toISOString(),
       status: 'draft',                  // не активен до оплаты
       moderation_status: 'pending',
       data: {
