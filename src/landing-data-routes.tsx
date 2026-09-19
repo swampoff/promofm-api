@@ -402,6 +402,130 @@ landing.get('/new-releases', async (c) => {
   }
 });
 
+/**
+ * GET /weekly-mixes — DJ-миксы текущего выпуска «Новинок недели».
+ *
+ * Источник — те же weekly_releases, что и у треков, только колонка
+ * mix_ids. Оплату проверяем ещё раз здесь, а не полагаемся на то, что
+ * в mix_ids попало только оплаченное: витрина не должна показывать
+ * неоплаченный микс, даже если он оказался в пакете по ошибке.
+ */
+landing.get('/weekly-mixes', async (c) => {
+  try {
+    const latest = await pool.query(
+      `SELECT id, mix_ids, release_date FROM weekly_releases
+        WHERE is_published = true ORDER BY release_date DESC LIMIT 1`
+    );
+    const mixIds: string[] = latest.rows[0]?.mix_ids || [];
+    if (!mixIds.length) {
+      return c.json({ success: true, data: { mixes: [], updatedAt: latest.rows[0]?.release_date || null } });
+    }
+
+    const res = await pool.query(
+      `SELECT m.id, m.title, m.genre, m.duration, m.audio_url, m.cover_url,
+              m.bpm_range, m.plays_count, m.created_at,
+              COALESCE(NULLIF(dp.dj_name, ''), dp.data->>'djName', 'DJ') AS dj_name,
+              COALESCE(dp.slug, dp.data->>'slug') AS dj_slug,
+              COALESCE(dp.data->>'avatarUrl', dp.data->>'photoUrl') AS dj_avatar
+         FROM dj_mixes m
+         LEFT JOIN dj_profiles dp ON dp.user_id = m.dj_id
+        WHERE m.id = ANY($1)
+          AND m.moderation_status = 'published'
+          AND m.is_hidden = false
+          AND m.payment_completed = true
+        ORDER BY array_position($1::text[], m.id)`,
+      [mixIds]
+    );
+
+    return c.json({
+      success: true,
+      data: {
+        mixes: res.rows.map((m: any) => ({
+          id: m.id,
+          title: m.title,
+          dj: m.dj_name,
+          djSlug: m.dj_slug,
+          djAvatar: m.dj_avatar,
+          genre: m.genre,
+          duration: m.duration,
+          audioUrl: m.audio_url,
+          coverUrl: m.cover_url,
+          bpmRange: m.bpm_range,
+          playsCount: m.plays_count,
+        })),
+        updatedAt: latest.rows[0]?.release_date || null,
+      },
+    });
+  } catch (error) {
+    console.error('[weekly-mixes] failed:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+/**
+ * GET /mixes/archive — миксы прошлых выпусков, страницами.
+ *
+ * Зеркало /releases/archive: свежая неделя показывается отдельно, всё
+ * остальное раскрывается кнопкой «Все» и никогда не удаляется.
+ */
+landing.get('/mixes/archive', async (c) => {
+  try {
+    const offset = Math.max(0, parseInt(c.req.query('offset') || '0', 10) || 0);
+    const limit = Math.min(10, Math.max(1, parseInt(c.req.query('limit') || '4', 10) || 4));
+
+    const base = `FROM weekly_releases
+       WHERE is_published
+         AND mix_ids IS NOT NULL AND array_length(mix_ids, 1) > 0
+         AND id <> (SELECT id FROM weekly_releases WHERE is_published ORDER BY release_date DESC LIMIT 1)`;
+
+    const totalQ = await pool.query(`SELECT COUNT(*)::int AS cnt ${base}`);
+    const total = totalQ.rows[0]?.cnt ?? 0;
+
+    const rel = await pool.query(
+      `SELECT id, title, release_date, week_number, year, mix_ids ${base}
+        ORDER BY release_date DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const releases = [];
+    for (const r of rel.rows) {
+      const res = await pool.query(
+        `SELECT m.id, m.title, m.duration, m.audio_url, m.cover_url, m.genre,
+                COALESCE(NULLIF(dp.dj_name, ''), dp.data->>'djName', 'DJ') AS dj_name
+           FROM dj_mixes m
+           LEFT JOIN dj_profiles dp ON dp.user_id = m.dj_id
+          WHERE m.id = ANY($1)
+            AND m.moderation_status = 'published'
+            AND m.is_hidden = false
+            AND m.payment_completed = true
+          ORDER BY array_position($1::text[], m.id)`,
+        [r.mix_ids]
+      );
+      releases.push({
+        id: r.id,
+        title: r.title,
+        releaseDate: r.release_date,
+        weekNumber: r.week_number,
+        year: r.year,
+        mixes: res.rows.map((m: any) => ({
+          id: m.id,
+          title: m.title,
+          dj: m.dj_name,
+          genre: m.genre,
+          duration: m.duration,
+          audioUrl: m.audio_url,
+          coverUrl: m.cover_url,
+        })),
+      });
+    }
+
+    return c.json({ success: true, data: { total, offset, limit, releases } });
+  } catch (error) {
+    console.error('[mixes/archive] failed:', error);
+    return c.json({ success: false, error: 'internal error' }, 500);
+  }
+});
+
 // ============================================
 // TRACKS (PUBLIC) — NOW FROM TYPED SQL TABLE!
 // ============================================

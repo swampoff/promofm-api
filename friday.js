@@ -300,6 +300,9 @@ async function scanAndCreate(trackDir) {
        WHERE moderation_status = 'published'
          AND is_hidden = false
          AND audio_url IS NOT NULL AND audio_url != ''
+         -- Только оплаченные: модерация пропускает микс в каталог,
+         -- но место в пакете недели — платная позиция (10 000 ₽).
+         AND payment_completed = true
          AND created_at >= NOW() - INTERVAL '7 days'
        ORDER BY created_at DESC
        LIMIT 5
