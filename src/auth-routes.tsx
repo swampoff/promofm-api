@@ -843,6 +843,84 @@ auth.post("/reset-password", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/verify-email
 // ──────────────────────────────────────────────────────────────────────
+/**
+ * POST /set-email — вписать настоящую почту вместо VK-плейсхолдера.
+ *
+ * Только для аккаунтов, у которых адрес — плейсхолдер вида
+ * vk<id>@promo-music.ru (VK-вход не отдаёт email). Такой аккаунт не
+ * получает ни одного письма: sendEmail пропускает весь домен
+ * promo-music.ru, потому что ящиков за этими адресами нет.
+ *
+ * Заполнение — не смена: аккаунту с настоящим адресом отказываем.
+ * Смена подтверждённой почты должна подтверждаться со старого ящика,
+ * иначе это угон аккаунта при уведённой сессии.
+ */
+auth.post("/set-email", requireAuth, async (c) => {
+  try {
+    const userId = c.get('userId');
+    const parsed = await safeJsonParse(c);
+    if (!parsed.ok) return parsed.response;
+
+    const email = String(parsed.body?.email || '').trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+      return c.json({ success: false, error: "Укажите корректный адрес почты" }, 400);
+    }
+    // Плейсхолдер вместо плейсхолдера — не решение задачи.
+    if (/@promo-music\.ru$/i.test(email)) {
+      return c.json({ success: false, error: "Нужен адрес настоящего почтового ящика" }, 400);
+    }
+
+    const cur = await sql(
+      `SELECT email, full_name, username FROM users WHERE id = $1 AND deleted_at IS NULL`,
+      [userId]
+    );
+    if (cur.rows.length === 0) return c.json({ success: false, error: "Пользователь не найден" }, 404);
+
+    const currentEmail = String(cur.rows[0].email || '');
+    const isPlaceholder = /@promo-music\.ru$/i.test(currentEmail);
+    if (!isPlaceholder) {
+      return c.json({
+        success: false,
+        error: "У аккаунта уже указана почта. Смена адреса — через поддержку.",
+      }, 409);
+    }
+
+    const taken = await sql(
+      `SELECT 1 FROM users WHERE LOWER(email) = $1 AND id <> $2 AND deleted_at IS NULL LIMIT 1`,
+      [email, userId]
+    );
+    if (taken.rows.length > 0) {
+      return c.json({ success: false, error: "Этот адрес уже привязан к другому аккаунту" }, 409);
+    }
+
+    // Почта записывается сразу (иначе письмо некуда слать), но
+    // неподтверждённой: подтверждение придёт по ссылке.
+    await sql(
+      `UPDATE users
+          SET email = $1, is_email_verified = FALSE, email_verified_at = NULL, updated_at = NOW()
+        WHERE id = $2`,
+      [email, userId]
+    );
+
+    const verificationToken = crypto.randomUUID();
+    await vpsStoreToken(userId, verificationToken, "email_verify", 24);
+    const profile = await vpsGetProfile(userId);
+    const name = profile?.name || cur.rows[0].full_name || cur.rows[0].username || email.split('@')[0];
+    sendVerificationEmail(email, name, verificationToken)
+      .catch((e) => log.warn({ err: e, email }, "set_email_verification_failed"));
+
+    log.info({ userId, from: currentEmail, to: email }, 'user_email_filled_in');
+    return c.json({
+      success: true,
+      email,
+      message: "Почта сохранена. Мы отправили письмо со ссылкой для подтверждения.",
+    });
+  } catch (error) {
+    log.error({ err: error }, "set_email_error");
+    return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
+  }
+});
+
 auth.post("/verify-email", async (c) => {
   try {
     const { token } = await c.req.json();
