@@ -904,6 +904,20 @@ videosRoutes.post('/:id/moderate', requireAuth, requireAdmin, async (c) => {
 
           const ok = await sendEmail({ to, subject, html });
           console.log(`[videos] письмо о модерации (${status}) -> ${to}: ${ok ? 'отправлено' : 'НЕ отправлено'}`);
+
+          // Копия на админскую почту: решение модератора должно быть видно
+          // в общем ящике, а не только в кабинете (просьба владельца 19.09.2026).
+          const adminTo = process.env.ADMIN_EMAIL || 'info@promofm.ru';
+          const adminHtml = head
+            + `<p>Клип <strong>«${title}»</strong> — <strong>${status === 'approved' ? 'одобрен' : 'отклонён'}</strong>.</p>`
+            + `<p>Артист: ${escapeHtml(String(u.rows[0]?.name || '-'))} (${escapeHtml(String(to))})</p>`
+            + (note ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ${escapeHtml(note)}</p>` : '')
+            + foot;
+          await sendEmail({
+            to: adminTo,
+            subject: `[ПРОМО] Клип ${status === 'approved' ? 'одобрен' : 'отклонён'}: ${video.title}`,
+            html: adminHtml,
+          });
         } else {
           console.log(`[videos] письмо не отправлено: ${isPlaceholder ? 'плейсхолдерный email (вход через VK)' : 'email не найден'}`);
         }
