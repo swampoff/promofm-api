@@ -430,7 +430,7 @@ landing.get('/weekly-mixes', async (c) => {
          FROM dj_mixes m
          LEFT JOIN dj_profiles dp ON dp.user_id = m.dj_id
         WHERE m.id = ANY($1)
-          AND m.moderation_status = 'published'
+          AND m.moderation_status IN ('published', 'upcoming')
           AND m.is_hidden = false
           AND m.payment_completed = true
         ORDER BY array_position($1::text[], m.id)`,
@@ -495,7 +495,7 @@ landing.get('/mixes/archive', async (c) => {
            FROM dj_mixes m
            LEFT JOIN dj_profiles dp ON dp.user_id = m.dj_id
           WHERE m.id = ANY($1)
-            AND m.moderation_status = 'published'
+            AND m.moderation_status IN ('published', 'upcoming')
             AND m.is_hidden = false
             AND m.payment_completed = true
           ORDER BY array_position($1::text[], m.id)`,

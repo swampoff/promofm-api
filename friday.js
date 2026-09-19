@@ -297,14 +297,21 @@ async function scanAndCreate(trackDir) {
   try {
     const mixRes = await pool.query(`
       SELECT id FROM dj_mixes
-       WHERE moderation_status = 'published'
+       -- upcoming — это оплаченный микс в витрине «Скоро» (3 дня после
+       -- оплаты), published — он же после крона promote-upcoming. Обоим
+       -- место в пакете есть; фильтр «только published» выбрасывал бы
+       -- микс ровно в те дни, когда он самый свежий.
+       WHERE moderation_status IN ('published', 'upcoming')
          AND is_hidden = false
          AND audio_url IS NOT NULL AND audio_url != ''
-         -- Только оплаченные: модерация пропускает микс в каталог,
-         -- но место в пакете недели — платная позиция (10 000 ₽).
+         -- Только оплаченные: модерация пускает микс в каталог, но место
+         -- в пакете недели — платная позиция (10 000 ₽).
          AND payment_completed = true
-         AND created_at >= NOW() - INTERVAL '7 days'
-       ORDER BY created_at DESC
+         -- Окно считаем от ОПЛАТЫ, а не от загрузки: миксы ждут
+         -- модерации неделями, и по created_at оплаченный микс не попал
+         -- бы в выпуск никогда.
+         AND paid_at >= NOW() - INTERVAL '7 days'
+       ORDER BY paid_at DESC
        LIMIT 5
     `);
     const mixIds = mixRes.rows.map(r => r.id);

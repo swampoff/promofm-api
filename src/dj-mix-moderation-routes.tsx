@@ -19,7 +19,7 @@ import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { upsertNotification } from './db.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
-import { sendEmail, escapeHtml } from './email-helper.tsx';
+import { sendEmail, escapeHtml, notifyAdminTelegram } from './email-helper.tsx';
 import { logAdminAction } from './audit-helper.tsx';
 import crypto from 'crypto';
 
@@ -210,8 +210,35 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
           + '</div>'
           + '</div>';
 
-        sendEmail({ to: djEmail, subject: emailSubject, html: emailHtml })
-          .catch((err: any) => console.error('[dj-mix-moderation] Email to DJ failed:', err.message));
+        // Результат отправки НЕЛЬЗЯ игнорировать. У DJ, зашедших через VK,
+        // адрес — плейсхолдер vk<id>@promo-music.ru, ящика за ним нет, и
+        // sendEmail возвращает false (молча, чтобы не сыпать ошибками).
+        // Раньше этот false терялся: мы одобряли микс, просили 10 000 ₽ и
+        // были уверены, что написали, — а DJ узнавал об оплате, только если
+        // сам заглядывал в кабинет. Теперь о недоставляемом адресе узнаёт
+        // админ и может написать в VK.
+        const emailDelivered = await sendEmail({ to: djEmail, subject: emailSubject, html: emailHtml })
+          .catch((err: any) => {
+            console.error('[dj-mix-moderation] Email to DJ failed:', err?.message || err);
+            return false;
+          });
+
+        if (!emailDelivered) {
+          console.warn(
+            '[dj-mix-moderation] DJ unreachable by email:',
+            djEmail,
+            'mix:',
+            pendingMixId,
+          );
+          const price = getPublicationPrice().toLocaleString('ru-RU');
+          notifyAdminTelegram(
+            [
+              '\u26a0\ufe0f Микс «' + mix.title + '» одобрен, но письмо об оплате ' + price + ' \u20bd НЕ доставлено.',
+              'Адрес DJ: ' + djEmail + ' — похоже на VK-плейсхолдер без ящика.',
+              'Он увидит счёт только в кабинете. Свяжитесь с ним вручную.',
+            ].join('\n'),
+          ).catch(() => {});
+        }
       }
 
       // In-app notification (DJ bell + admin SSE)
