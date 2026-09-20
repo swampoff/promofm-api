@@ -242,6 +242,13 @@ app.post('/request', async (c) => {
     const eventDate = body.eventDate || null;
     const city = String(body.city || '').trim().slice(0, 120);
     const message = String(body.message || '').trim().slice(0, 2000);
+    // Сумму предлагает заказчик (заведение в кабинете). Отрицательные и
+    // абсурдные значения отсекаем здесь: цифра уедет исполнителю как
+    // предложение, и мусор в ней недопустим.
+    const rawFee = Number(body.offeredFee);
+    const offeredFee = Number.isFinite(rawFee) && rawFee > 0 && rawFee < 100_000_000
+      ? Math.round(rawFee)
+      : null;
 
     if (!performerId) {
       return c.json({ success: false, error: 'Не указан исполнитель', code: 'PERFORMER_REQUIRED' }, 400);
@@ -299,9 +306,10 @@ app.post('/request', async (c) => {
          id, user_id, performer_id, performer_type, requester_type,
          event_type, event_title, event_description, event_date,
          venue_city, status, client_name, client_email, client_phone,
-         source, consent_at, client_ip, admin_status, created_at, updated_at
+         source, consent_at, client_ip, admin_status, total_price, performer_fee,
+         created_at, updated_at
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12,$13,
-                 'booking_page', now(), $14, 'new', now(), now())`,
+                 'booking_page', now(), $14, 'new', $15, $15, now(), now())`,
       [
         bookingId,
         userId,
@@ -317,6 +325,9 @@ app.post('/request', async (c) => {
         clientEmail || null,
         clientPhone || null,
         ip,
+        // Комиссии здесь нет: платформа деньги по этому потоку не
+        // проводит, поэтому предложенная сумма и есть гонорар.
+        offeredFee,
       ],
     );
 
@@ -327,6 +338,7 @@ app.post('/request', async (c) => {
       performerName: performer.name,
       eventTitle: title,
       eventDate: String(eventDate),
+      offeredPrice: offeredFee || undefined,
       clientEmail: clientEmail || undefined,
       clientPhone: clientPhone || undefined,
       city: city || undefined,
@@ -342,7 +354,9 @@ app.post('/request', async (c) => {
         sourceRole: 'system',
         type: 'booking_request',
         title: 'Новая заявка на выступление',
-        message: `${title} — ${eventDate}`,
+        message: offeredFee
+          ? `${title} — ${eventDate} · предложено ${offeredFee.toLocaleString('ru-RU')} \u20bd`
+          : `${title} — ${eventDate}`,
         link: performer.performer_category === 'dj' ? '/dj/bookings' : '/artist/booking',
       });
     } catch (err: any) {
