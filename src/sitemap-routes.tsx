@@ -26,6 +26,11 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   { loc: '/concerts', changefreq: 'daily', priority: '0.9' },
   // Core features (0.8)
   { loc: '/promo-air', changefreq: 'weekly', priority: '0.8' },
+  // Посадочные семантического ядра Promo.Air (кластеры «Своё радио»,
+  // «Легальная музыка», «Винные бары и винодельни»).
+  { loc: '/promo-air/own-radio', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/promo-air/legal-music', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/promo-air/wine-bars', changefreq: 'monthly', priority: '0.7' },
   { loc: '/promo-lab', changefreq: 'weekly', priority: '0.8' },
   { loc: '/promo-guide', changefreq: 'weekly', priority: '0.8' },
   { loc: '/marketplace', changefreq: 'daily', priority: '0.8' },
