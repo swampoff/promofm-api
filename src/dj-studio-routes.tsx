@@ -327,6 +327,43 @@ app.put('/profile', requireAuth, requireDjRole, async (c) => {
     }
 
     await upsertDjProfile(userId, body);
+
+    // Зеркалим в booking_profiles: каталог /booking и проверка «принимает
+    // ли заявки» читают только оттуда. Без этого диджей выключил бы
+    // букинг у себя, а в каталоге остался бы видимым.
+    try {
+      const b = body?.booking || {};
+      const prof = body?.profile || body || {};
+      const city = String(prof.city || prof.location || '').trim();
+      const isOpen = b.openForBookings !== false && !!city;
+      const { pool: bpPool } = await import('./db-client.tsx');
+      await bpPool.query(
+        `INSERT INTO booking_profiles (user_id, performer_category, is_open, display_name, cities, fee_hint, min_duration_hours, updated_at)
+         VALUES ($1, 'dj', $2, $3, $4, $5, $6, now())
+         ON CONFLICT (user_id) DO UPDATE SET
+           performer_category = 'dj',
+           is_open            = EXCLUDED.is_open,
+           display_name       = COALESCE(NULLIF(EXCLUDED.display_name, ''), booking_profiles.display_name),
+           cities             = CASE WHEN array_length(EXCLUDED.cities, 1) IS NULL
+                                     THEN booking_profiles.cities ELSE EXCLUDED.cities END,
+           fee_hint           = COALESCE(EXCLUDED.fee_hint, booking_profiles.fee_hint),
+           min_duration_hours = COALESCE(EXCLUDED.min_duration_hours, booking_profiles.min_duration_hours),
+           updated_at         = now()`,
+        [
+          userId,
+          isOpen,
+          String(prof.djName || prof.name || '').trim() || null,
+          city ? [city] : [],
+          b.ratePerHour ? Number(b.ratePerHour) : null,
+          b.minBookingHours ? Number(b.minBookingHours) : null,
+        ],
+      );
+    } catch (err: any) {
+      // Не валим сохранение профиля из-за зеркала: основная запись уже
+      // прошла, а рассинхрон лечится следующим сохранением.
+      console.warn('[dj-studio] booking_profiles mirror skipped:', err?.message || err);
+    }
+
     return c.json({ success: true, data: body });
   } catch (error) {
     console.error('Error saving DJ profile:', error);
