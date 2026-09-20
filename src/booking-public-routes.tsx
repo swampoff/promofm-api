@@ -21,6 +21,7 @@ import crypto from 'node:crypto';
 import { pool } from './db-client.tsx';
 import { notifyBookingRequest } from './email-helper.tsx';
 import { createLogger } from './logger.tsx';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const log = createLogger('booking-public');
 const app = new Hono();
@@ -352,6 +353,111 @@ app.post('/request', async (c) => {
     return c.json({ success: true, data: { id: bookingId } });
   } catch (error: any) {
     log.error({ err: error }, 'booking_request_failed');
+    return c.json({ success: false, error: 'internal error' }, 500);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// АДМИНКА: очередь заявок
+// ─────────────────────────────────────────────────────────────
+
+/** Воронка владельца. Не путать со status — тот принадлежит исполнителю. */
+const ADMIN_STATUSES = ['new', 'contacted', 'qualified', 'deal', 'lost', 'spam'];
+
+app.get('/admin/requests', requireAuth, requireAdmin, async (c) => {
+  try {
+    const status = c.req.query('adminStatus') || '';
+    const limit = Math.min(200, Math.max(1, parseInt(c.req.query('limit') || '100', 10) || 100));
+
+    const where: string[] = ["b.source = 'booking_page'"];
+    const params: any[] = [];
+    if (status && ADMIN_STATUSES.includes(status)) {
+      params.push(status);
+      where.push(`b.admin_status = $${params.length}`);
+    }
+    params.push(limit);
+
+    const { rows } = await pool.query(
+      `SELECT b.id, b.client_name, b.client_email, b.client_phone,
+              b.event_type, b.event_title, b.event_description, b.event_date,
+              b.venue_city, b.status, b.admin_status, b.admin_note,
+              b.consent_at, b.created_at, b.performer_id,
+              COALESCE(NULLIF(bp.display_name, ''), ap.artist_name, dp.dj_name) AS performer_name,
+              bp.performer_category
+         FROM bookings b
+         LEFT JOIN booking_profiles bp ON bp.user_id = b.performer_id
+         LEFT JOIN artist_profiles ap  ON ap.user_id = b.performer_id
+         LEFT JOIN dj_profiles dp      ON dp.user_id = b.performer_id
+        WHERE ${where.join(' AND ')}
+        ORDER BY b.created_at DESC
+        LIMIT $${params.length}`,
+      params,
+    );
+
+    const counts = await pool.query(
+      `SELECT admin_status, COUNT(*)::int AS cnt
+         FROM bookings WHERE source = 'booking_page'
+        GROUP BY admin_status`,
+    );
+
+    return c.json({
+      success: true,
+      data: {
+        requests: rows.map((r: any) => ({
+          id: r.id,
+          clientName: r.client_name,
+          clientEmail: r.client_email,
+          clientPhone: r.client_phone,
+          eventType: r.event_type,
+          eventTitle: r.event_title,
+          eventDescription: r.event_description,
+          eventDate: r.event_date,
+          city: r.venue_city,
+          status: r.status,
+          adminStatus: r.admin_status,
+          adminNote: r.admin_note,
+          hasConsent: !!r.consent_at,
+          createdAt: r.created_at,
+          performerId: r.performer_id,
+          performerName: r.performer_name,
+          performerCategory: r.performer_category,
+        })),
+        counts: Object.fromEntries(counts.rows.map((r: any) => [r.admin_status, r.cnt])),
+      },
+    });
+  } catch (error) {
+    log.error({ err: error }, 'admin_requests_failed');
+    return c.json({ success: false, error: 'internal error' }, 500);
+  }
+});
+
+app.put('/admin/requests/:id', requireAuth, requireAdmin, async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json().catch(() => ({}));
+
+    const adminStatus = ADMIN_STATUSES.includes(body.adminStatus) ? body.adminStatus : null;
+    if (!adminStatus && body.adminNote === undefined) {
+      return c.json({ success: false, error: 'Нечего обновлять' }, 400);
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE bookings
+          SET admin_status = COALESCE($2, admin_status),
+              admin_note   = COALESCE($3, admin_note),
+              updated_at   = now()
+        WHERE id = $1 AND source = 'booking_page'
+        RETURNING id, admin_status, admin_note`,
+      [id, adminStatus, body.adminNote === undefined ? null : String(body.adminNote).slice(0, 4000)],
+    );
+    if (rows.length === 0) {
+      return c.json({ success: false, error: 'Заявка не найдена' }, 404);
+    }
+
+    log.info({ id, adminStatus }, 'booking_lead_updated');
+    return c.json({ success: true, data: rows[0] });
+  } catch (error) {
+    log.error({ err: error }, 'admin_request_update_failed');
     return c.json({ success: false, error: 'internal error' }, 500);
   }
 });
