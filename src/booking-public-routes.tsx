@@ -29,6 +29,38 @@ const app = new Hono();
 const CATEGORIES = ['artist', 'dj', 'cover_band', 'host'] as const;
 
 /**
+ * Защита публичной формы. Лимит по IP и дедупликация одинаковых заявок:
+ * без них форма без авторизации превращается в поток мусора в очереди
+ * владельца и в его Telegram. Память процесса, а не БД: при рестарте
+ * счётчик обнуляется — для антиспама этого достаточно, а лишней записи
+ * в базу не создаёт.
+ */
+const RATE_WINDOW_MS = 10 * 60 * 1000;
+const RATE_MAX_PER_IP = 5;
+const recentByIp = new Map<string, number[]>();
+const recentFingerprints = new Map<string, number>();
+
+setInterval(() => {
+  const cutoff = Date.now() - RATE_WINDOW_MS;
+  for (const [ip, stamps] of recentByIp) {
+    const live = stamps.filter((t) => t > cutoff);
+    if (live.length) recentByIp.set(ip, live);
+    else recentByIp.delete(ip);
+  }
+  for (const [key, t] of recentFingerprints) {
+    if (t < cutoff) recentFingerprints.delete(key);
+  }
+}, RATE_WINDOW_MS).unref?.();
+
+function tooManyRequests(ip: string): boolean {
+  const now = Date.now();
+  const stamps = (recentByIp.get(ip) || []).filter((t) => t > now - RATE_WINDOW_MS);
+  stamps.push(now);
+  recentByIp.set(ip, stamps);
+  return stamps.length > RATE_MAX_PER_IP;
+}
+
+/**
  * Опциональная авторизация: есть валидный JWT — заявка привязывается к
  * аккаунту, нет — заказчик считается гостем и обязан оставить контакты.
  * Битый или просроченный токен не ошибка: продолжаем как гость.
@@ -189,6 +221,17 @@ app.post('/request', async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const { userId, email: tokenEmail } = optionalAuth(c);
 
+    const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
+      || c.req.header('x-real-ip') || 'unknown';
+    if (tooManyRequests(ip)) {
+      log.warn({ ip }, 'booking_request_rate_limited');
+      return c.json({
+        success: false,
+        error: 'Слишком много заявок подряд. Попробуйте через несколько минут.',
+        code: 'RATE_LIMITED',
+      }, 429);
+    }
+
     const performerId = String(body.performerId || '').trim();
     const clientName = String(body.clientName || '').trim().slice(0, 200);
     const clientEmail = String(body.clientEmail || tokenEmail || '').trim().slice(0, 200);
@@ -212,6 +255,23 @@ app.post('/request', async (c) => {
     if (!eventDate) {
       return c.json({ success: false, error: 'Укажите дату мероприятия', code: 'DATE_REQUIRED' }, 400);
     }
+    // 152-ФЗ: форма публичная и собирает персональные данные физлица.
+    // Согласие фиксируем меткой времени, а не «мелким шрифтом под кнопкой».
+    if (body.consent !== true) {
+      return c.json({
+        success: false,
+        error: 'Нужно согласие на обработку персональных данных',
+        code: 'CONSENT_REQUIRED',
+      }, 400);
+    }
+
+    // Дедупликация: та же почта + тот же исполнитель + та же дата в
+    // пределах окна — это двойной клик или бот, а не второй заказ.
+    const fingerprint = `${clientEmail}|${performerId}|${eventDate}`;
+    if (recentFingerprints.has(fingerprint)) {
+      return c.json({ success: true, data: { duplicate: true } });
+    }
+    recentFingerprints.set(fingerprint, Date.now());
 
     // Исполнитель должен быть реально открыт для букинга. Проверяем здесь,
     // а не полагаемся на то, что фронт показал только открытых.
@@ -237,9 +297,10 @@ app.post('/request', async (c) => {
       `INSERT INTO bookings (
          id, user_id, performer_id, performer_type, requester_type,
          event_type, event_title, event_description, event_date,
-         venue_city, status, client_name, client_email, source,
-         special_requests, created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12,'booking_page',$13, now(), now())`,
+         venue_city, status, client_name, client_email, client_phone,
+         source, consent_at, client_ip, admin_status, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12,$13,
+                 'booking_page', now(), $14, 'new', now(), now())`,
       [
         bookingId,
         userId,
@@ -253,9 +314,8 @@ app.post('/request', async (c) => {
         city,
         clientName || null,
         clientEmail || null,
-        // Телефон в схеме bookings отдельной колонки не имеет, а терять
-        // его нельзя — это основной канал связи по таким заявкам.
-        clientPhone ? `Телефон: ${clientPhone}` : null,
+        clientPhone || null,
+        ip,
       ],
     );
 

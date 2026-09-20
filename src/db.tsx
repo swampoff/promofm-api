@@ -785,6 +785,10 @@ const BOOKING_NATIVE_COLS = `id, user_id, performer_id, venue_id,
   technical_requirements, special_requests, status,
   accepted_at, rejected_at, cancelled_at, deposit_paid_at, final_paid_at,
   cancelled_by, cancelled_by_role, cancellation_reason,
+  -- Контакты заказчика. Без них гостевая заявка приходит исполнителю
+  -- «от кого-то» — ответить некому. В лидовой модели это основной
+  -- сценарий, а не исключение.
+  client_name, client_email, source,
   created_at, updated_at`;
 
 function mapBookingRow(r: any): any {
@@ -827,6 +831,11 @@ function mapBookingRow(r: any): any {
     cancelledBy: r.cancelled_by,
     cancelledByRole: r.cancelled_by_role,
     cancellationReason: r.cancellation_reason,
+    clientName: r.client_name || null,
+    clientEmail: r.client_email || null,
+    // 'booking_page' | 'marketplace' | null — по нему UI отличает
+    // заявку от гостя (контакты есть, цены нет) от венью-букинга.
+    source: r.source || null,
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
   };
