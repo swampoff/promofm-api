@@ -67,10 +67,10 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   { loc: '/donations', changefreq: 'weekly', priority: '0.6' },
   { loc: '/coins', changefreq: 'weekly', priority: '0.6' },
   { loc: '/booking', changefreq: 'daily', priority: '0.8' },
+  // /curator и /music-gen убраны 20.09.2026: страниц не существует
+  // (ни маршрута, ни компонента), sitemap вёл робота на 404.
   { loc: '/booking/cover-bands', changefreq: 'weekly', priority: '0.7' },
   { loc: '/booking/hosts', changefreq: 'weekly', priority: '0.7' },
-  { loc: '/curator', changefreq: 'weekly', priority: '0.6' },
-  { loc: '/music-gen', changefreq: 'weekly', priority: '0.6' },
   // Collaboration & messaging (0.5)
   { loc: '/collaboration', changefreq: 'weekly', priority: '0.5' },
   { loc: '/messages', changefreq: 'daily', priority: '0.5' },

@@ -1067,19 +1067,14 @@ app.get('/bookings', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
     const statusFilter = c.req.query('status');
-    const indexRaw = await getBookingsByUser(userId);
-    const bookingIds: string[] = parse(indexRaw) || [];
+    // getBookingsByUser отдаёт готовые строки (native-колонки, migration
+    // 047). Раньше здесь их разбирали как индекс id-шников и ходили за
+    // каждым отдельно — индекс-таблицы давно нет, и список всегда
+    // получался пустым.
+    const rows = await getBookingsByUser(userId);
 
-    if (bookingIds.length === 0) {
-      return c.json({ success: true, bookings: [] });
-    }
-
-    const bookingValues = await Promise.all(bookingIds.map((id: string) => getBooking(id)));
-
-    let bookings = bookingValues
-      .filter(v => v !== null)
-      .map(v => parse(v))
-      .filter(b => b && b.requesterId === userId); // only as requester (venue)
+    // Только как заказчик: заведение букает исполнителя, а не наоборот.
+    let bookings = (rows || []).filter((b: any) => b && b.requesterId === userId);
 
     if (statusFilter) {
       bookings = bookings.filter(b => b.status === statusFilter);

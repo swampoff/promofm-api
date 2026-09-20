@@ -102,57 +102,34 @@ async function sendNotification(params: {
 // HELPER: Получить профиль исполнителя из SQL (artist_profiles / dj_profiles / users)
 // =====================================================
 async function getPerformerProfile(performerId: string, performerType: string) {
-  // Try artist_profiles row first
-  const artistData = await getArtistProfile(performerId);
-  if (artistData) {
-    const artist = artistData;
-    return {
-      userId: artist.id,
-      displayName: artist.name,
-      avatar: artist.avatar,
-      hourlyRate: artist.hourlyRate || 5000,
-      minimumBookingHours: artist.minimumBookingHours || 2,
-      bookingEnabled: true,
-    };
-  }
+  // Единственный источник правды — анкета, которую исполнитель открыл
+  // сам. Имя и аватар подтягиваем из профиля соответствующей роли.
+  const { pool } = await import('./db-client.tsx');
+  const { rows } = await pool.query(
+    `SELECT bp.user_id, bp.is_open, bp.performer_category, bp.fee_hint, bp.min_duration_hours,
+            COALESCE(NULLIF(bp.display_name, ''), ap.artist_name, dp.dj_name) AS name,
+            COALESCE(ap.avatar_url, dp.data->>'avatarUrl')                     AS avatar
+       FROM booking_profiles bp
+       LEFT JOIN artist_profiles ap ON ap.user_id = bp.user_id
+       LEFT JOIN dj_profiles dp     ON dp.user_id = bp.user_id
+      WHERE bp.user_id = $1
+      LIMIT 1`,
+    [performerId],
+  );
 
-  // Try DJ profile.
-  // Editor stores data nested under `profile` / `booking`. Legacy rows are
-  // flat. Read both shapes so a booking can be created against either.
-  const djData = await getDjProfile(performerId);
-  if (djData) {
-    const dj: any = djData;
-    const p = dj.profile || dj;
-    const b = dj.booking || dj;
-    return {
-      userId: dj.userId || dj.id,
-      displayName: p.djName || dj.djName || dj.name || '',
-      avatar: p.avatarUrl || dj.avatar || '',
-      hourlyRate: b.ratePerHour || dj.hourlyRate || 4000,
-      minimumBookingHours: b.minBookingHours || dj.minimumBookingHours || 2,
-      // Backend supports a per-DJ off-switch via booking.openForBookings.
-      bookingEnabled: b.openForBookings !== false,
-    };
-  }
+  if (rows.length === 0) return null;
 
-  // Fallback: check users table — any registered user can be a performer
-  try {
-    const { pool } = await import('./db-client.tsx');
-    const res = await pool.query('SELECT id, email, username, full_name FROM users WHERE id = $1', [performerId]);
-    if (res.rows.length > 0) {
-      const u = res.rows[0];
-      return {
-        userId: u.id,
-        displayName: u.full_name || u.username || u.email,
-        avatar: null,
-        hourlyRate: 5000,
-        minimumBookingHours: 2,
-        bookingEnabled: true,
-      };
-    }
-  } catch {}
-
-  return null;
+  const r = rows[0];
+  return {
+    userId: r.user_id,
+    displayName: r.name || 'Исполнитель',
+    avatar: r.avatar || null,
+    // Ставку НЕ выдумываем. Нет ориентира — 0, и расчёт суммы по часам
+    // даст ноль, а не правдоподобную ложь.
+    hourlyRate: r.fee_hint !== null && r.fee_hint !== undefined ? Number(r.fee_hint) : 0,
+    minimumBookingHours: r.min_duration_hours ? Number(r.min_duration_hours) : 1,
+    bookingEnabled: !!r.is_open,
+  };
 }
 
 // =====================================================
