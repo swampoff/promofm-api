@@ -788,7 +788,7 @@ const BOOKING_NATIVE_COLS = `id, user_id, performer_id, venue_id,
   -- Контакты заказчика. Без них гостевая заявка приходит исполнителю
   -- «от кого-то» — ответить некому. В лидовой модели это основной
   -- сценарий, а не исключение.
-  client_name, client_email, source,
+  client_name, client_email, client_phone, source,
   created_at, updated_at`;
 
 function mapBookingRow(r: any): any {
@@ -833,6 +833,8 @@ function mapBookingRow(r: any): any {
     cancellationReason: r.cancellation_reason,
     clientName: r.client_name || null,
     clientEmail: r.client_email || null,
+    // Телефон — основной канал связи по заявкам на выступления.
+    clientPhone: r.client_phone || null,
     // 'booking_page' | 'marketplace' | null — по нему UI отличает
     // заявку от гостя (контакты есть, цены нет) от венью-букинга.
     source: r.source || null,

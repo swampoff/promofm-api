@@ -141,6 +141,7 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
     'X-Mailer': 'PromoMusic/2.0',
     'Precedence': 'bulk',
   };
+  let unsubLinkUrl = '';
   if (opts.listUnsubscribe !== false) {
     const email = recipients[0];
     // Audit B-7 (2026-05-31): подписываем unsub-URL HMAC-токеном чтобы
@@ -153,16 +154,37 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
     const unsubUrl = `${UNSUBSCRIBE_URL}?${params.toString()}`;
     headers['List-Unsubscribe'] = `<${unsubUrl}>`;
     headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
+
+    // Видимая ссылка в теле письма. Раньше адрес отписки жил ТОЛЬКО в
+    // заголовке: почтовые клиенты показывали кнопку, но в самом письме
+    // ссылки не было — а подписи в наших рассылках обещали «отпишитесь
+    // ссылкой ниже» (замечено владельцем 2026-08-17). Обещание без ссылки
+    // это и обман получателя, и повод пожаловаться на спам.
+    //
+    // Шаблон письма ставит {{unsubscribe_url}} там, где нужна ссылка. Если
+    // подстановки в шаблоне нет — дописываем строку в конец, чтобы ни одна
+    // массовая рассылка не ушла без возможности отписаться.
+    unsubLinkUrl = unsubUrl;
   }
 
   try {
     const transport = getTransporter();
 
+    let finalHtml = opts.html;
+    if (unsubLinkUrl) {
+      const link = `<a href="${unsubLinkUrl}" style="color:#8a8aa0;text-decoration:underline;">Отписаться от рассылки</a>`;
+      if (finalHtml.includes('{{unsubscribe_url}}')) {
+        finalHtml = finalHtml.split('{{unsubscribe_url}}').join(unsubLinkUrl);
+      } else if (!finalHtml.includes(UNSUBSCRIBE_URL)) {
+        finalHtml += `<div style="text-align:center;padding:14px 10px;font-family:Arial,sans-serif;font-size:12px;color:#8a8aa0;">${link}</div>`;
+      }
+    }
+
     const info = await transport.sendMail({
       from,
       to: recipients.join(', '),
       subject: opts.subject,
-      html: opts.html,
+      html: finalHtml,
       text: htmlToPlainText(opts.html),
       replyTo: opts.replyTo || SMTP_REPLY_TO,
       headers,
