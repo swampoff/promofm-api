@@ -305,9 +305,55 @@ export async function notifyVenueRequest(data: { venueName: string; venueCity?: 
   await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Заведение: ${escapeHtml(data.venueName)}`, html });
 }
 
-export async function notifyBookingRequest(data: { venueName: string; performerName?: string; eventTitle: string; eventDate: string; offeredPrice?: number; }) {
-  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: #10B981;">Новое бронирование</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Заведение:</td><td>${escapeHtml(data.venueName)}</td></tr>${data.performerName ? `<tr><td style="padding: 8px;">Артист:</td><td>${escapeHtml(data.performerName || "")}</td></tr>` : ''}<tr><td style="padding: 8px;">Событие:</td><td>${escapeHtml(data.eventTitle)}</td></tr><tr><td style="padding: 8px;">Дата:</td><td>${escapeHtml(data.eventDate)}</td></tr></table></div>`;
-  await sendEmail({ to: ADMIN_EMAIL, subject: `[ПРОМО] Бронирование: ${escapeHtml(data.eventTitle)} — ${escapeHtml(data.eventDate)}`, html });
+/**
+ * Заявка на букинг — владельцу.
+ *
+ * Модель лидовая: по заявке связываются вручную, поэтому КОНТАКТЫ
+ * заказчика здесь главное. Раньше письмо их не содержало вовсе —
+ * приходило «новое бронирование» без единого способа ответить.
+ * Дубль уходит в Telegram: скорость ответа и есть продукт.
+ */
+export async function notifyBookingRequest(data: {
+  venueName: string;
+  performerName?: string;
+  eventTitle: string;
+  eventDate: string;
+  offeredPrice?: number;
+  clientEmail?: string;
+  clientPhone?: string;
+  city?: string;
+  message?: string;
+}) {
+  const row = (label: string, value?: string) =>
+    value ? `<tr><td style="padding: 8px; color:#888;">${escapeHtml(label)}</td><td>${escapeHtml(value)}</td></tr>` : '';
+
+  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;">`
+    + `<h2 style="color: #10B981;">Заявка на букинг</h2>`
+    + `<table style="width: 100%; border-collapse: collapse;">`
+    + row('Заказчик:', data.venueName)
+    + row('Email:', data.clientEmail)
+    + row('Телефон:', data.clientPhone)
+    + row('Исполнитель:', data.performerName)
+    + row('Событие:', data.eventTitle)
+    + row('Дата:', data.eventDate)
+    + row('Город:', data.city)
+    + row('Сообщение:', data.message)
+    + `</table></div>`;
+
+  await sendEmail({
+    to: ADMIN_EMAIL,
+    subject: `[ПРОМО] Букинг: ${escapeHtml(data.eventTitle)} — ${escapeHtml(data.eventDate)}`,
+    html,
+  });
+
+  notifyAdminTelegram(
+    [
+      'Заявка на букинг',
+      'Заказчик: ' + data.venueName + (data.clientEmail ? ' / ' + data.clientEmail : '') + (data.clientPhone ? ' / ' + data.clientPhone : ''),
+      'Исполнитель: ' + (data.performerName || '—'),
+      'Событие: ' + data.eventTitle + ' — ' + data.eventDate + (data.city ? ', ' + data.city : ''),
+    ].join('\n'),
+  ).catch(() => {});
 }
 
 export async function notifyNewUser(data: { email: string; name: string; role: string; via?: string; needsApproval?: boolean; application?: any }) {
