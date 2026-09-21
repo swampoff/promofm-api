@@ -292,6 +292,7 @@ export async function rebuildCompositeChart() {
           title: t.title,
           artist: t.artist,
           source: s.id,
+          isOwn: s.id === 'promofm_ai',
           sourceName: s.name,
           position: t.position,
           plays: t.plays || 0,
@@ -313,6 +314,7 @@ export async function rebuildCompositeChart() {
     if (existing) {
       existing.score += e.score;
       if (!existing.sources.includes(e.source)) existing.sources.push(e.source);
+      if (e.isOwn) existing.isOwn = true;
       existing.plays += e.plays;
       existing.likes += e.likes;
       if (!existing.audioUrl && e.audioUrl) existing.audioUrl = e.audioUrl;
@@ -321,6 +323,7 @@ export async function rebuildCompositeChart() {
       grouped.set(key, {
         title: e.title,
         artist: e.artist,
+        isOwn: e.isOwn,
         sources: [e.source],
         bestPosition: e.position,
         plays: e.plays,
@@ -333,7 +336,20 @@ export async function rebuildCompositeChart() {
     }
   }
 
-  const tracks = Array.from(grouped.values()).sort((a, b) => b.score - a.score);
+  // Свои треки идут выше внешних, и вот почему. Место считается по формуле
+  // plays*0.1 + likes, а подборки Suno и Udio загружены разово 22.05.2026 и
+  // обновлятора у них нет (сайты закрыты авторизацией и капчей, проверено
+  // 17.08). В итоге свежий оплаченный релиз живого артиста с одним
+  // прослушиванием оказывался ниже чужих четырёхмесячных данных: «Греми моё
+  // сердце» Бориса Желубалина стоял 20-м из 26, на самой границе показа.
+  //
+  // Раздел — чарт нашей платформы, поэтому собственные релизы первые, а
+  // внешние источники идут справочным фоном. Внутри каждой группы порядок
+  // прежний, по очкам.
+  const tracks = Array.from(grouped.values()).sort((a, b) => {
+    if (!!a.isOwn !== !!b.isOwn) return a.isOwn ? -1 : 1;
+    return b.score - a.score;
+  });
   tracks.forEach((t, i) => { t.position = i + 1; });
 
   const sourceStats: Record<string, number> = {};
