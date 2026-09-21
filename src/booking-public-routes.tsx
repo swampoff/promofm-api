@@ -126,10 +126,15 @@ app.get('/performers', async (c) => {
               COALESCE(ap.avatar_url, dp.data->>'avatarUrl')                                    AS avatar_url,
               COALESCE(ap.genre, dp.data->>'genre')                                             AS genre,
               COALESCE(ap.is_verified, false)                                                   AS is_verified,
-              ap.slug
+              ap.slug,
+              (u.email IS NOT NULL
+               AND u.email NOT ILIKE '%@promofm.ru'
+               AND u.email NOT ILIKE '%@promo-music.ru')
+              OR u.last_login_at IS NOT NULL                                    AS contactable
          FROM booking_profiles bp
          LEFT JOIN artist_profiles ap ON ap.user_id = bp.user_id
          LEFT JOIN dj_profiles dp     ON dp.user_id = bp.user_id
+         LEFT JOIN users u            ON u.id::text = bp.user_id
         WHERE ${whereSql}
         ORDER BY COALESCE(ap.is_verified, false) DESC, bp.updated_at DESC
         LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -153,6 +158,9 @@ app.get('/performers', async (c) => {
           formats: r.formats || [],
           about: r.about,
           slug: r.slug,
+          // false = аккаунт из импорта, связи с артистом у нас нет.
+          // Карточка предлагает «уточнить возможность», а не заявку.
+          contactable: !!r.contactable,
           // Цены нет и не будет: владелец — «всегда по запросу».
         })),
       },
@@ -177,10 +185,15 @@ app.get('/performers/:id', async (c) => {
               COALESCE(ap.cover_url, '')                                                        AS cover_url,
               COALESCE(ap.genre, dp.data->>'genre')                                             AS genre,
               COALESCE(ap.is_verified, false)                                                   AS is_verified,
-              ap.slug, ap.bio
+              ap.slug, ap.bio,
+              (u.email IS NOT NULL
+               AND u.email NOT ILIKE '%@promofm.ru'
+               AND u.email NOT ILIKE '%@promo-music.ru')
+              OR u.last_login_at IS NOT NULL                                    AS contactable
          FROM booking_profiles bp
          LEFT JOIN artist_profiles ap ON ap.user_id = bp.user_id
          LEFT JOIN dj_profiles dp     ON dp.user_id = bp.user_id
+         LEFT JOIN users u            ON u.id::text = bp.user_id
         WHERE bp.user_id = $1 AND bp.is_open = true AND bp.moderation_status = 'approved'
         LIMIT 1`,
       [id],
@@ -206,6 +219,7 @@ app.get('/performers/:id', async (c) => {
         // Райдер показываем: заказчику полезно знать требования заранее.
         rider: r.rider || {},
         slug: r.slug,
+        contactable: !!r.contactable,
       },
     });
   } catch (error: any) {
@@ -285,10 +299,15 @@ app.post('/request', async (c) => {
     // а не полагаемся на то, что фронт показал только открытых.
     const perf = await pool.query(
       `SELECT bp.user_id, bp.performer_category,
-              COALESCE(NULLIF(bp.display_name, ''), ap.artist_name, dp.dj_name, 'Исполнитель') AS name
+              COALESCE(NULLIF(bp.display_name, ''), ap.artist_name, dp.dj_name, 'Исполнитель') AS name,
+              (u.email IS NOT NULL
+               AND u.email NOT ILIKE '%@promofm.ru'
+               AND u.email NOT ILIKE '%@promo-music.ru')
+              OR u.last_login_at IS NOT NULL AS contactable
          FROM booking_profiles bp
          LEFT JOIN artist_profiles ap ON ap.user_id = bp.user_id
          LEFT JOIN dj_profiles dp     ON dp.user_id = bp.user_id
+         LEFT JOIN users u            ON u.id::text = bp.user_id
         WHERE bp.user_id = $1 AND bp.is_open = true AND bp.moderation_status = 'approved'
         LIMIT 1`,
       [performerId],
@@ -299,7 +318,11 @@ app.post('/request', async (c) => {
     const performer = perf.rows[0];
 
     const bookingId = `bk-${crypto.randomUUID()}`;
-    const title = eventTitle || `${eventType} — ${city || 'город не указан'}`;
+    const baseTitle = eventTitle || `${eventType} — ${city || 'город не указан'}`;
+    // С артистом из импорта связи нет — это запрос на подбор, а не бронь.
+    // Пишем это прямо в заголовке, чтобы в очереди было видно без
+    // дополнительных проверок.
+    const title = performer.contactable ? baseTitle : `Уточнить возможность: ${baseTitle}`;
 
     await pool.query(
       `INSERT INTO bookings (
@@ -347,6 +370,9 @@ app.post('/request', async (c) => {
 
     // Исполнителю — уведомление в кабинет.
     try {
+      // Импортированному аккаунту уведомление слать некуда: в кабинет
+      // никто не заходит, почты не существует. Заявку разбирает площадка.
+      if (!performer.contactable) throw new Error('performer_not_contactable');
       const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
       await notifyCrossCabinet({
         targetUserId: performerId,
