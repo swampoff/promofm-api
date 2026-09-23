@@ -158,6 +158,27 @@ async function triggerAiAnalysis(trackId: string, audioUrl: string) {
 }
 
 // POST /submitTrack — Submit track for moderation
+/**
+ * Раздел кабинета, где лежат треки и кнопка оплаты. Зависит от роли:
+ * у лейбла это «Релизы» (/label/releases), у всех остальных «Мои треки».
+ * До 23.09.2026 во все письма и уведомления зашивался /artist/tracks —
+ * лейбл попадал в чужой кабинет, где своего трека не находил и не понимал,
+ * как платить (кейс «Александровский сад», лейбл Арина, 21.09.2026).
+ */
+async function cabinetTracksPath(userId?: string | null): Promise<string> {
+  if (!userId) return '/artist/tracks';
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const { rows } = await pool.query(
+      'SELECT role FROM users WHERE id::text = $1',
+      [String(userId)],
+    );
+    return rows[0]?.role === 'label' ? '/label/releases' : '/artist/tracks';
+  } catch {
+    return '/artist/tracks';
+  }
+}
+
 app.post('/submitTrack', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
@@ -510,6 +531,8 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         } catch {}
       }
       const artistName = track.artist_name || 'Артист';
+      // Куда вести артиста/лейбл за оплатой — зависит от его роли.
+      const cabinetPath = await cabinetTracksPath(track.user_id);
       const aiNote = (track.ai_score && track.ai_score > 60)
         ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:4px;"><strong>AI-анализ:</strong> С вероятностью ' + track.ai_score + '% трек создан с помощью ИИ. Мы предлагаем размещение в специальном разделе <strong>ИИ-треки</strong>.</p>'
         : '';
@@ -549,7 +572,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           // Normal track — paid approval email.
           emailSubject = 'Трек одобрен — ' + track.title;
           const statusBlock = '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + getPublicationPrice().toLocaleString('ru-RU') + ' ₽</strong></p>';
-          const ctaButton = '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/artist/tracks" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>';
+          const ctaButton = '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru' + cabinetPath + '" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>';
 
           emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
             + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
@@ -600,7 +623,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           type: 'track_moderation',
           title: notifTitle,
           message: notifMessage,
-          link: '/artist/tracks',
+          link: cabinetPath,
         }).catch(() => {});
 
         // Persistent inbox notification. The artist's bell / history
@@ -617,7 +640,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           trackId: pendingTrackId,
           trackTitle: track.title,
           newStatus: 'approved',
-          link: '/artist/tracks',
+          link: cabinetPath,
           read: false,
           createdAt: now,
         }).catch((err: any) => console.error('[moderation] inbox notif failed:', err?.message || err));
@@ -736,7 +759,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           type: 'track_moderation',
           title: rejectTitle,
           message: rejectMsg,
-          link: '/artist/tracks',
+          link: cabinetPath,
         }).catch(() => {});
 
         // Persistent inbox row — same reason as the approve branch:
@@ -751,7 +774,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           trackTitle: track.title,
           newStatus: 'rejected',
           rejectionReason: reason || '',
-          link: '/artist/tracks',
+          link: cabinetPath,
           read: false,
           createdAt: now,
         }).catch((err: any) => console.error('[moderation] inbox notif failed:', err?.message || err));
@@ -1033,6 +1056,7 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
       // Notify artist
       if (snapshot.user_id) {
         const upcomingTitle = 'Трек скоро в эфире!';
+        const cabinetPath = await cabinetTracksPath(snapshot.user_id);
         const upcomingMsg = `"${snapshot.title}" появится в новинках через ${UPCOMING_DAYS} дня`;
         notifyCrossCabinet({
           targetUserId: snapshot.user_id,
@@ -1041,7 +1065,7 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
           type: 'track_upcoming',
           title: upcomingTitle,
           message: upcomingMsg,
-          link: '/artist/tracks',
+          link: cabinetPath,
         }).catch(() => {});
 
         // Also write to the persistent inbox so the bell sees it.
@@ -1053,7 +1077,7 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
           message: upcomingMsg,
           trackId,
           trackTitle: snapshot.title,
-          link: '/artist/tracks',
+          link: cabinetPath,
           read: false,
           createdAt: new Date().toISOString(),
         }).catch((err: any) => console.error('[approve-paid] inbox notif failed:', err?.message || err));
@@ -1168,6 +1192,7 @@ app.post('/promote-upcoming', async (c) => {
       // Notify artist
       if (track.user_id) {
         const pubTitle = 'Трек опубликован!';
+        const cabinetPath = await cabinetTracksPath(track.user_id);
         const pubMsg = `"${track.title}" теперь в новинках недели`;
         notifyCrossCabinet({
           targetUserId: track.user_id,
@@ -1176,7 +1201,7 @@ app.post('/promote-upcoming', async (c) => {
           type: 'track_published',
           title: pubTitle,
           message: pubMsg,
-          link: '/artist/tracks',
+          link: cabinetPath,
         }).catch(() => {});
 
         // Persistent inbox row — bell reads `notifications` not
@@ -1189,7 +1214,7 @@ app.post('/promote-upcoming', async (c) => {
           message: pubMsg,
           trackId: track.id,
           trackTitle: track.title,
-          link: '/artist/tracks',
+          link: cabinetPath,
           read: false,
           createdAt: new Date().toISOString(),
         }).catch((err: any) => console.error('[promote-upcoming] inbox notif failed:', err?.message || err));
@@ -1331,7 +1356,8 @@ app.post('/send-payment-reminders', async (c) => {
     // Find approved tracks older than minAgeDays whose last_reminder_at (in data) is either null or older than reminderInterval
     const r = await pool.query(`
       SELECT t.id, t.title, t.artist_name, t.uploaded_by_email, t.user_id,
-             u.email as user_email, t.created_at
+             u.email as user_email, u.role as user_role,
+             t.payment_amount, t.created_at
       FROM tracks t LEFT JOIN users u ON u.id::text = t.user_id::text
       WHERE t.moderation_status = 'approved'
         AND t.created_at < NOW() - ($1::int || ' days')::interval
@@ -1354,6 +1380,14 @@ app.post('/send-payment-reminders', async (c) => {
       const email = t.uploaded_by_email || t.user_email || '';
       if (!email) { skipped++; continue; }
 
+      // Цена берётся из трека (фиксируется при одобрении), с запасным
+      // вариантом на актуальный тариф. Раньше здесь было захардкожено
+      // 5 000 ₽ — письмо называло сумму, которой не существует: письмо об
+      // одобрении уже присылало корректные 10 000 ₽ (исправлено 23.09.2026).
+      const priceValue = Number(t.payment_amount) || getPublicationPrice();
+      const priceText = priceValue.toLocaleString('ru-RU') + ' ₽';
+      const cabinetPath = t.user_role === 'label' ? '/label/releases' : '/artist/tracks';
+
       const subject = 'Напоминание об оплате — ' + t.title;
       const html = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
         + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;">'
@@ -1361,8 +1395,8 @@ app.post('/send-payment-reminders', async (c) => {
         + '</div><div style="padding:32px;">'
         + '<p>Добрый день!</p>'
         + '<p>Ваш трек <strong>«' + escapeHtml(t.title) + '»</strong> одобрен модерацией и ждёт оплаты для публикации.</p>'
-        + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Стоимость публикации: <strong>5 000 ₽</strong></p>'
-        + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/artist/tracks" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
+        + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Стоимость публикации: <strong>' + priceText + '</strong></p>'
+        + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru' + cabinetPath + '" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
         + '<p style="color:#888;">Если у вас вопросы — ответьте на это письмо.</p>'
         + '</div></div>';
 
@@ -1379,9 +1413,9 @@ app.post('/send-payment-reminders', async (c) => {
             type: 'payment_reminder',
             data: {
               title: 'Напоминание об оплате',
-              message: 'Трек «' + t.title + '» ждёт оплату — 5 000 ₽',
+              message: 'Трек «' + t.title + '» ждёт оплату: ' + priceText,
               trackId: t.id,
-              link: '/artist/tracks',
+              link: cabinetPath,
             },
           });
         } catch {}

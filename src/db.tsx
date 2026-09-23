@@ -706,6 +706,29 @@ export async function getAllArtistProfiles() {
     .select('*')
     .order('total_plays', { ascending: false });
   if (error) console.error('[db] getAllArtistProfiles:', error);
+
+  // Реальное число публичных треков на артиста. Раньше бралось из
+  // artist_profiles.data->>'track_count' — денормализованное поле, которое
+  // почти никто не обновлял: в каталоге у 429 из 500 артистов стояло
+  // «0 треков» при живых треках на странице. Набор здесь ДОЛЖЕН совпадать
+  // с публичной выдачей треков артиста (см. artist-profile-routes
+  // /profile/:id/tracks), иначе каталог снова разойдётся со страницей.
+  const trackCounts = new Map<string, number>();
+  try {
+    const { pool } = await import('./db-client.tsx');
+    const { rows } = await pool.query(
+      `SELECT artist_id, COUNT(*)::int AS n
+         FROM tracks
+        WHERE artist_id IS NOT NULL
+          AND moderation_status IN ('approved', 'upcoming', 'published')
+          AND COALESCE(is_hidden, false) = false
+        GROUP BY artist_id`,
+    );
+    for (const row of rows) trackCounts.set(String(row.artist_id), row.n);
+  } catch (e: any) {
+    console.warn('[db] getAllArtistProfiles track counts failed:', e?.message);
+  }
+
   // Return full rows with proper field names
   return (data || []).map((r: any) => ({
     id: r.user_id || r.id,
@@ -725,7 +748,7 @@ export async function getAllArtistProfiles() {
     totalPlays: r.total_plays || 0,
     totalFollowers: r.total_followers || 0,
     isVerified: r.is_verified || false,
-    trackCount: r.data?.track_count || 0,
+    trackCount: trackCounts.get(String(r.id)) ?? (r.data?.track_count || 0),
   }));
 }
 
@@ -4150,6 +4173,29 @@ export interface ChartAggregationStatus {
 }
 export async function getChartAggregationStatus(): Promise<ChartAggregationStatus | null> {
   const { pool } = await import('./db-client.tsx');
+
+  // Канонический источник — строка last_aggregation в chart_sources: её пишет
+  // promofm-charts-agent.py (крон Пн+Сб 6:00), который и собирает чарты.
+  // Таблицу chart_aggregation наполнял POST /charts/full-update, отключённый
+  // 11.06.2026 из-за гео-блокировки, затиравшей данные; с тех пор она стоит
+  // и выдавала за «последнюю агрегацию» июльские цифры.
+  const agent = await pool.query(
+    `SELECT data FROM chart_sources WHERE id = 'last_aggregation' LIMIT 1`
+  );
+  const d = agent.rows[0]?.data;
+  if (d) {
+    const parsed = typeof d === 'string' ? JSON.parse(d) : d;
+    if (parsed?.timestamp) {
+      return {
+        timestamp: parsed.timestamp,
+        sourcesProcessed: Number(parsed.sourcesProcessed || 0),
+        totalTracks: Number(parsed.totalTracks || 0),
+        results: Array.isArray(parsed.results) ? parsed.results : [],
+      };
+    }
+  }
+
+  // Фолбэк на старую таблицу: на случай, если агент ещё ни разу не отработал.
   const r = await pool.query(
     `SELECT timestamp, sources_processed, total_tracks, results
        FROM chart_aggregation WHERE key = 'last' LIMIT 1`
