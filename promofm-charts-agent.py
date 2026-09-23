@@ -500,6 +500,43 @@ def db_upsert(conn, table: str, pk: str, pk_val: str, data: dict):
     cur.close()
 
 
+def db_upsert_chart_source(conn, source_id: str, source_name: str, tracks: list):
+    """
+    Записать источник чарта в chart_sources.
+
+    Миграция 076 перевела API на нативные колонки (tracks, fetched_at,
+    parsed_by), но агент продолжал писать только в JSON-колонку data. С тех пор
+    TypeScript-сторона — админка «Здоровье контента», SEO-страница /charts,
+    лендинг — читала нативные колонки, замороженные на последнем запуске
+    отключённого конвейера /charts/full-update. Пишем в обе: нативные для
+    читателей, data для обратной совместимости.
+    """
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sourceId": source_id,
+        "sourceName": source_name,
+        "tracks": tracks,
+        "updatedAt": now.isoformat(),
+        "tracksCount": len(tracks),
+    }
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO chart_sources
+            (id, source_name, tracks, fetched_at, parsed_by, error, data, updated_at)
+        VALUES (%s, %s, %s, %s, %s, NULL, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            source_name = EXCLUDED.source_name,
+            tracks      = EXCLUDED.tracks,
+            fetched_at  = EXCLUDED.fetched_at,
+            parsed_by   = EXCLUDED.parsed_by,
+            error       = NULL,
+            data        = EXCLUDED.data,
+            updated_at  = EXCLUDED.updated_at
+    """, (source_id, source_name, Json(tracks), now, "agent", Json(payload), now))
+    conn.commit()
+    cur.close()
+
+
 def db_get(conn, table: str, pk: str, pk_val: str) -> dict | None:
     """Get JSON data from KV-like table."""
     cur = conn.cursor()
@@ -591,14 +628,7 @@ def main():
     # Save per-source data
     for source_id, tracks in all_sources.items():
         if tracks:
-            source_data = {
-                "sourceId": source_id,
-                "sourceName": SOURCE_NAMES[source_id],
-                "tracks": tracks,
-                "updatedAt": datetime.now(timezone.utc).isoformat(),
-                "tracksCount": len(tracks),
-            }
-            db_upsert(conn, "chart_sources", "id", source_id, source_data)
+            db_upsert_chart_source(conn, source_id, SOURCE_NAMES[source_id], tracks)
             log.info(f"  Saved {source_id}: {len(tracks)} tracks")
 
     # Save aggregation log

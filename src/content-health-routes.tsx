@@ -79,14 +79,17 @@ const NEWS_SOURCE_IDS = [
   'muzkarta', 'lenta-culture', 'kp-showbiz',
 ];
 
+// Ровно те источники, которые обходит promofm-charts-agent.py (SOURCE_NAMES).
+// Раньше здесь числились maximum и vk, которых агент не собирает вовсе —
+// строки maximum в chart_sources нет, а vk лежит с марта, — и оба показывались
+// как сломанные чарты. Shazam, наоборот, агент опрашивает, но в списке не было.
 const CHART_SOURCE_CONFIGS = [
-  { id: 'russkoe', name: 'Русское Радио' },
-  { id: 'nashe', name: 'Наше Радио' },
-  { id: 'maximum', name: 'Радио Maximum' },
-  { id: 'dfm', name: 'DFM' },
-  { id: 'europa', name: 'Europa Plus' },
   { id: 'yandex', name: 'Яндекс Музыка' },
-  { id: 'vk', name: 'VK Музыка' },
+  { id: 'shazam', name: 'Shazam Россия' },
+  { id: 'europa', name: 'Europa Plus' },
+  { id: 'dfm', name: 'DFM' },
+  { id: 'nashe', name: 'Наше Радио' },
+  { id: 'russkoe', name: 'Русское Радио' },
 ];
 
 // ── Helpers ──────────────────────────────────────────
@@ -245,14 +248,17 @@ async function collectHealthData(): Promise<ContentHealthData> {
     totalTracksAcrossAll += tracksCount;
 
     let status: ChartSourceHealth['status'] = 'ok';
-    if (tracksCount === 0) {
+    // Устаревание проверяем раньше нуля треков. Агент перезаписывает строку
+    // только когда источник что-то отдал (`if tracks:`), поэтому давняя дата —
+    // это «источник давно молчит», а не «сломался на последнем прогоне».
+    if (ageH !== null && ageH > 7 * 24) {
+      status = 'stale';
+    } else if (tracksCount === 0) {
       status = 'error';
     } else if (data.error || parsedBy === 'error') {
       status = 'error';
     } else if (parsedBy === 'fallback') {
       status = 'fallback';
-    } else if (ageH !== null && ageH > 7 * 24) {
-      status = 'stale';
     }
 
     if (status === 'error') {
@@ -261,6 +267,13 @@ async function collectHealthData(): Promise<ContentHealthData> {
         category: 'charts',
         message: `Чарт "${cfg.name}" - ошибка`,
         detail: data.error || `${tracksCount} треков, parsedBy: ${parsedBy}`,
+      });
+    } else if (status === 'stale') {
+      alerts.push({
+        level: 'warning',
+        category: 'charts',
+        message: `Чарт "${cfg.name}" не обновляется`,
+        detail: `Последние данные ${Math.round(ageH! / 24)}д назад`,
       });
     } else if (status === 'fallback') {
       alerts.push({
