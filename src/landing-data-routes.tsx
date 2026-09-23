@@ -175,6 +175,8 @@ landing.get('/artists/:idOrSlug', async (c) => {
     // money received but admin hasn't approved release yet → not public.
     const publishedTracks = (artistTracks || [])
       .filter((t: any) => ['approved', 'upcoming', 'published'].includes(t.moderation_status))
+      // is_hidden = «не показывать публично». Не проверялся до 23.09.2026.
+      .filter((t: any) => t.is_hidden !== true)
       .map((t: any) => ({
         id: t.id,
         title: t.title,
@@ -769,6 +771,7 @@ landing.get('/tracks/ai', async (c) => {
        FROM tracks
        WHERE is_ai_generated = true
          AND moderation_status IN ('approved', 'upcoming', 'published')
+         AND COALESCE(is_hidden, false) = false
        ORDER BY created_at DESC
        LIMIT $1`,
       [limit]

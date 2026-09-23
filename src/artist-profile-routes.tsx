@@ -808,7 +808,17 @@ app.get('/profile/:artistId/tracks', async (c) => {
         .eq('artist_id', resolvedId)
         .order('created_at', { ascending: false });
       
-      const formatted = (tracks || []).map((t: any) => ({
+      // ⛔ Публичная выдача. До 23.09.2026 фильтра НЕ БЫЛО вовсе: эндпоинт
+      // отдавал ВСЕ треки артиста, включая неоплаченные (is_hidden=true) и
+      // даже отклонённые модерацией — с рабочей ссылкой на аудио. Артисты
+      // видели свой трек «на сайте» и не понимали, за что просят 10 000 ₽
+      // (кейс «Александровский сад», 21.09.2026).
+      const PUBLIC_STATUSES = ['approved', 'upcoming', 'published'];
+      const visible = (tracks || []).filter(
+        (t: any) => PUBLIC_STATUSES.includes(t.moderation_status) && t.is_hidden !== true,
+      );
+
+      const formatted = visible.map((t: any) => ({
         id: t.id,
         title: t.title,
         artist: t.artist_name || '',
