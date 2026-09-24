@@ -4,6 +4,7 @@ import { getChartSource } from './db.tsx';
 import { PILLAR_PAGES, type PillarMeta } from './seo-content.tsx';
 import { ALL_ALIASES, type SeoAlias } from './seo-aliases.tsx';
 import { getPublicationPrice } from './pricing.tsx';
+import { classifySpaPath, seoRegistryEntry } from './spa-routes.tsx';
 
 const seoRoutes = new Hono();
 const DOMAIN = 'https://promo-music.ru';
@@ -182,17 +183,20 @@ function renderPage(opts: {
   title: string; desc: string; canonical: string; type: string;
   image?: string; jsonLd?: string; body: string;
   keywords?: string;
+  /** например 'noindex, follow' — для служебных страниц и 404 */
+  robots?: string;
 }): string {
   const orgLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"${SITE_NAME}","alternateName":[${SITE_ALT_NAMES.map((n) => `"${escJson(n)}"`).join(',')}],"url":"${DOMAIN}","logo":"${LOGO}","sameAs":["https://vk.com/promofm","https://t.me/promofm","https://www.youtube.com/@promo_muzik"]}</script>`;
   const breadcrumbs = opts.canonical === `${DOMAIN}/` ? '' :
     `<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Главная","item":"${DOMAIN}/"},{"@type":"ListItem","position":2,"name":"${escJson(opts.title.split(' — ')[0].split(' | ')[0])}","item":"${escJson(opts.canonical)}"}]}</script>`;
   const kw = opts.keywords ? `\n<meta name="keywords" content="${esc(opts.keywords)}">` : '';
+  const robots = opts.robots ? `\n<meta name="robots" content="${esc(opts.robots)}">` : '';
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(opts.title)}</title>
-<meta name="description" content="${esc(opts.desc)}">${kw}
+<meta name="description" content="${esc(opts.desc)}">${kw}${robots}
 <link rel="canonical" href="${esc(opts.canonical)}">
 <meta property="og:type" content="${opts.type}">
 <meta property="og:url" content="${esc(opts.canonical)}">
@@ -213,7 +217,7 @@ ${orgLd}${breadcrumbs}${opts.jsonLd || ''}
 <a href="${DOMAIN}/news">Новости</a>
 <a href="${DOMAIN}/charts">Чарты</a>
 <a href="${DOMAIN}/concerts">Концерты</a>
-<a href="${DOMAIN}/tracks">Треки</a>
+<a href="${DOMAIN}/new">Новинки</a>
 <a href="${DOMAIN}/promo-air">ПРОМО.ЭИР</a>
 <a href="${DOMAIN}/for-artists">Для артистов</a>
 <a href="${DOMAIN}/for-venues">Для заведений</a>
@@ -450,6 +454,27 @@ const PRODUCT_PAGES: Record<string, { meta: { title: string; desc: string; type:
   },
 };
 
+// ─── Ответы для адресов без своей страницы ───
+// До 24.09.2026 любой неизвестный путь получал копию главной с кодом 200
+// (мягкий 404): Яндекс видел тысячи дублей главной, а 29 адресов из sitemap
+// были такими заглушками. Теперь: нет у человека — 404; кабинет — noindex.
+async function renderNotFound(path: string): Promise<string> {
+  return renderPageWithTokens({
+    title: `Страница не найдена — ${SITE_NAME}`,
+    desc: 'Такой страницы на ПРОМО.МУЗЫКЕ нет. Перейдите на главную или в нужный раздел.',
+    canonical: `${DOMAIN}${path}`, type: 'website', robots: 'noindex, follow',
+    body: `<h1>Страница не найдена</h1><p>Такой страницы нет. Начните с <a href="${DOMAIN}/">главной</a>, <a href="${DOMAIN}/news">новостей</a> или <a href="${DOMAIN}/charts">чартов</a>.</p>`,
+  });
+}
+
+async function renderServicePage(path: string, title: string, robots: string): Promise<string> {
+  return renderPageWithTokens({
+    title, desc: `${SITE_NAME} — платформа продвижения музыки.`,
+    canonical: `${DOMAIN}${path}`, type: 'website', robots,
+    body: `<h1>${esc(title.split(' — ')[0])}</h1><p><a href="${DOMAIN}/">На главную ${SITE_NAME}</a></p>`,
+  });
+}
+
 // ─── GET /prerender/* — SSR for bots ───
 seoRoutes.get('/prerender/*', async (c) => {
   const rawParam = c.req.path.replace(/\/server\/prerender/, '') || '/';
@@ -504,6 +529,8 @@ seoRoutes.get('/prerender/*', async (c) => {
           body: `<article><h1>${esc(title)}</h1><p><time datetime="${pubDate}">${fmtDate(pubDate)}</time> · ${esc(author)}</p>${content}</article>`,
         }));
       }
+      c.header('Content-Type', 'text/html; charset=utf-8');
+      return c.body(await renderNotFound(path), 404);
     }
 
     // ─── News listing ───
@@ -610,8 +637,10 @@ seoRoutes.get('/prerender/*', async (c) => {
     if (path.startsWith('/tracks/') && path.length > 8) {
       const trackId = decodeURIComponent(path.slice(8));
       const { rows } = await pool.query(
-        `SELECT t.*, p.artist_name as display_name FROM tracks t LEFT JOIN profiles p ON t.user_id::text = p.user_id WHERE t.id = $1`, [trackId]
-      );
+        `SELECT t.*, p.artist_name as display_name FROM tracks t LEFT JOIN profiles p ON t.user_id::text = p.user_id
+          WHERE t.id::text = $1
+            AND t.moderation_status IN ('approved','upcoming','published') AND t.is_hidden = false`, [trackId]
+      ).catch(() => ({ rows: [] as any[] }));
       if (rows[0]) {
         const t = rows[0];
         const title = t.title || 'Трек';
@@ -629,6 +658,47 @@ seoRoutes.get('/prerender/*', async (c) => {
           body: `<article><h1>${esc(title)}</h1><p>${esc(artist)}${t.genre ? ` · ${esc(t.genre)}` : ''}</p>${desc ? `<p>${esc(desc)}</p>` : ''}</article>`,
         }));
       }
+      // Неоплаченный, отклонённый или несуществующий трек — 404, а не копия главной.
+      c.header('Content-Type', 'text/html; charset=utf-8');
+      return c.body(await renderNotFound(path), 404);
+    }
+
+    // ─── Individual concert ───
+    // 147 адресов /concerts/:id стояли в sitemap, а робот получал копию главной.
+    if (path.startsWith('/concerts/') && path.length > 10) {
+      const concertId = decodeURIComponent(path.slice(10));
+      const { rows } = await pool.query(
+        `SELECT id, title, artist_name, description, city, venue_name, venue_address,
+                event_date, event_time, event_type, banner_image_url, ticket_link,
+                ticket_price_min, ticket_price_max
+           FROM concerts
+          WHERE id::text = $1 AND moderation_status IN ('approved','published')
+            AND is_hidden = false AND is_cancelled = false`, [concertId]
+      ).catch(() => ({ rows: [] as any[] }));
+      const k = rows[0];
+      if (k) {
+        const date = k.event_date instanceof Date ? k.event_date.toISOString().slice(0, 10) : String(k.event_date || '').slice(0, 10);
+        const time = String(k.event_time || '').slice(0, 5);
+        const artist = k.artist_name || '';
+        const title = k.title || 'Концерт';
+        const where = [k.city, k.venue_name].filter(Boolean).join(', ');
+        const price = k.ticket_price_min ? ` Билеты от ${Number(k.ticket_price_min).toLocaleString('ru-RU')} ₽.` : '';
+        const desc = `${artist ? artist + ' — ' : ''}${title}: ${fmtDate(date)}${time ? ' в ' + time : ''}, ${where}.${price}`.slice(0, 300);
+        const img = k.banner_image_url ? (k.banner_image_url.startsWith('/') ? `${DOMAIN}${k.banner_image_url}` : k.banner_image_url) : LOGO;
+        const jsonLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"MusicEvent","name":"${escJson(title)}","startDate":"${escJson(date)}${time ? 'T' + escJson(time) : ''}","eventStatus":"https://schema.org/EventScheduled","location":{"@type":"Place","name":"${escJson(k.venue_name || '')}","address":"${escJson([k.city, k.venue_address].filter(Boolean).join(', '))}"}${artist ? `,"performer":{"@type":"MusicGroup","name":"${escJson(artist)}"}` : ''},"image":"${escJson(img)}","url":"${DOMAIN}/concerts/${escJson(String(k.id))}"}</script>`;
+        c.header('Content-Type', 'text/html; charset=utf-8');
+        return c.body(await renderPageWithTokens({
+          title: `${artist ? artist + ' — ' : ''}${title}, ${k.city || ''} — ${SITE_NAME}`,
+          desc, canonical: `${DOMAIN}/concerts/${k.id}`, type: 'website', image: img, jsonLd,
+          body: `<article><h1>${esc(artist ? `${artist}: ${title}` : title)}</h1>
+<p><time datetime="${esc(date)}">${fmtDate(date)}</time>${time ? ` в ${esc(time)}` : ''} · ${esc(where)}${k.venue_address ? `, ${esc(k.venue_address)}` : ''}</p>
+${k.description ? `<p>${esc(String(k.description).slice(0, 2000))}</p>` : ''}
+${k.ticket_link ? `<p><a href="${esc(k.ticket_link)}" rel="nofollow noopener">Купить билеты</a>${price}</p>` : ''}
+<p>Другие события — в <a href="${DOMAIN}/concerts">афише концертов</a>.</p></article>`,
+        }));
+      }
+      c.header('Content-Type', 'text/html; charset=utf-8');
+      return c.body(await renderNotFound(path), 404);
     }
 
     // ─── Homepage with featured content ───
@@ -758,20 +828,48 @@ seoRoutes.get('/prerender/*', async (c) => {
     }
 
     // ─── Generic static pages ───
-    const meta = PAGE_META[path] || PAGE_META['/']!;
     c.header('Content-Type', 'text/html; charset=utf-8');
-    return c.body(await renderPageWithTokens({
-      title: meta.title, desc: meta.desc, canonical: `${DOMAIN}${path}`, type: meta.type,
-      body: `<h1>${esc(meta.title)}</h1><p>${esc(meta.desc)}</p>`,
-    }));
+    // Сначала — есть ли адрес у человека. В PAGE_META остались записи на
+    // страницы, которых в SPA нет (/coins, /donations, /help, /dj-studio…),
+    // и кабинет /radio — им не 200, а 404 и noindex соответственно.
+    const kind = classifySpaPath(path);
+    if (kind === 'unknown') {
+      return c.body(await renderNotFound(path), 404);
+    }
+    if (kind === 'private') {
+      c.header('X-Robots-Tag', 'noindex, nofollow');
+      return c.body(await renderServicePage(path, `Личный кабинет — ${SITE_NAME}`, 'noindex, nofollow'));
+    }
+
+    const meta = PAGE_META[path];
+    if (meta) {
+      return c.body(await renderPageWithTokens({
+        title: meta.title, desc: meta.desc, canonical: `${DOMAIN}${path}`, type: meta.type,
+        body: `<h1>${esc(meta.title)}</h1><p>${esc(meta.desc)}</p>`,
+      }));
+    }
+    // Публичная страница SPA без своей ветки: заголовок, описание и FAQ —
+    // из реестра фронта seo-pages.ts, то есть то же, что видит человек.
+    const reg = seoRegistryEntry(path);
+    if (reg) {
+      const faqHtml = reg.faqs.length
+        ? `<section class="faq-block"><h2>Частые вопросы</h2><dl class="faq">${reg.faqs.map(({ q, a }) => `<dt>${esc(q)}</dt><dd>${esc(a)}</dd>`).join('')}</dl></section>`
+        : '';
+      return c.body(await renderPageWithTokens({
+        title: reg.title, desc: reg.description, canonical: `${DOMAIN}${path}`, type: 'website',
+        jsonLd: reg.faqs.length ? buildFaqLd(reg.faqs) : '',
+        body: `<article><h1>${esc(reg.title.split(/ — | · | \| /)[0])}</h1><p class="lead">${esc(reg.description)}</p>${faqHtml}</article>`,
+      }));
+    }
+    // Страница у человека есть, но текста для робота нет: не выдаём её за
+    // главную — noindex, follow (ссылки со страницы робот пройдёт).
+    c.header('X-Robots-Tag', 'noindex, follow');
+    return c.body(await renderServicePage(path, SITE_NAME, 'noindex, follow'));
   } catch (err) {
     console.error('[seo] prerender error:', err);
-    const meta = PAGE_META[path] || PAGE_META['/']!;
-    c.header('Content-Type', 'text/html; charset=utf-8');
-    return c.body(await renderPageWithTokens({
-      title: meta.title, desc: meta.desc, canonical: `${DOMAIN}${path}`, type: meta.type,
-      body: `<h1>${esc(meta.title)}</h1><p>${esc(meta.desc)}</p>`,
-    }));
+    // Временная ошибка: 503, чтобы робот пришёл позже, а не проиндексировал заглушку.
+    c.header('Retry-After', '120');
+    return c.text('Temporarily unavailable', 503);
   }
 });
 

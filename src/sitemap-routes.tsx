@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { listAllNewsPublic } from './db.tsx';
+import { classifySpaPath } from './spa-routes.tsx';
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 
 async function requireAdminOrKey(c: any, next: any) {
@@ -201,18 +202,39 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
     // Fetch dynamic content in parallel
     const [newsResult, concertsResult, videosResult, tracksResult] = await Promise.all([
       listAllNewsPublic().catch(() => []),
-      pool.query(`SELECT id, title, updated_at, created_at FROM concerts WHERE is_hidden = false AND is_cancelled = false ORDER BY event_date DESC`).catch(() => ({ rows: [] })),
-      pool.query(`SELECT id, title, updated_at, created_at FROM videos WHERE is_hidden = false ORDER BY created_at DESC`).catch(() => ({ rows: [] })),
-      pool.query(`SELECT id, title, artist_name, genre, updated_at, created_at FROM tracks WHERE moderation_status = 'approved' AND is_hidden = false ORDER BY created_at DESC LIMIT 500`).catch(() => ({ rows: [] })),
+      // Только то, что человек видит на странице концерта (PUBLIC_STATUSES в concerts-routes).
+      pool.query(`SELECT id, title, updated_at, created_at FROM concerts
+                   WHERE moderation_status IN ('approved','published') AND is_hidden = false AND is_cancelled = false
+                   ORDER BY event_date DESC`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT id, title, updated_at, created_at FROM videos
+                   WHERE moderation_status = 'approved' AND is_hidden = false ORDER BY created_at DESC`).catch(() => ({ rows: [] })),
+      // Живые треки (published), без архива promo.fm и демо-засева. Раньше
+      // брались 500 последних approved — почти целиком архив, а 178 живых
+      // треков в карту не попадали вовсе.
+      pool.query(`SELECT id, title, artist_name, genre, updated_at, created_at FROM tracks
+                   WHERE moderation_status IN ('approved','upcoming','published') AND is_hidden = false
+                     AND COALESCE(is_legacy, false) = false AND user_id IS NOT NULL
+                     AND COALESCE(artist_name, '') NOT ILIKE 'demo artist%'
+                   ORDER BY created_at DESC LIMIT 500`).catch(() => ({ rows: [] })),
     ]);
+
+    // В карту — только адреса, которые у человека существуют (маршруты SPA).
+    // До 24.09.2026 тут стояли /dashboard*, /login, /coins, /tracks/:id,
+    // /videos/:id — у человека это «не найдено» или кабинет. Если маршруты
+    // фронта прочитать не удалось (null), список не режем.
+    const isPublic = (p: string) => { const k = classifySpaPath(p); return k === null || k === 'public'; };
+    const staticPages = STATIC_PAGES.filter((p) => isPublic(p.loc));
+    const withConcerts = isPublic('/concerts/x');
+    const withVideos = isPublic('/videos/x');
+    const withTracks = isPublic('/tracks/x');
 
     const publishedNews = (newsResult || []).filter((n: any) => {
       const status = n?.status || n?.data?.status;
       return status === 'published' && n?.id;
     });
-    const concerts = concertsResult.rows || [];
-    const videos = videosResult.rows || [];
-    const tracks = tracksResult.rows || [];
+    const concerts = withConcerts ? (concertsResult.rows || []) : [];
+    const videos = withVideos ? (videosResult.rows || []) : [];
+    const tracks = withTracks ? (tracksResult.rows || []) : [];
 
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n`;
@@ -220,7 +242,7 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
     xml += `        xmlns:video="http://www.google.com/schemas/sitemap-video/1.1">\n`;
 
     // ── Static pages ──
-    for (const p of STATIC_PAGES) {
+    for (const p of staticPages) {
       xml += `  <url>\n`;
       xml += `    <loc>${DOMAIN}${p.loc}</loc>\n`;
       xml += `    <lastmod>${today}</lastmod>\n`;
@@ -289,8 +311,8 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
 
     xml += `</urlset>`;
 
-    const urlCount = STATIC_PAGES.length + publishedNews.length + concerts.length + videos.length + tracks.length;
-    console.log(`[sitemap] Generated: ${STATIC_PAGES.length} static + ${publishedNews.length} news + ${concerts.length} concerts + ${videos.length} videos + ${tracks.length} tracks = ${urlCount} URLs`);
+    const urlCount = staticPages.length + publishedNews.length + concerts.length + videos.length + tracks.length;
+    console.log(`[sitemap] Generated: ${staticPages.length} static + ${publishedNews.length} news + ${concerts.length} concerts + ${videos.length} videos + ${tracks.length} tracks = ${urlCount} URLs`);
 
     c.header('Content-Type', 'application/xml; charset=utf-8');
     c.header('Cache-Control', 'public, max-age=600'); // 10min cache
