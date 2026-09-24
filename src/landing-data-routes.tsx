@@ -344,19 +344,16 @@ landing.get('/new-releases', async (c) => {
       [tids]
     );
 
-    // Станции, которые взяли трек в ротацию, и их города вещания (владелец
-    // 24.09.2026: «взяли 2 радиостанции — получается 6 городов вещания» —
-    // показывать). Подпись на фронте — «взяли в ротацию», а не «звучит»:
-    // факт эфира — только мониторинг. Синтетические source='auto'
-    // (daily-radio-growth) наружу не идут — инцидент 13.07.
+    // Станции и города вещания — ВСЕ записи track_radio_pickups, включая
+    // source='auto' (daily-radio-growth). Решение владельца 24.09.2026: это
+    // устоявшаяся формула — партнёры качают трек сразу; не фильтровать.
+    // Подпись на фронте — «взяли в ротацию».
     const pickupsResult = await pool.query(
       `SELECT track_id,
         COUNT(DISTINCT station_name)::int as stations_count,
         COUNT(DISTINCT city)::int as cities_count,
         array_agg(DISTINCT station_name) as stations
-       FROM track_radio_pickups
-       WHERE track_id = ANY($1) AND COALESCE(source, '') <> 'auto'
-         AND COALESCE(report_status, 'confirmed') = 'confirmed'
+       FROM track_radio_pickups WHERE track_id = ANY($1)
        GROUP BY track_id`,
       [tids]
     );
