@@ -14,6 +14,10 @@ import { quickLLM, getLLMStatus } from './llm-router.tsx';
 import { pool } from './db-client.tsx';
 
 const TRACK_TEST_BASE_PRICE = 3000;
+// Сколько рецензий собрать до сводного анализа. Решение владельца 24.09.2026:
+// не меньше трёх экспертов на трек.
+const TT_MIN_EXPERTS = 3;
+const TT_MAX_EXPERTS = 10;
 
 /**
  * Resolve the artist's PromoLab test quota for the current calendar
@@ -92,6 +96,14 @@ async function getMonthlyTestQuotaState(userId: string | null | undefined): Prom
 }
 
 const app = new Hono();
+
+const TT_CABINET_URL = 'https://promo-music.ru/artist/track-test';
+const TT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function ttIsAdmin(c: any): boolean {
+  const role = String(c.get('userRole') || '');
+  return role === 'admin' || role === 'superadmin';
+}
 
 // =====================================================
 // TRACK TEST SYSTEM - PROFESSIONAL EXPERT REVIEWS
@@ -178,17 +190,21 @@ interface ExpertReview {
 app.post('/submit', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { 
-      user_id, 
-      track_id,
+    const {
       guest_email,
       guest_name,
       guest_track_url,
       guest_cover_url,
       track_title,
       artist_name,
-      genre 
+      genre
     } = body;
+    // Владелец — из JWT. Раньше user_id брался из тела: любой залогиненный мог
+    // оформить заявку на чужой аккаунт и списать чужую подписочную квоту.
+    const user_id = String(c.get('userId') || '') || null;
+    // track_id — только настоящий трек из каталога. Модалка для загруженного
+    // файла присылала Date.now(), и /pipeline/* потом искал несуществующую строку.
+    const track_id = TT_UUID_RE.test(String(body?.track_id || '')) ? String(body.track_id) : null;
 
     // Валидация
     if (!track_title || !artist_name) {
@@ -231,7 +247,7 @@ app.post('/submit', requireAuth, async (c) => {
       status: initialStatus,
       payment_status: initialPaymentStatus,
       payment_amount: paymentAmount,
-      required_expert_count: 5, // по умолчанию 5 экспертов
+      required_expert_count: TT_MIN_EXPERTS,
       completed_reviews_count: 0,
       assigned_experts: [],
       created_at: now,
@@ -308,6 +324,9 @@ app.post('/payment', requireAuth, async (c) => {
     if (!request) {
       return c.json({ error: 'Request not found' }, 404);
     }
+    if (request.user_id && request.user_id !== String(c.get('userId') || '') && !ttIsAdmin(c)) {
+      return c.json({ error: 'Access denied' }, 403);
+    }
 
     if (request.payment_status === 'completed') {
       return c.json({ error: 'Payment already completed' }, 400);
@@ -319,7 +338,8 @@ app.post('/payment', requireAuth, async (c) => {
 
     const gateway = getGateway('yookassa');
     const orderId = crypto.randomUUID();
-    const returnUrl = `https://promo-music.ru/cabinet/tracks?payment=success&request_id=${request_id}`;
+    // /cabinet/tracks во фронте не существует — после оплаты артист попадал на пустую страницу.
+    const returnUrl = `${TT_CABINET_URL}?payment=success&request_id=${request_id}`;
 
     const result = await gateway.createPayment({
       orderId,
@@ -465,8 +485,9 @@ app.post('/payment/confirm', requireAuth, async (c) => {
 app.post('/moderate', requireAuth, requireAdmin, async (c) => {
   try {
     const body = await c.req.json();
-    const { request_id, action, notes } = body;
+    const { request_id, action, notes, required_count } = body;
     // action: 'approve' | 'reject'
+    // required_count: сколько рецензий собрать до сводного анализа (3–10).
 
     const request = await trackTestRequestsStore.get(request_id);
     if (!request) {
@@ -480,6 +501,10 @@ app.post('/moderate', requireAuth, requireAdmin, async (c) => {
     if (action === 'approve') {
       request.status = 'pending_expert_assignment';
       request.moderation_notes = notes;
+      const rc = Number(required_count);
+      request.required_expert_count = Number.isInteger(rc)
+        ? Math.min(Math.max(rc, TT_MIN_EXPERTS), TT_MAX_EXPERTS)
+        : Math.max(Number(request.required_expert_count) || 0, TT_MIN_EXPERTS);
       console.log(`Request approved: ${request_id}`);
 
       // SSE: уведомить всех онлайн-экспертов о новом доступном тесте.
@@ -648,7 +673,10 @@ app.post('/assign-experts', requireAuth, requireAdmin, async (c) => {
     // Обновить заявку. track_test_request_reviews DROPPED migration 053 —
     // derived через listTrackTestReviewsByRequest, no separate index write.
     request.assigned_experts = expert_emails;
-    request.required_expert_count = required_count || expert_emails.length;
+    request.required_expert_count = Math.min(
+      Math.max(Number(required_count) || expert_emails.length, TT_MIN_EXPERTS),
+      TT_MAX_EXPERTS,
+    );
     request.status = 'experts_assigned';
     request.updated_at = now;
 
@@ -1109,8 +1137,35 @@ app.post('/send-feedback', requireAuth, requireAdmin, async (c) => {
       });
     }
 
-    const recipient = request.guest_email || request.user_id;
-    console.log(`Feedback sent to: ${recipient} at ${now}`);
+    // Письмо артисту. До 24.09.2026 уходил только SSE: артист, не сидевший в
+    // кабинете в момент отправки, об отчёте не узнавал вовсе.
+    let recipient = request.guest_email || '';
+    try {
+      if (!recipient && request.user_id) {
+        const u = await pool.query(`SELECT email FROM users WHERE id::text = $1 LIMIT 1`, [request.user_id]);
+        recipient = u.rows[0]?.email || '';
+      }
+      if (recipient) {
+        const { sendEmail, emailWrapper, escapeHtml } = await import('./email-helper.tsx');
+        const rating = request.average_rating !== undefined && request.average_rating !== null
+          ? `<p style="color:#e0e0e0;">Средняя оценка экспертов: <b>${escapeHtml(String(request.average_rating))}/10</b></p>`
+          : '';
+        await sendEmail({
+          to: recipient,
+          subject: `[ПРОМО] Готов отчёт по тесту трека «${request.track_title}»`,
+          html: emailWrapper(`
+            <h2 style="margin: 0 0 16px; color: #7C3AED;">Отчёт экспертов готов</h2>
+            <p style="color:#e0e0e0;">«${escapeHtml(request.track_title)}» — ${escapeHtml(request.artist_name || '')}</p>
+            ${rating}
+            <p style="color:#e0e0e0;">Оценки по критериям, комментарии каждого эксперта и рекомендации — в кабинете, раздел «Тест трека».</p>
+            <p><a href="${TT_CABINET_URL}" style="display:inline-block;padding:12px 24px;background:#7C3AED;color:#fff;border-radius:8px;text-decoration:none;">Открыть отчёт</a></p>
+          `),
+        });
+      }
+    } catch (e: any) {
+      console.warn(`[track-test] feedback email failed (${request_id}):`, e?.message);
+    }
+    console.log(`Feedback sent to: ${recipient || request.user_id} at ${now}`);
 
     return c.json({
       success: true,
@@ -1163,7 +1218,7 @@ async function createTrackTestPipelinePayment(
   const { getGateway } = await import('./payment-gateway.tsx');
   const { upsertPaymentSession } = await import('./db.tsx');
   const orderId = crypto.randomUUID();
-  const returnUrl = 'https://promo-music.ru/cabinet/artist?tab=promolab';
+  const returnUrl = TT_CABINET_URL;
 
   try {
     const gw = getGateway('yookassa');
@@ -1420,8 +1475,11 @@ app.post('/pipeline/exclusivePitch', requireAuth, requireAdmin, async (c) => {
 // Получить список заявок пользователя
 app.get('/requests', requireAuth, async (c) => {
   try {
-    const userId = c.req.query('user_id');
-    
+    // Владелец — из JWT. Раньше брался из ?user_id, и любой залогиненный получал
+    // чужие заявки вместе с отчётами экспертов. Админ может смотреть чужие.
+    const authId = String(c.get('userId') || '');
+    const userId = ttIsAdmin(c) ? (c.req.query('user_id') || authId) : authId;
+
     if (!userId) {
       return c.json({ error: 'User ID required' }, 400);
     }
@@ -1460,6 +1518,13 @@ app.get('/requests/:id', requireAuth, async (c) => {
 
     // Single indexed SELECT — заменяет dropped track_test_request_reviews + N+1.
     const reviews = await listTrackTestReviewsByRequest(requestId);
+
+    const me = String(c.get('userId') || '');
+    const myEmail = String(c.get('userEmail') || '');
+    const isExpertHere = reviews.some((r: any) => r.expert_email && (r.expert_email === myEmail || r.expert_email === me));
+    if (request.user_id !== me && !isExpertHere && !ttIsAdmin(c)) {
+      return c.json({ error: 'Access denied' }, 403);
+    }
 
     return c.json({
       success: true,
@@ -1779,8 +1844,9 @@ app.get('/expert/my-reviews', requireAuth, async (c) => {
 // этом месяце» before they hit /submit. Owner or admin only.
 app.get('/quota/:userId', requireAuth, async (c) => {
   try {
-    const userId = c.req.param('userId');
     const authUserId = (c as any).get('userId');
+    // 'me' — кабинет не обязан знать users.id (у него в руках id профиля).
+    const userId = c.req.param('userId') === 'me' ? authUserId : c.req.param('userId');
     const authRole = (c as any).get('userRole');
     if (userId !== authUserId && authRole !== 'admin' && authRole !== 'superadmin') {
       return c.json({ success: false, error: 'Access denied' }, 403);
