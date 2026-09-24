@@ -143,6 +143,58 @@ export async function getPublicVideo(id: string): Promise<PublicVideo | null> {
   };
 }
 
+export interface PublicArtist {
+  id: string;
+  /** slug или id — то же, что canonical у страницы профиля на фронте */
+  key: string;
+  name: string;
+  city: string | null;
+  bio: string | null;
+  genre: string | null;
+  avatar: string | null;
+  tracks: { id: string; title: string; genre: string | null; durationSec: number | null }[];
+  videos: { id: string; title: string }[];
+}
+
+/**
+ * Профиль артиста глазами человека: тот же поиск (id / user_id / slug) и тот же
+ * список треков, что у GET /api/artist-profile/profile/:id/tracks (artist_id,
+ * публичный фильтр, новые сверху).
+ */
+export async function getPublicArtist(idOrSlug: string): Promise<PublicArtist | null> {
+  if (!idOrSlug || idOrSlug.length > 200) return null;
+  const { rows } = await pool.query(
+    `SELECT id, slug, artist_name, city, bio, genre, avatar_url FROM artist_profiles
+      WHERE id::text = $1 OR user_id = $1 OR LOWER(slug) = LOWER($1)
+      ORDER BY (LOWER(slug) = LOWER($1)) DESC NULLS LAST LIMIT 1`,
+    [idOrSlug],
+  );
+  const a = rows[0];
+  if (!a) return null;
+  const [tr, vr] = await Promise.all([
+    pool.query(
+      `SELECT t.id, t.title, t.genre, t.duration FROM tracks t
+        WHERE t.artist_id = $1 AND ${PUBLIC_TRACK_SQL} ORDER BY t.created_at DESC LIMIT 200`,
+      [a.id],
+    ).catch(() => ({ rows: [] as any[] })),
+    pool.query(
+      `SELECT v.id, v.title FROM videos v WHERE v.artist_id = $1 AND ${PUBLIC_VIDEO_SQL} ORDER BY v.created_at DESC LIMIT 50`,
+      [a.id],
+    ).catch(() => ({ rows: [] as any[] })),
+  ]);
+  return {
+    id: String(a.id),
+    key: a.slug || String(a.id),
+    name: a.artist_name || 'Артист',
+    city: a.city || null,
+    bio: a.bio || null,
+    genre: a.genre || null,
+    avatar: a.avatar_url || null,
+    tracks: tr.rows.map((t: any) => ({ id: String(t.id), title: t.title || 'Без названия', genre: t.genre || null, durationSec: t.duration ? Number(t.duration) : null })),
+    videos: vr.rows.map((v: any) => ({ id: String(v.id), title: v.title || 'Клип' })),
+  };
+}
+
 /** «3:45» из секунд. */
 export function fmtDuration(sec: number | null): string {
   if (!sec || sec <= 0) return '';

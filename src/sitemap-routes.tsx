@@ -201,7 +201,7 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
     const today = new Date().toISOString().split('T')[0];
 
     // Fetch dynamic content in parallel
-    const [newsResult, concertsResult, videosResult, tracksResult] = await Promise.all([
+    const [newsResult, concertsResult, videosResult, tracksResult, profilesResult] = await Promise.all([
       listAllNewsPublic().catch(() => []),
       // Только то, что человек видит на странице концерта (PUBLIC_STATUSES в concerts-routes).
       pool.query(`SELECT c.id, c.title, c.updated_at, c.created_at FROM concerts c
@@ -216,6 +216,11 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
                      AND COALESCE(t.is_legacy, false) = false AND t.user_id IS NOT NULL
                      AND COALESCE(t.artist_name, '') NOT ILIKE 'demo artist%'
                    ORDER BY t.created_at DESC LIMIT 500`).catch(() => ({ rows: [] })),
+      // Профили артистов с живыми треками — адрес как canonical на странице (slug, иначе id).
+      pool.query(`SELECT COALESCE(ap.slug, ap.id::text) AS key, MAX(t.updated_at) AS updated_at
+                    FROM artist_profiles ap JOIN tracks t ON t.artist_id = ap.id
+                   WHERE ${PUBLIC_TRACK_SQL} AND COALESCE(t.is_legacy, false) = false
+                   GROUP BY 1 ORDER BY 2 DESC LIMIT 1000`).catch(() => ({ rows: [] })),
     ]);
 
     // В карту — только адреса, которые у человека существуют (маршруты SPA).
@@ -227,6 +232,7 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
     const withConcerts = isPublic('/concerts/x');
     const withVideos = isPublic('/videos/x');
     const withTracks = isPublic('/tracks/x');
+    const profiles = isPublic('/profile/x') ? (profilesResult.rows || []) : [];
 
     const publishedNews = (newsResult || []).filter((n: any) => {
       const status = n?.status || n?.data?.status;
@@ -309,9 +315,19 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
       xml += `  </url>\n`;
     }
 
+    // ── Artist profiles ──
+    for (const p of profiles) {
+      xml += `  <url>\n`;
+      xml += `    <loc>${DOMAIN}/profile/${escapeXml(encodeURIComponent(String(p.key)))}</loc>\n`;
+      xml += `    <lastmod>${toW3CDate(p.updated_at)}</lastmod>\n`;
+      xml += `    <changefreq>weekly</changefreq>\n`;
+      xml += `    <priority>0.6</priority>\n`;
+      xml += `  </url>\n`;
+    }
+
     xml += `</urlset>`;
 
-    const urlCount = staticPages.length + publishedNews.length + concerts.length + videos.length + tracks.length;
+    const urlCount = staticPages.length + publishedNews.length + concerts.length + videos.length + tracks.length + profiles.length;
     console.log(`[sitemap] Generated: ${staticPages.length} static + ${publishedNews.length} news + ${concerts.length} concerts + ${videos.length} videos + ${tracks.length} tracks = ${urlCount} URLs`);
 
     c.header('Content-Type', 'application/xml; charset=utf-8');

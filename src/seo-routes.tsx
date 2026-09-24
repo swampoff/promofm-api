@@ -5,7 +5,7 @@ import { PILLAR_PAGES, type PillarMeta } from './seo-content.tsx';
 import { ALL_ALIASES, type SeoAlias } from './seo-aliases.tsx';
 import { getPublicationPrice } from './pricing.tsx';
 import { classifySpaPath, seoRegistryEntry } from './spa-routes.tsx';
-import { getPublicTrack, getPublicVideo, fmtDuration, PUBLIC_CONCERT_SQL } from './public-content.tsx';
+import { getPublicTrack, getPublicVideo, getPublicArtist, fmtDuration, PUBLIC_CONCERT_SQL } from './public-content.tsx';
 
 const seoRoutes = new Hono();
 const DOMAIN = 'https://promo-music.ru';
@@ -661,6 +661,40 @@ ${t.artistProfile ? `<p><a href="${DOMAIN}/profile/${esc(t.artistProfile)}">Вс
       return c.body(await renderPageWithTokens({
         title: `${t.artist} — ${t.title}: слушать онлайн — ${SITE_NAME}`, desc,
         canonical: `${DOMAIN}/tracks/${t.id}`, type: 'music.song', image: img, jsonLd, body,
+      }));
+    }
+
+    // ─── Artist profile ───
+    // Зеркало ArtistPublicProfile.tsx: тот же заголовок, canonical (/profile/slug)
+    // и список треков — теперь со ссылками на страницы треков. После правки
+    // мягких 404 профиль без своей ветки получал бы noindex.
+    if (path.startsWith('/profile/') && path.length > 9) {
+      const a = await getPublicArtist(decodeURIComponent(path.slice(9))).catch(() => null);
+      c.header('Content-Type', 'text/html; charset=utf-8');
+      if (!a) return c.body(await renderNotFound(path), 404);
+      const canonical = `${DOMAIN}/profile/${a.key}`;
+      const desc = (a.bio || `${a.name} на ПРОМО.МУЗЫКЕ: треки, ротации на радио, контакты для связи.`).slice(0, 300);
+      const img = a.avatar ? (a.avatar.startsWith('/') ? `${DOMAIN}${a.avatar}` : a.avatar) : LOGO;
+      const ld = {
+        '@context': 'https://schema.org', '@type': 'MusicGroup', name: a.name, url: canonical,
+        ...(a.bio ? { description: a.bio } : {}), ...(a.avatar ? { image: img } : {}),
+        ...(a.genre ? { genre: a.genre } : {}), ...(a.city ? { location: { '@type': 'Place', name: a.city } } : {}),
+        ...(a.tracks.length ? { track: a.tracks.slice(0, 25).map((t) => ({ '@type': 'MusicRecording', name: t.title, url: `${DOMAIN}/tracks/${t.id}` })) } : {}),
+      };
+      const jsonLd = `<script type="application/ld+json">${JSON.stringify(ld).replace(/</g, '\\u003c')}</script>`;
+      const body = `<article>
+<h1>${esc(a.name)}</h1>
+${[a.city, a.genre].filter(Boolean).length ? `<p>${esc([a.city, a.genre].filter(Boolean).join(' · '))}</p>` : ''}
+${a.bio ? `<p>${esc(a.bio.slice(0, 3000))}</p>` : ''}
+${a.tracks.length ? `<section><h2>Треки</h2><ol>${a.tracks.map((t) => `<li><a href="${DOMAIN}/tracks/${esc(t.id)}">${esc(t.title)}</a>${t.genre ? ` — ${esc(t.genre)}` : ''}${t.durationSec ? `, ${fmtDuration(t.durationSec)}` : ''}</li>`).join('')}</ol></section>` : '<p>Релизы пока не добавлены.</p>'}
+${a.videos.length ? `<section><h2>Клипы</h2><ul>${a.videos.map((v) => `<li><a href="${DOMAIN}/videos/${esc(v.id)}">${esc(v.title)}</a></li>`).join('')}</ul></section>` : ''}
+</article>`;
+      // Пустой профиль (нет ни треков, ни био) — не мусорим в индексе, ссылки робот пройдёт.
+      const thin = a.tracks.length === 0 && !a.bio;
+      if (thin) c.header('X-Robots-Tag', 'noindex, follow');
+      return c.body(await renderPageWithTokens({
+        title: `${a.name} — треки и ротации · ${SITE_NAME}`, desc, canonical, type: 'profile', image: img, jsonLd, body,
+        ...(thin ? { robots: 'noindex, follow' } : {}),
       }));
     }
 

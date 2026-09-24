@@ -344,12 +344,19 @@ landing.get('/new-releases', async (c) => {
       [tids]
     );
 
+    // Станции, которые взяли трек в ротацию, и их города вещания (владелец
+    // 24.09.2026: «взяли 2 радиостанции — получается 6 городов вещания» —
+    // показывать). Подпись на фронте — «взяли в ротацию», а не «звучит»:
+    // факт эфира — только мониторинг. Синтетические source='auto'
+    // (daily-radio-growth) наружу не идут — инцидент 13.07.
     const pickupsResult = await pool.query(
       `SELECT track_id,
         COUNT(DISTINCT station_name)::int as stations_count,
         COUNT(DISTINCT city)::int as cities_count,
         array_agg(DISTINCT station_name) as stations
-       FROM track_radio_pickups WHERE track_id = ANY($1)
+       FROM track_radio_pickups
+       WHERE track_id = ANY($1) AND COALESCE(source, '') <> 'auto'
+         AND COALESCE(report_status, 'confirmed') = 'confirmed'
        GROUP BY track_id`,
       [tids]
     );
@@ -364,6 +371,7 @@ landing.get('/new-releases', async (c) => {
     }
 
     const tracks = tracksResult.rows.map((t: any, idx: number) => ({
+      id: String(t.id),
       position: idx + 1,
       title: t.title,
       artist: t.artist_name,
