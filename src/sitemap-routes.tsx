@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { listAllNewsPublic } from './db.tsx';
 import { classifySpaPath } from './spa-routes.tsx';
+import { PUBLIC_TRACK_SQL, PUBLIC_VIDEO_SQL, PUBLIC_CONCERT_SQL } from './public-content.tsx';
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 
 async function requireAdminOrKey(c: any, next: any) {
@@ -203,19 +204,18 @@ sitemapRoutes.get('/sitemap.xml', async (c) => {
     const [newsResult, concertsResult, videosResult, tracksResult] = await Promise.all([
       listAllNewsPublic().catch(() => []),
       // Только то, что человек видит на странице концерта (PUBLIC_STATUSES в concerts-routes).
-      pool.query(`SELECT id, title, updated_at, created_at FROM concerts
-                   WHERE moderation_status IN ('approved','published') AND is_hidden = false AND is_cancelled = false
-                   ORDER BY event_date DESC`).catch(() => ({ rows: [] })),
-      pool.query(`SELECT id, title, updated_at, created_at FROM videos
-                   WHERE moderation_status = 'approved' AND is_hidden = false ORDER BY created_at DESC`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT c.id, c.title, c.updated_at, c.created_at FROM concerts c
+                   WHERE ${PUBLIC_CONCERT_SQL} ORDER BY c.event_date ASC`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT v.id, v.title, v.updated_at, v.created_at FROM videos v
+                   WHERE ${PUBLIC_VIDEO_SQL} ORDER BY v.created_at DESC`).catch(() => ({ rows: [] })),
       // Живые треки (published), без архива promo.fm и демо-засева. Раньше
       // брались 500 последних approved — почти целиком архив, а 178 живых
       // треков в карту не попадали вовсе.
-      pool.query(`SELECT id, title, artist_name, genre, updated_at, created_at FROM tracks
-                   WHERE moderation_status IN ('approved','upcoming','published') AND is_hidden = false
-                     AND COALESCE(is_legacy, false) = false AND user_id IS NOT NULL
-                     AND COALESCE(artist_name, '') NOT ILIKE 'demo artist%'
-                   ORDER BY created_at DESC LIMIT 500`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT t.id, t.title, t.artist_name, t.genre, t.updated_at, t.created_at FROM tracks t
+                   WHERE ${PUBLIC_TRACK_SQL}
+                     AND COALESCE(t.is_legacy, false) = false AND t.user_id IS NOT NULL
+                     AND COALESCE(t.artist_name, '') NOT ILIKE 'demo artist%'
+                   ORDER BY t.created_at DESC LIMIT 500`).catch(() => ({ rows: [] })),
     ]);
 
     // В карту — только адреса, которые у человека существуют (маршруты SPA).

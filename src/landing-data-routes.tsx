@@ -2501,6 +2501,37 @@ landing.post('/build-albums', async (c) => {
   });
 });
 
+// ─── Публичные страницы трека и клипа (24.09.2026) ───
+// Раньше у человека страниц /tracks/:id и /videos/:id не было вовсе (NotFound),
+// а в sitemap стояли 927 таких адресов. Фильтры — public-content.tsx, общие
+// с HTML для роботов и картой сайта. Параметр — только UUID, чтобы не
+// перехватывать /tracks/new, /tracks/trending и т.п.
+landing.get('/tracks/:id{[0-9a-fA-F-]{36}}', async (c) => {
+  try {
+    const { getPublicTrack } = await import('./public-content.tsx');
+    const t = await getPublicTrack(c.req.param('id'));
+    if (!t) return c.json({ success: false, error: 'Трек не найден' }, 404);
+    c.header('Cache-Control', 'public, max-age=60');
+    return c.json({ success: true, data: t });
+  } catch (error) {
+    console.error('[landing] public track error:', error);
+    return c.json({ success: false, error: 'Ошибка загрузки' }, 500);
+  }
+});
+
+landing.get('/videos/:id{[0-9a-fA-F-]{36}}', async (c) => {
+  try {
+    const { getPublicVideo } = await import('./public-content.tsx');
+    const v = await getPublicVideo(c.req.param('id'));
+    if (!v) return c.json({ success: false, error: 'Клип не найден' }, 404);
+    c.header('Cache-Control', 'public, max-age=60');
+    return c.json({ success: true, data: v });
+  } catch (error) {
+    console.error('[landing] public video error:', error);
+    return c.json({ success: false, error: 'Ошибка загрузки' }, 500);
+  }
+});
+
 export default landing;
 
 // ── Admin Users ──

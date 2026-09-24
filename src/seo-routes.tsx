@@ -5,6 +5,7 @@ import { PILLAR_PAGES, type PillarMeta } from './seo-content.tsx';
 import { ALL_ALIASES, type SeoAlias } from './seo-aliases.tsx';
 import { getPublicationPrice } from './pricing.tsx';
 import { classifySpaPath, seoRegistryEntry } from './spa-routes.tsx';
+import { getPublicTrack, getPublicVideo, fmtDuration, PUBLIC_CONCERT_SQL } from './public-content.tsx';
 
 const seoRoutes = new Hono();
 const DOMAIN = 'https://promo-music.ru';
@@ -634,46 +635,71 @@ seoRoutes.get('/prerender/*', async (c) => {
     }
 
     // ─── Individual track ───
+    // Текст = страница трека у человека (фронт TrackPublicPage.tsx), данные —
+    // getPublicTrack (public-content.tsx). Не публичный или нет — 404.
     if (path.startsWith('/tracks/') && path.length > 8) {
-      const trackId = decodeURIComponent(path.slice(8));
-      const { rows } = await pool.query(
-        `SELECT t.*, p.artist_name as display_name FROM tracks t LEFT JOIN profiles p ON t.user_id::text = p.user_id
-          WHERE t.id::text = $1
-            AND t.moderation_status IN ('approved','upcoming','published') AND t.is_hidden = false`, [trackId]
-      ).catch(() => ({ rows: [] as any[] }));
-      if (rows[0]) {
-        const t = rows[0];
-        const title = t.title || 'Трек';
-        const artist = t.artist_name || t.display_name || 'Артист';
-        const desc = (t.description || `${title} — ${artist}`).slice(0, 300);
-        const img = t.cover_url ? (t.cover_url.startsWith('/') ? `${DOMAIN}${t.cover_url}` : t.cover_url) : LOGO;
-        const duration = t.duration ? `PT${Math.floor(t.duration / 60)}M${Math.floor(t.duration % 60)}S` : '';
-
-        const jsonLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"MusicRecording","name":"${escJson(title)}","byArtist":{"@type":"MusicGroup","name":"${escJson(artist)}"}${t.genre ? `,"genre":"${escJson(t.genre)}"` : ''}${duration ? `,"duration":"${duration}"` : ''},"url":"${DOMAIN}/tracks/${escJson(trackId)}","image":"${escJson(img)}"}</script>`;
-
-        c.header('Content-Type', 'text/html; charset=utf-8');
-        return c.body(await renderPageWithTokens({
-          title: `${title} — ${artist} — ${SITE_NAME}`, desc, canonical: `${DOMAIN}/tracks/${trackId}`,
-          type: 'music.song', image: img, jsonLd,
-          body: `<article><h1>${esc(title)}</h1><p>${esc(artist)}${t.genre ? ` · ${esc(t.genre)}` : ''}</p>${desc ? `<p>${esc(desc)}</p>` : ''}</article>`,
-        }));
-      }
-      // Неоплаченный, отклонённый или несуществующий трек — 404, а не копия главной.
+      const t = await getPublicTrack(decodeURIComponent(path.slice(8))).catch(() => null);
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(await renderNotFound(path), 404);
+      if (!t) return c.body(await renderNotFound(path), 404);
+      const dur = fmtDuration(t.durationSec);
+      const img = t.cover ? (t.cover.startsWith('/') ? `${DOMAIN}${t.cover}` : t.cover) : LOGO;
+      const facts = [t.genre, dur, t.releaseDate ? `релиз ${fmtDate(t.releaseDate)}` : ''].filter(Boolean).join(' · ');
+      const desc = `Слушать «${t.title}» — ${t.artist} на ПРОМО.МУЗЫКЕ${t.genre ? `. Жанр: ${t.genre}` : ''}${dur ? `, ${dur}` : ''}.${t.links.length ? ' Ссылки на стриминги.' : ''}${t.airplayStations.length ? ' Эфиры на радио, подтверждённые мониторингом.' : ''}`.slice(0, 300);
+      const iso = t.durationSec ? `PT${Math.floor(t.durationSec / 60)}M${Math.floor(t.durationSec % 60)}S` : '';
+      const jsonLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"MusicRecording","name":"${escJson(t.title)}","byArtist":{"@type":"MusicGroup","name":"${escJson(t.artist)}"${t.artistProfile ? `,"url":"${DOMAIN}/profile/${escJson(t.artistProfile)}"` : ''}}${t.genre ? `,"genre":"${escJson(t.genre)}"` : ''}${iso ? `,"duration":"${iso}"` : ''}${t.releaseDate ? `,"datePublished":"${escJson(t.releaseDate)}"` : ''},"url":"${DOMAIN}/tracks/${escJson(t.id)}","image":"${escJson(img)}"}</script>`;
+      const body = `<article>
+<h1>${esc(t.artist)} — ${esc(t.title)}</h1>
+${facts ? `<p>${esc(facts)}</p>` : ''}
+${t.isAi ? '<p>Трек создан с использованием ИИ.</p>' : ''}${t.isArchive ? '<p>Архив promo.fm.</p>' : ''}
+${t.composer || t.lyricist ? `<p>${t.composer ? `Музыка: ${esc(t.composer)}. ` : ''}${t.lyricist ? `Слова: ${esc(t.lyricist)}.` : ''}</p>` : ''}
+${t.description ? `<p>${esc(t.description.slice(0, 2000))}</p>` : ''}
+${t.links.length ? `<section><h2>Слушать на площадках</h2><ul>${t.links.map((l) => `<li><a href="${esc(l.url)}" rel="nofollow noopener">${esc(l.platform)}</a></li>`).join('')}</ul></section>` : ''}
+${t.airplayStations.length ? `<section><h2>Звучит в эфире</h2><p>Эфиры подтверждены мониторингом ПРОМО.CHECK: ${esc(t.airplayStations.join(', '))}.</p></section>` : ''}
+${t.artistProfile ? `<p><a href="${DOMAIN}/profile/${esc(t.artistProfile)}">Все треки: ${esc(t.artist)}</a></p>` : ''}
+<section><h2>Хотите так же со своей песней?</h2><p><a href="${DOMAIN}/pesnya-na-radio">Песня на радио</a> · <a href="${DOMAIN}/promotion">Продвижение трека</a> · <a href="${DOMAIN}/get-in-chart">Песня в чартах</a></p></section>
+</article>`;
+      return c.body(await renderPageWithTokens({
+        title: `${t.artist} — ${t.title}: слушать онлайн — ${SITE_NAME}`, desc,
+        canonical: `${DOMAIN}/tracks/${t.id}`, type: 'music.song', image: img, jsonLd, body,
+      }));
+    }
+
+    // ─── Individual video ───
+    // Текст = VideoPublicPage.tsx на фронте; данные — getPublicVideo.
+    if (path.startsWith('/videos/') && path.length > 8) {
+      const v = await getPublicVideo(decodeURIComponent(path.slice(8))).catch(() => null);
+      c.header('Content-Type', 'text/html; charset=utf-8');
+      if (!v) return c.body(await renderNotFound(path), 404);
+      const img = v.thumbnail || LOGO;
+      const desc = (v.description || `Смотреть клип «${v.title}» на ПРОМО.МУЗЫКЕ.`).slice(0, 300);
+      const jsonLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"VideoObject","name":"${escJson(v.title)}","description":"${escJson(desc)}","thumbnailUrl":"${escJson(img)}"${v.uploadDate ? `,"uploadDate":"${escJson(v.uploadDate)}"` : ''}${v.youtubeId ? `,"embedUrl":"https://www.youtube.com/embed/${escJson(v.youtubeId)}"` : ''},"contentUrl":"${escJson(v.videoUrl)}","url":"${DOMAIN}/videos/${escJson(v.id)}"}</script>`;
+      const body = `<article>
+<h1>${esc(v.title)}</h1>
+<p><img src="${esc(img)}" alt="${esc(v.title)}"></p>
+<p><a href="${esc(v.videoUrl)}" rel="nofollow noopener">Смотреть клип на YouTube</a></p>
+${v.description ? `<p>${esc(v.description.slice(0, 2000))}</p>` : ''}
+${v.artistProfile && v.artist ? `<p><a href="${DOMAIN}/profile/${esc(v.artistProfile)}">Артист: ${esc(v.artist)}</a></p>` : ''}
+${v.trackId ? `<p><a href="${DOMAIN}/tracks/${esc(v.trackId)}">Слушать трек</a></p>` : ''}
+<section><h2>Свой клип на ТВ?</h2><p><a href="${DOMAIN}/tv-rotation">Клип и песня на ТВ</a> · <a href="${DOMAIN}/promotion">Продвижение трека</a></p></section>
+</article>`;
+      return c.body(await renderPageWithTokens({
+        title: `${v.title}: смотреть клип — ${SITE_NAME}`, desc,
+        canonical: `${DOMAIN}/videos/${v.id}`, type: 'website', image: img, jsonLd, body,
+      }));
     }
 
     // ─── Individual concert ───
     // 147 адресов /concerts/:id стояли в sitemap, а робот получал копию главной.
+    // Фильтр = афиша у человека (PUBLIC_CONCERT_SQL): прошедший концерт у него
+    // «не найден», значит и роботу 404.
     if (path.startsWith('/concerts/') && path.length > 10) {
       const concertId = decodeURIComponent(path.slice(10));
       const { rows } = await pool.query(
         `SELECT id, title, artist_name, description, city, venue_name, venue_address,
                 event_date, event_time, event_type, banner_image_url, ticket_link,
                 ticket_price_min, ticket_price_max
-           FROM concerts
-          WHERE id::text = $1 AND moderation_status IN ('approved','published')
-            AND is_hidden = false AND is_cancelled = false`, [concertId]
+           FROM concerts c
+          WHERE c.id::text = $1 AND ${PUBLIC_CONCERT_SQL}`, [concertId]
       ).catch(() => ({ rows: [] as any[] }));
       const k = rows[0];
       if (k) {
