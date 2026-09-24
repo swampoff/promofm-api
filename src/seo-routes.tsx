@@ -134,10 +134,10 @@ const PAGE_META: Record<string, { title: string; desc: string; type: string; ima
   '/concerts': { title: `Концерты и фестивали — ${SITE_NAME}`, desc: 'Афиша концертов и музыкальных событий', type: 'website' },
   '/airplay-monitoring': { title: `Мониторинг эфира радиостанций: когда ваша песня звучит на радио — ${SITE_NAME}`, desc: 'Автоматический мониторинг эфира радиостанций по аудиоотпечатку. Точное время эфира песни на радио, отчёт по дням и станциям, подсчёт фактических ротаций трека.', type: 'website' },
   '/promo-air': { title: `ПРОМО.ЭИР: песня на радио и музыка для заведения от одного оператора — ${SITE_NAME}`, desc: 'ПРОМО.ЭИР доводит песню до плейлист-комитетов радиостанций из базы в {{STATIONS_ACC}} и поставляет лицензированную музыку для кафе, ресторанов, баров, фитнес-клубов и магазинов. Радиоротации артистам и фоновое аудио бизнесу из одной системы.', type: 'website' },
-  '/pesnya-na-radio': { title: 'Песня на радио: как попасть в ротацию радиостанций | ПРОМО.МУЗЫКА', desc: 'Подробное руководство, как разместить песню на радио: подача в базу из {{STATIONS_GEN}}, решение редакторов о ротации и отчёт о реальных эфирах. ПРОМО.ЭИР доводит трек до плейлист-комитета без посредников.', type: 'article' },
-  '/muzyka-dlya-zavedeniya': { title: 'Музыка для заведения: лицензионное аудио для кафе, ресторанов и магазинов | ПРОМО.МУЗЫКА', desc: 'Лицензионная музыка для заведений: кафе, рестораны, бары, фитнес-клубы, магазины и салоны. Готовые плейлисты под формат места, отчётность для РАО и ВОИС, брендированные джинглы и звуковая идентичность от ПРОМО.ЭИР.', type: 'article' },
-  '/for-venues': { title: `Музыка для заведений: подключение фонового аудио для бизнеса — ${SITE_NAME}`, desc: 'Лицензионная музыка для заведений общепита, ритейла и услуг. Подбор плейлистов под аудиторию, отчётность для РАО и ВОИС, фирменные джинглы и звуковое оформление зала от ПРОМО.ЭИР.', type: 'website' },
-  '/music-for-restaurants': { title: `Музыка для ресторанов и кафе: фоновое аудио и плейлисты под формат заведения — ${SITE_NAME}`, desc: 'Готовые плейлисты для ресторана, кафе, кофейни и бара под целевую аудиторию и время суток. Лицензионная музыка с отчётностью для РАО и ВОИС, обновление треков без участия персонала.', type: 'website' },
+  '/pesnya-na-radio': { title: 'Песня на радио: как попасть в ротацию — ПРОМО.МУЗЫКА', desc: 'Подробное руководство, как разместить песню на радио: подача в базу из {{STATIONS_GEN}}, решение редакторов о ротации и отчёт о реальных эфирах. ПРОМО.ЭИР доводит трек до плейлист-комитета без посредников.', type: 'article' },
+  '/muzyka-dlya-zavedeniya': { title: 'Музыка для заведения: кафе, ресторан, магазин — ПРОМО.ЭИР', desc: 'Лицензионная музыка для заведений: кафе, рестораны, бары, фитнес-клубы, магазины и салоны. Готовые плейлисты под формат места, отчётность для РАО и ВОИС, брендированные джинглы и звуковая идентичность от ПРОМО.ЭИР.', type: 'article' },
+  '/for-venues': { title: 'Радио для заведений и музыка в зал — ПРОМО.ЭИР', desc: 'Лицензионная музыка для заведений общепита, ритейла и услуг. Подбор плейлистов под аудиторию, отчётность для РАО и ВОИС, фирменные джинглы и звуковое оформление зала от ПРОМО.ЭИР.', type: 'website' },
+  '/music-for-restaurants': { title: 'Музыка для ресторанов и кафе — ПРОМО.ЭИР', desc: 'Готовые плейлисты для ресторана, кафе, кофейни и бара под целевую аудиторию и время суток. Лицензионная музыка с отчётностью для РАО и ВОИС, обновление треков без участия персонала.', type: 'website' },
   '/audio-branding': { title: `Звуковой брендинг: джинглы, аудиоидентичность и звук бренда — ${SITE_NAME}`, desc: 'Создание звукового бренда: фирменные джинглы, музыкальная тема, аудио-логотип и звуковая идентичность для бизнеса. Внедряется в плейлисты заведений, рекламу и точки контакта.', type: 'website' },
   '/audiobranding': { title: `Звуковой брендинг для бизнеса: джинглы и музыкальная идентичность — ${SITE_NAME}`, desc: 'Звуковой брендинг для заведений и компаний: фирменные джинглы, аудио-логотип, музыкальная тема. ПРОМО.ЭИР собирает плейлист и звуковые элементы под бренд.', type: 'website' },
   '/radio-advertising': { title: `Реклама на радио: размещение роликов на радиостанциях России — ${SITE_NAME}`, desc: 'Размещение рекламы на радио: подбор станций под аудиторию, расчёт охвата, производство ролика и эфирная сетка. Работаем по всей России через операторскую систему ПРОМО.ЭИР.', type: 'website' },
@@ -183,7 +183,7 @@ function renderPage(opts: {
   image?: string; jsonLd?: string; body: string;
   keywords?: string;
 }): string {
-  const orgLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"${SITE_NAME}","alternateName":[${SITE_ALT_NAMES.map((n) => `"${escJson(n)}"`).join(',')}],"url":"${DOMAIN}","logo":"${LOGO}","sameAs":["https://vk.com/promomusic"]}</script>`;
+  const orgLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"${SITE_NAME}","alternateName":[${SITE_ALT_NAMES.map((n) => `"${escJson(n)}"`).join(',')}],"url":"${DOMAIN}","logo":"${LOGO}","sameAs":["https://vk.com/promofm","https://t.me/promofm","https://www.youtube.com/@promo_muzik"]}</script>`;
   const breadcrumbs = opts.canonical === `${DOMAIN}/` ? '' :
     `<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Главная","item":"${DOMAIN}/"},{"@type":"ListItem","position":2,"name":"${escJson(opts.title.split(' — ')[0].split(' | ')[0])}","item":"${escJson(opts.canonical)}"}]}</script>`;
   const kw = opts.keywords ? `\n<meta name="keywords" content="${esc(opts.keywords)}">` : '';
@@ -220,16 +220,31 @@ ${orgLd}${breadcrumbs}${opts.jsonLd || ''}
 </nav></header>
 <main>${opts.body}</main>
 <footer>
-<p>&copy; 2026 ${SITE_NAME}. Музыкальная платформа для артистов, DJ и продюсеров.</p>
-<nav aria-label="Карта сайта">
+<p>&copy; 2026 ${SITE_NAME} (<a href="${DOMAIN}/">Промо Музыка</a>) — платформа продвижения музыки для артистов, DJ, продюсеров и заведений.</p>
+<nav aria-label="Артистам"><strong>Артистам:</strong>
 <a href="${DOMAIN}/pesnya-na-radio">Песня на радио</a> ·
-<a href="${DOMAIN}/muzyka-dlya-zavedeniya">Музыка для заведения</a> ·
-<a href="${DOMAIN}/promo-air">ПРОМО.ЭИР</a> ·
+<a href="${DOMAIN}/tv-rotation">Клип на ТВ</a> ·
+<a href="${DOMAIN}/get-in-chart">Песня в чартах</a> ·
+<a href="${DOMAIN}/promotion">Продвижение трека</a> ·
+<a href="${DOMAIN}/how-to-grow-track">Как раскрутить трек</a> ·
+<a href="${DOMAIN}/distribution">Дистрибуция музыки</a> ·
 <a href="${DOMAIN}/airplay-monitoring">Мониторинг эфира</a> ·
+<a href="${DOMAIN}/promo-lab">Оценка трека</a> ·
+<a href="${DOMAIN}/pricing">Тарифы</a>
+</nav>
+<nav aria-label="Заведениям"><strong>Заведениям:</strong>
+<a href="${DOMAIN}/for-venues">Радио для заведений</a> ·
+<a href="${DOMAIN}/muzyka-dlya-zavedeniya">Музыка для заведения</a> ·
+<a href="${DOMAIN}/music-for-restaurants">Музыка для ресторанов</a> ·
 <a href="${DOMAIN}/radio-advertising">Реклама на радио</a> ·
-<a href="${DOMAIN}/audio-branding">Звуковой брендинг</a> ·
+<a href="${DOMAIN}/audio-branding">Звуковой брендинг</a>
+</nav>
+<nav aria-label="Платформа">
+<a href="${DOMAIN}/promo-air">ПРОМО.ЭИР</a> ·
+<a href="${DOMAIN}/promo-guide">ПРОМО.ГИД</a> ·
 <a href="${DOMAIN}/charts">Чарты</a> ·
-<a href="${DOMAIN}/promo-guide">Гид по продвижению</a>
+<a href="${DOMAIN}/concerts">Концерты</a> ·
+<a href="${DOMAIN}/booking">Букинг артистов</a>
 </nav>
 </footer>
 </body></html>`;
@@ -675,10 +690,15 @@ seoRoutes.get('/prerender/*', async (c) => {
 
       body += `<section><h2>Возможности платформы</h2><ul>
 <li><a href="${DOMAIN}/pesnya-na-radio">Питчинг песни на {{STATIONS_ACC}}</a></li>
+<li><a href="${DOMAIN}/promotion">Продвижение трека: плейлисты, радио, посевы</a></li>
+<li><a href="${DOMAIN}/tv-rotation">Клип и песня на ТВ</a></li>
+<li><a href="${DOMAIN}/get-in-chart">Как попасть с песней в чарты</a></li>
 <li><a href="${DOMAIN}/airplay-monitoring">Мониторинг эфира и отчёт о ротациях</a></li>
 <li><a href="${DOMAIN}/charts">Музыкальные чарты TOP 50</a></li>
 <li><a href="${DOMAIN}/promo-lab">Профессиональная оценка треков</a></li>
-<li><a href="${DOMAIN}/promo-air">ПРОМО.ЭИР — радио и музыка для заведений</a></li>
+<li><a href="${DOMAIN}/for-venues">Радио для заведений: ПРОМО.ЭИР</a></li>
+<li><a href="${DOMAIN}/distribution">Дистрибуция музыки на стриминги</a></li>
+<li><a href="${DOMAIN}/pricing">Тарифы и цены</a></li>
 <li><a href="${DOMAIN}/marketplace">Маркетплейс музыкальных услуг</a></li>
 <li><a href="${DOMAIN}/concerts">Афиша концертов</a></li>
 <li><a href="${DOMAIN}/booking">Букинг артистов на мероприятия</a></li>
