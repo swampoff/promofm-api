@@ -7,7 +7,11 @@ import { ALL_ALIASES, type SeoAlias } from './seo-aliases.tsx';
 const seoRoutes = new Hono();
 const DOMAIN = 'https://promo-music.ru';
 const SITE_NAME = 'ПРОМО.МУЗЫКА';
-const SITE_DESC = 'Музыкальная платформа для артистов: чарты, аналитика, продвижение треков, новости индустрии, радиоротации';
+const SITE_DESC = 'Платформа продвижения для артистов: питчинг на {{STATIONS_COUNT}} радиостанции, попадание в плейлисты Яндекс.Музыки и VK Музыки, чарты, дистрибуция.';
+// Разговорные написания бренда. Боту нужно видеть их в тексте и в Organization-разметке:
+// «ПРОМО.МУЗЫКА» с точкой поисковик за фразу «промо музыка» не засчитывает.
+const SITE_ALT_NAMES = ['Промо Музыка', 'Promo Music', 'PROMO.MUSIC', 'promo-music.ru'];
+const HOME_KEYWORDS = 'промо музыка, promo music, продвижение музыки, питчинг на радио, попасть на радио, чарты, дистрибуция музыки, promo-music.ru';
 const LOGO = `${DOMAIN}/logo.png`;
 
 function esc(s: string): string {
@@ -94,7 +98,7 @@ async function renderPillarWithTokens(p: PillarMeta): Promise<string> {
 
 // ─── Page meta configs ───
 const PAGE_META: Record<string, { title: string; desc: string; type: string; image?: string }> = {
-  '/': { title: `${SITE_NAME} — музыкальная платформа для артистов`, desc: SITE_DESC, type: 'website' },
+  '/': { title: `${SITE_NAME} — продвижение музыки, питчинг на радио и в плейлисты`, desc: SITE_DESC, type: 'website' },
   '/news': { title: `Новости музыки — ${SITE_NAME}`, desc: 'Свежие новости музыкальной индустрии: релизы, фестивали, интервью, аналитика', type: 'website' },
   '/charts': { title: `Музыкальные чарты TOP 50 — ${SITE_NAME}`, desc: 'Еженедельный чарт из Spotify, Apple Music, Яндекс Музыки, радиостанций и ВКонтакте', type: 'website' },
   '/concerts': { title: `Концерты и фестивали — ${SITE_NAME}`, desc: 'Афиша концертов и музыкальных событий', type: 'website' },
@@ -149,7 +153,7 @@ function renderPage(opts: {
   image?: string; jsonLd?: string; body: string;
   keywords?: string;
 }): string {
-  const orgLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"${SITE_NAME}","url":"${DOMAIN}","logo":"${LOGO}","sameAs":["https://vk.com/promomusic"]}</script>`;
+  const orgLd = `<script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"${SITE_NAME}","alternateName":[${SITE_ALT_NAMES.map((n) => `"${escJson(n)}"`).join(',')}],"url":"${DOMAIN}","logo":"${LOGO}","sameAs":["https://vk.com/promomusic"]}</script>`;
   const breadcrumbs = opts.canonical === `${DOMAIN}/` ? '' :
     `<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Главная","item":"${DOMAIN}/"},{"@type":"ListItem","position":2,"name":"${escJson(opts.title.split(' — ')[0].split(' | ')[0])}","item":"${escJson(opts.canonical)}"}]}</script>`;
   const kw = opts.keywords ? `\n<meta name="keywords" content="${esc(opts.keywords)}">` : '';
@@ -584,37 +588,76 @@ seoRoutes.get('/prerender/*', async (c) => {
 
     // ─── Homepage with featured content ───
     if (path === '/' || path === '') {
-      const [newsRes, tracksRes] = await Promise.all([
-        pool.query(`SELECT id, title, published_at FROM news WHERE status = 'published' ORDER BY published_at DESC LIMIT 5`).catch(() => ({ rows: [] })),
-        pool.query(`SELECT title, artist_name FROM tracks WHERE moderation_status = 'approved' AND is_hidden = false ORDER BY plays_count DESC NULLS LAST LIMIT 10`).catch(() => ({ rows: [] })),
+      const [statsRes, weeklyRes, newsRes] = await Promise.all([
+        // Публичный трек — тот же фильтр, что в a5ee088: живые треки имеют статус 'published',
+        // поэтому прежний фильтр по одному 'approved' оставлял подборку пустой.
+        pool.query(`SELECT COUNT(*)::int AS tracks FROM tracks
+            WHERE moderation_status IN ('approved','upcoming','published') AND is_hidden = false`).catch(() => ({ rows: [] as any[] })),
+        // Витрина — редакционная подборка «Новинок недели», а не сортировка по plays_count:
+        // ненулевой счётчик остался только у демо-засева (3201 прослушивание при нуле строк
+        // в track_plays), и бот получал список несуществующих артистов вида DeepFlow/SynthMind.
+        pool.query(`WITH latest AS (
+            SELECT title, track_ids FROM weekly_releases
+            WHERE is_published = true ORDER BY release_date DESC LIMIT 1
+          )
+          SELECT l.title AS issue_title, t.id, t.title, t.artist_name
+          FROM latest l
+          CROSS JOIN LATERAL unnest(l.track_ids) WITH ORDINALITY AS u(track_id, ord)
+          JOIN tracks t ON t.id = u.track_id
+          WHERE t.moderation_status IN ('approved','upcoming','published') AND t.is_hidden = false
+          ORDER BY u.ord LIMIT 10`).catch(() => ({ rows: [] as any[] })),
+        // Лента живёт в news_public — в legacy news осталось 9 строк с NULL published_at,
+        // и бот показывал их как «последние новости». published_at <= now() отсекает
+        // будущие даты агрегатора.
+        pool.query(`(SELECT id, title, published_at FROM news_public
+            WHERE status = 'published' AND published_at <= now() AND source = 'admin'
+            ORDER BY published_at DESC LIMIT 3)
+          UNION ALL
+          (SELECT id, title, published_at FROM news_public
+            WHERE status = 'published' AND published_at <= now() AND source <> 'admin'
+            ORDER BY published_at DESC LIMIT 3)`).catch(() => ({ rows: [] as any[] })),
       ]);
 
-      let body = `<h1>${SITE_NAME}</h1><p>${esc(SITE_DESC)}</p>`;
-      if (newsRes.rows.length > 0) {
-        body += '<section><h2>Последние новости</h2><ul>';
-        for (const n of newsRes.rows) {
-          body += `<li><a href="${DOMAIN}/news/${esc(n.id)}">${esc(n.title)}</a></li>`;
-        }
-        body += '</ul></section>';
-      }
-      if (tracksRes.rows.length > 0) {
-        body += '<section><h2>Популярные треки</h2><ol>';
-        for (const t of tracksRes.rows) {
-          body += `<li>${esc(t.title)} — ${esc(t.artist_name || 'Артист')}</li>`;
+      const tracksTotal = Number(statsRes.rows[0]?.tracks) || 0;
+      const issueTitle = weeklyRes.rows[0]?.issue_title || 'Новинки недели';
+
+      let body = `<h1>${SITE_NAME} — платформа продвижения музыки</h1>
+<p class="lead">${SITE_NAME} (Promo Music) — российская платформа продвижения музыки. Артист загружает трек, питчит его на {{STATIONS_COUNT}} радиостанций и в плейлисты стримингов, видит реальные эфиры в отчётах и попадает в чарты.${tracksTotal > 0 ? ` Сейчас в каталоге ${tracksTotal} треков.` : ''}</p>
+<section><h2>Что такое Промо Музыка</h2>
+<p>Промо Музыка (promo-music.ru) — это единое окно продвижения: питчинг песни на радио через ПРОМО.ЭИР, мониторинг эфира по аудиоотпечатку, экспертная оценка трека в ПРОМО.ЛАБ, маркетплейс услуг и битов, афиша концертов и букинг артистов. Платформа рассчитана на артистов, лейблы, DJ, продюсеров и звукорежиссёров, а также на заведения, которым нужна лицензированная фоновая музыка.</p></section>`;
+
+      if (weeklyRes.rows.length > 0) {
+        body += `<section><h2>${esc(issueTitle)}</h2><p>Свежая подборка треков, опубликованных на платформе.</p><ol>`;
+        for (const t of weeklyRes.rows) {
+          body += `<li><a href="${DOMAIN}/tracks/${esc(t.id)}">${esc(t.title)}</a> — ${esc(t.artist_name || 'Артист')}</li>`;
         }
         body += '</ol></section>';
       }
+
+      if (newsRes.rows.length > 0) {
+        body += '<section><h2>Новости платформы и индустрии</h2><ul>';
+        for (const n of newsRes.rows) {
+          const pub = n.published_at || '';
+          body += `<li><a href="${DOMAIN}/news/${esc(n.id)}">${esc(n.title)}</a>${pub ? ` — <time datetime="${esc(String(pub))}">${fmtDate(String(pub))}</time>` : ''}</li>`;
+        }
+        body += '</ul></section>';
+      }
+
       body += `<section><h2>Возможности платформы</h2><ul>
+<li><a href="${DOMAIN}/pesnya-na-radio">Питчинг песни на {{STATIONS_COUNT}} радиостанций</a></li>
+<li><a href="${DOMAIN}/airplay-monitoring">Мониторинг эфира и отчёт о ротациях</a></li>
 <li><a href="${DOMAIN}/charts">Музыкальные чарты TOP 50</a></li>
 <li><a href="${DOMAIN}/promo-lab">Профессиональная оценка треков</a></li>
-<li><a href="${DOMAIN}/promo-air">Радиоротации для артистов</a></li>
+<li><a href="${DOMAIN}/promo-air">ПРОМО.ЭИР — радио и музыка для заведений</a></li>
 <li><a href="${DOMAIN}/marketplace">Маркетплейс музыкальных услуг</a></li>
 <li><a href="${DOMAIN}/concerts">Афиша концертов</a></li>
+<li><a href="${DOMAIN}/booking">Букинг артистов на мероприятия</a></li>
 </ul></section>`;
 
-      // FAQPage на главной — копия 4 Q&A из фронт-реестра seo-pages.ts (синхрон).
+      // FAQPage на главной — копия Q&A из фронт-реестра seo-pages.ts (синхрон).
       // FAQ-schema нет ни у tophit, ни у конкурентов обоих кластеров → rich-сниппет.
       const homeFaq = [
+        { q: 'ПРОМО.МУЗЫКА, Промо Музыка и Promo Music — это одно и то же?', a: 'Да. Это одно название в разных написаниях: платформа работает на домене promo-music.ru и в текстах встречается как ПРОМО.МУЗЫКА, Промо Музыка и Promo Music.' },
         { q: 'Что такое ПРОМО.МУЗЫКА?', a: 'Российская платформа продвижения музыки для артистов, лейблов, DJ, продюсеров и звукорежиссёров. Объединяет питчинг на {{STATIONS_COUNT}} радиостанции, попадание в плейлисты стримингов, чарты, дистрибуцию и маркетплейс битов и услуг.' },
         { q: 'Как попасть на радио со своей песней?', a: 'Зарегистрируйтесь как артист, загрузите трек, отметьте радиостанции для питчинга. Заявка приходит в кабинет радио, редактор принимает решение о ротации напрямую.' },
         { q: 'Сколько стоит продвижение трека?', a: 'Публикация трека — 7 000 ₽ с пожизненным доступом к питчингу, аналитике и попаданию в «Новинки недели». Подробнее на странице тарифов.' },
@@ -623,7 +666,7 @@ seoRoutes.get('/prerender/*', async (c) => {
       body += `<section class="faq-block"><h2>Частые вопросы</h2><dl class="faq">${homeFaq.map(({ q, a }) => `<dt>${esc(q)}</dt><dd>${esc(a)}</dd>`).join('')}</dl></section>`;
 
       c.header('Content-Type', 'text/html; charset=utf-8');
-      return c.body(await renderPageWithTokens({ title: PAGE_META['/'].title, desc: PAGE_META['/'].desc, canonical: `${DOMAIN}/`, type: 'website', jsonLd: buildFaqLd(homeFaq), body }));
+      return c.body(await renderPageWithTokens({ title: PAGE_META['/'].title, desc: PAGE_META['/'].desc, canonical: `${DOMAIN}/`, type: 'website', keywords: HOME_KEYWORDS, jsonLd: buildFaqLd(homeFaq), body }));
     }
 
     // ─── Pillar pages (rich SEO landing pages with FAQ schema) ───
