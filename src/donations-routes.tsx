@@ -276,9 +276,12 @@ donationsRoutes.post('/', optionalAuth, async (c) => {
     if (body.amount > 100000) {
       return c.json({ success: false, error: 'Max donation amount is 100000 RUB' }, 400);
     }
-    if (!body.artistId) {
-      return c.json({ success: false, error: 'artistId required' }, 400);
-    }
+    // Решение владельца 24.09.2026: все донаты поступают на счёт платформы
+    // (получатель 'platform'). Для кого нажали «Поддержать» — сохраняем в data
+    // для истории. Раньше «Новинки недели» не передавали артиста, и донат
+    // записывался получателю 'unknown' — его никто не мог увидеть и вывести.
+    const RECIPIENT = 'platform';
+    const intendedArtistId: string | null = body.artistId && body.artistId !== 'unknown' ? String(body.artistId) : null;
 
     // Optional per-track donation. Allows the artist's analytics to
     // surface «доната пришло на этот трек» as a separate line item.
@@ -291,7 +294,8 @@ donationsRoutes.post('/', optionalAuth, async (c) => {
       id: donationId,
       ...safeBody,
       status: 'pending_payment',
-      artistId: body.artistId,
+      artistId: RECIPIENT,
+      intendedArtistId,
       trackId,                          // null when no track context
       donorId: userId,
       createdAt: now,
@@ -305,7 +309,10 @@ donationsRoutes.post('/', optionalAuth, async (c) => {
       const gateway = body.paymentMethod === 'sbp' ? 'tbank' : 'yookassa';
       const gw = getGateway(gateway);
       const orderId = crypto.randomUUID();
-      const returnUrl = `https://promo-music.ru/cabinet/donations?payment=success&donationId=${donationId}`;
+      // /cabinet/donations во фронте нет — донор после оплаты попадал на пустую страницу.
+      const returnUrl = trackId && /^[0-9a-f-]{36}$/i.test(trackId)
+        ? `https://promo-music.ru/tracks/${trackId}?donation=success`
+        : 'https://promo-music.ru/?donation=success';
       const donorLabel = body.isAnonymous ? 'Anonymous' : (body.donorName || 'Listener');
 
       const result = await gw.createPayment({
@@ -320,7 +327,8 @@ donationsRoutes.post('/', optionalAuth, async (c) => {
         metadata: {
           type: 'donation',
           donationId,
-          artistId: body.artistId,
+          artistId: RECIPIENT,
+          ...(intendedArtistId ? { intendedArtistId } : {}),
           ...(trackId ? { trackId } : {}),
           donorName: donorLabel,
           isAnonymous: String(body.isAnonymous || false),
@@ -339,7 +347,8 @@ donationsRoutes.post('/', optionalAuth, async (c) => {
         description: `Donation for artist from ${donorLabel}`,
         metadata: {
           donationId,
-          artistId: body.artistId,
+          artistId: RECIPIENT,
+          ...(intendedArtistId ? { intendedArtistId } : {}),
           ...(trackId ? { trackId } : {}),
           donorName: donorLabel,
           isAnonymous: String(body.isAnonymous || false),
