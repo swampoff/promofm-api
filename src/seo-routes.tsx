@@ -22,6 +22,24 @@ function esc(s: string): string {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// Товары маркетплейса для робота — то же, что человек видит на /marketplace.
+async function renderMarketItemsHtml(): Promise<string> {
+  const KIND: Record<string, string> = { beat: 'Бит', minus: 'Минус', song: 'Песня' };
+  const { rows } = await pool.query(
+    `SELECT kind, title, seller_name, genre, bpm, music_key, price_lease, price_exclusive
+       FROM market_items WHERE status = 'active' ORDER BY created_at DESC LIMIT 60`,
+  );
+  if (!rows.length) {
+    return '<p>Витрина только открылась: первые продавцы выставляют свои биты, минусы и песни. Выставить свою работу можно уже сейчас.</p>';
+  }
+  const rub = (n: unknown) => `${Math.round(Number(n)).toLocaleString('ru-RU')} ₽`;
+  return `<ul>${rows.map((r: any) => {
+    const meta = [r.genre, r.bpm ? `${r.bpm} BPM` : '', r.music_key].filter(Boolean).join(', ');
+    const prices = [r.price_lease ? `лицензия ${rub(r.price_lease)}` : '', r.price_exclusive ? `эксклюзив ${rub(r.price_exclusive)}` : ''].filter(Boolean).join(', ');
+    return `<li>${KIND[r.kind] || ''} «${esc(r.title)}» — ${esc(r.seller_name || '')}${meta ? ` (${esc(meta)})` : ''}: ${prices}</li>`;
+  }).join('')}</ul>`;
+}
+
 function escJson(s: string): string {
   return (s || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
 }
@@ -146,7 +164,7 @@ const PAGE_META: Record<string, { title: string; desc: string; type: string; ima
   '/airplay-monitoring-': { title: `Мониторинг ротаций песни на радио — ${SITE_NAME}`, desc: 'Сервис мониторинга эфира радиостанций. Узнайте, когда и сколько раз песня прозвучала на радио.', type: 'website' },
   '/promo-lab': { title: `ПРОМО.ЛАБ — оценка треков — ${SITE_NAME}`, desc: 'Профессиональная оценка треков от экспертов индустрии', type: 'website' },
   '/promo-guide': { title: `ПРОМО.ГИД — руководства — ${SITE_NAME}`, desc: 'Гайды по продвижению музыки и развитию карьеры артиста', type: 'website' },
-  '/marketplace': { title: `Маркетплейс — ${SITE_NAME}`, desc: 'Маркетплейс музыкальных услуг: биты, мастеринг, дизайн, продвижение', type: 'website' },
+  '/marketplace': { title: `Маркетплейс битов, минусов и песен — ${SITE_NAME}`, desc: 'Купить или продать бит, минус или песню: лицензия или эксклюзив, оплата через ЮKassa', type: 'website' },
   '/tracks': { title: `Треки — ${SITE_NAME}`, desc: 'Слушайте и открывайте новую музыку: треки артистов платформы', type: 'website' },
   '/radio': { title: `Радиостанции — ${SITE_NAME}`, desc: 'Каталог радиостанций-партнёров: ротации, эфиры, сотрудничество', type: 'website' },
   '/videos': { title: `Видео — ${SITE_NAME}`, desc: 'Музыкальные видео, клипы и live-выступления артистов', type: 'website' },
@@ -235,6 +253,7 @@ ${orgLd}${breadcrumbs}${opts.jsonLd || ''}
 <a href="${DOMAIN}/distribution">Дистрибуция музыки</a> ·
 <a href="${DOMAIN}/airplay-monitoring">Мониторинг эфира</a> ·
 <a href="${DOMAIN}/promo-lab">Оценка трека</a> ·
+<a href="${DOMAIN}/sell-music">Продать бит или песню</a> ·
 <a href="${DOMAIN}/pricing">Тарифы</a>
 </nav>
 <nav aria-label="Заведениям"><strong>Заведениям:</strong>
@@ -829,7 +848,8 @@ ${k.ticket_link ? `<p><a href="${esc(k.ticket_link)}" rel="nofollow noopener">К
 <li><a href="${DOMAIN}/for-venues">Радио для заведений: ПРОМО.ЭИР</a></li>
 <li><a href="${DOMAIN}/distribution">Дистрибуция музыки на стриминги</a></li>
 <li><a href="${DOMAIN}/pricing">Тарифы и цены</a></li>
-<li><a href="${DOMAIN}/marketplace">Маркетплейс музыкальных услуг</a></li>
+<li><a href="${DOMAIN}/marketplace">Маркетплейс битов, минусов и песен</a></li>
+<li><a href="${DOMAIN}/sell-music">Продать бит, минус или песню</a></li>
 <li><a href="${DOMAIN}/concerts">Афиша концертов</a></li>
 <li><a href="${DOMAIN}/booking">Букинг артистов на мероприятия</a></li>
 </ul></section>`;
@@ -874,7 +894,9 @@ ${k.ticket_link ? `<p><a href="${esc(k.ticket_link)}" rel="nofollow noopener">К
         ? `<section class="faq-block"><h2>Частые вопросы</h2><dl class="faq">${a.faq.map(({ q, a: ans }) =>
             `<dt>${esc(q)}</dt><dd>${esc(ans)}</dd>`).join('')}</dl></section>`
         : '';
-      const bodyHtml = a.body.includes('class="faq"') ? a.body : `${a.body}\n${faqHtml}`;
+      let bodyHtml = a.body.includes('class="faq"') ? a.body : `${a.body}\n${faqHtml}`;
+      // Витрина маркетплейса: метка в тексте → живой список товаров в продаже.
+      if (bodyHtml.includes('<!--market-items-->')) bodyHtml = bodyHtml.replace('<!--market-items-->', await renderMarketItemsHtml());
       c.header('Content-Type', 'text/html; charset=utf-8');
       return c.body(await renderPageWithTokens({
         title: a.title,

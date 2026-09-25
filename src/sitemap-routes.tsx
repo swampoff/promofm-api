@@ -39,6 +39,7 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   { loc: '/promo-lab', changefreq: 'weekly', priority: '0.8' },
   { loc: '/promo-guide', changefreq: 'weekly', priority: '0.8' },
   { loc: '/marketplace', changefreq: 'daily', priority: '0.8' },
+  { loc: '/sell-music', changefreq: 'weekly', priority: '0.8' },
   { loc: '/radio', changefreq: 'daily', priority: '0.8' },
   { loc: '/tracks', changefreq: 'daily', priority: '0.8' },
   { loc: '/videos', changefreq: 'daily', priority: '0.8' },
