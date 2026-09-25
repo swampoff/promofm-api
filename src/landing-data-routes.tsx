@@ -578,6 +578,25 @@ landing.get('/tracks/new', async (c) => {
       } catch (e) { console.warn('[landing] radio airplay query failed:', (e as any)?.message); }
     }
 
+    // Адрес профиля артиста — как в /new-releases: профиль по artist_id или по
+    // точному имени. Фронт раньше собирал адрес из имени («Madonna, Charli xcx»
+    // → madonna-charli-xcx) и попадал в 404 (25.09.2026).
+    const slugMap: Record<string, string> = {};
+    if (trackIds.length > 0) {
+      try {
+        const { rows } = await pool.query(
+          `SELECT DISTINCT ON (t.id) t.id::text AS id, COALESCE(ap2.slug, ap.slug) AS slug
+             FROM tracks t
+             LEFT JOIN artist_profiles ap  ON ap.id = t.artist_id
+             LEFT JOIN artist_profiles ap2 ON LOWER(ap2.artist_name) = LOWER(t.artist_name)
+            WHERE t.id = ANY($1::uuid[])
+            ORDER BY t.id, COALESCE(ap2.is_verified, ap.is_verified) DESC NULLS LAST`,
+          [trackIds]
+        );
+        for (const r of rows) if (r.slug) slugMap[r.id] = r.slug;
+      } catch (e) { console.warn('[landing] artist slug query failed:', (e as any)?.message); }
+    }
+
     // ── DJ-миксы в той же ленте «Новинки недели» ──────────────────
     // Зеркало артистского пайплайна: микс после модерации (status
     // upcoming/published, is_hidden=false) попадает в общий фид
@@ -628,6 +647,7 @@ landing.get('/tracks/new', async (c) => {
       plays: t.plays_count || 0,
       likes: t.likes_count || 0,
       artistId: t.user_id || t.artist_id || '',
+      artistSlug: slugMap[String(t.id)] || null,
       createdAt: t.created_at,
       created_at: t.created_at,
       yandex_music_url: t.yandex_music_url || '',
