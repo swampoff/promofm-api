@@ -61,7 +61,7 @@ const BUCKET_CONFIGS: Record<string, BucketConfig> = {
       'audio/mpeg', 'audio/mp3',
       'audio/wav', 'audio/x-wav', 'audio/vnd.wave', 'audio/wave',
       'audio/flac', 'audio/x-flac',
-      'audio/ogg', 'audio/oga',
+      'audio/ogg', 'audio/oga', 'audio/opus',
       'audio/aac',
       'audio/mp4', 'audio/x-m4a', 'audio/m4a',
     ],
@@ -111,7 +111,7 @@ export function validateFileType(filename: string, allowedTypes: string[]): bool
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
     '.webp': 'image/webp', '.gif': 'image/gif',
     '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.flac': 'audio/flac',
-    '.ogg': 'audio/ogg', '.aac': 'audio/aac', '.m4a': 'audio/mp4',
+    '.ogg': 'audio/ogg', '.oga': 'audio/ogg', '.opus': 'audio/opus', '.aac': 'audio/aac', '.m4a': 'audio/mp4',
     '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
     '.pdf': 'application/pdf', '.zip': 'application/zip',
   };

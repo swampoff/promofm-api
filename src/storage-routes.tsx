@@ -184,8 +184,14 @@ storage.post('/upload', requireAuth, async (c) => {
       }, 400);
     }
     
-    // Validate file type
-    if (!validateFileType(file.name, bucketConfig.allowedMimeTypes)) {
+    // Validate file type. Расширение решает, когда оно есть. Андроид-пикеры
+    // часто отдают файл БЕЗ расширения («Запись 12») — тогда берём тип,
+    // заявленный браузером; содержимое ниже всё равно сверяется по магическим
+    // байтам. До 25.09.2026 такой файл получал 400, и форма трека обрывалась
+    // на необязательном шаутауте — трек не создавался (кейс Вячеслава К.).
+    const hasExt = /\.[a-z0-9]{2,5}$/i.test(file.name);
+    const declaredOk = !hasExt && !!file.type && bucketConfig.allowedMimeTypes.includes(String(file.type).toLowerCase());
+    if (!validateFileType(file.name, bucketConfig.allowedMimeTypes) && !declaredOk) {
       return c.json({
         success: false,
         error: `File type not allowed. Allowed types: ${bucketConfig.allowedMimeTypes.join(', ')}`,
@@ -265,8 +271,10 @@ storage.post('/upload', requireAuth, async (c) => {
       }, 400);
     }
     
-    // Generate unique filename
-    const filename = generateUniqueFilename(file.name, path);
+    // Generate unique filename (файлу без расширения — расширение по содержимому,
+    // иначе плеер и nginx не поймут тип).
+    const nameForSave = !hasExt && detectedType?.ext ? `${file.name}.${detectedType.ext}` : file.name;
+    const filename = generateUniqueFilename(nameForSave, path);
     
     // Upload file
     // fileData already declared above (magic bytes check)
