@@ -321,17 +321,29 @@ app.post("/library/sync", async (c) => {
   }
 
   try {
+    // Оплаченные треки артистов → эфир ПРОМО.ЭИР (25.09.2026). Раньше выборка
+    // брала только 'approved' (то есть ещё НЕ оплаченные), искала файлы не в
+    // той папке и копировала WAV под именем .mp3 — ни один оплаченный трек в
+    // эфир не попал (Hargi, Желубалин, Черниченко, Подиум, Дюкова, SHOO…).
+    // Теперь: оплачен (payment_completed/is_paid), в «Скоро» или опубликован,
+    // не архив promo.fm, не скрыт; имя файла «Артист - Название.mp3», как у
+    // friday.js; не-MP3 перекодируем. Дубли ищем и по имени, и по артист+название.
     const { rows: platformTracks } = await pool.query(`
       SELECT t.id, t.title, t.artist_name, t.audio_url, t.genre, t.duration, t.city
       FROM tracks t
       WHERE t.audio_url IS NOT NULL
         AND t.audio_url != ''
-        AND t.moderation_status = 'approved'
+        AND t.moderation_status IN ('upcoming', 'published')
+        AND (t.payment_completed = true OR t.is_paid = true)
+        -- тестовые оплаты (1–999 ₽, публикация стоит 10 000 ₽) в эфир не идут
+        AND NOT (COALESCE(t.payment_amount, 0) > 0 AND t.payment_amount < 1000)
+        AND COALESCE(t.is_legacy, false) = false
         AND t.is_hidden = false
         AND (t.is_ai_generated IS NULL OR t.is_ai_generated = false)
         AND NOT EXISTS (
-          SELECT 1 FROM radio_library rl 
-          WHERE rl.filename = regexp_replace(t.audio_url, '^.*/', '')
+          SELECT 1 FROM radio_library rl
+          WHERE rl.filename = replace(t.artist_name || ' - ' || t.title || '.mp3', '/', '_')
+             OR (lower(rl.artist) = lower(t.artist_name) AND lower(rl.title) = lower(t.title))
         )
     `);
 
@@ -341,46 +353,57 @@ app.post("/library/sync", async (c) => {
 
     const path = await import("path");
     const fs = await import("fs");
+    const { spawnSync } = await import("child_process");
     const RADIO_TRACKS_DIR = "/mnt/data/promofm-music/tracks";
-    const UPLOADS_DIR = "/opt/promofm-api/uploads/tracks";
     let synced = 0;
     const errors: string[] = [];
 
+    // audio_url → файл на диске (форматы, которые реально встречаются в tracks).
+    const resolveLocal = (audioUrl: string): string => {
+      const u = audioUrl.replace(/^https?:\/\/[^/]+/, "");
+      const cands: string[] = [];
+      if (u.startsWith("/server/uploads/tracks/")) {
+        cands.push(path.join("/opt/promofm-api/uploads/tracks", decodeURIComponent(u.slice("/server/uploads/tracks/".length))));
+      }
+      const m = u.match(/^\/(?:server\/)?uploads\/(.+)$/);
+      if (m) {
+        const rest = decodeURIComponent(m[1]);
+        cands.push(path.join("/var/www/promofm/uploads", rest), path.join("/opt/promofm-api/uploads", rest));
+      }
+      return cands.find((p) => fs.existsSync(p)) || "";
+    };
+
     for (const track of platformTracks) {
       try {
-        let srcPath = "";
-        const audioUrl = track.audio_url as string;
-
-        if (audioUrl.startsWith("/server/uploads/tracks/")) {
-          const filename = decodeURIComponent(audioUrl.replace("/server/uploads/tracks/", ""));
-          srcPath = path.join(UPLOADS_DIR, filename);
-        } else if (audioUrl.startsWith("https://promo-music.ru/uploads/track-audio/")) {
-          const filename = decodeURIComponent(audioUrl.replace("https://promo-music.ru/uploads/track-audio/", ""));
-          srcPath = path.join("/opt/promofm-api/uploads/track-audio", filename);
-        } else {
-          errors.push("Unknown audio_url format: " + audioUrl);
+        const srcPath = resolveLocal(track.audio_url as string);
+        if (!srcPath) {
+          errors.push("File not found for: " + track.audio_url);
           continue;
         }
 
-        if (!fs.existsSync(srcPath)) {
-          errors.push("File not found: " + srcPath);
-          continue;
-        }
-
-        const artist = (track.artist_name || "Unknown").replace(/[\/\\]/g, "-");
-        const title = (track.title || "Untitled").replace(/[\/\\]/g, "-");
-        const radioFilename = artist + " - " + title + ".mp3";
+        const radioFilename = `${track.artist_name || "Unknown"} - ${track.title || "Untitled"}.mp3`.replace(/\//g, "_");
         const destPath = path.join(RADIO_TRACKS_DIR, radioFilename);
 
         if (!fs.existsSync(destPath)) {
-          fs.copyFileSync(srcPath, destPath);
+          // Расширение не гарантирует формат: встречались WAV под именем .mp3.
+          const probe = spawnSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0", srcPath], { encoding: "utf8", timeout: 30000 });
+          const isMp3 = (probe.stdout || "").trim().split("\n")[0] === "mp3";
+          if (isMp3) {
+            fs.copyFileSync(srcPath, destPath);
+          } else {
+            const ff = spawnSync("ffmpeg", ["-loglevel", "error", "-y", "-i", srcPath, "-vn", "-codec:a", "libmp3lame", "-b:a", "256k", destPath], { encoding: "utf8", timeout: 300000 });
+            if (ff.status !== 0 || !fs.existsSync(destPath)) {
+              errors.push(track.title + ": ffmpeg " + (ff.stderr || "").slice(0, 200));
+              continue;
+            }
+          }
         }
 
         await pool.query(
           `INSERT INTO radio_library (filename, title, artist, genre, duration_seconds, region, is_vocal, file_path)
            VALUES ($1, $2, $3, $4, $5, $6, true, $7)
            ON CONFLICT (filename) DO NOTHING`,
-          [radioFilename, track.title, track.artist_name, track.genre, track.duration || 0, track.city || "Global", destPath]
+          [radioFilename, track.title, track.artist_name, track.genre || "pop", track.duration || 180, track.city || "Global", destPath]
         );
 
         synced++;
