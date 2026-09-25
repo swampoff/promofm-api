@@ -82,6 +82,7 @@ import ogImageRoutes from './og-image-routes.tsx';
 import messagingRoutes from './messaging-routes.tsx';
 import waitlistRoutes from './waitlist-routes.tsx';
 import marketplaceRoutes from './marketplace-routes.tsx';
+import marketRoutes from './market-routes.tsx';
 import chartsRoutes from './charts-routes.tsx';
 import aiChartsRoutes from './ai-charts-routes.tsx';
 import production360App from './production-360-routes.tsx';
@@ -461,6 +462,8 @@ app.route('/server/api/og-image', ogImageRoutes);
 app.route('/server/api/messaging', messagingRoutes);
 app.route('/server/api/waitlist', waitlistRoutes);
 app.route('/server/api/marketplace', marketplaceRoutes);
+// Готовые биты, минусы и песни от артистов/продюсеров/DJ (25.09.2026)
+app.route('/server/api/market', marketRoutes);
 app.route('/server/api/charts', chartsRoutes);
 app.route('/server/api/ai-charts', aiChartsRoutes);
 app.route('/server/api/production360', production360App);

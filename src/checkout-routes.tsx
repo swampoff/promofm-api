@@ -1447,6 +1447,17 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
+  // ─── Fulfill market_purchase (готовые биты/минусы/песни, 25.09.2026) ───
+  if (session.metadata?.type === 'market_purchase' && session.metadata?.purchaseId) {
+    try {
+      const { fulfillMarketPurchase } = await import('./market-routes.tsx');
+      await fulfillMarketPurchase(String(session.metadata.purchaseId), session.orderId, Number(session.amount));
+      log.info({ purchaseId: session.metadata.purchaseId, orderId: session.orderId }, 'market_purchase_fulfilled');
+    } catch (err) {
+      log.error({ err, purchaseId: session.metadata.purchaseId }, 'market_purchase_fulfillment_error');
+    }
+  }
+
   // ─── Fulfill beat_purchase (Beats Marketplace) ───
   if (session.metadata?.type === 'beat_purchase' && session.metadata?.beatId) {
     try {
@@ -1888,6 +1899,16 @@ async function processPaymentCanceled(session: PaymentSession, rawBody?: any) {
     rawBody?.body?.object?.cancellation_details?.reason ||
     '';
   log.info({ orderId: session.orderId, reason }, 'payment_canceled');
+
+  // Отменённая оплата товара маркетплейса освобождает эксклюзив для других покупателей.
+  if (session.metadata?.type === 'market_purchase' && session.metadata?.purchaseId) {
+    try {
+      const { cancelMarketPurchase } = await import('./market-routes.tsx');
+      await cancelMarketPurchase(String(session.metadata.purchaseId));
+    } catch (err) {
+      log.warn({ err, purchaseId: session.metadata.purchaseId }, 'market_purchase_cancel_error');
+    }
+  }
 
   // Email-возврат при expired_on_confirmation: пользователь начал оплату, но не довёл — шлём reminder
   if (reason === 'expired_on_confirmation') {
