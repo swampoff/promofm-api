@@ -2321,5 +2321,90 @@ charts.post('/fetch-international', requireAdminOrKey, async (c) => {
   }
 });
 
+// ─── Превью чартов с нашего домена (25.09.2026) ─────────────
+// Ссылки Deezer подписаны примерно на 15 минут, а чарты пересобираются раз в
+// несколько дней — к моменту клика превью протухали. Вдобавок плеер ведёт
+// звук через Web Audio анализатор, и чужой домен без crossOrigin даёт в нём
+// тишину. Поэтому в момент нажатия находим свежее превью (iTunes, затем
+// Deezer), один раз сохраняем файл у себя и отдаём его с promo-music.ru.
+const PREVIEW_DIR = '/var/www/promofm/uploads/chart-previews';
+const PREVIEW_PUBLIC = '/server/uploads/chart-previews';
+const PREVIEW_MAX_BYTES = 6 * 1024 * 1024;
+const PREVIEW_HOSTS = /^https:\/\/([a-z0-9-]+\.)*(mzstatic\.com|itunes\.apple\.com|dzcdn\.net)\//i;
+const previewInflight = new Map<string, Promise<string | null>>();
+const previewMiss = new Map<string, number>();
+
+function previewNorm(s: string): string {
+  return s.toLowerCase().replace(/ё/g, 'е').replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/[^a-zа-я0-9]+/gi, ' ').trim();
+}
+
+async function findITunesPreviewStrict(artist: string, title: string): Promise<string> {
+  const want = previewNorm(title).slice(0, 12);
+  for (const cc of ['ru', 'us']) {
+    try {
+      const q = encodeURIComponent(`${artist} ${title}`);
+      const r = await fetch(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=5&country=${cc}`, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) continue;
+      const data = await r.json() as any;
+      const hit = (data.results || []).find((x: any) => x.previewUrl && want && previewNorm(x.trackName || '').includes(want));
+      if (hit) return hit.previewUrl;
+    } catch { /* следующая страна */ }
+  }
+  return '';
+}
+
+async function resolveChartPreview(artist: string, title: string): Promise<string | null> {
+  const { createHash } = await import('crypto');
+  const { existsSync, mkdirSync, writeFileSync } = await import('fs');
+  const key = createHash('sha1').update(`${previewNorm(artist)}|${previewNorm(title)}`).digest('hex').slice(0, 24);
+  for (const ext of ['m4a', 'mp3']) {
+    if (existsSync(`${PREVIEW_DIR}/${key}.${ext}`)) return `${PREVIEW_PUBLIC}/${key}.${ext}`;
+  }
+  const missAt = previewMiss.get(key);
+  if (missAt && Date.now() - missAt < 6 * 3600_000) return null;
+  const running = previewInflight.get(key);
+  if (running) return running;
+  const job = (async () => {
+    const candidates: string[] = [];
+    const it = await findITunesPreviewStrict(artist, title);
+    if (it) candidates.push(it);
+    const dz = await fetchDeezerData(artist, title);
+    if (dz.preview) candidates.push(dz.preview);
+    for (const url of candidates) {
+      if (!PREVIEW_HOSTS.test(url)) continue;
+      try {
+        const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
+        const ct = r.headers.get('content-type') || '';
+        if (!r.ok || !/^audio\//i.test(ct)) continue;
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (buf.length < 10_000 || buf.length > PREVIEW_MAX_BYTES) continue;
+        const ext = /mpeg|mp3/i.test(ct) ? 'mp3' : 'm4a';
+        mkdirSync(PREVIEW_DIR, { recursive: true });
+        writeFileSync(`${PREVIEW_DIR}/${key}.${ext}`, buf);
+        return `${PREVIEW_PUBLIC}/${key}.${ext}`;
+      } catch { /* следующий кандидат */ }
+    }
+    previewMiss.set(key, Date.now());
+    return null;
+  })().finally(() => previewInflight.delete(key));
+  previewInflight.set(key, job);
+  return job;
+}
+
+// GET /charts/preview?artist=&title= → 302 на закешированный файл превью.
+charts.get('/preview', async (c) => {
+  const artist = (c.req.query('artist') || '').slice(0, 200).trim();
+  const title = (c.req.query('title') || '').slice(0, 200).trim();
+  if (!artist || !title) return c.json({ success: false, error: 'artist и title обязательны' }, 400);
+  try {
+    const url = await resolveChartPreview(artist, title);
+    if (!url) return c.json({ success: false, error: 'Превью не найдено' }, 404);
+    c.header('Cache-Control', 'public, max-age=86400');
+    return c.redirect(url, 302);
+  } catch (e: any) {
+    return c.json({ success: false, error: safeErrorMessage(e) }, 500);
+  }
+});
+
 export default charts;
 
