@@ -2116,6 +2116,14 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
         if (track.moderation_status !== 'approved') {
           return c.json({ success: false, error: `Трек должен быть одобрен модератором (текущий статус: ${track.moderation_status})` }, 400);
         }
+        // Архив promo.fm и уже оплаченные треки остаются 'approved' — повторно
+        // их не оплатить (25.09.2026).
+        if ((track as any).is_legacy) {
+          return c.json({ success: false, error: 'Архивный трек promo.fm не публикуется через оплату' }, 400);
+        }
+        if ((track as any).is_paid || (track as any).payment_completed) {
+          return c.json({ success: false, error: 'Публикация этого трека уже оплачена' }, 409);
+        }
         // Native column since migration 062 (resync'd by 088). Webhook handler
         // выше (строки 645-657) тоже пишет в native — читать должны оттуда.
         // Legacy data->>'payment_amount' fallback оставлен только для

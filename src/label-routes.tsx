@@ -26,6 +26,7 @@ import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { getPublicationPrice } from './pricing.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { sendLabelInvitationEmail } from './email-helper.tsx';
 import { saveUpload, IMAGE_EXTS, MAX_IMAGE_BYTES } from './cabinet-uploads.tsx';
@@ -1101,6 +1102,8 @@ app.get('/releases', requireAuth, async (c) => {
       `SELECT t.id, t.title, t.artist_name, t.moderation_status,
               t.cover_url, t.audio_url, t.genre, t.created_at, t.updated_at,
               t.artist_id, t.label_id, t.payment_amount,
+              COALESCE(t.is_legacy, false) AS is_legacy,
+              COALESCE(t.is_paid, false) OR COALESCE(t.payment_completed, false) AS is_paid,
               ap.artist_name AS resolved_artist_name
        FROM tracks t
        LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
@@ -1135,16 +1138,26 @@ app.get('/releases', requireAuth, async (c) => {
       // Guard: skip rows owned by this user but explicitly labeled for a
       // different label (legacy migration safety). Native label_id since 089.
       if (row.label_id && row.label_id !== gate.labelId) continue;
+      // Архив promo.fm (is_legacy) и уже оплаченные треки остаются 'approved',
+      // но платить за них нельзя: архив — «Одобрено» без кнопки (как в кабинете
+      // артиста), оплаченный — «Опубликовано». Иначе блок «Ждут оплаты» звал бы
+      // заплатить 10 000 ₽ за архивный трек (25.09.2026).
+      let status = STATUS_MAP[row.moderation_status] || row.moderation_status;
+      if (row.moderation_status === 'approved') {
+        if (row.is_legacy) status = 'approved';
+        else if (row.is_paid) status = 'published';
+      }
       releases.push({
         id: row.id,
         type: 'track',
         title: row.title,
-        status: STATUS_MAP[row.moderation_status] || row.moderation_status,
+        status,
         plan: 'track',
-        // Цена из track.payment_amount (модерация ставит PUBLICATION_PRICE=7000;
-        // amount-gate чекаута сверяет ровно с ней). Хардкод 5000 был устаревшим
-        // → оплата отбивалась 400 по несовпадению суммы.
-        price: Number(row.payment_amount) || 7000,
+        // Цена из track.payment_amount (фиксируется при одобрении); запасная —
+        // актуальный тариф, тот же, что amount-gate чекаута берёт при пустом
+        // payment_amount. Хардкоды 5000/7000 расходились с тарифом → оплата
+        // отбивалась 400 по несовпадению суммы.
+        price: status === 'pending_payment' ? (Number(row.payment_amount) || getPublicationPrice()) : 0,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         actingForArtistId: row.artist_id,

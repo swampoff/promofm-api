@@ -179,6 +179,17 @@ async function cabinetTracksPath(userId?: string | null): Promise<string> {
   }
 }
 
+/**
+ * Ссылка «Оплатить»: лейблу — сразу на трек в «Релизах» (?pay= поднимает его
+ * в блок оплаты), артисту — «Мои треки». Кабинет запоминает адрес, если
+ * человек не вошёл, и возвращает на него после входа (25.09.2026).
+ */
+function payLink(cabinetPath: string, trackId: string): string {
+  return cabinetPath === '/label/releases'
+    ? `/label/releases?pay=${encodeURIComponent(trackId)}`
+    : cabinetPath;
+}
+
 app.post('/submitTrack', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
@@ -572,7 +583,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           // Normal track — paid approval email.
           emailSubject = 'Трек одобрен — ' + track.title;
           const statusBlock = '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + getPublicationPrice().toLocaleString('ru-RU') + ' ₽</strong></p>';
-          const ctaButton = '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru' + cabinetPath + '" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>';
+          const ctaButton = '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru' + payLink(cabinetPath, String(pendingTrackId)) + '" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>';
 
           emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
             + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
@@ -623,7 +634,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           type: 'track_moderation',
           title: notifTitle,
           message: notifMessage,
-          link: cabinetPath,
+          link: payLink(cabinetPath, String(pendingTrackId)),
         }).catch(() => {});
 
         // Persistent inbox notification. The artist's bell / history
@@ -640,7 +651,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
           trackId: pendingTrackId,
           trackTitle: track.title,
           newStatus: 'approved',
-          link: cabinetPath,
+          link: payLink(cabinetPath, String(pendingTrackId)),
           read: false,
           createdAt: now,
         }).catch((err: any) => console.error('[moderation] inbox notif failed:', err?.message || err));
@@ -1386,7 +1397,7 @@ app.post('/send-payment-reminders', async (c) => {
       // одобрении уже присылало корректные 10 000 ₽ (исправлено 23.09.2026).
       const priceValue = Number(t.payment_amount) || getPublicationPrice();
       const priceText = priceValue.toLocaleString('ru-RU') + ' ₽';
-      const cabinetPath = t.user_role === 'label' ? '/label/releases' : '/artist/tracks';
+      const cabinetPath = t.user_role === 'label' ? `/label/releases?pay=${encodeURIComponent(String(t.id))}` : '/artist/tracks';
 
       const subject = 'Напоминание об оплате — ' + t.title;
       const html = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
