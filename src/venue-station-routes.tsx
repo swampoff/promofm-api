@@ -616,10 +616,11 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
     );
 
     const upd = await pool.query(
+      // Поток для следующей точки не сбрасывает «в эфире»/«пауза» обратно.
       `UPDATE venue_station_requests
-          SET status         = 'provisioned',
-              provisioned_at = NOW(),
-              monthly_price  = $2,
+          SET status         = CASE WHEN status IN ('live', 'paused') THEN status ELSE 'provisioned' END,
+              provisioned_at = COALESCE(provisioned_at, NOW()),
+              monthly_price  = CASE WHEN $2::numeric > 0 THEN $2::numeric ELSE monthly_price END,
               updated_at     = NOW()
         WHERE id = $1
         RETURNING *`,
