@@ -85,6 +85,7 @@ function rowToRequest(r: any) {
     musicPreferences: r.music_preferences || {},
     jingles: r.jingles || {},
     aiHostConfig: r.ai_host_config || {},
+    format: r.format || {},
     status: r.status,
     assignedAdminId: r.assigned_admin_id,
     adminNotes: r.admin_notes,
@@ -106,6 +107,7 @@ function rowToStream(r: any, includePrivate = false) {
     requestId: r.request_id,
     venueId: r.venue_id,
     locationId: r.location_id,
+    pointName: r.point_name || null,
     streamUrl: r.stream_url,
     pairingCode: r.paired_at ? null : r.pairing_code,    // hide code once paired
     pairingExpiresAt: r.pairing_expires_at,
@@ -136,6 +138,46 @@ function newPairingCode(): string {
       .map((b) => PAIRING_ALPHABET[b % PAIRING_ALPHABET.length])
       .join('');
   return `${part(3)}-${part(3)}`;
+}
+
+// ── Анкета: формат эфира и точки (миграция 150, 26.09.2026) ──────────
+const AIR_TYPES = ['background', 'full_radio'] as const;
+function sanitizeFormat(raw: any, fallback: any = {}): { airType: string; points: { name: string }[] } {
+  const src = raw && typeof raw === 'object' ? raw : (fallback || {});
+  const airType = AIR_TYPES.includes(src.airType) ? src.airType : 'background';
+  const pts = Array.isArray(src.points) ? src.points : [];
+  const points = pts
+    .map((p: any) => ({ name: String((p && p.name) || '').trim().slice(0, 60) }))
+    .filter((p: any) => p.name)
+    .slice(0, 20);
+  return { airType, points: points.length ? points : [{ name: 'Основной зал' }] };
+}
+
+// ── Приложение PROMO.AIR: постоянный токен устройства ────────────────
+// Выдаётся один раз при привязке по коду; в базе храним только sha256.
+const hashDeviceToken = (t: string) => crypto.createHash('sha256').update(t).digest('hex');
+const GENERAL_AIR_STATUS_URL = 'https://promo-music.ru/air/dj-api/status';
+function nowPlayingUrlFor(streamUrl: string | null | undefined): string | null {
+  return streamUrl && streamUrl.includes('/air/live/promo.fm') ? GENERAL_AIR_STATUS_URL : null;
+}
+async function venueNameFor(userId: string): Promise<string> {
+  try {
+    const p = await loadVenueProfile(userId);
+    const n = p?.venueName || p?.name;
+    if (n) return String(n);
+  } catch { /* ниже — имя из users */ }
+  const contact = await loadVenueContact(userId);
+  return contact?.name || 'Заведение';
+}
+async function streamByDeviceToken(c: any): Promise<any | null> {
+  const auth = c.req.header('Authorization') || '';
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (!m) return null;
+  const r = await pool.query(
+    `SELECT * FROM venue_station_streams WHERE device_token_hash = $1 LIMIT 1`,
+    [hashDeviceToken(m[1].trim())]
+  );
+  return r.rows[0] || null;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -209,12 +251,13 @@ app.post('/', requireAuth, async (c) => {
     const musicPreferences = body.musicPreferences || {};
     const jingles          = body.jingles          || {};
     const aiHostConfig     = body.aiHostConfig     || {};
+    const format           = sanitizeFormat(body.format);
 
     const r = await pool.query(
       `INSERT INTO venue_station_requests
          (user_id, venue_id, music_preferences, jingles, ai_host_config,
-          status, submitted_at)
-       VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb,
+          format, status, submitted_at)
+       VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb,
                'pending_admin', NOW())
        RETURNING *`,
       [
@@ -223,6 +266,7 @@ app.post('/', requireAuth, async (c) => {
         JSON.stringify(musicPreferences),
         JSON.stringify(jingles),
         JSON.stringify(aiHostConfig),
+        JSON.stringify(format),
       ]
     );
 
@@ -264,6 +308,7 @@ app.put('/', requireAuth, async (c) => {
     const musicPreferences = body.musicPreferences ?? cur.music_preferences;
     const jingles          = body.jingles          ?? cur.jingles;
     const aiHostConfig     = body.aiHostConfig     ?? cur.ai_host_config;
+    const format           = sanitizeFormat(body.format, cur.format);
 
     // Auto-resubmit semantics: any edit bumps us back to pending_admin
     // (unless already provisioned/live — those keep their status; only
@@ -283,6 +328,7 @@ app.put('/', requireAuth, async (c) => {
               status             = $4,
               submitted_at       = $5,
               changes_requested  = NULL,
+              format             = $7::jsonb,
               updated_at         = NOW()
         WHERE id = $6
         RETURNING *`,
@@ -293,6 +339,7 @@ app.put('/', requireAuth, async (c) => {
         nextStatus,
         nextSubmittedAt,
         cur.id,
+        JSON.stringify(format),
       ]
     );
 
@@ -337,6 +384,7 @@ app.post('/me/regenerate-pairing', requireAuth, async (c) => {
               pairing_expires_at  = $2,
               paired_at           = NULL,
               paired_device_info  = NULL,
+              device_token_hash   = NULL,   -- старое устройство отвязывается (401)
               updated_at          = NOW()
         WHERE id::text = $3
         RETURNING *`,
@@ -526,6 +574,7 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
     const vpsHost      = body.vpsHost      ? String(body.vpsHost).trim()      : null;
     const bearerTokenId = body.bearerTokenId ? String(body.bearerTokenId).trim() : null;
     const locationId   = body.locationId   ? String(body.locationId).trim()   : null;
+    const pointName    = body.pointName    ? String(body.pointName).trim().slice(0, 60) : null;
     const geminiConfig = body.geminiConfig || null;
     // Цена абонемента по типу эфира — админ задаёт при провижининге
     // (migration 123). 0 допустимо (проставит позже), триал стартует
@@ -555,13 +604,14 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
       `INSERT INTO venue_station_streams
          (request_id, user_id, venue_id, location_id, stream_url, vps_host,
           bearer_token_id, pairing_code, pairing_expires_at, status,
-          gemini_config)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'provisioned', $10::jsonb)
+          gemini_config, point_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'provisioned', $10::jsonb, $11)
        RETURNING *`,
       [
         req.id, req.user_id, req.venue_id, locationId, streamUrl,
         vpsHost, bearerTokenId, code, expires,
         geminiConfig ? JSON.stringify(geminiConfig) : null,
+        pointName,
       ]
     );
 
@@ -705,16 +755,20 @@ app.post('/pair', async (c) => {
       return c.json({ success: false, error: 'Code expired' }, 410);
     }
 
-    // Mark paired + record device info.
+    // Mark paired + record device info. Приложению PROMO.AIR выдаём
+    // постоянный токен устройства (в базе — только sha256): с ним оно
+    // берёт настройки потока и шлёт сигнал «в сети».
     const deviceInfo = body.deviceInfo && typeof body.deviceInfo === 'object' ? body.deviceInfo : {};
+    const deviceToken = crypto.randomBytes(32).toString('base64url');
     await pool.query(
       `UPDATE venue_station_streams
           SET paired_at           = NOW(),
               paired_device_info  = $1::jsonb,
+              device_token_hash   = $3,
               last_seen_at        = NOW(),
               updated_at          = NOW()
         WHERE id = $2`,
-      [JSON.stringify(deviceInfo), stream.id]
+      [JSON.stringify(deviceInfo), stream.id, hashDeviceToken(deviceToken)]
     );
 
     // Fetch the bearer token plaintext-equivalent identifier so APK
@@ -730,9 +784,13 @@ app.post('/pair', async (c) => {
     // (e.g. as a query param) when provisioning.
     return c.json({
       success: true,
+      deviceToken,
       streamUrl: stream.stream_url,
       venueId: stream.venue_id,
       streamId: stream.id,
+      venueName: await venueNameFor(stream.user_id),
+      pointName: stream.point_name || null,
+      nowPlayingUrl: nowPlayingUrlFor(stream.stream_url),
       // Optional branding hint so APK can render splash before its
       // first /venue-branding/public call.
       brandingHint: {
@@ -742,6 +800,57 @@ app.post('/pair', async (c) => {
     });
   } catch (error: any) {
     console.error('POST /venue-station/pair:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────
+// ПРИЛОЖЕНИЕ PROMO.AIR (Bearer = токен устройства из /pair)
+// ──────────────────────────────────────────────────────────────────
+
+// GET /device/config — адрес потока, название заведения и точки, статус.
+// 401 → устройство отвязано (новый код в кабинете) — приложение
+// возвращается на экран привязки.
+app.get('/device/config', async (c) => {
+  try {
+    const stream = await streamByDeviceToken(c);
+    if (!stream) return c.json({ success: false, error: 'Device not paired' }, 401);
+    return c.json({
+      success: true,
+      streamId: stream.id,
+      streamUrl: stream.stream_url,
+      venueName: await venueNameFor(stream.user_id),
+      pointName: stream.point_name || null,
+      status: stream.status,
+      nowPlayingUrl: nowPlayingUrlFor(stream.stream_url),
+    });
+  } catch (error: any) {
+    console.error('GET /venue-station/device/config:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// POST /device/heartbeat — «устройство в сети»: last_seen_at + что играет.
+app.post('/device/heartbeat', async (c) => {
+  try {
+    const stream = await streamByDeviceToken(c);
+    if (!stream) return c.json({ success: false, error: 'Device not paired' }, 401);
+    const body = await c.req.json().catch(() => ({}));
+    const beat = {
+      isPlaying: !!body.isPlaying,
+      appVersion: String(body.appVersion || '').slice(0, 20),
+      heartbeatAt: new Date().toISOString(),
+    };
+    await pool.query(
+      `UPDATE venue_station_streams
+          SET last_seen_at = NOW(),
+              paired_device_info = COALESCE(paired_device_info, '{}'::jsonb) || $2::jsonb
+        WHERE id = $1`,
+      [stream.id, JSON.stringify(beat)]
+    );
+    return c.json({ success: true });
+  } catch (error: any) {
+    console.error('POST /venue-station/device/heartbeat:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
