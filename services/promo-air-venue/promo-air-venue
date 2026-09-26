@@ -1,0 +1,94 @@
+#!/bin/bash
+# PROMO.AIR — управление отдельными потоками заведений (26.09.2026).
+#   promo-air-venue create <slug> [--music-dir DIR] [--name "Заведение · Точка"] [--jingle-every N]
+#   promo-air-venue list
+#   promo-air-venue start|stop|restart|status <slug>
+#   promo-air-venue rebuild <slug>      — пересобрать список треков после смены музыки
+#   promo-air-venue remove <slug>       — остановить и выключить (данные остаются)
+# Поток заведения: https://promo-music.ru/air/live/venue-<slug>
+# Этот адрес админ вставляет в «Провижининг» заявки (поток на точку).
+set -euo pipefail
+ENV_DIR=/etc/promo-air/venues
+DATA_ROOT=/var/lib/promo-air
+PUBLIC=https://promo-music.ru/air/live
+
+die() { echo "ОШИБКА: $*" >&2; exit 1; }
+need_slug() { [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]] || die "slug: латиница в нижнем регистре, цифры и дефис (например zagorami-veranda)"; }
+envfile() { echo "$ENV_DIR/$1.env"; }
+
+rebuild() {
+  local slug=$1 f; f=$(envfile "$slug"); [ -f "$f" ] || die "нет потока $slug"
+  set -a; . "$f"; set +a
+  python3 /opt/promo-air-venue/build-metadata.py | head -1
+  chown promofm:promofm "$VENUE_METADATA_FILE"
+  if systemctl is-active --quiet "promo-air-venue@$slug"; then
+    curl -s -m 5 -X POST "http://127.0.0.1:$VENUE_API_PORT/api/metadata/scan" >/dev/null || true
+  fi
+}
+
+cmd=${1:-}; shift || true
+case "$cmd" in
+  create)
+    slug=${1:-}; need_slug "$slug"; shift
+    music=""; name=""; jingle_every=3
+    while [ $# -gt 0 ]; do case "$1" in
+      --music-dir) music=$2; shift 2;; --name) name=$2; shift 2;; --jingle-every) jingle_every=$2; shift 2;;
+      *) die "неизвестный параметр $1";; esac; done
+    [ -f "$(envfile "$slug")" ] && die "поток $slug уже есть (promo-air-venue list)"
+    mkdir -p "$ENV_DIR"
+    station_name=${name:-$slug}
+    data="$DATA_ROOT/$slug"
+    mkdir -p "$data"/{music,jingles,announcements,news,podcasts}
+    [ -n "$music" ] || music="$data/music"
+    [ -d "$music" ] || die "нет папки с музыкой: $music"
+    port=""
+    for p in $(seq 8101 8199); do
+      grep -qs "^VENUE_API_PORT=$p$" "$ENV_DIR"/*.env && continue
+      ss -ltn "( sport = :$p )" | grep -q ":$p" && continue
+      port=$p; break
+    done
+    [ -n "$port" ] || die "нет свободного порта 8101-8199"
+    cat > "$(envfile "$slug")" <<ENV
+VENUE_STREAM_MOUNT=venue-$slug
+VENUE_STATION_NAME="${station_name//\"/}"
+VENUE_API_PORT=$port
+VENUE_FIFO=/tmp/promo-air-$slug.fifo
+VENUE_MUSIC_DIR=$music
+VENUE_JINGLES_DIR=$data/jingles
+VENUE_ANNOUNCEMENTS_DIR=$data/announcements
+VENUE_NEWS_DIR=$data/news
+VENUE_PODCASTS_DIR=$data/podcasts
+VENUE_METADATA_FILE=$data/metadata.json
+VENUE_HISTORY_FILE=$data/play_history.json
+VENUE_ANALYTICS_FILE=$data/analytics.json
+VENUE_JINGLE_EVERY=$jingle_every
+VENUE_DJ_VOICE=0
+VENUE_REPORT_PLAY=0
+ENV
+    chown -R promofm:promofm "$data"
+    rebuild "$slug"
+    systemctl daemon-reload
+    systemctl enable --now "promo-air-venue@$slug" >/dev/null 2>&1
+    echo "Запускаю поток venue-$slug (порт $port)…"
+    for i in $(seq 1 20); do
+      sleep 2
+      curl -s -m 3 http://127.0.0.1:8086/status | grep -q "\"/venue-$slug\"" && { echo "✓ В эфире: $PUBLIC/venue-$slug"; exit 0; }
+    done
+    die "поток не появился на стрим-сервере — journalctl -u promo-air-venue@$slug -n 50"
+    ;;
+  list)
+    live=$(curl -s -m 3 http://127.0.0.1:8086/status || true)
+    for f in "$ENV_DIR"/*.env; do [ -e "$f" ] || { echo "(потоков нет)"; exit 0; }
+      s=$(basename "$f" .env); st=$(systemctl is-active "promo-air-venue@$s" || true)
+      on=$(echo "$live" | grep -q "\"/venue-$s\"" && echo "эфир есть" || echo "эфира нет")
+      echo "$s  [$st, $on]  $PUBLIC/venue-$s  $(grep ^VENUE_STATION_NAME= "$f" | cut -d= -f2-)"
+    done ;;
+  start|stop|restart|status) slug=${1:-}; need_slug "$slug"; systemctl "$cmd" "promo-air-venue@$slug" ;;
+  rebuild) slug=${1:-}; need_slug "$slug"; rebuild "$slug" ;;
+  remove)
+    slug=${1:-}; need_slug "$slug"
+    systemctl disable --now "promo-air-venue@$slug" >/dev/null 2>&1 || true
+    mv "$(envfile "$slug")" "$(envfile "$slug").removed.$(date +%s)" 2>/dev/null || true
+    echo "Поток $slug выключен (данные в $DATA_ROOT/$slug сохранены)." ;;
+  *) sed -n '2,10p' "$0"; exit 1 ;;
+esac

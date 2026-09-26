@@ -1,0 +1,23 @@
+# PROMO.AIR — отдельный поток заведения (26.09.2026). Экземпляр = slug заведения.
+# Настройки: /etc/promo-air/venues/<slug>.env (создаёт `promo-air-venue create`).
+[Unit]
+Description=PROMO.AIR venue stream %i
+After=network.target promofm-stream.service
+Requires=promofm-stream.service
+
+[Service]
+Type=simple
+User=promofm
+Group=promofm
+NoNewPrivileges=true
+WorkingDirectory=/opt/promo-air-venue
+EnvironmentFile=-/opt/promofm-autodj/.env
+EnvironmentFile=/etc/promo-air/venues/%i.env
+ExecStart=/opt/promofm-autodj/venv/bin/python3 /opt/promo-air-venue/promofm_dj.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

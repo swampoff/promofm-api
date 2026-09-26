@@ -157,8 +157,22 @@ function sanitizeFormat(raw: any, fallback: any = {}): { airType: string; points
 // Выдаётся один раз при привязке по коду; в базе храним только sha256.
 const hashDeviceToken = (t: string) => crypto.createHash('sha256').update(t).digest('hex');
 const GENERAL_AIR_STATUS_URL = 'https://promo-music.ru/air/dj-api/status';
-function nowPlayingUrlFor(streamUrl: string | null | undefined): string | null {
-  return streamUrl && streamUrl.includes('/air/live/promo.fm') ? GENERAL_AIR_STATUS_URL : null;
+// Отдельный поток заведения: /air/live/venue-<slug> (promo-air-venue create).
+const VENUE_MOUNT_RE = /\/air\/live\/venue-([a-z0-9][a-z0-9-]{1,40})(?:[?#].*)?$/;
+function nowPlayingUrlFor(stream: { id?: string; stream_url?: string | null } | null | undefined): string | null {
+  const url = stream?.stream_url || '';
+  if (url.includes('/air/live/promo.fm')) return GENERAL_AIR_STATUS_URL;
+  if (VENUE_MOUNT_RE.test(url) && stream?.id) return `https://promo-music.ru/server/api/venue-station/now-playing/${stream.id}`;
+  return null;
+}
+// Порт AutoDJ заведения — из /etc/promo-air/venues/<slug>.env.
+async function venueDjPort(slug: string): Promise<number | null> {
+  try {
+    const { readFile } = await import('fs/promises');
+    const env = await readFile(`/etc/promo-air/venues/${slug}.env`, 'utf8');
+    const m = env.match(/^VENUE_API_PORT=(\d+)$/m);
+    return m ? Number(m[1]) : null;
+  } catch { return null; }
 }
 async function venueNameFor(userId: string): Promise<string> {
   try {
@@ -791,7 +805,7 @@ app.post('/pair', async (c) => {
       streamId: stream.id,
       venueName: await venueNameFor(stream.user_id),
       pointName: stream.point_name || null,
-      nowPlayingUrl: nowPlayingUrlFor(stream.stream_url),
+      nowPlayingUrl: nowPlayingUrlFor(stream),
       // Optional branding hint so APK can render splash before its
       // first /venue-branding/public call.
       brandingHint: {
@@ -823,11 +837,38 @@ app.get('/device/config', async (c) => {
       venueName: await venueNameFor(stream.user_id),
       pointName: stream.point_name || null,
       status: stream.status,
-      nowPlayingUrl: nowPlayingUrlFor(stream.stream_url),
+      nowPlayingUrl: nowPlayingUrlFor(stream),
     });
   } catch (error: any) {
     console.error('GET /venue-station/device/config:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// GET /now-playing/:streamId — что играет в отдельном потоке заведения
+// (формат как у общего эфира: current_track_info { artist, title }).
+// Открытый: название трека не секрет, а приложению так проще.
+app.get('/now-playing/:streamId', async (c) => {
+  try {
+    const id = c.req.param('streamId');
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return c.json({ success: false, error: 'Bad stream id' }, 400);
+    const r = await pool.query(`SELECT stream_url FROM venue_station_streams WHERE id::text = $1`, [id]);
+    const m = (r.rows[0]?.stream_url || '').match(VENUE_MOUNT_RE);
+    if (!m) return c.json({ success: false, error: 'Not a venue stream' }, 404);
+    const port = await venueDjPort(m[1]);
+    if (!port) return c.json({ success: false, error: 'Stream not running' }, 404);
+    const res = await fetch(`http://127.0.0.1:${port}/api/status`, { signal: AbortSignal.timeout(3000) });
+    const st: any = await res.json().catch(() => ({}));
+    const t = st.current_track_info || {};
+    c.header('Cache-Control', 'public, max-age=5');
+    return c.json({
+      success: true,
+      station: st.station || null,
+      status: st.status || null,
+      current_track_info: { artist: t.artist || '', title: t.title || '' },
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 502);
   }
 });
 
