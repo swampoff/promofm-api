@@ -496,15 +496,6 @@ const PRODUCT_PAGES: Record<string, { meta: { title: string; desc: string; type:
 </ul>
 </section>
 
-<section class="faq-block">
-<h2>Частые вопросы</h2>
-<dl class="faq">
-<dt>Нужен ли ресторану договор с РАО и ВОИС?</dt><dd>С музыкой ПРОМО.ЭИР — нет. В эфире собственный каталог платформы без сторонних правообладателей и треки артистов по прямым соглашениям.</dd>
-<dt>Сколько стоит музыка для ресторана?</dt><dd>Одна точка — от 4 990 ₽ в месяц; зал и веранда — 14 990 ₽ в месяц; радио полного цикла с ведущими и анонсами — 20 000 ₽ в месяц.</dd>
-<dt>Можно ли разное звучание утром и вечером?</dt><dd>Да, эфир сам меняется по времени суток под формат ресторана.</dd>
-<dt>Можно ли анонсировать меню и события?</dt><dd>Да. Анонсы звучат между треками: в радио полного цикла они входят в подписку, при обычной подписке ролик стоит от 2 000 ₽.</dd>
-</dl>
-</section>
 </article>`,
   },
 };
@@ -914,10 +905,18 @@ ${k.ticket_link ? `<p><a href="${esc(k.ticket_link)}" rel="nofollow noopener">К
     // ─── Product pages with rich body content ───
     if (PRODUCT_PAGES[path]) {
       const p = PRODUCT_PAGES[path];
+      // FAQ — из реестра фронта (seo-pages.ts), то есть то же, что видит человек;
+      // если в теле страницы свой FAQ-блок уже есть, не дублируем.
+      const regFaqs = p.body.includes('class="faq') ? [] : (seoRegistryEntry(path)?.faqs ?? []);
+      const faqHtml = regFaqs.length
+        ? `<section class="faq-block"><h2>Частые вопросы</h2><dl class="faq">${regFaqs.map(({ q, a }) => `<dt>${esc(q)}</dt><dd>${esc(a)}</dd>`).join('')}</dl></section>`
+        : '';
       c.header('Content-Type', 'text/html; charset=utf-8');
       return c.body(await renderPageWithTokens({
         title: p.meta.title, desc: p.meta.desc, canonical: `${DOMAIN}${path}`, type: p.meta.type,
-        keywords: p.keywords, body: p.body,
+        keywords: p.keywords,
+        jsonLd: regFaqs.length ? buildFaqLd(regFaqs) : '',
+        body: faqHtml ? p.body.replace(/<\/article>\s*$/, `${faqHtml}\n</article>`) : p.body,
       }));
     }
 
