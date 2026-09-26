@@ -32,6 +32,7 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   // «Легальная музыка», «Винные бары и винодельни»).
   { loc: '/promo-air/own-radio', changefreq: 'weekly', priority: '0.8' },
   { loc: '/promo-air/legal-music', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/music-for-business', changefreq: 'weekly', priority: '0.9' },
   { loc: '/promo-air/wine-bars', changefreq: 'monthly', priority: '0.7' },
   { loc: '/promo-air/audio-branding', changefreq: 'weekly', priority: '0.8' },
   { loc: '/promo-air/in-store-music', changefreq: 'weekly', priority: '0.8' },
@@ -107,7 +108,7 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   { loc: '/music-for-restaurants', changefreq: 'weekly', priority: '0.8' },
   { loc: '/audiobranding', changefreq: 'weekly', priority: '0.7' },
   { loc: '/radio-advertising', changefreq: 'weekly', priority: '0.7' },
-  { loc: '/for-business', changefreq: 'weekly', priority: '0.7' },
+  // /for-business — 301 на /radio-stations (дубль PROMO.FM), в карте не нужен.
   { loc: '/djs', changefreq: 'daily', priority: '0.7' },
   { loc: '/faq', changefreq: 'monthly', priority: '0.6' },
   { loc: '/pricing', changefreq: 'weekly', priority: '0.7' },
