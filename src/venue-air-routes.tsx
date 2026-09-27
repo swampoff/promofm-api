@@ -1,6 +1,6 @@
 // СТУДИЯ ЭФИРА ЗАВЕДЕНИЯ ПРОМО.ЭИР (27.09.2026)
 //
-// Решение владельца для «радио полного цикла»: ведущие выходят в эфир с
+// Решение владельца для LIVE AIR («радио полного цикла»): ведущие выходят в эфир с
 // повесткой заведения (меню, события, акции), подкасты о заведении, управление
 // через Telegram. Всё собирается здесь, AutoDJ заведения не меняется:
 //   • ведущий — раз в N минут (анкета: ai_host_config.intervalMinutes) на потоке
@@ -33,6 +33,9 @@ const DATA_ROOT = '/var/lib/promo-air';
 const SAMPLE_RATE = 24000;
 const DEVICE_ONLINE_SEC = 180;
 const PODCASTS_PER_DAY = 3;
+// LIVE AIR (радио полного цикла): 20 000 ₽/мес — в платёжном слое такого тарифа нет,
+// включение из кабинета уведомляет владельца, тариф переводится вручную.
+const LIVE_AIR_PRICE = 20000;
 const HOST_DEFAULT_MIN = 30;
 const AGENDA_MAX_ACTIVE = 30;
 const AGENDA_MAX_LEN = 500;
@@ -703,11 +706,15 @@ app.get('/my', requireAuth, async (c) => {
     ]);
     const [host] = hostNames(venueUserId, cfg.voice);
     const hostOn = streams.some((s) => s.hostEnabled === true || (s.hostEnabled !== false && cfg.airType === 'full_radio'));
+    const { rows: reqRows } = await pool.query(`SELECT 1 FROM venue_station_requests WHERE user_id = $1 LIMIT 1`, [venueUserId]);
     const t = tg.rows[0];
     return c.json({
       success: true,
       data: {
         hasStream: streams.length > 0,
+        liveAir: cfg.airType === 'full_radio',
+        liveAirPrice: LIVE_AIR_PRICE,
+        hasRequest: reqRows.length > 0,
         streams: streams.map((s) => ({ id: s.id, pointName: s.pointName, online: s.online })),
         host: {
           name: host, enabled: hostOn, voice: cfg.voice || 'female', style: cfg.style || 'relaxed',
@@ -729,6 +736,35 @@ app.get('/my', requireAuth, async (c) => {
     console.error('[venue-air] my', e?.message);
     return c.json({ success: false, error: 'Не удалось загрузить студию' }, 500);
   }
+});
+
+// Переключатель LIVE AIR в кабинете: формат эфира в анкете (full_radio ↔ background).
+app.post('/my/live-air', requireAuth, async (c) => {
+  const venueUserId = String(c.get('userId'));
+  const body: any = await c.req.json().catch(() => ({}));
+  const enabled = body?.enabled === true;
+  const { rows } = await pool.query(
+    `UPDATE venue_station_requests
+        SET format = jsonb_set(COALESCE(format, '{}'::jsonb), '{airType}', to_jsonb($2::text)), updated_at = now()
+      WHERE id = (SELECT id FROM venue_station_requests WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1)
+      RETURNING id`,
+    [venueUserId, enabled ? 'full_radio' : 'background'],
+  );
+  if (!rows[0]) return c.json({ success: false, error: 'Сначала заполните анкету эфира' }, 400);
+  // Формат решает сам: ручной запрет/включение ведущего на потоках сбрасываем.
+  await pool.query(`UPDATE venue_station_streams SET host_enabled = NULL WHERE user_id = $1`, [venueUserId]);
+  const venueName = await venueNameFor(venueUserId).catch(() => 'Заведение');
+  const { rows: u } = await pool.query(`SELECT email FROM users WHERE id::text = $1 LIMIT 1`, [venueUserId]);
+  import('./email-helper.tsx').then(async (m) => {
+    const what = enabled ? `включило LIVE AIR (${LIVE_AIR_PRICE.toLocaleString('ru-RU')} ₽/мес)` : 'выключило LIVE AIR';
+    const html = m.emailWrapper(`
+      <h2 style="margin:0 0 16px;color:#FF577F;">LIVE AIR: ${m.escapeHtml(venueName)}</h2>
+      <p style="color:#e0e0e0;">Заведение ${m.escapeHtml(venueName)} (${m.escapeHtml(u[0]?.email || 'нет почты')}) ${what} в кабинете.</p>
+      <p style="color:#888;font-size:13px;">${enabled ? 'Ведущие и подкасты уже работают. Переведите заведение на тариф LIVE AIR.' : 'Ведущие и подкасты остановлены. Проверьте тариф.'}</p>`);
+    await m.sendEmail({ to: 'info@promofm.ru', subject: `[ПРОМО] LIVE AIR ${enabled ? 'включён' : 'выключен'}: ${venueName}`, html });
+    await m.notifyAdminTelegram(`📻 <b>LIVE AIR ${enabled ? 'включён' : 'выключен'}</b>\n${venueName} (${u[0]?.email || 'нет почты'})${enabled ? `\nТариф ${LIVE_AIR_PRICE} ₽/мес — перевести вручную` : ''}`).catch(() => {});
+  }).catch(() => {});
+  return c.json({ success: true, data: { liveAir: enabled } });
 });
 
 app.post('/my/agenda', requireAuth, async (c) => {
