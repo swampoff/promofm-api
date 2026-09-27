@@ -1,0 +1,706 @@
+// СТУДИЯ ЭФИРА ЗАВЕДЕНИЯ ПРОМО.ЭИР (27.09.2026)
+//
+// Решение владельца для «радио полного цикла»: ведущие выходят в эфир с
+// повесткой заведения (меню, события, акции), подкасты о заведении, управление
+// через Telegram. Всё собирается здесь, AutoDJ заведения не меняется:
+//   • ведущий — раз в N минут (анкета: ai_host_config.intervalMinutes) на потоке
+//     с устройством на связи: Gemini пишет 2–4 фразы по пункту повестки, прокси
+//     озвучивает (/tts-stream), звук уходит в AutoDJ заведения POST /api/inject
+//     (накладывается на музыку с приглушением, как у основного эфира);
+//   • подкаст — диалог двух ведущих о заведении по повестке → MP3 в папку
+//     podcasts потока; AutoDJ сам ставит свежий подкаст раз в час с 10 до 22 МСК;
+//     автоматически раз в день и по запросу (кабинет, /podcast), до 3 в день;
+//   • Telegram — @Promomusicalbot (его читает voice-bot.mjs и пересылает сюда
+//     сообщения не из админских чатов): привязка кодом из кабинета, текст →
+//     пункт повестки (и в канал заведения, если привязан), голосовое → в эфир.
+
+import { Hono } from 'hono';
+import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { pool } from './db-client.tsx';
+import { venueDjPort, venueNameFor, VENUE_MOUNT_RE } from './venue-station-routes.tsx';
+
+const app = new Hono();
+
+const GEMINI_PROXY_URL = process.env.GEMINI_PROXY_URL || 'http://187.77.85.42:8088';
+const GEMINI_PROXY_KEY = process.env.GEMINI_PROXY_KEY || '';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || 'gemini-3-flash-preview';
+const INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const DATA_ROOT = '/var/lib/promo-air';
+const SAMPLE_RATE = 24000;
+const DEVICE_ONLINE_SEC = 180;
+const PODCASTS_PER_DAY = 3;
+const HOST_DEFAULT_MIN = 30;
+const AGENDA_MAX_ACTIVE = 30;
+const AGENDA_MAX_LEN = 500;
+const FEMALE_HOSTS = ['Сандра', 'Лиана', 'Стелла'];
+const MALE_HOSTS = ['Макс', 'Марк', 'Пабло'];
+const STYLE_TEXT: Record<string, string> = {
+  casual: 'непринуждённо и дружелюбно',
+  business: 'сдержанно и чётко',
+  relaxed: 'спокойно и тепло',
+  energetic: 'бодро, с энергией',
+};
+const BANNED_RE = /нейросет|искусственн[а-я]* интеллект|\bИИ\b|сгенерир|политик|выбор[ыа]|санкци|войн[аыу]/i;
+
+const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
+const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const iso = (d: any) => (d instanceof Date ? d.toISOString() : d ?? null);
+
+// ─── Данные заведения ─────────────────────────────────────────────────────
+
+interface VenueStream { id: string; slug: string; pointName: string | null; online: boolean; hostEnabled: boolean | null; status: string }
+
+async function venueStreams(venueUserId: string): Promise<VenueStream[]> {
+  const { rows } = await pool.query(
+    `SELECT id, stream_url, point_name, status, host_enabled,
+            (device_token_hash IS NOT NULL AND last_seen_at > now() - make_interval(secs => $2)) AS online
+       FROM venue_station_streams
+      WHERE user_id = $1 AND stream_url ~ '/air/live/venue-' AND status <> 'dead'
+      ORDER BY created_at`,
+    [venueUserId, DEVICE_ONLINE_SEC],
+  );
+  const out: VenueStream[] = [];
+  for (const r of rows) {
+    const m = String(r.stream_url || '').match(VENUE_MOUNT_RE);
+    if (m) out.push({ id: String(r.id), slug: m[1], pointName: r.point_name || null, online: !!r.online, hostEnabled: r.host_enabled, status: r.status });
+  }
+  return out;
+}
+
+interface HostCfg { voice?: string; style?: string; intervalMinutes?: number; topics?: string[]; notes?: string; airType?: string }
+
+async function hostConfigFor(venueUserId: string): Promise<HostCfg> {
+  const { rows } = await pool.query(
+    `SELECT ai_host_config, format FROM venue_station_requests WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [venueUserId],
+  );
+  const cfg = (rows[0]?.ai_host_config || {}) as HostCfg;
+  return { ...cfg, airType: rows[0]?.format?.airType };
+}
+
+// Ведущий у заведения постоянный: выбираем по голосу из анкеты и id заведения.
+function hostNames(venueUserId: string, voice?: string): [string, string] {
+  let h = 0;
+  for (const ch of venueUserId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const female = FEMALE_HOSTS[h % FEMALE_HOSTS.length];
+  const male = MALE_HOSTS[h % MALE_HOSTS.length];
+  return voice === 'male' ? [male, female] : [female, male];
+}
+
+async function activeAgenda(venueUserId: string) {
+  const { rows } = await pool.query(
+    `SELECT id, text, source, expires_at, aired_count, last_aired_at, created_at
+       FROM venue_air_agenda
+      WHERE venue_user_id = $1 AND active = true AND (expires_at IS NULL OR expires_at > now())
+      ORDER BY created_at DESC`,
+    [venueUserId],
+  );
+  return rows;
+}
+
+function mskContext() {
+  const now = new Date(Date.now() + 3 * 3600_000);
+  const h = now.getUTCHours();
+  const period = h < 5 ? 'ночь' : h < 12 ? 'утро' : h < 17 ? 'день' : h < 22 ? 'вечер' : 'поздний вечер';
+  const weekday = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'][now.getUTCDay()];
+  const time = `${String(h).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
+  return { h, period, weekday, time, date: now.toISOString().slice(0, 10) };
+}
+
+// ─── Gemini: текст и озвучка ──────────────────────────────────────────────
+
+async function geminiJson(prompt: string): Promise<any> {
+  const url = `${GEMINI_PROXY_URL}/v1beta/models/${GEMINI_TEXT_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.8, maxOutputTokens: 4096, responseMimeType: 'application/json' },
+    }),
+    signal: AbortSignal.timeout(90_000),
+  });
+  const d: any = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(`gemini ${r.status}`);
+  const text = d?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  return JSON.parse(text.trim().replace(/^```json\s*/i, '').replace(/```\s*$/, ''));
+}
+
+function cleanSpeech(s: any): string {
+  let t = String(s || '').replace(/[«»"“”]/g, '').replace(/\?+/g, '.').replace(/\s{2,}/g, ' ').trim();
+  if (t.length > 700) t = t.slice(0, 700).replace(/[^.!]*$/, '');
+  return t;
+}
+
+async function tts(text: string, author: string): Promise<Buffer> {
+  const r = await fetch(`${GEMINI_PROXY_URL}/tts-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
+    body: JSON.stringify({ text, author }),
+    signal: AbortSignal.timeout(90_000),
+  });
+  if (!r.ok) throw new Error(`tts ${r.status}`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (buf.length < 1000) throw new Error('tts too short');
+  return buf;
+}
+
+const silence = (ms: number) => Buffer.alloc(Math.floor((ms / 1000) * SAMPLE_RATE) * 2);
+
+async function ffmpeg(args: string[], input?: Buffer): Promise<void> {
+  const { spawn } = await import('child_process');
+  await new Promise<void>((resolve, reject) => {
+    const p = spawn('ffmpeg', args, { stdio: [input ? 'pipe' : 'ignore', 'ignore', 'pipe'] });
+    let err = '';
+    p.stderr?.on('data', (d) => { err += d.toString(); });
+    p.on('error', reject);
+    p.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}: ${err.slice(-200)}`))));
+    if (input && p.stdin) p.stdin.end(input);
+  });
+}
+
+// Кладём готовый MP3 в папку подкастов каждого потока заведения.
+async function putToPodcastDirs(streams: VenueStream[], srcPath: string, name: string): Promise<number> {
+  const fs = await import('fs/promises');
+  let n = 0;
+  for (const s of streams) {
+    const dir = `${DATA_ROOT}/${s.slug}/podcasts`;
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      await fs.copyFile(srcPath, `${dir}/${name}`);
+      n++;
+    } catch (e: any) {
+      console.warn('[venue-air] podcast copy', s.slug, e?.message);
+    }
+  }
+  return n;
+}
+
+async function injectPcm(port: number, pcm: Buffer): Promise<number> {
+  const r = await fetch(`http://127.0.0.1:${port}/api/inject`, {
+    method: 'POST',
+    headers: { 'X-Internal-Key': INTERNAL_KEY, 'Content-Type': 'application/octet-stream' },
+    body: pcm,
+    signal: AbortSignal.timeout(30_000),
+  });
+  return r.status;
+}
+
+// ─── Telegram ─────────────────────────────────────────────────────────────
+
+async function tgApi(method: string, body: any): Promise<any> {
+  if (!TG_TOKEN) return { ok: false };
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+    });
+    return await r.json();
+  } catch { return { ok: false }; }
+}
+const tgSend = (chatId: string, text: string) => tgApi('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true });
+
+let botInfo: { id: number; username: string } | null = null;
+async function getBot() {
+  if (botInfo) return botInfo;
+  const d = await tgApi('getMe', {});
+  if (d?.ok) botInfo = { id: d.result.id, username: d.result.username };
+  return botInfo;
+}
+
+async function postToChannel(venueUserId: string, text: string): Promise<string | null> {
+  const { rows } = await pool.query(`SELECT channel_id, channel_title FROM venue_air_telegram WHERE venue_user_id = $1`, [venueUserId]);
+  const ch = rows[0];
+  if (!ch?.channel_id) return null;
+  const d = await tgApi('sendMessage', { chat_id: ch.channel_id, text });
+  return d?.ok ? (ch.channel_title || 'канал') : null;
+}
+
+// ─── Повестка ─────────────────────────────────────────────────────────────
+
+async function addAgenda(venueUserId: string, text: string, source: string, expiresAt?: string | null) {
+  const t = String(text || '').trim().slice(0, AGENDA_MAX_LEN);
+  if (t.length < 3) return { error: 'Слишком короткий текст' };
+  const { rows: cnt } = await pool.query(
+    `SELECT count(*)::int AS n FROM venue_air_agenda WHERE venue_user_id = $1 AND active = true AND (expires_at IS NULL OR expires_at > now())`,
+    [venueUserId],
+  );
+  if ((cnt[0]?.n || 0) >= AGENDA_MAX_ACTIVE) return { error: `В повестке уже ${AGENDA_MAX_ACTIVE} пунктов, уберите устаревшие` };
+  const exp = expiresAt && !Number.isNaN(Date.parse(expiresAt)) ? new Date(expiresAt).toISOString() : null;
+  const { rows } = await pool.query(
+    `INSERT INTO venue_air_agenda (venue_user_id, text, source, expires_at) VALUES ($1, $2, $3, $4) RETURNING id`,
+    [venueUserId, t, source, exp],
+  );
+  const channel = await postToChannel(venueUserId, t).catch(() => null);
+  return { id: String(rows[0].id), text: t, channel };
+}
+
+// ─── Ведущий ──────────────────────────────────────────────────────────────
+
+const pendingHost = new Map<string, { pcm: Buffer; text: string; host: string; itemId: string | null; at: number }>();
+
+async function composeHost(venueUserId: string, cfg: HostCfg) {
+  const venueName = await venueNameFor(venueUserId).catch(() => 'Заведение');
+  const items = await activeAgenda(venueUserId);
+  items.sort((a: any, b: any) => (a.last_aired_at ? new Date(a.last_aired_at).getTime() : 0) - (b.last_aired_at ? new Date(b.last_aired_at).getTime() : 0));
+  const item = items[0] || null;
+  const [host] = hostNames(venueUserId, cfg.voice);
+  const style = STYLE_TEXT[cfg.style || ''] || STYLE_TEXT.relaxed;
+  const t = mskContext();
+  const task = item
+    ? `Расскажи гостям новость заведения своими словами: «${item.text}».`
+    : `Тепло поприветствуй гостей, пожелай хорошего времени в «${venueName}» и скажи, что в эфире радио заведения звучит музыка.`;
+  const prompt = `Ты пишешь текст короткого выхода ведущего в эфир радио заведения «${venueName}». Эфир звучит в зале для гостей.
+Ведущий: ${host}, манера: ${style}. Сейчас ${t.weekday}, ${t.time}, ${t.period}.
+${cfg.notes ? `Пожелания заведения к ведущему: ${String(cfg.notes).slice(0, 300)}\n` : ''}Задача: ${task}
+Правила:
+- 2–4 коротких предложения, 15–30 секунд речи, по-русски.
+- Обращайся к гостям в зале. Назови заведение «${venueName}».
+- Никаких вопросов. Приветствие по времени суток (не «доброе утро» вечером).
+- Не выдумывай блюда, цены, даты, имена и факты, которых нет в новости.
+- Не упоминай нейросети, ИИ и то, что текст написан программой. Без политики.
+Верни JSON: {"text": "текст выхода"}`;
+  const res = await geminiJson(prompt);
+  const text = cleanSpeech(res?.text);
+  if (!text || text.length < 20 || BANNED_RE.test(text)) throw new Error('host text rejected');
+  const pcm = await tts(text, host);
+  return { pcm, text, host, itemId: item ? String(item.id) : null };
+}
+
+async function airHost(streamId: string, venueUserId: string, port: number, cfg: HostCfg): Promise<'done' | 'busy'> {
+  let seg = pendingHost.get(streamId);
+  if (seg && Date.now() - seg.at > 10 * 60_000) { pendingHost.delete(streamId); seg = undefined; }
+  if (!seg) seg = { ...(await composeHost(venueUserId, cfg)), at: Date.now() };
+  const status = await injectPcm(port, seg.pcm);
+  if (status === 423) { pendingHost.set(streamId, seg); return 'busy'; }
+  pendingHost.delete(streamId);
+  if (status < 200 || status >= 300) throw new Error(`inject ${status}`);
+  await pool.query(
+    `INSERT INTO venue_air_log (venue_user_id, stream_id, kind, title, text) VALUES ($1, $2, 'host', $3, $4)`,
+    [venueUserId, streamId, seg.host, seg.text],
+  );
+  if (seg.itemId) await pool.query(`UPDATE venue_air_agenda SET aired_count = aired_count + 1, last_aired_at = now() WHERE id = $1`, [seg.itemId]);
+  return 'done';
+}
+
+// ─── Подкаст ──────────────────────────────────────────────────────────────
+
+const podcastRunning = new Set<string>();
+
+async function podcastsToday(venueUserId: string): Promise<number> {
+  const { rows } = await pool.query(
+    `SELECT count(*)::int AS n FROM venue_air_log
+      WHERE venue_user_id = $1 AND kind = 'podcast' AND status <> 'failed'
+        AND (created_at AT TIME ZONE 'Europe/Moscow')::date = (now() AT TIME ZONE 'Europe/Moscow')::date`,
+    [venueUserId],
+  );
+  return rows[0]?.n || 0;
+}
+
+export async function startVenuePodcast(venueUserId: string, topic: string | null, notifyChat: string | null): Promise<{ ok: boolean; error?: string }> {
+  const streams = await venueStreams(venueUserId);
+  if (!streams.length) return { ok: false, error: 'Эфир заведения ещё не запущен' };
+  if (podcastRunning.has(venueUserId)) return { ok: false, error: 'Подкаст уже собирается' };
+  if ((await podcastsToday(venueUserId)) >= PODCASTS_PER_DAY) return { ok: false, error: `Сегодня уже ${PODCASTS_PER_DAY} подкаста, это предел на день` };
+  const items = await activeAgenda(venueUserId);
+  const extra = topic ? String(topic).trim().slice(0, 300) : '';
+  if (!items.length && !extra) return { ok: false, error: 'Повестка пуста: добавьте новости заведения или укажите тему подкаста' };
+  podcastRunning.add(venueUserId);
+  buildPodcast(venueUserId, streams, items, extra)
+    .then(async (r) => { if (notifyChat) await tgSend(notifyChat, r.ok ? `🎙 Подкаст готов (${r.turns} реплик). Он прозвучит в эфире в ближайший час с 10:00 до 22:00.` : `Не получилось собрать подкаст: ${esc(r.error || 'ошибка')}. Попробуйте позже.`); })
+    .catch((e) => console.warn('[venue-air] podcast', e?.message))
+    .finally(() => podcastRunning.delete(venueUserId));
+  return { ok: true };
+}
+
+async function buildPodcast(venueUserId: string, streams: VenueStream[], items: any[], topic: string): Promise<{ ok: boolean; error?: string; turns?: number }> {
+  const venueName = await venueNameFor(venueUserId).catch(() => 'Заведение');
+  const cfg = await hostConfigFor(venueUserId);
+  const [a, b] = hostNames(venueUserId, cfg.voice);
+  const facts = items.slice(0, 8).map((it: any) => `- ${it.text}`).join('\n');
+  const t = mskContext();
+  const prompt = `Ты сценарист короткой радиопередачи для радио заведения «${venueName}». Передача звучит в зале для гостей.
+Ведущие: ${a} и ${b}. Манера: ${STYLE_TEXT[cfg.style || ''] || STYLE_TEXT.relaxed}. Сейчас ${t.weekday}, ${t.period}.
+О чём говорить (только эти факты, ничего не добавляй от себя):
+${facts || '- (повестка пуста)'}
+${topic ? `Тема от заведения: ${topic}\n` : ''}Правила:
+- 8–12 реплик, ведущие чередуются, живой разговор о заведении и его событиях, 2–3 минуты.
+- Первая реплика — приветствие гостей «${venueName}» по времени суток, последняя — приглашение оставаться с радио «${venueName}».
+- Не выдумывай блюда, цены, даты, имена и факты. Никаких вопросов к слушателям.
+- Не упоминай нейросети, ИИ и то, что текст написан программой. Без политики.
+Верни JSON-массив: [{"author": "${a}", "text": "..."}, {"author": "${b}", "text": "..."}]`;
+  let turns: { author: string; text: string }[] = [];
+  try {
+    const res = await geminiJson(prompt);
+    turns = (Array.isArray(res) ? res : [])
+      .map((x: any) => ({ author: x?.author === b ? b : a, text: cleanSpeech(x?.text) }))
+      .filter((x) => x.text.length > 5 && !BANNED_RE.test(x.text))
+      .slice(0, 14);
+  } catch (e: any) {
+    return logFailed(venueUserId, `script: ${e?.message}`);
+  }
+  if (turns.length < 4) return logFailed(venueUserId, 'сценарий слишком короткий');
+  const parts: Buffer[] = [];
+  for (const tr of turns) {
+    try { parts.push(await tts(tr.text, tr.author), silence(600)); } catch (e: any) { console.warn('[venue-air] tts', e?.message); }
+  }
+  if (parts.length < 8) return logFailed(venueUserId, 'озвучка не удалась');
+  const stamp = new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  const tmp = `/tmp/venue-podcast-${venueUserId.slice(0, 8)}-${stamp}.mp3`;
+  try {
+    await ffmpeg(['-y', '-f', 's16le', '-ar', String(SAMPLE_RATE), '-ac', '1', '-i', 'pipe:0',
+      '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', '-ar', '44100', '-ac', '2', '-b:a', '128k', tmp], Buffer.concat(parts));
+    const n = await putToPodcastDirs(streams, tmp, `podcast_${stamp}.mp3`);
+    if (!n) return logFailed(venueUserId, 'не удалось положить файл в эфир');
+  } finally {
+    (await import('fs/promises')).unlink(tmp).catch(() => {});
+  }
+  await pool.query(
+    `INSERT INTO venue_air_log (venue_user_id, kind, title, text) VALUES ($1, 'podcast', $2, $3)`,
+    [venueUserId, topic || 'Подкаст о заведении', turns.map((x) => `${x.author}: ${x.text}`).join('\n')],
+  );
+  return { ok: true, turns: turns.length };
+}
+
+async function logFailed(venueUserId: string, why: string) {
+  await pool.query(`INSERT INTO venue_air_log (venue_user_id, kind, title, status) VALUES ($1, 'podcast', $2, 'failed')`, [venueUserId, why.slice(0, 200)]).catch(() => {});
+  return { ok: false, error: why };
+}
+
+// ─── Запись заведения из Telegram → эфир ──────────────────────────────────
+
+async function telegramAudioToAir(venueUserId: string, fileId: string, chatId: string) {
+  const streams = await venueStreams(venueUserId);
+  if (!streams.length) { await tgSend(chatId, 'Эфир заведения ещё не запущен, запись поставить некуда.'); return; }
+  const f = await tgApi('getFile', { file_id: fileId });
+  const path = f?.result?.file_path;
+  if (!path) { await tgSend(chatId, 'Не удалось получить файл. Если он больше 20 МБ, пришлите короче.'); return; }
+  const res = await fetch(`https://api.telegram.org/file/bot${TG_TOKEN}/${path}`, { signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) { await tgSend(chatId, 'Не удалось скачать запись, попробуйте ещё раз.'); return; }
+  const fs = await import('fs/promises');
+  const stamp = new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  const src = `/tmp/venue-voice-${venueUserId.slice(0, 8)}-${stamp}`;
+  const out = `${src}.mp3`;
+  try {
+    await fs.writeFile(src, Buffer.from(await res.arrayBuffer()));
+    await ffmpeg(['-y', '-i', src, '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', '-ar', '44100', '-ac', '2', '-b:a', '128k', out]);
+    const n = await putToPodcastDirs(streams, out, `voice_${stamp}.mp3`);
+    if (!n) throw new Error('copy failed');
+    await pool.query(`INSERT INTO venue_air_log (venue_user_id, kind, title) VALUES ($1, 'voice', 'Запись из Telegram')`, [venueUserId]);
+    await tgSend(chatId, '🎙 Запись в эфире: прозвучит в ближайший час с 10:00 до 22:00.');
+  } catch (e: any) {
+    console.warn('[venue-air] voice', e?.message);
+    await tgSend(chatId, 'Не получилось обработать запись. Пришлите голосовое или аудиофайл ещё раз.');
+  } finally {
+    fs.unlink(src).catch(() => {});
+    fs.unlink(out).catch(() => {});
+  }
+}
+
+// ─── Планировщик: ведущие и дневной подкаст ───────────────────────────────
+
+let tickRunning = false;
+const autoPodcastTried = new Map<string, string>(); // venue → дата МСК
+
+async function studioTick() {
+  if (tickRunning || !INTERNAL_KEY) return;
+  tickRunning = true;
+  try {
+    const { rows } = await pool.query(
+      `SELECT s.id, s.user_id, s.stream_url, s.host_enabled, r.ai_host_config, r.format,
+              (SELECT max(created_at) FROM venue_air_log l WHERE l.stream_id = s.id AND l.kind = 'host') AS last_host
+         FROM venue_station_streams s
+         LEFT JOIN LATERAL (
+           SELECT ai_host_config, format FROM venue_station_requests q
+            WHERE q.id = s.request_id OR q.user_id = s.user_id
+            ORDER BY (q.id = s.request_id) DESC NULLS LAST, q.created_at DESC LIMIT 1
+         ) r ON true
+        WHERE s.status IN ('live', 'provisioned') AND s.device_token_hash IS NOT NULL
+          AND s.last_seen_at > now() - make_interval(secs => $1)
+          AND s.stream_url ~ '/air/live/venue-'`,
+      [DEVICE_ONLINE_SEC],
+    );
+    const t = mskContext();
+    for (const s of rows) {
+      const cfg: HostCfg = { ...(s.ai_host_config || {}), airType: s.format?.airType };
+      const enabled = s.host_enabled === true || (s.host_enabled !== false && cfg.airType === 'full_radio');
+      if (!enabled) continue;
+      const venueUserId = String(s.user_id);
+      // Раз в день подкаст о заведении, если есть повестка (с 12 до 20 МСК).
+      if (t.h >= 12 && t.h < 20 && autoPodcastTried.get(venueUserId) !== t.date) {
+        autoPodcastTried.set(venueUserId, t.date);
+        if ((await podcastsToday(venueUserId)) === 0 && (await activeAgenda(venueUserId)).length) {
+          await startVenuePodcast(venueUserId, null, null).catch(() => {});
+        }
+      }
+      const everyMin = clamp(Number(s.ai_host_config?.intervalMinutes) || HOST_DEFAULT_MIN, 15, 180);
+      if (s.last_host && Date.now() - new Date(s.last_host).getTime() < everyMin * 60_000) continue;
+      const m = String(s.stream_url).match(VENUE_MOUNT_RE);
+      const port = m ? await venueDjPort(m[1]) : null;
+      if (!port) continue;
+      await airHost(String(s.id), venueUserId, port, cfg).catch((e) => console.warn('[venue-air] host', e?.message));
+    }
+  } catch (e: any) {
+    console.warn('[venue-air] tick', e?.message);
+  } finally {
+    tickRunning = false;
+  }
+}
+
+if (process.env.VENUE_AIR_STUDIO !== '0') {
+  setTimeout(() => { setInterval(() => { studioTick(); }, 60_000); }, 30_000);
+}
+
+// ─── Telegram: сообщения от voice-bot.mjs ─────────────────────────────────
+
+const HELP = (venue: string) => `Бот радио «${esc(venue)}» в ПРОМО.ЭИР.
+
+✍️ Напишите новость текстом: новое меню, событие, акция. Ведущие расскажут о ней гостям в ближайших выходах в эфир.
+🎙 Пришлите голосовое или аудиофайл: запись прозвучит в эфире в ближайший час с 10:00 до 22:00.
+
+/agenda — повестка ведущих
+/del N — убрать пункт N
+/clear — очистить повестку
+/podcast [тема] — собрать подкаст о заведении (до ${PODCASTS_PER_DAY} в день)
+/channel @канал — дублировать новости в ваш Telegram-канал (бот должен быть админом канала); /channel off — выключить
+/stop — отключить этот чат`;
+
+async function linkByChat(chatId: string) {
+  const { rows } = await pool.query(`SELECT * FROM venue_air_telegram WHERE chat_id = $1`, [chatId]);
+  return rows[0] || null;
+}
+
+app.post('/tg/update', async (c) => {
+  if (!INTERNAL_KEY || c.req.header('X-Internal-Key') !== INTERNAL_KEY) return c.json({ error: 'Unauthorized' }, 401);
+  const body: any = await c.req.json().catch(() => ({}));
+  const msg = body?.message;
+  if (!msg?.chat?.id) return c.json({ handled: false });
+  const chatId = String(msg.chat.id);
+  const text = String(msg.text || msg.caption || '').trim();
+  try {
+    // Бота читает и голосовой помощник владельца (voice-bot.mjs): чужой /start без кода
+    // и сообщения непривязанных чатов не трогаем — handled:false, их обработает он.
+    const start = text.match(/^\/start(?:@\w+)?(?:\s+(\S+))?$/i);
+    if (start && !start[1]) {
+      const link = await linkByChat(chatId);
+      if (link) return c.json({ handled: true, reply: HELP(await venueNameFor(link.venue_user_id).catch(() => 'заведения')) });
+      return c.json({ handled: false });
+    }
+    if (start && /^[A-Z2-9]{8}$/i.test(start[1] || '')) {
+      const code = String(start[1]).toUpperCase();
+      const { rows } = await pool.query(
+        `UPDATE venue_air_telegram
+            SET chat_id = $2, chat_title = $3, linked_at = now(), link_code = NULL, link_code_expires = NULL, updated_at = now()
+          WHERE link_code = $1 AND link_code_expires > now()
+          RETURNING venue_user_id`,
+        [code, chatId, String(msg.chat.title || [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || msg.chat.username || 'чат')],
+      ).catch(async (e: any) => {
+        // Чат уже привязан к другому заведению (unique chat_id) — отвязываем старую привязку.
+        if (String(e?.code) === '23505') {
+          await pool.query(`UPDATE venue_air_telegram SET chat_id = NULL WHERE chat_id = $1`, [chatId]);
+          return pool.query(
+            `UPDATE venue_air_telegram SET chat_id = $2, linked_at = now(), link_code = NULL, link_code_expires = NULL, updated_at = now()
+              WHERE link_code = $1 AND link_code_expires > now() RETURNING venue_user_id`, [code, chatId]);
+        }
+        throw e;
+      });
+      if (!rows[0]) return c.json({ handled: true, reply: 'Код не найден или истёк. Возьмите новый в кабинете заведения: «Студия эфира» → «Telegram».' });
+      const venue = await venueNameFor(rows[0].venue_user_id).catch(() => 'заведения');
+      return c.json({ handled: true, reply: `✅ Чат подключён к радио «${esc(venue)}».\n\n${HELP(venue)}` });
+    }
+
+    const link = await linkByChat(chatId);
+    if (!link) return c.json({ handled: false });
+    const venueUserId = String(link.venue_user_id);
+    const venue = await venueNameFor(venueUserId).catch(() => 'заведения');
+
+    const audio = msg.voice || msg.audio || (msg.document && /^audio\//.test(msg.document.mime_type || '') ? msg.document : null);
+    if (audio?.file_id) {
+      telegramAudioToAir(venueUserId, audio.file_id, chatId).catch(() => {});
+      return c.json({ handled: true, reply: 'Принял запись, готовлю к эфиру…' });
+    }
+    if (!text) return c.json({ handled: true, reply: 'Пришлите новость текстом или голосовое сообщение. /help — что умеет бот.' });
+
+    if (/^\/help/i.test(text)) return c.json({ handled: true, reply: HELP(venue) });
+    if (/^\/agenda/i.test(text)) {
+      const items = await activeAgenda(venueUserId);
+      if (!items.length) return c.json({ handled: true, reply: 'Повестка пуста. Напишите новость заведения, и ведущие расскажут о ней в эфире.' });
+      const list = items.map((it: any, i: number) => `${i + 1}. ${esc(it.text)}${it.aired_count ? ` <i>(в эфире ${it.aired_count} раз)</i>` : ''}`).join('\n');
+      return c.json({ handled: true, reply: `Повестка ведущих:\n\n${list}\n\n/del N — убрать пункт` });
+    }
+    const del = text.match(/^\/del(?:@\w+)?\s+(\d+)/i);
+    if (del) {
+      const items = await activeAgenda(venueUserId);
+      const it = items[Number(del[1]) - 1];
+      if (!it) return c.json({ handled: true, reply: 'Нет такого пункта. /agenda — список.' });
+      await pool.query(`UPDATE venue_air_agenda SET active = false WHERE id = $1`, [it.id]);
+      return c.json({ handled: true, reply: `Убрал: «${esc(it.text)}»` });
+    }
+    if (/^\/clear/i.test(text)) {
+      await pool.query(`UPDATE venue_air_agenda SET active = false WHERE venue_user_id = $1 AND active = true`, [venueUserId]);
+      return c.json({ handled: true, reply: 'Повестка очищена.' });
+    }
+    const pod = text.match(/^\/podcast(?:@\w+)?\s*(.*)$/is);
+    if (pod) {
+      const r = await startVenuePodcast(venueUserId, pod[1] || null, chatId);
+      return c.json({ handled: true, reply: r.ok ? '🎙 Собираю подкаст о заведении, это займёт пару минут. Напишу, когда будет готов.' : esc(r.error || 'Не получилось') });
+    }
+    const chm = text.match(/^\/channel(?:@\w+)?\s*(\S*)/i);
+    if (chm) {
+      const arg = chm[1];
+      if (!arg || /^off$/i.test(arg)) {
+        await pool.query(`UPDATE venue_air_telegram SET channel_id = NULL, channel_title = NULL, updated_at = now() WHERE venue_user_id = $1`, [venueUserId]);
+        return c.json({ handled: true, reply: arg ? 'Дублирование в канал выключено.' : 'Укажите канал: /channel @имя_канала. Бота нужно добавить администратором канала с правом публикации.' });
+      }
+      const chat = await tgApi('getChat', { chat_id: arg.startsWith('@') || arg.startsWith('-') ? arg : `@${arg}` });
+      const bot = await getBot();
+      if (!chat?.ok || !bot) return c.json({ handled: true, reply: 'Канал не найден. Проверьте имя: /channel @имя_канала' });
+      const member = await tgApi('getChatMember', { chat_id: chat.result.id, user_id: bot.id });
+      const st = member?.result?.status;
+      if (!(st === 'administrator' || st === 'creator') || member?.result?.can_post_messages === false) {
+        return c.json({ handled: true, reply: `Добавьте @${esc(bot.username)} администратором канала с правом публикации и повторите команду.` });
+      }
+      await pool.query(
+        `UPDATE venue_air_telegram SET channel_id = $2, channel_title = $3, updated_at = now() WHERE venue_user_id = $1`,
+        [venueUserId, String(chat.result.id), String(chat.result.title || arg)],
+      );
+      return c.json({ handled: true, reply: `✅ Новости будут дублироваться в канал «${esc(chat.result.title || arg)}».` });
+    }
+    if (/^\/stop/i.test(text)) {
+      await pool.query(`UPDATE venue_air_telegram SET chat_id = NULL, updated_at = now() WHERE venue_user_id = $1`, [venueUserId]);
+      return c.json({ handled: true, reply: 'Чат отключён от радио заведения. Подключить снова можно по ссылке из кабинета.' });
+    }
+    if (text.startsWith('/')) return c.json({ handled: true, reply: HELP(venue) });
+
+    const r = await addAgenda(venueUserId, text, 'telegram');
+    if ('error' in r) return c.json({ handled: true, reply: esc(String(r.error)) });
+    return c.json({
+      handled: true,
+      reply: `✅ В повестке ведущих: «${esc(r.text)}».\nВедущие расскажут об этом гостям в ближайших выходах в эфир.${r.channel ? `\nПродублировал в канал «${esc(r.channel)}».` : ''}`,
+    });
+  } catch (e: any) {
+    console.error('[venue-air] tg', e?.message);
+    return c.json({ handled: true, reply: 'Что-то пошло не так, попробуйте ещё раз.' });
+  }
+});
+
+// ─── Кабинет заведения ────────────────────────────────────────────────────
+
+app.get('/my', requireAuth, async (c) => {
+  try {
+    const venueUserId = String(c.get('userId'));
+    const [streams, cfg, agenda, tg, log, today, bot] = await Promise.all([
+      venueStreams(venueUserId),
+      hostConfigFor(venueUserId),
+      activeAgenda(venueUserId),
+      pool.query(`SELECT chat_id, chat_title, channel_title, linked_at FROM venue_air_telegram WHERE venue_user_id = $1`, [venueUserId]),
+      pool.query(
+        `SELECT kind, title, text, status, created_at FROM venue_air_log WHERE venue_user_id = $1 ORDER BY created_at DESC LIMIT 20`,
+        [venueUserId],
+      ),
+      podcastsToday(venueUserId),
+      getBot(),
+    ]);
+    const [host] = hostNames(venueUserId, cfg.voice);
+    const hostOn = streams.some((s) => s.hostEnabled === true || (s.hostEnabled !== false && cfg.airType === 'full_radio'));
+    const t = tg.rows[0];
+    return c.json({
+      success: true,
+      data: {
+        hasStream: streams.length > 0,
+        streams: streams.map((s) => ({ id: s.id, pointName: s.pointName, online: s.online })),
+        host: {
+          name: host, enabled: hostOn, voice: cfg.voice || 'female', style: cfg.style || 'relaxed',
+          intervalMinutes: clamp(Number(cfg.intervalMinutes) || HOST_DEFAULT_MIN, 15, 180),
+        },
+        agenda: agenda.map((it: any) => ({
+          id: String(it.id), text: it.text, source: it.source, expiresAt: iso(it.expires_at),
+          airedCount: it.aired_count || 0, lastAiredAt: iso(it.last_aired_at), createdAt: iso(it.created_at),
+        })),
+        telegram: {
+          linked: !!t?.chat_id, chatTitle: t?.chat_title || null, channelTitle: t?.channel_title || null,
+          botUsername: bot?.username || null,
+        },
+        podcasts: { today, limit: PODCASTS_PER_DAY, building: podcastRunning.has(venueUserId) },
+        log: log.rows.map((r: any) => ({ kind: r.kind, title: r.title, text: r.text, status: r.status, createdAt: iso(r.created_at) })),
+      },
+    });
+  } catch (e: any) {
+    console.error('[venue-air] my', e?.message);
+    return c.json({ success: false, error: 'Не удалось загрузить студию' }, 500);
+  }
+});
+
+app.post('/my/agenda', requireAuth, async (c) => {
+  const venueUserId = String(c.get('userId'));
+  const body: any = await c.req.json().catch(() => ({}));
+  const r = await addAgenda(venueUserId, body?.text, 'cabinet', body?.expiresAt || null);
+  if ('error' in r) return c.json({ success: false, error: r.error }, 400);
+  return c.json({ success: true, data: r });
+});
+
+app.delete('/my/agenda/:id', requireAuth, async (c) => {
+  const venueUserId = String(c.get('userId'));
+  const id = c.req.param('id');
+  if (!/^\d+$/.test(id)) return c.json({ success: false, error: 'Неверный пункт' }, 400);
+  await pool.query(`UPDATE venue_air_agenda SET active = false WHERE id = $1 AND venue_user_id = $2`, [id, venueUserId]);
+  return c.json({ success: true });
+});
+
+app.post('/my/podcast', requireAuth, async (c) => {
+  const venueUserId = String(c.get('userId'));
+  const body: any = await c.req.json().catch(() => ({}));
+  const r = await startVenuePodcast(venueUserId, body?.topic || null, null);
+  if (!r.ok) return c.json({ success: false, error: r.error }, 400);
+  return c.json({ success: true, data: { started: true } }, 202);
+});
+
+app.post('/my/telegram/code', requireAuth, async (c) => {
+  const venueUserId = String(c.get('userId'));
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  const code = Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
+  await pool.query(
+    `INSERT INTO venue_air_telegram (venue_user_id, link_code, link_code_expires, updated_at)
+     VALUES ($1, $2, now() + interval '24 hours', now())
+     ON CONFLICT (venue_user_id) DO UPDATE SET link_code = EXCLUDED.link_code, link_code_expires = EXCLUDED.link_code_expires, updated_at = now()`,
+    [venueUserId, code],
+  );
+  const bot = await getBot();
+  return c.json({ success: true, data: { code, link: bot ? `https://t.me/${bot.username}?start=${code}` : null, botUsername: bot?.username || null } });
+});
+
+app.post('/my/telegram/unlink', requireAuth, async (c) => {
+  const venueUserId = String(c.get('userId'));
+  await pool.query(`UPDATE venue_air_telegram SET chat_id = NULL, channel_id = NULL, channel_title = NULL, updated_at = now() WHERE venue_user_id = $1`, [venueUserId]);
+  return c.json({ success: true });
+});
+
+// ─── Админ ────────────────────────────────────────────────────────────────
+
+app.post('/admin/streams/:id/host', requireAuth, requireAdmin, async (c) => {
+  const id = c.req.param('id');
+  const body: any = await c.req.json().catch(() => ({}));
+  const v = body?.enabled === true ? true : body?.enabled === false ? false : null;
+  const { rowCount } = await pool.query(`UPDATE venue_station_streams SET host_enabled = $2 WHERE id::text = $1`, [id, v]);
+  return c.json({ success: !!rowCount, data: { hostEnabled: v } });
+});
+
+// Выход ведущего прямо сейчас (проверка звучания).
+app.post('/admin/streams/:id/host-now', requireAuth, requireAdmin, async (c) => {
+  const id = c.req.param('id');
+  const { rows } = await pool.query(`SELECT id, user_id, stream_url FROM venue_station_streams WHERE id::text = $1`, [id]);
+  const s = rows[0];
+  const m = s ? String(s.stream_url || '').match(VENUE_MOUNT_RE) : null;
+  const port = m ? await venueDjPort(m[1]) : null;
+  if (!s || !port) return c.json({ success: false, error: 'Поток не найден или не запущен' }, 404);
+  try {
+    const r = await airHost(String(s.id), String(s.user_id), port, await hostConfigFor(String(s.user_id)));
+    return c.json({ success: true, data: { result: r } });
+  } catch (e: any) {
+    return c.json({ success: false, error: e?.message || 'ошибка' }, 500);
+  }
+});
+
+export default app;

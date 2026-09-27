@@ -62,6 +62,7 @@ import venueBrandingRoutes from './venue-branding-routes.tsx';
 import streamPlayerRoutes from './stream-player-routes.tsx';
 import venueStationRoutes from './venue-station-routes.tsx';
 import venueRoyaltyRoutes from './venue-royalty-routes.tsx';
+import venueAirRoutes from './venue-air-routes.tsx';
 import venueApkRoutes from './venue-apk-routes.tsx';
 import venueScheduleRoutes from './venue-schedule-routes.tsx';
 import { venueApiTokensApp, venueApiPublicApp } from './venue-api-routes.tsx';
@@ -438,6 +439,7 @@ app.route('/server/api/venue-branding', venueBrandingRoutes);
 app.route('/server/api/stream-player', streamPlayerRoutes);
 app.route('/server/api/venue-station', venueStationRoutes);
 app.route('/server/api/venue-royalty', venueRoyaltyRoutes);
+app.route('/server/api/venue-air', venueAirRoutes);
 app.route('/server/api/venue-apk', venueApkRoutes);
 app.route('/server/api/venue-billing', venueBillingRoutes);
 // Раньше не были смонтированы → playout-цепочка расписаний и API-токены

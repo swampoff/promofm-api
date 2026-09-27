@@ -73,12 +73,38 @@ async function getStatus() {
   return await r.json();
 }
 
+// --- PROMO.AIR: чаты заведений (27.09.2026) ---
+// Чат, привязанный к заведению кодом из кабинета («Студия эфира» → Telegram),
+// и /start <код> уходят в API студии заведения — в эфир ПРОМО.ФМ не попадают.
+// Остальные сообщения API не трогает (handled:false) — дальше как раньше.
+async function venueAir(msg) {
+  try {
+    const r = await fetch(`${API_BASE}/server/api/venue-air/tg/update`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(30000),
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Key': INTERNAL_KEY },
+      body: JSON.stringify({ message: msg }),
+    });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    console.error('[venue-air]', e.message);
+    return null;
+  }
+}
+
 // --- Message handler ---
 
 async function handle(msg) {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
   const name = msg.from?.first_name || 'User';
+
+  const venue = await venueAir(msg);
+  if (venue?.handled) {
+    if (venue.reply) await send(chatId, venue.reply);
+    return;
+  }
 
   if (ALLOWED_CHATS.length > 0 && !ALLOWED_CHATS.includes(String(chatId))) {
     await send(chatId, 'Доступ ограничен.');
