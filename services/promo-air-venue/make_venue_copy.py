@@ -57,6 +57,9 @@ rewrite('radio_announcer.py', [
 rewrite('build-metadata.py', [
     ('MUSIC_DIR = "/mnt/data/promofm-music/tracks"', f'MUSIC_DIR = os.getenv("VENUE_MUSIC_DIR", "/mnt/data/promofm-music/tracks")'),
     ('OUT = "/opt/promofm-autodj/metadata.json"', f'OUT = os.getenv("VENUE_METADATA_FILE", "/opt/promofm-autodj/metadata.json")'),
+    # API (пользователь promofm, без sudo) пересобирает список по DATABASE_URL — роялти за заведения, 27.09.2026.
+    ("db_rows = subprocess.check_output([\n    'sudo', '-u', 'postgres', 'psql', '-d', 'promofm', '-t', '-A', '-F', '|', '-c',",
+     "db_rows = subprocess.check_output((['psql', os.environ['DATABASE_URL']] if os.getenv('DATABASE_URL')\n                                   else ['sudo', '-u', 'postgres', 'psql', '-d', 'promofm']) + [\n    '-t', '-A', '-F', '|', '-c',"),
 ])
 for f in ('requirements.txt',):
     if os.path.exists(os.path.join(SRC, f)):
