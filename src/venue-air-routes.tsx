@@ -160,21 +160,34 @@ function mskContext() {
 
 // ─── Gemini: текст и озвучка ──────────────────────────────────────────────
 
+// Бесплатный ключ Gemini иногда отвечает 503/429 — повторяем с паузой, последней
+// попыткой берём запасную модель.
 async function geminiJson(prompt: string): Promise<any> {
-  const url = `${GEMINI_PROXY_URL}/v1beta/models/${GEMINI_TEXT_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.8, maxOutputTokens: 4096, responseMimeType: 'application/json' },
-    }),
-    signal: AbortSignal.timeout(90_000),
-  });
-  const d: any = await r.json().catch(() => null);
-  if (!r.ok) throw new Error(`gemini ${r.status}`);
-  const text = d?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  return JSON.parse(text.trim().replace(/^```json\s*/i, '').replace(/```\s*$/, ''));
+  const models = [GEMINI_TEXT_MODEL, GEMINI_TEXT_MODEL, 'gemini-2.5-flash'];
+  let lastErr: Error | null = null;
+  for (let i = 0; i < models.length; i++) {
+    if (i) await new Promise((r) => setTimeout(r, i * 5000));
+    const url = `${GEMINI_PROXY_URL}/v1beta/models/${models[i]}:generateContent?key=${GEMINI_API_KEY}`;
+    try {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-proxy-key': GEMINI_PROXY_KEY },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.8, maxOutputTokens: 4096, responseMimeType: 'application/json' },
+        }),
+        signal: AbortSignal.timeout(90_000),
+      });
+      const d: any = await r.json().catch(() => null);
+      if (!r.ok) { lastErr = new Error(`gemini ${r.status}`); if (r.status === 429 || r.status >= 500) continue; throw lastErr; }
+      const text = d?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      return JSON.parse(text.trim().replace(/^```json\s*/i, '').replace(/```\s*$/, ''));
+    } catch (e: any) {
+      lastErr = e;
+      if (!/gemini (429|5\d\d)|abort|timeout|fetch failed/i.test(String(e?.message || e?.name))) throw e;
+    }
+  }
+  throw lastErr || new Error('gemini failed');
 }
 
 async function tts(text: string, author: string): Promise<Buffer> {
