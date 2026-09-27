@@ -27,6 +27,8 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || 'gemini-3-flash-preview';
 const INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+// С RU-сервера Telegram API отвечает не всегда — имя бота на случай, если getMe не прошёл.
+const BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || 'Promomusicalbot';
 const DATA_ROOT = '/var/lib/promo-air';
 const SAMPLE_RATE = 24000;
 const DEVICE_ONLINE_SEC = 180;
@@ -58,6 +60,7 @@ const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const iso = (d: any) => (d instanceof Date ? d.toISOString() : d ?? null);
 const isFemale = (host: string) => FEMALE_HOSTS.includes(host);
+const timesRu = (n: number) => `${n} ${n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'раза' : 'раз'}`;
 
 // Латиница в озвучке запрещена (регламент Soul FM NP5): название заведения — по-русски.
 const TRANSLIT: [string, string][] = [
@@ -622,7 +625,7 @@ app.post('/tg/update', async (c) => {
     if (/^\/agenda/i.test(text)) {
       const items = await activeAgenda(venueUserId);
       if (!items.length) return c.json({ handled: true, reply: 'Повестка пуста. Напишите новость заведения, и ведущие расскажут о ней в эфире.' });
-      const list = items.map((it: any, i: number) => `${i + 1}. ${esc(it.text)}${it.aired_count ? ` <i>(в эфире ${it.aired_count} раз)</i>` : ''}`).join('\n');
+      const list = items.map((it: any, i: number) => `${i + 1}. ${esc(it.text)}${it.aired_count ? ` <i>(в эфире ${timesRu(it.aired_count)})</i>` : ''}`).join('\n');
       return c.json({ handled: true, reply: `Повестка ведущих:\n\n${list}\n\n/del N — убрать пункт` });
     }
     const del = text.match(/^\/del(?:@\w+)?\s+(\d+)/i);
@@ -655,7 +658,7 @@ app.post('/tg/update', async (c) => {
       const member = await tgApi('getChatMember', { chat_id: chat.result.id, user_id: bot.id });
       const st = member?.result?.status;
       if (!(st === 'administrator' || st === 'creator') || member?.result?.can_post_messages === false) {
-        return c.json({ handled: true, reply: `Добавьте @${esc(bot.username)} администратором канала с правом публикации и повторите команду.` });
+        return c.json({ handled: true, reply: `Добавьте @${esc(bot.username || BOT_USERNAME)} администратором канала с правом публикации и повторите команду.` });
       }
       await pool.query(
         `UPDATE venue_air_telegram SET channel_id = $2, channel_title = $3, updated_at = now() WHERE venue_user_id = $1`,
@@ -716,7 +719,7 @@ app.get('/my', requireAuth, async (c) => {
         })),
         telegram: {
           linked: !!t?.chat_id, chatTitle: t?.chat_title || null, channelTitle: t?.channel_title || null,
-          botUsername: bot?.username || null,
+          botUsername: bot?.username || BOT_USERNAME,
         },
         podcasts: { today, limit: PODCASTS_PER_DAY, building: podcastRunning.has(venueUserId) },
         log: log.rows.map((r: any) => ({ kind: r.kind, title: r.title, text: r.text, status: r.status, createdAt: iso(r.created_at) })),
@@ -764,7 +767,8 @@ app.post('/my/telegram/code', requireAuth, async (c) => {
     [venueUserId, code],
   );
   const bot = await getBot();
-  return c.json({ success: true, data: { code, link: bot ? `https://t.me/${bot.username}?start=${code}` : null, botUsername: bot?.username || null } });
+  const username = bot?.username || BOT_USERNAME;
+  return c.json({ success: true, data: { code, link: `https://t.me/${username}?start=${code}`, botUsername: username } });
 });
 
 app.post('/my/telegram/unlink', requireAuth, async (c) => {
