@@ -330,6 +330,16 @@ app.post('/submitTrack', requireAuth, async (c) => {
       console.warn('[submitTrack] extra metadata save failed:', e?.message);
     }
 
+    // Эфир в заведениях ПРОМО.ЭИР: отметка артиста + дополнительное соглашение (27.09.2026).
+    if (body.venue_opt_in === true && body.venue_agreement === true) {
+      try {
+        const { applyVenueOptInOnUpload } = await import('./venue-royalty-routes.tsx');
+        await applyVenueOptInOnUpload(track.id);
+      } catch (e: any) {
+        console.warn('[submitTrack] venue opt-in save failed:', e?.message);
+      }
+    }
+
     // Fire-and-forget AI analysis (don't block the response)
     const audioUrl = track.audio_url || body.audio_file_url || body.audio_url || '';
     if (audioUrl) {

@@ -158,7 +158,7 @@ function sanitizeFormat(raw: any, fallback: any = {}): { airType: string; points
 const hashDeviceToken = (t: string) => crypto.createHash('sha256').update(t).digest('hex');
 const GENERAL_AIR_STATUS_URL = 'https://promo-music.ru/air/dj-api/status';
 // Отдельный поток заведения: /air/live/venue-<slug> (promo-air-venue create).
-const VENUE_MOUNT_RE = /\/air\/live\/venue-([a-z0-9][a-z0-9-]{1,40})(?:[?#].*)?$/;
+export const VENUE_MOUNT_RE = /\/air\/live\/venue-([a-z0-9][a-z0-9-]{1,40})(?:[?#].*)?$/;
 function nowPlayingUrlFor(stream: { id?: string; stream_url?: string | null } | null | undefined): string | null {
   const url = stream?.stream_url || '';
   if (url.includes('/air/live/promo.fm')) return GENERAL_AIR_STATUS_URL;
@@ -166,7 +166,7 @@ function nowPlayingUrlFor(stream: { id?: string; stream_url?: string | null } | 
   return null;
 }
 // Порт AutoDJ заведения — из /etc/promo-air/venues/<slug>.env.
-async function venueDjPort(slug: string): Promise<number | null> {
+export async function venueDjPort(slug: string): Promise<number | null> {
   try {
     const { readFile } = await import('fs/promises');
     const env = await readFile(`/etc/promo-air/venues/${slug}.env`, 'utf8');
@@ -174,7 +174,7 @@ async function venueDjPort(slug: string): Promise<number | null> {
     return m ? Number(m[1]) : null;
   } catch { return null; }
 }
-async function venueNameFor(userId: string): Promise<string> {
+export async function venueNameFor(userId: string): Promise<string> {
   try {
     const p = await loadVenueProfile(userId);
     const n = p?.venueName || p?.name;
