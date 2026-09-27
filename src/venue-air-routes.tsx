@@ -34,19 +34,68 @@ const PODCASTS_PER_DAY = 3;
 const HOST_DEFAULT_MIN = 30;
 const AGENDA_MAX_ACTIVE = 30;
 const AGENDA_MAX_LEN = 500;
+// Формула ведущих — по регламенту Soul FM (владелец, 27.09.2026: «формулу ведущих бери
+// с soul fm, там всё уже настроено»). Голоса: тёплые; низкий Charon (Марк) из
+// приветствий исключён, как в регламенте Soul FM (G1).
 const FEMALE_HOSTS = ['Сандра', 'Лиана', 'Стелла'];
-const MALE_HOSTS = ['Макс', 'Марк', 'Пабло'];
+const MALE_HOSTS = ['Макс', 'Пабло'];
+const ALL_HOSTS = [...FEMALE_HOSTS, ...MALE_HOSTS, 'Марк', 'Нико', 'DJ Den', 'Ден'];
 const STYLE_TEXT: Record<string, string> = {
   casual: 'непринуждённо и дружелюбно',
   business: 'сдержанно и чётко',
   relaxed: 'спокойно и тепло',
   energetic: 'бодро, с энергией',
 };
-const BANNED_RE = /нейросет|искусственн[а-я]* интеллект|\bИИ\b|сгенерир|политик|выбор[ыа]|санкци|войн[аыу]/i;
+// Повтор хуже тишины (регламент Soul FM 3.3): пункт повестки — не чаще раза в 2 часа,
+// приветствие без пункта — тоже не чаще раза в 2 часа.
+const ITEM_COOLDOWN_MIN = 120;
+const GREETING_COOLDOWN_MIN = 120;
+const BANNED_RE = /нейросет|искусственн[а-яё]* интеллект|(^|[^а-яё])ИИ([^а-яё]|$)|голосов[а-яё]* модел|сгенерир|политик|выбор[ыа]|санкци|войн[аыу]|доллар|курс валют/i;
+// Рекламные эпитеты режем постобработкой (как _scrub_hype у Soul FM): только прилагательные.
+const HYPE_RE = /(^|[\s(«"])(?:уникальн|потрясающ|невероятн|легендарн|культов|волшебн|магическ|фантастическ|феноменальн|грандиозн|восхитительн)[а-яё]*(?=[\s,.!?…»")]|$)/gi;
 
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const iso = (d: any) => (d instanceof Date ? d.toISOString() : d ?? null);
+const isFemale = (host: string) => FEMALE_HOSTS.includes(host);
+
+// Латиница в озвучке запрещена (регламент Soul FM NP5): название заведения — по-русски.
+const TRANSLIT: [string, string][] = [
+  ['shch', 'щ'], ['sch', 'щ'], ['sh', 'ш'], ['ch', 'ч'], ['zh', 'ж'], ['kh', 'х'], ['ts', 'ц'], ['tz', 'ц'],
+  ['ya', 'я'], ['yu', 'ю'], ['yo', 'ё'], ['ye', 'е'], ['ph', 'ф'], ['th', 'т'], ['ck', 'к'], ['qu', 'кв'], ['ee', 'и'], ['oo', 'у'],
+  ['a', 'а'], ['b', 'б'], ['c', 'к'], ['d', 'д'], ['e', 'е'], ['f', 'ф'], ['g', 'г'], ['h', 'х'], ['i', 'и'], ['j', 'дж'], ['k', 'к'],
+  ['l', 'л'], ['m', 'м'], ['n', 'н'], ['o', 'о'], ['p', 'п'], ['q', 'к'], ['r', 'р'], ['s', 'с'], ['t', 'т'], ['u', 'у'], ['v', 'в'],
+  ['w', 'в'], ['x', 'кс'], ['y', 'и'], ['z', 'з'],
+];
+function spokenName(name: string): string {
+  return String(name || '').split(/(\s+)/).map((w) => {
+    if (!/[a-z]/i.test(w)) return w;
+    let s = w.toLowerCase();
+    let out = '';
+    while (s.length) {
+      const hit = TRANSLIT.find(([lat]) => s.startsWith(lat));
+      if (hit) { out += hit[1]; s = s.slice(hit[0].length); } else { out += s[0]; s = s.slice(1); }
+    }
+    return out.charAt(0).toUpperCase() + out.slice(1);
+  }).join('');
+}
+
+// Постобработка реплики: эпитеты, латиница (предложение с ней выкидываем), имена ведущих
+// в обращениях (в подкастах имён нет — регламент Soul FM 15.07), пробелы.
+function polish(text: string, venueName: string, spoken: string, opts: { keepQuestions?: boolean; stripNames?: boolean } = {}): string {
+  let t = String(text || '').replace(/[«»"“”]/g, '').replace(/\([^)]*\)/g, '');
+  if (venueName && venueName !== spoken) t = t.split(venueName).join(spoken).replace(new RegExp(venueName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), spoken);
+  t = t.replace(HYPE_RE, '$1');
+  if (opts.stripNames) {
+    const names = ALL_HOSTS.join('|');
+    t = t.replace(new RegExp(`^\\s*(?:${names})\\s*[,!]\\s*`, 'i'), '').replace(new RegExp(`,\\s*(?:${names})(?=\\s*[?!.…])`, 'gi'), '');
+  }
+  if (!opts.keepQuestions) t = t.replace(/\?+/g, '.');
+  if (/[a-z]/i.test(t)) t = t.split(/(?<=[.!?…])\s+/).filter((s) => !/[a-z]/i.test(s)).join(' ');
+  t = t.replace(/\s+([,.!?…])/g, '$1').replace(/\s{2,}/g, ' ').trim();
+  if (t) t = t.charAt(0).toUpperCase() + t.slice(1);
+  return t;
+}
 
 // ─── Данные заведения ─────────────────────────────────────────────────────
 
@@ -126,12 +175,6 @@ async function geminiJson(prompt: string): Promise<any> {
   if (!r.ok) throw new Error(`gemini ${r.status}`);
   const text = d?.candidates?.[0]?.content?.parts?.[0]?.text || '';
   return JSON.parse(text.trim().replace(/^```json\s*/i, '').replace(/```\s*$/, ''));
-}
-
-function cleanSpeech(s: any): string {
-  let t = String(s || '').replace(/[«»"“”]/g, '').replace(/\?+/g, '.').replace(/\s{2,}/g, ' ').trim();
-  if (t.length > 700) t = t.slice(0, 700).replace(/[^.!]*$/, '');
-  return t;
 }
 
 async function tts(text: string, author: string): Promise<Buffer> {
@@ -240,45 +283,69 @@ async function addAgenda(venueUserId: string, text: string, source: string, expi
 
 const pendingHost = new Map<string, { pcm: Buffer; text: string; host: string; itemId: string | null; at: number }>();
 
-async function composeHost(venueUserId: string, cfg: HostCfg) {
+// Соло-выход ведущего по формуле Soul FM: приветствие по времени суток и имя
+// ведущего, одна новость заведения (или тёплое приветствие), подпись станции.
+async function composeHost(venueUserId: string, cfg: HostCfg, streamId: string, force = false) {
   const venueName = await venueNameFor(venueUserId).catch(() => 'Заведение');
-  const items = await activeAgenda(venueUserId);
-  items.sort((a: any, b: any) => (a.last_aired_at ? new Date(a.last_aired_at).getTime() : 0) - (b.last_aired_at ? new Date(b.last_aired_at).getTime() : 0));
+  const spoken = spokenName(venueName);
+  const cutoff = Date.now() - ITEM_COOLDOWN_MIN * 60_000;
+  const items = (await activeAgenda(venueUserId))
+    .filter((it: any) => force || !it.last_aired_at || new Date(it.last_aired_at).getTime() < cutoff)
+    .sort((a: any, b: any) => (a.last_aired_at ? new Date(a.last_aired_at).getTime() : 0) - (b.last_aired_at ? new Date(b.last_aired_at).getTime() : 0));
   const item = items[0] || null;
+  if (!item && !force) {
+    const { rows } = await pool.query(
+      `SELECT max(created_at) AS at FROM venue_air_log WHERE stream_id = $1 AND kind = 'host' AND title LIKE '%· приветствие'`,
+      [streamId],
+    );
+    if (rows[0]?.at && Date.now() - new Date(rows[0].at).getTime() < GREETING_COOLDOWN_MIN * 60_000) return null; // лучше тишина, чем повтор
+  }
   const [host] = hostNames(venueUserId, cfg.voice);
+  const female = isFemale(host);
   const style = STYLE_TEXT[cfg.style || ''] || STYLE_TEXT.relaxed;
   const t = mskContext();
   const task = item
-    ? `Расскажи гостям новость заведения своими словами: «${item.text}».`
-    : `Тепло поприветствуй гостей, пожелай хорошего времени в «${venueName}» и скажи, что в эфире радио заведения звучит музыка.`;
-  const prompt = `Ты пишешь текст короткого выхода ведущего в эфир радио заведения «${venueName}». Эфир звучит в зале для гостей.
-Ведущий: ${host}, манера: ${style}. Сейчас ${t.weekday}, ${t.time}, ${t.period}.
+    ? `Коротко расскажи гостям новость заведения, только факты из неё: «${item.text}».`
+    : `Тепло поприветствуй гостей и пожелай им хорошего ${t.period === 'утро' ? 'утра' : t.period === 'день' ? 'дня' : 'вечера'}.`;
+  const prompt = `Ты — ${host}, ${female ? 'ведущая' : 'ведущий'} радио заведения «${spoken}». Эфир звучит в зале для гостей.
+Манера: ${style}, тёплым, спокойным, дружелюбным тоном, без драматизации.
+Сейчас ${t.weekday}, ${t.time} по Москве, ${t.period}.
 ${cfg.notes ? `Пожелания заведения к ведущему: ${String(cfg.notes).slice(0, 300)}\n` : ''}Задача: ${task}
+Формула выхода:
+1) приветствие по времени суток и представься: «С вами ${host}»;
+2) ${item ? 'новость своими словами, 1–2 предложения' : 'одна тёплая фраза о том, что вы рады гостям'};
+3) подпись: «Это радио ${spoken}, оставайтесь с нами».
 Правила:
-- 2–4 коротких предложения, 15–30 секунд речи, по-русски.
-- Обращайся к гостям в зале. Назови заведение «${venueName}».
-- Никаких вопросов. Приветствие по времени суток (не «доброе утро» вечером).
-- Не выдумывай блюда, цены, даты, имена и факты, которых нет в новости.
-- Не упоминай нейросети, ИИ и то, что текст написан программой. Без политики.
+- 3–5 коротких предложений, 15–30 секунд речи. Только русские буквы, никакой латиницы, название заведения пиши так: ${spoken}.
+- Ни одного вопроса. Никаких «срочно», «внимание», «шок».
+- Не выдумывай блюда, цены, даты, время, имена и события, которых нет в новости. Числа и время — словами по-русски.
+- Без рекламных эпитетов (уникальный, потрясающий, невероятный, легендарный, волшебный).
+- О себе говори в ${female ? 'женском' : 'мужском'} роде.
+- Не упоминай нейросети, ИИ, голосовые модели и то, что текст написан программой. Без политики, экономики, медицины.
 Верни JSON: {"text": "текст выхода"}`;
   const res = await geminiJson(prompt);
-  const text = cleanSpeech(res?.text);
-  if (!text || text.length < 20 || BANNED_RE.test(text)) throw new Error('host text rejected');
+  let text = polish(res?.text, venueName, spoken);
+  if (text && !/оставайтесь с нами/i.test(text)) text = `${text} Это радио ${spoken}, оставайтесь с нами.`;
+  if (!text || text.length < 30 || text.length > 700 || BANNED_RE.test(text)) throw new Error('host text rejected');
   const pcm = await tts(text, host);
   return { pcm, text, host, itemId: item ? String(item.id) : null };
 }
 
-async function airHost(streamId: string, venueUserId: string, port: number, cfg: HostCfg): Promise<'done' | 'busy'> {
+async function airHost(streamId: string, venueUserId: string, port: number, cfg: HostCfg, force = false): Promise<'done' | 'busy' | 'skip'> {
   let seg = pendingHost.get(streamId);
   if (seg && Date.now() - seg.at > 10 * 60_000) { pendingHost.delete(streamId); seg = undefined; }
-  if (!seg) seg = { ...(await composeHost(venueUserId, cfg)), at: Date.now() };
+  if (!seg) {
+    const fresh = await composeHost(venueUserId, cfg, streamId, force);
+    if (!fresh) return 'skip';
+    seg = { ...fresh, at: Date.now() };
+  }
   const status = await injectPcm(port, seg.pcm);
   if (status === 423) { pendingHost.set(streamId, seg); return 'busy'; }
   pendingHost.delete(streamId);
   if (status < 200 || status >= 300) throw new Error(`inject ${status}`);
   await pool.query(
     `INSERT INTO venue_air_log (venue_user_id, stream_id, kind, title, text) VALUES ($1, $2, 'host', $3, $4)`,
-    [venueUserId, streamId, seg.host, seg.text],
+    [venueUserId, streamId, `${seg.host} · ${seg.itemId ? 'повестка' : 'приветствие'}`, seg.text],
   );
   if (seg.itemId) await pool.query(`UPDATE venue_air_agenda SET aired_count = aired_count + 1, last_aired_at = now() WHERE id = $1`, [seg.itemId]);
   return 'done';
@@ -314,38 +381,54 @@ export async function startVenuePodcast(venueUserId: string, topic: string | nul
   return { ok: true };
 }
 
+// Диалог двух ведущих по формуле Soul FM (связность, приветствие, прощание,
+// без имён в речи, ≤2 фактов, без эпитетов), озвучка каждой реплики своим голосом.
 async function buildPodcast(venueUserId: string, streams: VenueStream[], items: any[], topic: string): Promise<{ ok: boolean; error?: string; turns?: number }> {
   const venueName = await venueNameFor(venueUserId).catch(() => 'Заведение');
+  const spoken = spokenName(venueName);
   const cfg = await hostConfigFor(venueUserId);
   const [a, b] = hostNames(venueUserId, cfg.voice);
-  const facts = items.slice(0, 8).map((it: any) => `- ${it.text}`).join('\n');
+  const g = (h: string) => (isFemale(h) ? 'женщина, о себе в женском роде' : 'мужчина, о себе в мужском роде');
+  const facts = items.slice(0, 2).map((it: any) => `- ${it.text}`).join('\n');
   const t = mskContext();
-  const prompt = `Ты сценарист короткой радиопередачи для радио заведения «${venueName}». Передача звучит в зале для гостей.
-Ведущие: ${a} и ${b}. Манера: ${STYLE_TEXT[cfg.style || ''] || STYLE_TEXT.relaxed}. Сейчас ${t.weekday}, ${t.period}.
-О чём говорить (только эти факты, ничего не добавляй от себя):
-${facts || '- (повестка пуста)'}
-${topic ? `Тема от заведения: ${topic}\n` : ''}Правила:
-- 8–12 реплик, ведущие чередуются, живой разговор о заведении и его событиях, 2–3 минуты.
-- Первая реплика — приветствие гостей «${venueName}» по времени суток, последняя — приглашение оставаться с радио «${venueName}».
-- Не выдумывай блюда, цены, даты, имена и факты. Никаких вопросов к слушателям.
-- Не упоминай нейросети, ИИ и то, что текст написан программой. Без политики.
+  const prompt = `Ты — сценарист живой радиопередачи для радио заведения «${spoken}». Передача звучит в зале для гостей.
+Ведущие: ${a} (${g(a)}) и ${b} (${g(b)}). Манера: ${STYLE_TEXT[cfg.style || ''] || STYLE_TEXT.relaxed}, тёплым дружелюбным тоном.
+Сейчас ${t.weekday}, ${t.period}.
+МАТЕРИАЛ ВЫПУСКА (только это, ничего не добавляй от себя):
+${facts || '- (повестки нет, говорим только о теме ниже)'}
+${topic ? `Тема от заведения: ${topic}\n` : ''}
+ФОРМАТ:
+- 12–16 реплик по 20–45 слов, строго чередуются: ${a}, ${b}, ${a}… Длинные абзацы запрещены.
+- Метки авторов нужны только для озвучки. ИМЕНА ВЕДУЩИХ В РЕЧИ НЕ ПРОИЗНОСЯТСЯ: друг к другу обращаются «друзья», «коллега».
+- Первая реплика: живое приветствие гостей по времени суток — «Вы на волнах радио ${spoken}…», своими словами, без имени, и подводка к теме.
+СВЯЗНОСТЬ:
+- каждая реплика начинается с подхвата конкретного слова или мысли предыдущей; менять тему нельзя;
+- если прозвучал вопрос, следующая реплика — ответ на него («Хм… я думаю, что…»); никто не вступает внезапно.
+ЖИВАЯ ПОДАЧА: паузы многоточием, междометия «хм», «ах»; смех только словами «ха-ха», редко. Никаких ремарок в скобках.
+ФИНАЛ: последняя реплика собирает мысль, тепло прощается своими словами и называет радио ${spoken}.
+ЗАПРЕТЫ:
+- не выдумывать блюда, цены, даты, время, имена, артистов и события, которых нет в материале; не вводить новых людей и мест;
+- без рекламных эпитетов (уникальный, потрясающий, невероятный, легендарный, волшебный);
+- без политики, экономики, медицины; не упоминать нейросети, ИИ, голосовые модели;
+- числа и время словами по-русски; только русские буквы, никакой латиницы, название пиши так: ${spoken}.
 Верни JSON-массив: [{"author": "${a}", "text": "..."}, {"author": "${b}", "text": "..."}]`;
   let turns: { author: string; text: string }[] = [];
   try {
     const res = await geminiJson(prompt);
     turns = (Array.isArray(res) ? res : [])
-      .map((x: any) => ({ author: x?.author === b ? b : a, text: cleanSpeech(x?.text) }))
+      .filter((x: any) => x?.author === a || x?.author === b) // чужую метку не переприсваиваем другому голосу
+      .map((x: any) => ({ author: String(x.author), text: polish(x?.text, venueName, spoken, { keepQuestions: true, stripNames: true }) }))
       .filter((x) => x.text.length > 5 && !BANNED_RE.test(x.text))
-      .slice(0, 14);
+      .slice(0, 18);
   } catch (e: any) {
     return logFailed(venueUserId, `script: ${e?.message}`);
   }
-  if (turns.length < 4) return logFailed(venueUserId, 'сценарий слишком короткий');
+  if (turns.length < 8) return logFailed(venueUserId, 'сценарий слишком короткий');
   const parts: Buffer[] = [];
   for (const tr of turns) {
-    try { parts.push(await tts(tr.text, tr.author), silence(600)); } catch (e: any) { console.warn('[venue-air] tts', e?.message); }
+    try { parts.push(await tts(tr.text, tr.author), silence(500)); } catch (e: any) { console.warn('[venue-air] tts', e?.message); }
   }
-  if (parts.length < 8) return logFailed(venueUserId, 'озвучка не удалась');
+  if (parts.length < 16) return logFailed(venueUserId, 'озвучка не удалась');
   const stamp = new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 16).replace(/[-:T]/g, '');
   const tmp = `/tmp/venue-podcast-${venueUserId.slice(0, 8)}-${stamp}.mp3`;
   try {
@@ -696,7 +779,7 @@ app.post('/admin/streams/:id/host-now', requireAuth, requireAdmin, async (c) => 
   const port = m ? await venueDjPort(m[1]) : null;
   if (!s || !port) return c.json({ success: false, error: 'Поток не найден или не запущен' }, 404);
   try {
-    const r = await airHost(String(s.id), String(s.user_id), port, await hostConfigFor(String(s.user_id)));
+    const r = await airHost(String(s.id), String(s.user_id), port, await hostConfigFor(String(s.user_id)), true);
     return c.json({ success: true, data: { result: r } });
   } catch (e: any) {
     return c.json({ success: false, error: e?.message || 'ошибка' }, 500);
