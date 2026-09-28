@@ -1052,28 +1052,21 @@ app.get('/releases', requireAuth, async (c) => {
     if (gate instanceof Response) return gate;
     if (!gate.labelId) return c.json({ success: true, releases: [] });
 
-    // Pull orders that the label owns. publish-orders live in the
-    // publish_orders SQL table — `data` is the JSON blob payload column.
-    // The fast path uses the `user_id` column.
-    const r = await pool.query(
-      `SELECT id AS order_id, data, created_at, updated_at
-       FROM publish_orders
-       WHERE user_id = $1
-       ORDER BY created_at DESC
-       LIMIT 200`,
-      [gate.userId]
-    );
-
-    // Filter to orders with labelId set to this label (defensive — guards
-    // against any leftover from before the label-on-behalf field was added).
+    // Заказы публикации (клипы, концерты) лейбла. Колонки `data` в publish_orders
+    // больше нет — поля разложены по native-колонкам, читаем через db-хелпер.
+    // До 28.09.2026 здесь был SELECT data → 500 на каждый запрос, и лейблы видели
+    // «пока нет релизов» вместо своих треков и кнопки «Оплатить». Сбой заказов
+    // не должен прятать треки — ловим отдельно.
     const releases: any[] = [];
-    for (const row of r.rows) {
-      let payload: any;
-      try {
-        payload = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
-      } catch { continue; }
-      if (payload?.labelId && payload.labelId !== gate.labelId) continue;
-      releases.push(payload);
+    try {
+      const { listPublishOrdersByUser } = await import('./db.tsx');
+      const orders = await listPublishOrdersByUser(gate.userId);
+      for (const o of orders.slice(0, 200)) {
+        if (o.labelId && o.labelId !== gate.labelId) continue;
+        releases.push(o);
+      }
+    } catch (e: any) {
+      console.error('[label/releases] publish orders:', e?.message);
     }
 
     // Resolve artist display names for the actingFor* set in one query.
@@ -1172,6 +1165,7 @@ app.get('/releases', requireAuth, async (c) => {
 
     return c.json({ success: true, releases });
   } catch (error: any) {
+    console.error('[label/releases]', error?.message);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
