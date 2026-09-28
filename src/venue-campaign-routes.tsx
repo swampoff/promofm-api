@@ -95,6 +95,7 @@ app.post('/run-wave', requireAdminOrKey, async (c) => {
         to: test, subject: `[ТЕСТ] ${subject}`,
         html: html.replace(/\{\{name\}\}/g, 'ТЕСТ-заведение'),
         campaignId: CAMPAIGN_ID, listUnsubscribe: true,
+        replyTo: ADMIN_COPY,
       });
       return c.json({ success: r.success, test: true, to: test, error: r.error });
     }
@@ -135,6 +136,8 @@ app.post('/run-wave', requireAdminOrKey, async (c) => {
 
     const res = await smtpSendBatch(recipients, subject, html, {
       campaignId: CAMPAIGN_ID,
+      // Ответы заведений — в мониторимый ящик; noreply@promo-music.ru почту не принимает.
+      replyTo: ADMIN_COPY,
       batchSize: 40,
       delayMs: 2500,
     });
