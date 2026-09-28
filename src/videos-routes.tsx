@@ -522,7 +522,9 @@ videosRoutes.post('/', requireAuth, async (c) => {
 // Требует migration 122 (promoted_until / pipeline / newsletter_*).
 // ═══════════════════════════════════════════════════════════════
 
-const VIDEO_PIPELINE_PROMOTE_PRICE = 10000;
+// Владелец 28.09.2026: «Новые клипы» — не отдельная услуга за 10 000 ₽, а часть размещения
+// клипа за 19 990 ₽ (публикация, «Новые клипы» на главной 14 дней, продвижение в ленте, аналитика).
+const VIDEO_PIPELINE_PROMOTE_PRICE = 19990;
 const VIDEO_PIPELINE_EXCLUSIVE_PRICE = 15000;
 const VIDEO_PROMOTE_DAYS = 14;
 
@@ -623,7 +625,7 @@ videosRoutes.post('/promoteToNovelty', requireAuth, requireAdmin, async (c) => {
       video,
       'video_promote',
       VIDEO_PIPELINE_PROMOTE_PRICE,
-      `Клип «${video.title}» — секция «Новые клипы» на главной, ${VIDEO_PROMOTE_DAYS} дней`,
+      `Размещение клипа «${video.title}»: «Новые клипы» на главной ${VIDEO_PROMOTE_DAYS} дней, продвижение в ленте`,
     );
     if ('error' in payment) return c.json({ success: false, error: payment.error }, 400);
 
@@ -638,8 +640,8 @@ videosRoutes.post('/promoteToNovelty', requireAuth, requireAdmin, async (c) => {
     const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     await upsertNotification(video.user_id, notifId, {
       type: 'video_promote_invoice',
-      title: 'Продвижение клипа в «Новые клипы»',
-      message: `Админ предлагает разместить клип «${video.title}» на ${VIDEO_PROMOTE_DAYS} дней в секции «Новые клипы» на главной. Стоимость: ${VIDEO_PIPELINE_PROMOTE_PRICE} ₽.`,
+      title: 'Размещение клипа на главной',
+      message: `Предлагаем размещение клипа «${video.title}»: ${VIDEO_PROMOTE_DAYS} дней в «Новых клипах» на главной и продвижение в ленте. Стоимость ${VIDEO_PIPELINE_PROMOTE_PRICE.toLocaleString('ru-RU')} ₽.`,
       link: payment.confirmationUrl,
       metadata: { video_id: String(video.id), order_id: payment.orderId, amount: VIDEO_PIPELINE_PROMOTE_PRICE },
       created_at: new Date().toISOString(),
@@ -647,7 +649,7 @@ videosRoutes.post('/promoteToNovelty', requireAuth, requireAdmin, async (c) => {
     });
     emitSSE(video.user_id, {
       type: 'notification',
-      data: { title: 'Предложение от ПРОМО.МУЗЫКА', comment: `Продвинуть клип «${video.title}» за ${VIDEO_PIPELINE_PROMOTE_PRICE} ₽` },
+      data: { title: 'Предложение от ПРОМО.МУЗЫКА', comment: `Размещение клипа «${video.title}» на главной за ${VIDEO_PIPELINE_PROMOTE_PRICE.toLocaleString('ru-RU')} ₽` },
     });
 
     return c.json({
