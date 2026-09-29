@@ -1,7 +1,7 @@
 """Общая часть конвейера каталога: очередь, обработка звука, контроль качества, заливка.
 
 Обработка: обрезка тишины по краям → выравнивание громкости (двухпроходный loudnorm,
--16 LUFS, пик -1.5 dBTP) → фейды → MP3 192 кбит/с 44.1 кГц стерео.
+-16 LUFS, пик -1.5 dBTP) → фейды → MP3 320 кбит/с 44.1 кГц стерео.
 Контроль: длина ≥ 60 с, не тишина, внутри не больше 15 % тишины, без клиппинга.
 Заливка: POST https://promo-music.ru/server/api/air-catalog/ingest (X-Catalog-Key).
 """
@@ -69,7 +69,7 @@ def postprocess(src, mp3):
           f"measured_LRA={ms['input_lra']}:measured_thresh={ms['input_thresh']}:offset={ms['target_offset']}:linear=true,"
           f"afade=t=in:d=0.05,afade=t=out:st={fade_out:.2f}:d=3")
     r = _run(["ffmpeg", "-y", "-v", "error", "-i", trimmed, "-af", af,
-              "-ar", "44100", "-ac", "2", "-codec:a", "libmp3lame", "-b:a", "192k", mp3])
+              "-ar", "44100", "-ac", "2", "-codec:a", "libmp3lame", "-b:a", "320k", mp3])
     os.remove(trimmed)
     if r.returncode:
         raise RuntimeError("encode: " + r.stderr[-300:])

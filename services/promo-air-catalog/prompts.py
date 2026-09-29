@@ -16,7 +16,8 @@ import random
 import sys
 
 NEGATIVE = ("vocals, singing, voice, lyrics, speech, choir, rap, distortion, noise, clipping, "
-            "low quality, lo-fi hiss, abrupt ending, harsh high frequencies")
+            "low quality, lo-fi hiss, abrupt ending, harsh high frequencies, muddy mix, mono, "
+            "amateur, out of tune, glitches, artifacts, repetitive loop, sudden cuts, low bitrate")
 
 TEXTURES = [
     "spacious and smooth", "gentle steady groove", "soft dynamics", "warm analog feel",
@@ -119,7 +120,8 @@ def genre_prompts(genre: str, n: int) -> list:
         out.append({
             "prompt_id": f"{genre}-p{i:03d}",
             "prompt": f"{mood} {style} instrumental for a {setting}, {inst}, {texture}, {bpm} BPM, "
-                      f"no vocals, polished studio mix",
+                      f"full arrangement with intro, gradual development and smooth outro, high-fidelity professional studio recording, "
+                      f"rich wide stereo mix, clear detailed instruments, no vocals",
             "bpm": bpm,
         })
     return out

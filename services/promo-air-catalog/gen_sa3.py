@@ -10,6 +10,7 @@ import argparse
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import WORK, finish, is_done, load_tasks, log  # noqa: E402
@@ -23,6 +24,7 @@ def main():
     ap.add_argument("--steps", type=int, default=8)          # для Medium выше 8 качество не растёт
     ap.add_argument("--cfg", type=float, default=1.0)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=4)   # обработка и заливка параллельно с генерацией
     a = ap.parse_args()
 
     tasks = [t for t in load_tasks(a.tasks) if not is_done(t["id"])]
@@ -37,13 +39,27 @@ def main():
     from stable_audio_3 import StableAudioModel
 
     model = StableAudioModel.from_pretrained("medium")
+    # По умолчанию generate() режет звук до 120 с (sample_size=5292032); как в штатном CLI,
+    # берём максимум из конфигурации модели, длину задаёт duration.
+    max_samples = int((getattr(model, "model_config", None) or {}).get("sample_size") or 5292032)
     sr = int(getattr(model, "sample_rate", 44100) or 44100)
-    t0, ok = time.time(), 0
+    t0 = time.time()
+    pool = ThreadPoolExecutor(max_workers=a.workers)
+    futures = []
+
+    def post(t, wav):
+        try:
+            return finish(t, wav, MODEL_VERSION, a.steps)
+        finally:
+            if os.path.exists(wav):
+                os.remove(wav)
+
     for i, t in enumerate(tasks, 1):
         wav = os.path.join(WORK, f"{t['id']}.wav")
         try:
             audio = model.generate(prompt=t["prompt"], negative_prompt=t["negative_prompt"], duration=t["duration"],
-                                   steps=a.steps, cfg_scale=a.cfg, seed=t["seed"], batch_size=1)
+                                   steps=a.steps, cfg_scale=a.cfg, seed=t["seed"], batch_size=1,
+                                   sample_size=max_samples)
             if isinstance(audio, (list, tuple)):
                 audio = audio[0]
             audio = audio.detach().float().cpu()
@@ -55,13 +71,16 @@ def main():
             if "out of memory" in str(e).lower():
                 torch.cuda.empty_cache()
             continue
-        if finish(t, wav, MODEL_VERSION, a.steps):
-            ok += 1
-        if os.path.exists(wav):
-            os.remove(wav)
-        if i % 10 == 0:
+        futures.append(pool.submit(post, t, wav))
+        # не копим сырые WAV: если обработка отстаёт, ждём самую старую
+        while sum(1 for f in futures if not f.done()) > a.workers * 2:
+            time.sleep(0.5)
+        if i % 20 == 0:
             rate = (time.time() - t0) / i
-            log(f"прогресс {i}/{len(tasks)}, в каталоге {ok}, {rate:.1f} с/трек, осталось ~{rate * (len(tasks) - i) / 3600:.1f} ч")
+            done_ok = sum(1 for f in futures if f.done() and f.result())
+            log(f"прогресс {i}/{len(tasks)}, в каталоге {done_ok}, {rate:.1f} с/трек, осталось ~{rate * (len(tasks) - i) / 3600:.1f} ч")
+    pool.shutdown(wait=True)
+    ok = sum(1 for f in futures if f.result())
     log(f"SA3 готово: {ok} из {len(tasks)}")
 
 
