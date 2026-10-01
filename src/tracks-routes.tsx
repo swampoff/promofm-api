@@ -13,6 +13,7 @@ import { profileLimiter, playLimiter } from './rate-limiter.tsx';
 import { logUserAction } from './audit-helper.tsx';
 import { scheduleAiCheck } from './ai-check.tsx';
 import { notifyTrackUpload } from './email-helper.tsx';
+import { sendTrackFile } from './track-file.tsx';
 
 /**
  * Streaming-link validator. Возвращает '' для пустой / битой ссылки,
@@ -534,44 +535,9 @@ tracksRoutes.get('/:id/download', htmlDenialFallback, requireAuth, async (c) => 
       `city=${profile.city || '?'} -> ${track.audio_url}`
     );
 
-    // Отдаём файл сами, а не редиректом на audio_url. Жалоба радиостанции
-    // 2026-08-11: «скачивается без названия трека» — на диске имена
-    // технические, кириллица при загрузке терялась
-    // («_________________97100179.wav»). Теперь имя человеческое:
-    // «Артист - Название.mp3» (ASCII-версия + RFC 5987 для кириллицы).
-    try {
-      const rel = String(track.audio_url).replace(/^https?:\/\/[^/]+/, '');
-      const decoded = decodeURIComponent(rel);
-      const diskName = decoded.split('/').pop() || '';
-      const ext = (decoded.match(/\.([a-z0-9]{2,5})$/i)?.[1] || 'mp3').toLowerCase();
-      const { existsSync, statSync, createReadStream } = await import('node:fs');
-      const { join, resolve } = await import('node:path');
-      const uploadsRoot = process.env.UPLOADS_DIR || '/var/www/promofm/uploads';
-      const subdir = decoded.includes('/track-audio/') ? 'track-audio' : 'tracks';
-
-      let filePath = '';
-      for (const base of [
-        join(uploadsRoot, subdir, 'uploads'),
-        join(uploadsRoot, subdir),
-        '/opt/promofm-api/uploads/tracks',
-      ]) {
-        const candidate = resolve(base, diskName);
-        if (candidate.startsWith(resolve(base)) && existsSync(candidate)) { filePath = candidate; break; }
-      }
-
-      if (filePath) {
-        const clean = (x: string) => String(x || '').replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim();
-        const nice = `${clean(track.artist_name) || 'Artist'} - ${clean(track.title) || 'Track'}.${ext}`;
-        const ascii = nice.replace(/[^\x20-\x7E]/g, '_');
-        c.header('Content-Type', ext === 'wav' ? 'audio/wav' : 'audio/mpeg');
-        c.header('Content-Length', String(statSync(filePath).size));
-        c.header('Content-Disposition',
-          `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(nice)}`);
-        return c.body(createReadStream(filePath) as any);
-      }
-    } catch (e: any) {
-      console.warn('[tracks/download] stream failed, fallback to redirect:', e?.message || e);
-    }
+    // Файл отдаём сами с человеческим именем (track-file.tsx, жалоба 2026-08-11).
+    const sent = await sendTrackFile(c, track);
+    if (sent) return sent;
     // Файл не найден на диске — старое поведение как запасной путь.
     return c.redirect(track.audio_url, 302);
   } catch (error) {

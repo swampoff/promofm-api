@@ -94,6 +94,7 @@ import spotifyCuratorApp from './spotify-curator-routes.tsx';
 import newsAgentRoutes from './news-agent-routes.tsx';
 import releaseAgentRoutes from "./release-agent-routes.tsx";
 import radioDigestRoutes from './radio-digest-routes.tsx';
+import radioGetRoutes from './radio-get-routes.tsx';
 import venueCampaignRoutes from './venue-campaign-routes.tsx';
 import aiScoreRoutes from './ai-score-routes.tsx';
 import catalogRoutes from './catalog-routes.tsx';
@@ -480,6 +481,8 @@ app.route("/server/api/news-voice", newsVoiceRoutes);
 app.route("/server/api/broadcast", newsBroadcastRoutes);
 app.route("/server/api/release-agent", releaseAgentRoutes);
 app.route('/server/api/radio-digest', radioDigestRoutes);
+// Скачивание треков станциями по личной ссылке из письма, без входа (01.10.2026)
+app.route('/server/api/radio-get', radioGetRoutes);
 app.route('/server/api/venue-campaign', venueCampaignRoutes);
 app.route('/server/api/ai-score', aiScoreRoutes);
 app.route('/server/api/catalog', catalogRoutes);

@@ -311,6 +311,23 @@ publication fee. Source: `tracks-page.tsx:775` (Promomusicfigma) +
   `track-download-helper.tsx:191` — простой `createReadStream` +
   `Readable.toWeb` без модификации содержимого.
 
+### Скачивание треков станциями из письма «Новинки недели» (с 01.10.2026)
+
+- В еженедельном письме (`radio-digest-routes.tsx` `/run-weekly`) кнопка «Скачать» ведёт на
+  `/server/api/radio-get/:trackId?k=<ключ>` — личная ссылка получателя, вход в кабинет НЕ нужен.
+  Ключ — `radio-dl-token.tsx`: `u.<users.id>` (аккаунт станции), `p.<radio_partner_contacts.id>`
+  (партнёрский контакт без аккаунта), `t.<нули>` (служебная копия на info@ и `?test=`, не учитывается).
+- Страница (`radio-get-routes.tsx`): плеер, кнопка «Скачать», анкета станции (название, город, формат,
+  ссылка на эфир → `radio_profiles` / `radio_partner_contacts`), остальные треки подборки.
+  Прямой ссылки на файл в HTML нет: адрес `/file?…&go=1` собирает скрипт по нажатию, чтобы проверка
+  ссылок Mail.ru (79.137.*, 12:00–12:08 после рассылки) не засчитывалась скачиванием.
+- Учёт: `track_downloads_by_radio` (`via='email_link'`, `user_id` ИЛИ `partner_contact_id`); повтор той же
+  станции и трека в течение 30 мин не пишется, боты по User-Agent не пишутся. Артист видит станции в
+  аналитике скачиваний (`artist-analytics-routes.tsx` `/downloads/:artistId`).
+- Старый путь `GET /server/api/tracks/:id/download` (вход + `radio_profiles.is_verified`) остаётся для кабинета.
+- Файл отдаёт `track-file.tsx` (`sendTrackFile`, `Readable.toWeb`). До 01.10 там был `c.body(createReadStream())`:
+  после отдачи файла процесс падал с «ReadableStream is already closed».
+
 ### Слушающий сервис и хранилища
 
 - **Мониторинг 7 станций seed:** `src/migrations/010_promo_check_monitoring_seed.sql` (`promo_check_monitoring` rows со

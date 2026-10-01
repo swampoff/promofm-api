@@ -25,6 +25,7 @@ import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { sendEmail, escapeHtml } from './email-helper.tsx';
 import { smtpSendBatch } from './smtp-sender.tsx';
+import { makeRadioDownloadKey, TEST_RECIPIENT_ID } from './radio-dl-token.tsx';
 
 const radioDigest = new Hono();
 
@@ -192,7 +193,9 @@ function weeklyTrackCard(t: WeeklyTrack, i: number): string {
   // публичную страницу новинок с плеером (логин не нужен), а скачивание
   // вынесено отдельной кнопкой на защищённый эндпоинт с учётом выдач.
   const listen = `${SITE_URL}/novinki-nedeli`;
-  const download = `${SITE_URL}/server/api/tracks/${t.id}/download`;
+  // 01.10.2026: личная ссылка станции без входа (radio-get-routes.tsx).
+  // {{dlkey}} подставляет smtpSendBatch на каждого получателя.
+  const download = `${SITE_URL}/server/api/radio-get/${t.id}?k={{dlkey}}`;
   const coverCell = cover
     ? `<img src="${escapeHtml(cover)}" width="64" height="64" alt="" style="border-radius:10px;display:block;" />`
     : `<div style="width:64px;height:64px;border-radius:10px;background:${COVER_GRADIENTS[i % COVER_GRADIENTS.length]};text-align:center;line-height:64px;color:#fff;font-size:24px;font-weight:700;">&#9834;</div>`;
@@ -301,7 +304,7 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
     <tr><td align="center" style="padding:18px 40px 8px;">
       <a href="${releasesUrl}" style="display:inline-block;padding:15px 38px;background:linear-gradient(135deg,#FF577F 0%,#7C3AED 100%);color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:16px;">Открыть все новинки недели</a>
     </td></tr>
-    <tr><td align="center" style="padding:4px 40px 24px;color:#8a8aa0;font-size:13px;">Слушать можно сразу, без входа в кабинет. Вход нужен только для скачивания файлов.</td></tr>
+    <tr><td align="center" style="padding:4px 40px 24px;color:#8a8aa0;font-size:13px;">Слушать и скачивать можно сразу, без входа в кабинет: кнопки «Скачать» в этом письме личные, для вашей станции.</td></tr>
     <tr><td style="padding:24px 40px 30px;border-top:1px solid #2a2a45;text-align:center;">
       <img src="${SITE_URL}/logo.png" alt="ПРОМО.МУЗЫКА" height="30" style="height:30px;margin-bottom:12px;border:0;" />
       <p style="margin:0 0 6px;color:#c8c8d8;font-size:13px;font-weight:600;">Команда ПРОМО.МУЗЫКА</p>
@@ -319,9 +322,9 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
  *   3) info@promofm.ru (копия оператору для ручной пересылки тем, кого нет в б/д).
  * Дедуп по lower(email). Глобально отписанные (email_unsubscribes) отсекаются.
  */
-export async function getWeeklyRecipients(client: any): Promise<{ email: string; name: string }[]> {
+export async function getWeeklyRecipients(client: any): Promise<{ email: string; name: string; dlkey: string }[]> {
   const users = await client.query(
-    `SELECT u.email AS email,
+    `SELECT u.id::text AS id, u.email AS email,
             COALESCE(NULLIF(u.full_name, ''), split_part(u.email, '@', 1)) AS name
        FROM users u
       WHERE u.role = 'radio_station'
@@ -332,7 +335,7 @@ export async function getWeeklyRecipients(client: any): Promise<{ email: string;
     // ГПМ/ЕМГ/НРА и т.п.). Музыкальный дайджест «забирайте треки в ротацию» им
     // слать НЕЛЬЗЯ (не та аудитория) — исключаем из weekly. Они в базе для
     // рекламного аутрича + суппрессии, но не для music-рассылки.
-    `SELECT email, station_name AS name
+    `SELECT id::text AS id, email, station_name AS name
        FROM radio_partner_contacts
       WHERE active = TRUE AND unsubscribed_at IS NULL
         AND email IS NOT NULL AND email <> ''
@@ -341,16 +344,18 @@ export async function getWeeklyRecipients(client: any): Promise<{ email: string;
   const unsub = await client.query(`SELECT LOWER(email) AS email FROM email_unsubscribes`);
   const unsubSet = new Set<string>(unsub.rows.map((r: any) => r.email));
 
-  const map = new Map<string, { email: string; name: string }>();
-  const push = (rawEmail: string, rawName: string) => {
+  const map = new Map<string, { email: string; name: string; dlkey: string }>();
+  // dlkey — личный ключ ссылок «Скачать» (radio-dl-token.tsx): u — аккаунт станции,
+  // p — партнёрский контакт, t — служебная копия (скачивания не учитываются).
+  const push = (rawEmail: string, rawName: string, dlkey: string) => {
     const email = String(rawEmail || '').trim();
     const key = email.toLowerCase();
     if (!email || !key.includes('@') || unsubSet.has(key) || map.has(key)) return;
-    map.set(key, { email, name: String(rawName || '').trim() || email.split('@')[0] });
+    map.set(key, { email, name: String(rawName || '').trim() || email.split('@')[0], dlkey });
   };
-  for (const r of users.rows) push(r.email, r.name);
-  for (const r of partners.rows) push(r.email, r.name);
-  push(DIGEST_RECIPIENT, 'ПРОМО.ФМ');
+  for (const r of users.rows) push(r.email, r.name, makeRadioDownloadKey('u', r.id));
+  for (const r of partners.rows) push(r.email, r.name, makeRadioDownloadKey('p', r.id));
+  push(DIGEST_RECIPIENT, 'ПРОМО.ФМ', makeRadioDownloadKey('t', TEST_RECIPIENT_ID));
   return [...map.values()];
 }
 
@@ -426,7 +431,7 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
     // ?test=<email> — превью одному получателю, БЕЗ штампов курсоров/last_sent_at
     const testEmail = (c.req.query('test') || '').trim() || null;
     const recipients = testEmail
-      ? [{ email: testEmail, name: 'ТЕСТ-превью' }]
+      ? [{ email: testEmail, name: 'ТЕСТ-превью', dlkey: makeRadioDownloadKey('t', TEST_RECIPIENT_ID) }]
       : await getWeeklyRecipients(client);
     if (recipients.length === 0) {
       return c.json({ success: true, sent: 0, message: 'no radio recipients' });
@@ -445,7 +450,7 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
     const finishInBackground = async () => {
       try {
         const result = await smtpSendBatch(
-          recipients.map(r => ({ email: r.email, vars: { name: r.name } })),
+          recipients.map(r => ({ email: r.email, vars: { name: r.name, dlkey: r.dlkey } })),
           subject,
           html,
           { batchSize: 50, delayMs: 2000, replyTo: DIGEST_RECIPIENT }
