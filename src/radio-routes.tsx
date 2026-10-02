@@ -1548,16 +1548,20 @@ app.post('/rotations/report', requireAuth, requireRole('radio_station'), async (
     // об uq_trp_track_station_city. confirmed не понижается; source
     // становится radio_self_report (реальный отчёт вытесняет декор).
     const insRes = await pool.query(
-      `INSERT INTO track_radio_pickups (track_id, station_name, city, region, country, picked_up_at, source, rotation_count, aired_at, report_status, submitted_by_user_id)
-        VALUES ($1, $2, $3, $4, 'Россия', NOW(), 'radio_self_report', $5, $6, $7, $8)
+      `INSERT INTO track_radio_pickups (track_id, station_name, city, region, country, picked_up_at, source, rotation_count, aired_at, report_status, submitted_by_user_id, submitted_via)
+        VALUES ($1, $2, $3, $4, 'Россия', NOW(), 'radio_self_report', $5, $6, $7, $8, 'cabinet')
         ON CONFLICT (track_id, station_name, city) DO UPDATE SET
           rotation_count = track_radio_pickups.rotation_count + EXCLUDED.rotation_count,
           aired_at = GREATEST(COALESCE(track_radio_pickups.aired_at, EXCLUDED.aired_at), EXCLUDED.aired_at),
+          -- строка-декор source='auto' «confirmed» по умолчанию — она не должна
+          -- делать отчёт станции подтверждённым (01.10.2026)
           report_status = CASE
-            WHEN track_radio_pickups.report_status = 'confirmed' OR EXCLUDED.report_status = 'confirmed'
+            WHEN (track_radio_pickups.source <> 'auto' AND track_radio_pickups.report_status = 'confirmed')
+                 OR EXCLUDED.report_status = 'confirmed'
             THEN 'confirmed' ELSE EXCLUDED.report_status END,
           source = EXCLUDED.source,
-          submitted_by_user_id = EXCLUDED.submitted_by_user_id
+          submitted_by_user_id = EXCLUDED.submitted_by_user_id,
+          submitted_via = EXCLUDED.submitted_via
         RETURNING id, report_status`,
       [trackId, finalStationName, city || null, region || null, rc, airedAt, autoConfirm ? 'confirmed' : 'pending', userId]
     );
@@ -1626,10 +1630,13 @@ app.get('/admin/rotation-reports', requireAuth, async (c) => {
       `SELECT trp.id, trp.track_id, trp.station_name, trp.city, trp.region, trp.rotation_count,
               trp.aired_at, trp.report_status, trp.picked_up_at, trp.submitted_by_user_id, trp.rejection_reason,
               t.title as track_title, t.artist_name, t.cover_url, t.user_id as artist_user_id,
-              u.email as radio_email
+              COALESCE(u.email, pc.email) as radio_email, trp.submitted_via
        FROM track_radio_pickups trp
        LEFT JOIN tracks t ON t.id = trp.track_id
        LEFT JOIN users u ON u.id = trp.submitted_by_user_id
+       -- отметки со страницы скачивания по личной ссылке (radio-get-routes.tsx):
+       -- у партнёрского контакта аккаунта нет, почта — из radio_partner_contacts
+       LEFT JOIN radio_partner_contacts pc ON pc.id = trp.submitted_by_partner_contact_id
        WHERE trp.report_status = $1 ORDER BY trp.picked_up_at DESC LIMIT 200`,
       [status]
     );

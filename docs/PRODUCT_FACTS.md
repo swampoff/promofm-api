@@ -328,6 +328,16 @@ publication fee. Source: `tracks-page.tsx:775` (Promomusicfigma) +
 - Файл отдаёт `track-file.tsx` (`sendTrackFile`, `Readable.toWeb`). До 01.10 там был `c.body(createReadStream())`:
   после отдачи файла процесс падал с «ReadableStream is already closed».
 
+- «Отметить, что трек в эфире» на той же странице → `POST /server/api/radio-get/rotation {k, track_id}` →
+  `track_radio_pickups` (`source='radio_self_report'`, `submitted_via='email_link'`, `submitted_by_user_id` или
+  `submitted_by_partner_contact_id`). Станция скачивала трек → `confirmed` (артист видит сразу, SSE
+  `radio_rotation_confirmed`), не скачивала → `pending` (модерация `/api/radio/admin/rotation-reports`).
+  Не чаще раза в 20 ч на трек от получателя письма. Строка-декор `auto` не делает отчёт подтверждённым
+  (то же исправлено в кабинетном `POST /api/radio/rotations/report`, он пишет `submitted_via='cabinet'`).
+- Публичные счётчики «станции/города» (`landing-data-routes.tsx` /new-releases и airplay, `weekly-releases-routes.tsx`)
+  считают ВСЕ строки `track_radio_pickups`, включая отчёты станций на модерации (`pending`) и отклонённые.
+  Решение владельца 02.10.2026: «на витрине для не наших специальная статистика, она должна остаться» — не фильтровать.
+
 ### Слушающий сервис и хранилища
 
 - **Мониторинг 7 станций seed:** `src/migrations/010_promo_check_monitoring_seed.sql` (`promo_check_monitoring` rows со

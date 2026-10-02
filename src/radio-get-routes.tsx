@@ -9,7 +9,8 @@
  *   GET  /:trackId?k=<ключ>          — страница трека: плеер, кнопка «Скачать»,
  *                                       анкета «для какой станции», остальные новинки недели;
  *   GET  /:trackId/file?k=..&go=1     — сам файл + запись в track_downloads_by_radio;
- *   POST /station   {k, station_name, city, format, stream_url} — анкета.
+ *   POST /station   {k, station_name, city, format, stream_url} — анкета;
+ *   POST /rotation  {k, track_id} — «Отметить, что трек в эфире» (отчёт станции о ротации).
  *
  * Ключ — radio-dl-token.tsx (HMAC получателя письма). Учёт выдач сохраняется:
  * скачивание пишется за конкретной станцией (аккаунт или партнёрский контакт).
@@ -115,7 +116,7 @@ async function resolveRecipient(key: unknown): Promise<Recipient | null> {
 async function loadTrack(trackId: string) {
   if (!UUID_RE.test(trackId)) return null;
   const r = await pool.query(
-    `SELECT id, title, artist_name, genre, audio_url, cover_url, duration, moderation_status
+    `SELECT id, title, artist_name, genre, audio_url, cover_url, duration, moderation_status, user_id
        FROM tracks WHERE id = $1 LIMIT 1`,
     [trackId],
   );
@@ -182,6 +183,8 @@ const STYLE = `
  .muted{color:#8a8aa0;font-size:12px;text-align:center;margin-top:20px}
  .muted a{color:#FF8FA8;text-decoration:none}
  .hidden{display:none}
+ .air{margin-top:14px;padding-top:14px;border-top:1px solid rgba(255,255,255,.08)}
+ button:disabled{opacity:.6;cursor:default}
 `;
 
 function page(title: string, body: string, status = 200, c?: any) {
@@ -264,12 +267,17 @@ app.get('/:trackId', async (c) => {
  <audio controls preload="none" src="${escapeHtml(abs(t.audio_url))}"></audio>
  <button type="button" class="btn primary" data-dl="${escapeHtml(t.id)}">&#8681; Скачать трек</button>
  <p class="note">Файл придёт с названием «${escapeHtml(t.artist_name || 'Артист')} - ${escapeHtml(t.title || 'Трек')}». Трек можно брать в эфир: артист разместил его на ПРОМО.МУЗЫКЕ для ротации на радио.</p>
+ <div class="air">
+  <button type="button" class="btn ghost" id="markAir" data-track="${escapeHtml(t.id)}">&#127908; Отметить, что трек в эфире</button>
+  <p class="note" id="airHint">Нажмите, если трек уже звучит на вашей станции. Артист увидит отметку в своём кабинете.</p>
+ </div>
 </div>
 ${stationForm(rcp)}
 ${otherRows ? `<div class="card"><h2>Ещё в подборке этой недели</h2>${otherRows}</div>` : ''}
 <script>
 (function(){
  var K=${JSON.stringify(key)};
+ var NEED_NAME=${rcp.nameUnknown ? 'true' : 'false'};
  document.querySelectorAll('[data-dl]').forEach(function(b){
   b.addEventListener('click',function(){
    location.href='/server/api/radio-get/'+b.getAttribute('data-dl')+'/file?k='+encodeURIComponent(K)+'&go=1';
@@ -283,8 +291,22 @@ ${otherRows ? `<div class="card"><h2>Ещё в подборке этой нед�
   ['station_name','city','format','stream_url'].forEach(function(n){d[n]=f.elements[n].value;});
   fetch('/server/api/radio-get/station',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)})
    .then(function(r){return r.json();})
-   .then(function(j){var s=document.getElementById('saved');s.textContent=j.success?'Спасибо, сохранили.':(j.error||'Не получилось сохранить');s.classList.remove('hidden');})
+   .then(function(j){var s=document.getElementById('saved');s.textContent=j.success?'Спасибо, сохранили.':(j.error||'Не получилось сохранить');s.classList.remove('hidden');
+    if(j.success&&f.elements['station_name'].value.trim()){NEED_NAME=false;}})
    .catch(function(){var s=document.getElementById('saved');s.textContent='Не получилось сохранить';s.classList.remove('hidden');});
+ });}
+ var m=document.getElementById('markAir'), h=document.getElementById('airHint');
+ if(m){m.addEventListener('click',function(){
+  if(NEED_NAME){
+   if(f){f.classList.remove('hidden');if(e){e.classList.add('hidden');}f.elements['station_name'].focus();}
+   h.textContent='Сначала укажите ниже название станции и нажмите «Сохранить», потом отметьте эфир.';
+   return;
+  }
+  m.disabled=true;
+  fetch('/server/api/radio-get/rotation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({k:K,track_id:m.getAttribute('data-track')})})
+   .then(function(r){return r.json();})
+   .then(function(j){h.textContent=j.message||j.error||'Готово';if(!j.success){m.disabled=false;}})
+   .catch(function(){h.textContent='Не получилось отправить, попробуйте ещё раз';m.disabled=false;});
  });}
 })();
 </script>`;
@@ -398,6 +420,114 @@ app.post('/station', async (c) => {
   } catch (err: any) {
     console.error('[radio-get] station save failed:', err?.message || err);
     return c.json({ success: false, error: 'Не получилось сохранить' }, 500);
+  }
+});
+
+// ── POST /rotation — «Отметить, что трек в эфире» ───────────────────────────
+//
+// Отчёт станции о ротации — те же правила, что у кабинета (radio-routes.tsx
+// POST /rotations/report): source='radio_self_report'; станция скачивала трек →
+// confirmed (виден артисту сразу), не скачивала → pending (модерация).
+// Отличия:
+//   - работает по личному ключу из письма, в т.ч. для партнёрского контакта
+//     без аккаунта (submitted_by_partner_contact_id);
+//   - не чаще раза в 20 ч на трек+станцию: повторное нажатие не накручивает
+//     rotation_count (условие в ON CONFLICT … WHERE, атомарно — двойной клик тоже);
+//   - строка-декор source='auto' не делает отчёт подтверждённым и не даёт
+//     ему свой rotation_count.
+// В публичных текстах это «заявлено станцией», не «звучит»: эфир подтверждает
+// только PROMO.CHECK (promo_check_detections).
+app.post('/rotation', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({} as any));
+    const rcp = await resolveRecipient(body?.k);
+    if (!rcp) return c.json({ success: false, error: 'Ссылка не подходит' }, 403);
+    const t = await loadTrack(String(body?.track_id || ''));
+    if (!t) return c.json({ success: false, error: 'Трек недоступен' }, 404);
+    if (rcp.kind === 't') {
+      return c.json({ success: true, test: true, message: 'Тестовое письмо: отметка не сохраняется.' });
+    }
+    if (rcp.nameUnknown || !rcp.stationName) {
+      return c.json({ success: false, code: 'station_required', error: 'Сначала укажите название станции' }, 400);
+    }
+
+    // Раз в сутки на трек от этого получателя письма — даже если он переименовал
+    // станцию в анкете (тогда ON CONFLICT попал бы в новую строку).
+    const recent = await pool.query(
+      `SELECT 1 FROM track_radio_pickups
+        WHERE track_id = $1 AND submitted_via = 'email_link'
+          AND (($2::uuid IS NOT NULL AND submitted_by_user_id = $2::uuid)
+               OR ($3::uuid IS NOT NULL AND submitted_by_partner_contact_id = $3::uuid))
+          AND aired_at > NOW() - INTERVAL '20 hours'
+        LIMIT 1`,
+      [t.id, rcp.userId, rcp.partnerId],
+    );
+    if (recent.rows.length) {
+      return c.json({ success: true, already: true, message: 'Сегодня вы уже отмечали этот трек. Спасибо!' });
+    }
+
+    const dl = await pool.query(
+      `SELECT 1 FROM track_downloads_by_radio
+        WHERE track_id = $1
+          AND (($2::uuid IS NOT NULL AND user_id = $2::uuid) OR ($3::uuid IS NOT NULL AND partner_contact_id = $3::uuid))
+        LIMIT 1`,
+      [t.id, rcp.userId, rcp.partnerId],
+    );
+    const status = dl.rows.length ? 'confirmed' : 'pending';
+    const stationName = rcp.stationName.slice(0, 255);
+    const city = rcp.city ? rcp.city.slice(0, 255) : null;
+
+    const r = await pool.query(
+      `INSERT INTO track_radio_pickups
+         (track_id, station_name, city, country, picked_up_at, source, rotation_count, aired_at,
+          report_status, submitted_by_user_id, submitted_by_partner_contact_id, submitted_via)
+       VALUES ($1, $2, $3, NULL, NOW(), 'radio_self_report', 1, NOW(), $4, $5, $6, 'email_link')
+       ON CONFLICT (track_id, station_name, city) DO UPDATE SET
+         rotation_count = CASE WHEN track_radio_pickups.source = 'auto' THEN 1
+                               ELSE COALESCE(track_radio_pickups.rotation_count, 0) + 1 END,
+         aired_at = NOW(),
+         report_status = CASE
+           WHEN track_radio_pickups.source <> 'auto' AND track_radio_pickups.report_status = 'confirmed' THEN 'confirmed'
+           ELSE EXCLUDED.report_status END,
+         source = 'radio_self_report',
+         submitted_by_user_id = COALESCE(EXCLUDED.submitted_by_user_id, track_radio_pickups.submitted_by_user_id),
+         submitted_by_partner_contact_id = COALESCE(EXCLUDED.submitted_by_partner_contact_id, track_radio_pickups.submitted_by_partner_contact_id),
+         submitted_via = 'email_link'
+       WHERE track_radio_pickups.aired_at IS NULL OR track_radio_pickups.aired_at < NOW() - INTERVAL '20 hours'
+       RETURNING report_status`,
+      [t.id, stationName, city, status, rcp.userId, rcp.partnerId],
+    );
+    if (!r.rows.length) {
+      return c.json({ success: true, already: true, message: 'Сегодня вы уже отмечали этот трек. Спасибо!' });
+    }
+    const finalStatus = r.rows[0].report_status as string;
+    console.log(`[radio-get] rotation ${rcp.kind}:${rcp.id} station="${stationName}" track=${t.id} status=${finalStatus}`);
+
+    if (finalStatus === 'confirmed' && t.user_id) {
+      try {
+        const { emitSSE } = await import('./sse-routes.tsx');
+        emitSSE(String(t.user_id), {
+          type: 'radio_rotation_confirmed',
+          data: {
+            title: 'Станция отметила ваш трек в эфире',
+            message: `«${t.title}»: ${stationName}${city ? ', ' + city : ''}`,
+            trackId: t.id,
+            link: '/artist',
+          },
+        });
+      } catch { /* уведомление best-effort */ }
+    }
+
+    return c.json({
+      success: true,
+      status: finalStatus,
+      message: finalStatus === 'confirmed'
+        ? `Спасибо! Отметили: трек в эфире у «${stationName}». Артист увидит это в своём кабинете.`
+        : 'Спасибо! Отметку проверит модератор, после этого её увидит артист. Скачайте трек кнопкой выше: тогда следующие отметки засчитываются сразу.',
+    });
+  } catch (err: any) {
+    console.error('[radio-get] rotation failed:', err?.message || err);
+    return c.json({ success: false, error: 'Не получилось сохранить отметку' }, 500);
   }
 });
 
