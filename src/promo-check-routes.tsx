@@ -112,6 +112,77 @@ app.get("/artist/:artistId", requireAuth, requireOwner("artistId"), async (c) =>
   });
 });
 
+// ─── PROMO.CHECK Live: подтверждённые проигрывания артиста ────────────────────
+//
+// Источник — promo_check_plays (promo-check/live_monitor.py, с 02.10.2026): станции
+// слушаются непрерывно, засчитывается ТОЛЬКО наш водяной знак, одна строка = одно
+// проигрывание. Отпечатки сюда не попадают, поэтому это «настоящие ротации».
+// artistId — users.id (как у /artist/:artistId выше: фильтр по tracks.user_id).
+app.get("/plays/artist/:artistId", requireAuth, requireOwner("artistId"), async (c) => {
+  const { artistId } = c.req.param();
+  const raw = c.req.query("days") || "30";
+  const days = raw === "all" ? 3650 : Math.max(1, Math.min(Number(raw) || 30, 3650));
+  const params = [artistId, String(days)];
+  const since = `p.started_at >= NOW() - ($2 || ' days')::interval`;
+  try {
+    const [totals, byStation, byTrack, recent, monitored] = await Promise.all([
+      query<{ plays: string; stations: string; tracks: string; first_play: string | null; last_play: string | null }>(
+        `SELECT COUNT(*) AS plays, COUNT(DISTINCT p.station_id) AS stations, COUNT(DISTINCT p.track_id) AS tracks,
+                MIN(p.started_at) AS first_play, MAX(p.started_at) AS last_play
+           FROM promo_check_plays p JOIN tracks t ON t.id = p.track_id
+          WHERE t.user_id = $1 AND ${since}`, params),
+      query<{ station_name: string; plays: string; last_play: string }>(
+        `SELECT p.station_name, COUNT(*) AS plays, MAX(p.started_at) AS last_play
+           FROM promo_check_plays p JOIN tracks t ON t.id = p.track_id
+          WHERE t.user_id = $1 AND ${since}
+          GROUP BY p.station_name ORDER BY plays DESC, last_play DESC`, params),
+      query<{ track_id: string; title: string; plays: string; last_play: string }>(
+        `SELECT t.id AS track_id, t.title, COUNT(*) AS plays, MAX(p.started_at) AS last_play
+           FROM promo_check_plays p JOIN tracks t ON t.id = p.track_id
+          WHERE t.user_id = $1 AND ${since}
+          GROUP BY t.id, t.title ORDER BY plays DESC, last_play DESC`, params),
+      query<{ track_id: string; title: string; station_name: string; started_at: string; last_heard_at: string; hits: number }>(
+        `SELECT t.id AS track_id, t.title, p.station_name, p.started_at, p.last_heard_at, p.hits
+           FROM promo_check_plays p JOIN tracks t ON t.id = p.track_id
+          WHERE t.user_id = $1 AND ${since}
+          ORDER BY p.started_at DESC LIMIT 100`, params),
+      query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM promo_check_live_status WHERE capture_state = 'running'`),
+    ]);
+    const t = totals.rows[0];
+    return c.json({
+      success: true,
+      period_days: raw === "all" ? "all" : days,
+      method: "watermark",
+      total_plays: parseInt(t?.plays || "0"),
+      stations_count: parseInt(t?.stations || "0"),
+      tracks_count: parseInt(t?.tracks || "0"),
+      first_play: t?.first_play || null,
+      last_play: t?.last_play || null,
+      monitored_stations: parseInt(monitored.rows[0]?.n || "0"),
+      by_station: byStation.rows.map((r) => ({ station_name: r.station_name, plays: parseInt(r.plays), last_play: r.last_play })),
+      by_track: byTrack.rows.map((r) => ({ track_id: r.track_id, title: r.title, plays: parseInt(r.plays), last_play: r.last_play })),
+      recent: recent.rows,
+    });
+  } catch (err: any) {
+    console.error("[promo-check] plays failed:", err?.message || err);
+    return c.json({ success: false, error: "Не удалось загрузить эфиры" }, 500);
+  }
+});
+
+// Состояние непрерывного мониторинга по станциям — только админ.
+app.get("/live/status", requireAuth, async (c) => {
+  const isAdmin = (c.get("userRole") === "admin" || c.get("userRole") === "superadmin") && isAdminEmail(c.get("userEmail"));
+  if (!isAdmin) return c.json({ success: false, error: "Forbidden" }, 403);
+  const r = await query(
+    `SELECT s.station_name, s.capture_state, s.last_segment_at, s.segments_ok, s.segments_skipped,
+            s.hits_total, s.last_error, s.updated_at,
+            (SELECT COUNT(*) FROM promo_check_plays p WHERE p.station_id = s.station_id) AS plays_total,
+            (SELECT MAX(p.started_at) FROM promo_check_plays p WHERE p.station_id = s.station_id) AS last_play
+       FROM promo_check_live_status s ORDER BY s.station_name`);
+  return c.json({ success: true, stations: r.rows });
+});
+
 // ─── Recent detections feed ───────────────────────────────────────────────────
 
 app.get("/detections", requireAuth, async (c) => {
