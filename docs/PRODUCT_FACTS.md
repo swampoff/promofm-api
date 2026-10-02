@@ -338,6 +338,17 @@ publication fee. Source: `tracks-page.tsx:775` (Promomusicfigma) +
   считают ВСЕ строки `track_radio_pickups`, включая отчёты станций на модерации (`pending`) и отклонённые.
   Решение владельца 02.10.2026: «на витрине для не наших специальная статистика, она должна остаться» — не фильтровать.
 
+### PROMO.CHECK Live — настоящие эфиры по водяному знаку (с 02.10.2026)
+
+- `promo-check/live_monitor.py` (сервис `promo-check-live`) слушает активные станции `promo_check_monitoring`
+  непрерывно: 30-с куски, в каждом `audiowmark get`; засчитываются только наши watermark_id.
+- Находки склеиваются в проигрывания → `promo_check_plays` (одна строка = одна ротация: станция, трек/микс,
+  `started_at`, `last_heard_at`, `hits`, `max_score`, `evidence_path`). Состояние станций → `promo_check_live_status`.
+- Отпечатки (Chromaprint) сюда не попадают. Старый `monitor.py` (выборочно, 30 с раз в ~6 мин) и
+  `promo_check_detections` не менялись — на них стоит витрина.
+- Проверка 02.10.2026: водяной знак после эфирной обработки (loudnorm + компрессор + MP3 128k) виден в 7 из 7
+  случайных 30-с кусков; трек даёт 6–8 подтверждений за проигрывание.
+
 ### Слушающий сервис и хранилища
 
 - **Мониторинг 7 станций seed:** `src/migrations/010_promo_check_monitoring_seed.sql` (`promo_check_monitoring` rows со

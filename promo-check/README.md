@@ -35,3 +35,16 @@ reconcile-cron'ы подхватывают новый `fingerprinter.py` сра�
 `monitor.py`: loader → view `promo_check_all_fingerprints` (треки+миксы) + `record_detection()`
 dispatch по `content_type`. `db.py`: `insert_mix_detection` + `dedup_window_seconds`
 (окно = длительность микса). Гейт «Night» пройден (self-match → `dj_mix_detections`).
+
+## PROMO.CHECK Live — настоящие эфиры по водяному знаку (02.10.2026)
+`live_monitor.py` — сервис `promo-check-live.service` (юнит в этой папке, ставится в /etc/systemd/system).
+- Слушает каждую активную станцию из `promo_check_monitoring` НЕПРЕРЫВНО: ffmpeg режет поток на
+  30-с WAV-куски в `/dev/shm/promo-check-live/<station_id>/`, каждый кусок проверяется `audiowmark get`.
+- Засчитывает ТОЛЬКО наши watermark_id (`promo_check_all_fingerprints`), отпечатки не использует.
+- Находки склеиваются в проигрывания (тот же трек, та же станция, пауза ≤ 240 с) →
+  `promo_check_plays` (одна строка = одна ротация); состояние станций → `promo_check_live_status`.
+- Доказательство: первый кусок проигрывания в MP3 64k моно, `/var/lib/promo-check-live/evidence/<play_id>.mp3`, 90 дней.
+- Нагрузка ≈ 11 % ядра на станцию (audiowmark ≈ 1,7 с на 30 с эфира). Юнит: Nice=19, CPUQuota=120 %,
+  MemoryMax=900M; если декодер не успевает, старые куски отбрасываются (`segments_skipped`).
+- Старый `monitor.py` и `promo_check_detections` не меняются (на них стоит витрина).
+- Миграция 156. Установка: `cp promo-check-live.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now promo-check-live`.

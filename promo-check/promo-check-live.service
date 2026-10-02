@@ -1,0 +1,24 @@
+[Unit]
+Description=PROMO.CHECK Live — непрерывный подсчёт эфиров по водяному знаку
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/promofm-promo-check/live_monitor.py
+WorkingDirectory=/opt/promofm-promo-check
+User=promofm
+Group=promofm
+Environment=PYTHONUNBUFFERED=1
+# Сайт важнее мониторинга: самый низкий приоритет и потолок CPU/памяти.
+Nice=19
+IOSchedulingClass=idle
+CPUQuota=120%
+MemoryMax=900M
+StateDirectory=promo-check-live
+Restart=always
+RestartSec=30
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
