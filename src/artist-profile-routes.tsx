@@ -8,10 +8,9 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsListProfiles } from './vps-userdata.tsx';
 import { requireAuth, requireOwner } from './auth-middleware.tsx';
-import { profileLimiter, profileSaveLimiter } from './rate-limiter.tsx';
+import { profileSaveLimiter } from './rate-limiter.tsx';
 import { logUserAction } from './audit-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
-import { notifyAdminTelegram, escapeHtml } from './email-helper.tsx';
 
 const app = new Hono();
 
@@ -651,76 +650,14 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileSave
   }
 });
 
-/**
- * POST /request-verification
- * Artist submits a verification request. Admin processes via
- * POST /auth/admin/verify-profile { role: 'artist', isVerified }.
- *
- * Idempotent: re-clicking the button refreshes `verification_requested_at`
- * and clears any previous rejection reason, so an artist who was
- * rejected can submit a corrected request.
- */
-// Audit B-A2 (2026-05-31): profileLimiter — раньше можно было спамить
-// кнопку «Запросить верификацию» (заваливая admin-inbox).
-app.post('/request-verification', requireAuth, profileLimiter, async (c) => {
-  const userId = c.get('userId' as never) as string | undefined;
-  if (!userId) {
-    return c.json({ success: false, error: 'Не авторизован' }, 401);
-  }
-
-  try {
-    const { pool } = await import('./db-client.tsx');
-
-    const { rows } = await pool.query(
-      `SELECT is_verified, artist_name
-         FROM artist_profiles
-        WHERE user_id = $1
-        LIMIT 1`,
-      [userId],
-    );
-
-    if (rows.length === 0) {
-      return c.json({ success: false, error: 'Artist profile not found' }, 404);
-    }
-    if (rows[0].is_verified) {
-      return c.json(
-        { success: false, error: 'Профиль уже верифицирован' },
-        400,
-      );
-    }
-
-    await pool.query(
-      `UPDATE artist_profiles
-          SET verification_requested_at  = NOW(),
-              verification_rejection_reason = NULL
-        WHERE user_id = $1`,
-      [userId],
-    );
-
-    console.log(`[ArtistProfile] Verification requested by ${userId}`);
-    // Раньше о заявке не узнавал никто: на 2026-10-01 с мая висели 55
-    // заявок артистов. Сигнал админу — как у треков, видео и тикетов.
-    notifyAdminTelegram(
-      `✅ <b>Заявка на значок верификации</b>\n\nАртист: <b>${escapeHtml(String(rows[0].artist_name || userId))}</b>`
-      + `\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f/users">Пользователи</a>`,
-    ).catch(() => {});
-    logUserAction(c, {
-      action: 'artist_verification_request',
-      resourceType: 'artist_profile',
-      targetId: String(userId),
-    });
-    return c.json({
-      success: true,
-      message: 'Заявка на верификацию отправлена. Ожидайте рассмотрения администратором.',
-    });
-  } catch (error) {
-    console.error('[ArtistProfile] request-verification error:', error);
-    return c.json(
-      { success: false, error: 'Failed to submit verification request' },
-      500,
-    );
-  }
-});
+// Заявки на значок верификации больше нет (решение 2026-10-02): значок ничего
+// не открывал, а очередь заявок никто не разбирал (55 артистов ждали с мая).
+// Значок выдаёт администратор вручную — POST /auth/admin/verify-profile.
+// 410 — для вкладок, открытых со старым фронтом.
+app.post('/request-verification', (c) => c.json({
+  success: false,
+  error: 'Заявка на значок больше не нужна: кабинет полностью работает без неё.',
+}, 410));
 
 /**
  * GET /profile/:artistId/stats
