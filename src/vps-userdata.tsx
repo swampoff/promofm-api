@@ -19,7 +19,7 @@ export async function vpsGetProfile(userId: string): Promise<Record<string, unkn
               u.is_email_verified as "isEmailVerified", u.status as "accountStatus",
               u.bio, u.phone, u.website_url as website,
               u.instagram_url, u.youtube_url, u.twitter_url, u.facebook_url,
-              u.display_name as "displayName", u.created_at as "createdAt",
+              u.display_name as "displayName", u.created_at as "createdAt", u.username,
               p.genre, p.city, p.social_links as "socialLinks", p.data as "extraData"
        FROM users u
        LEFT JOIN profiles p ON p.user_id = u.id::text
@@ -33,6 +33,9 @@ export async function vpsGetProfile(userId: string): Promise<Record<string, unkn
       userId: row.userId,
       email: row.email,
       name: row.name || row.displayName || '',
+      // Сценическое имя (@handle) кабинета артиста — users.username.
+      // Раньше не отдавалось, и поле «Сценическое имя» всегда было пустым.
+      username: row.username || '',
       role: row.role || 'artist',
       avatar: row.avatar || null,
       avatarUrl: row.avatar || null,

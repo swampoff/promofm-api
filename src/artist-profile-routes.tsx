@@ -8,9 +8,10 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { vpsGetProfile, vpsSaveProfile, vpsListProfiles } from './vps-userdata.tsx';
 import { requireAuth, requireOwner } from './auth-middleware.tsx';
-import { profileLimiter } from './rate-limiter.tsx';
+import { profileLimiter, profileSaveLimiter } from './rate-limiter.tsx';
 import { logUserAction } from './audit-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { notifyAdminTelegram, escapeHtml } from './email-helper.tsx';
 
 const app = new Hono();
 
@@ -244,6 +245,109 @@ function sanitizeUpdates(updates: Record<string, unknown>): Partial<ArtistProfil
   return clean as Partial<ArtistProfile>;
 }
 
+/**
+ * Профиль в том виде, в каком его видит кабинет: строка users+profiles
+ * поверх канонических колонок artist_profiles. Один источник и для GET,
+ * и для ответа PUT — фронт кэширует ответ PUT как профиль, и если он
+ * беднее GET (без fullName, верификации, ярлыков), поля «пропадают»
+ * при повторном заходе в течение TTL кэша.
+ */
+async function loadFullProfile(artistId: string): Promise<ArtistProfile | null> {
+  const profileRow = await loadProfileRow(artistId);
+  if (!profileRow) return null;
+  // Normalize legacy rows that predate certain fields.
+  // vpsGetProfile отдаёт имя как `name` (users.full_name), ключа fullName в
+  // строке нет — раньше GET всегда возвращал fullName:'' и форма настроек
+  // показывала пустое «Имя артиста» после каждой перезагрузки (2026-10-01).
+  const normalized = makeProfile({
+    id: artistId,
+    email: profileRow.email || '',
+    ...profileRow,
+    fullName: profileRow.fullName || (profileRow as unknown as { name?: string }).name || '',
+  });
+
+  // Overlay canonical fields from artist_profiles. The users/profiles
+  // row was caching stats not recomputed since it was written —
+  // real artists with 30+ tracks saw "0 прослушиваний / 0 треков"
+  // on their public profile because cached totalPlays was 0.
+  // Pull live values + live published-track count.
+  const apRow = await lookupArtistProfileRow(artistId);
+  if (apRow) {
+    if (apRow.artist_name) normalized.artistName = apRow.artist_name as string;
+    if (apRow.total_plays != null) normalized.totalPlays = Number(apRow.total_plays);
+    if (apRow.total_followers != null) normalized.totalFollowers = Number(apRow.total_followers);
+    if (apRow.is_verified) normalized.isVerified = !!apRow.is_verified;
+    if (apRow.rating != null) normalized.rating = Number(apRow.rating);
+    // Migration 057 columns — surface them in the cached-profile
+    // response so refresh shows what the user just saved.
+    if (apRow.label         != null) normalized.label        = apRow.label         as string;
+    if (apRow.manager       != null) normalized.manager      = apRow.manager       as string;
+    if (apRow.booking_email != null) normalized.bookingEmail = apRow.booking_email as string;
+    if (apRow.career_start  != null) normalized.careerStart  = apRow.career_start  as string;
+    if (apRow.location      != null) normalized.location     = apRow.location      as string;
+    if (Array.isArray(apRow.languages) && apRow.languages.length > 0) {
+      normalized.languages = apRow.languages as string[];
+    }
+    // Migration 058 verification state — surface for the
+    // 3-state UI on settings-page.tsx ("not requested" /
+    // "pending" / "verified or rejected").
+    if (apRow.verification_requested_at != null) {
+      normalized.verificationRequestedAt = (apRow.verification_requested_at instanceof Date)
+        ? apRow.verification_requested_at.toISOString()
+        : String(apRow.verification_requested_at);
+    }
+    if (apRow.verification_approved_at != null) {
+      normalized.verificationApprovedAt = (apRow.verification_approved_at instanceof Date)
+        ? apRow.verification_approved_at.toISOString()
+        : String(apRow.verification_approved_at);
+    }
+    if (apRow.verification_rejection_reason != null) {
+      normalized.verificationRejectionReason = apRow.verification_rejection_reason as string;
+    }
+
+    try {
+      const { pool } = await import('./db-client.tsx');
+      // tracks.artist_id is UUID FK on artist_profiles.id — apRow.id
+      // comes back from PG as a UUID-typed value so no cast needed
+      // (matches existing path 3 query just below).
+      const { rows } = await pool.query(
+        `SELECT COUNT(*)::int AS cnt FROM tracks
+         WHERE artist_id = $1 AND moderation_status = 'published'`,
+        [apRow.id],
+      );
+      normalized.totalTracks = Number(rows[0]?.cnt ?? 0);
+    } catch { /* keep whatever the row had */ }
+
+    // Real cover (the canonical column, not the stale jsonb copy)
+    // and the live radio-airplay footprint — both feed the public
+    // profile hero. Missing/zero → the page hides them, never fakes.
+    if (apRow.cover_url) normalized.coverUrl = apRow.cover_url as string;
+    // Та же болезнь, что у cover: KV-копия профиля не знает про
+    // аватар/жанры/сайт, записанные в canonical SQL-колонки другими
+    // флоу (upload аватара, PUT формы). Строка таблицы выигрывает —
+    // иначе форма «сбрасывается» и артист заполняет её по кругу.
+    if (apRow.avatar_url) normalized.avatarUrl = apRow.avatar_url as string;
+    {
+      const rowGenres: string[] = (Array.isArray(apRow.sub_genres) && apRow.sub_genres.length > 0)
+        ? (apRow.sub_genres as string[])
+        : (apRow.genre ? [apRow.genre as string] : []);
+      if (rowGenres.length > 0 && (!Array.isArray(normalized.genres) || normalized.genres.length === 0)) {
+        normalized.genres = rowGenres;
+      }
+    }
+    if (apRow.website && !normalized.website) normalized.website = apRow.website as string;
+    if (apRow.social_links && typeof apRow.social_links === 'object'
+        && Object.values(normalized.socials ?? {}).every((v) => !v)) {
+      normalized.socials = apRow.social_links as Record<string, string>;
+    }
+    const reach = await computeRadioReach(String(apRow.id));
+    normalized.radioStations = reach.radioStations;
+    normalized.radioCities   = reach.radioCities;
+  }
+
+  return normalized;
+}
+
 // ── Routes ────────────────────────────────────────────────
 
 /**
@@ -259,96 +363,9 @@ app.get('/profile/:artistId', async (c) => {
     // 1. profiles-строка из users+profiles (152-ФЗ; только для UUID —
     //    slug'и резолвятся ниже, в шаге 3 по artist_profiles).
     if (isUuidParam) {
-      const profileRow = await loadProfileRow(artistId);
-      if (profileRow) {
-        // Normalize legacy rows that predate certain fields.
-        const normalized = makeProfile({
-          id: artistId,
-          email: profileRow.email || '',
-          fullName: profileRow.fullName || '',
-          ...profileRow,
-        });
-
-        // Overlay canonical fields from artist_profiles. The users/profiles
-        // row was caching stats not recomputed since it was written —
-        // real artists with 30+ tracks saw "0 прослушиваний / 0 треков"
-        // on their public profile because cached totalPlays was 0.
-        // Pull live values + live published-track count.
-        const apRow = await lookupArtistProfileRow(artistId);
-        if (apRow) {
-          if (apRow.artist_name) normalized.artistName = apRow.artist_name as string;
-          if (apRow.total_plays != null) normalized.totalPlays = Number(apRow.total_plays);
-          if (apRow.total_followers != null) normalized.totalFollowers = Number(apRow.total_followers);
-          if (apRow.is_verified) normalized.isVerified = !!apRow.is_verified;
-          if (apRow.rating != null) normalized.rating = Number(apRow.rating);
-          // Migration 057 columns — surface them in the cached-profile
-          // response so refresh shows what the user just saved.
-          if (apRow.label         != null) normalized.label        = apRow.label         as string;
-          if (apRow.manager       != null) normalized.manager      = apRow.manager       as string;
-          if (apRow.booking_email != null) normalized.bookingEmail = apRow.booking_email as string;
-          if (apRow.career_start  != null) normalized.careerStart  = apRow.career_start  as string;
-          if (apRow.location      != null) normalized.location     = apRow.location      as string;
-          if (Array.isArray(apRow.languages) && apRow.languages.length > 0) {
-            normalized.languages = apRow.languages as string[];
-          }
-          // Migration 058 verification state — surface for the
-          // 3-state UI on settings-page.tsx ("not requested" /
-          // "pending" / "verified or rejected").
-          if (apRow.verification_requested_at != null) {
-            normalized.verificationRequestedAt = (apRow.verification_requested_at instanceof Date)
-              ? apRow.verification_requested_at.toISOString()
-              : String(apRow.verification_requested_at);
-          }
-          if (apRow.verification_approved_at != null) {
-            normalized.verificationApprovedAt = (apRow.verification_approved_at instanceof Date)
-              ? apRow.verification_approved_at.toISOString()
-              : String(apRow.verification_approved_at);
-          }
-          if (apRow.verification_rejection_reason != null) {
-            normalized.verificationRejectionReason = apRow.verification_rejection_reason as string;
-          }
-
-          try {
-            const { pool } = await import('./db-client.tsx');
-            // tracks.artist_id is UUID FK on artist_profiles.id — apRow.id
-            // comes back from PG as a UUID-typed value so no cast needed
-            // (matches existing path 3 query just below).
-            const { rows } = await pool.query(
-              `SELECT COUNT(*)::int AS cnt FROM tracks
-               WHERE artist_id = $1 AND moderation_status = 'published'`,
-              [apRow.id],
-            );
-            normalized.totalTracks = Number(rows[0]?.cnt ?? 0);
-          } catch { /* keep whatever the row had */ }
-
-          // Real cover (the canonical column, not the stale jsonb copy)
-          // and the live radio-airplay footprint — both feed the public
-          // profile hero. Missing/zero → the page hides them, never fakes.
-          if (apRow.cover_url) normalized.coverUrl = apRow.cover_url as string;
-          // Та же болезнь, что у cover: KV-копия профиля не знает про
-          // аватар/жанры/сайт, записанные в canonical SQL-колонки другими
-          // флоу (upload аватара, PUT формы). Строка таблицы выигрывает —
-          // иначе форма «сбрасывается» и артист заполняет её по кругу.
-          if (apRow.avatar_url) normalized.avatarUrl = apRow.avatar_url as string;
-          {
-            const rowGenres: string[] = (Array.isArray(apRow.sub_genres) && apRow.sub_genres.length > 0)
-              ? (apRow.sub_genres as string[])
-              : (apRow.genre ? [apRow.genre as string] : []);
-            if (rowGenres.length > 0 && (!Array.isArray(normalized.genres) || normalized.genres.length === 0)) {
-              normalized.genres = rowGenres;
-            }
-          }
-          if (apRow.website && !normalized.website) normalized.website = apRow.website as string;
-          if (apRow.social_links && typeof apRow.social_links === 'object'
-              && Object.values(normalized.socials ?? {}).every((v) => !v)) {
-            normalized.socials = apRow.social_links as Record<string, string>;
-          }
-          const reach = await computeRadioReach(String(apRow.id));
-          normalized.radioStations = reach.radioStations;
-          normalized.radioCities   = reach.radioCities;
-        }
-
-        return c.json({ success: true, source: 'profile', data: normalized });
+      const full = await loadFullProfile(artistId);
+      if (full) {
+        return c.json({ success: true, source: 'profile', data: full });
       }
     }
 
@@ -506,7 +523,7 @@ app.get('/profile/:artistId', async (c) => {
 // Audit B-A2 (2026-05-31): profileLimiter (5/min) против abuse (burst-spam
 // email confirmation loop, XSS-exfil token abuse). B-A1: logUserAction
 // в конце handler'а (см. ниже return).
-app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileLimiter, async (c) => {
+app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileSaveLimiter, async (c) => {
   const artistId = c.req.param('artistId');
   console.log(`[ArtistProfile] PUT ${artistId}`);
 
@@ -518,14 +535,18 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileLimi
       return c.json({ success: false, error: 'No valid fields to update' }, 400);
     }
 
-    // Если клиент явно прислал fullName — он не должен быть пустой строкой.
-    // Это блокирует "пустое сохранение", из-за которого имя оставалось null.
+    // Ошибки отдельных полей не роняют весь запрос: остальное сохраняется,
+    // а проблемное поле возвращается в fieldErrors и показывается артисту.
+    // Раньше 400 на одно поле (пустое имя) молча терял весь автосейв —
+    // соцсети, био, контакты (жалоба 2026-10-01).
+    const fieldErrors: Record<string, string> = {};
+
+    // Пустое имя не затираем (это «пустое сохранение» и блокировал старый 400),
+    // но и остальные поля из-за него не отбрасываем.
     if ('fullName' in updates) {
       const name = typeof updates.fullName === 'string' ? updates.fullName.trim() : '';
-      if (!name) {
-        return c.json({ success: false, error: 'fullName cannot be empty' }, 400);
-      }
-      updates.fullName = name;
+      if (name) updates.fullName = name;
+      else delete updates.fullName;
     }
 
     // Получаем текущий профиль или создаём новый
@@ -538,6 +559,50 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileLimi
         fullName: (updates.fullName as string) || '',
         createdAt: new Date().toISOString(),
       });
+    }
+    const { pool } = await import('./db-client.tsx');
+
+    // Email для входа (users.email, UNIQUE): пустой не затираем, занятый
+    // не пишем — иначе UPDATE падал на уникальности и терялось всё.
+    if ('email' in updates) {
+      const email = typeof updates.email === 'string' ? updates.email.trim() : '';
+      if (!email || email.toLowerCase() === String(currentProfile.email || '').toLowerCase()) {
+        delete updates.email;
+      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        delete updates.email;
+        fieldErrors.email = 'Некорректный email';
+      } else {
+        const { rows } = await pool.query(
+          `SELECT 1 FROM users WHERE lower(email) = lower($1) AND id::text <> $2 LIMIT 1`,
+          [email, artistId],
+        );
+        if (rows.length > 0) {
+          delete updates.email;
+          fieldErrors.email = 'Этот email уже занят другим аккаунтом';
+        } else {
+          updates.email = email;
+        }
+      }
+    }
+
+    // Сценическое имя (@handle) — users.username (UNIQUE). vpsSaveProfile его
+    // не пишет, поэтому раньше поле не сохранялось вовсе. Пишем здесь сами.
+    let newUsername: string | null = null;
+    if ('username' in updates) {
+      const handle = typeof updates.username === 'string' ? updates.username.trim().replace(/^@+/, '') : '';
+      delete updates.username;
+      if (handle && handle !== (currentProfile.username || '')) {
+        if (!/^[A-Za-z0-9А-Яа-яЁё_.-]{2,50}$/.test(handle)) {
+          fieldErrors.username = 'Сценическое имя: от 2 до 50 символов — буквы, цифры, «_», «.», «-», без пробелов';
+        } else {
+          const { rows } = await pool.query(
+            `SELECT 1 FROM users WHERE lower(username) = lower($1) AND id::text <> $2 LIMIT 1`,
+            [handle, artistId],
+          );
+          if (rows.length > 0) fieldErrors.username = `Сценическое имя @${handle} уже занято — выберите другое`;
+          else newUsername = handle;
+        }
+      }
     }
 
     // Мержим с глубоким слиянием socials
@@ -555,14 +620,30 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileLimi
     // вместо "тихого успеха", если запись не прошла.
     await saveProfileRow(artistId, updatedProfile);
 
+    if (newUsername) {
+      try {
+        await pool.query(`UPDATE users SET username = $1 WHERE id::text = $2`, [newUsername, artistId]);
+      } catch (e: any) {
+        if (e?.code === '23505') fieldErrors.username = `Сценическое имя @${newUsername} уже занято — выберите другое`;
+        else throw e;
+      }
+    }
+
     console.log(`[ArtistProfile] Updated: ${artistId}`);
     logUserAction(c, {
       action: 'artist_profile_update',
       resourceType: 'artist_profile',
       targetId: String(c.req.param('artistId')),
-      details: { fields: Object.keys(updates) },
+      details: { fields: Object.keys(updates), ...(Object.keys(fieldErrors).length ? { fieldErrors } : {}) },
     });
-    return c.json({ success: true, data: updatedProfile });
+    // Отдаём ровно то, что вернёт следующий GET: фронт кэширует этот ответ
+    // как профиль, и усечённая копия «стирала» поля при повторном заходе.
+    const fresh = (await loadFullProfile(artistId)) || updatedProfile;
+    return c.json({
+      success: true,
+      data: fresh,
+      ...(Object.keys(fieldErrors).length ? { fieldErrors } : {}),
+    });
 
   } catch (error) {
     console.error(`[ArtistProfile] PUT error: ${error}`);
@@ -591,7 +672,7 @@ app.post('/request-verification', requireAuth, profileLimiter, async (c) => {
     const { pool } = await import('./db-client.tsx');
 
     const { rows } = await pool.query(
-      `SELECT is_verified
+      `SELECT is_verified, artist_name
          FROM artist_profiles
         WHERE user_id = $1
         LIMIT 1`,
@@ -617,6 +698,12 @@ app.post('/request-verification', requireAuth, profileLimiter, async (c) => {
     );
 
     console.log(`[ArtistProfile] Verification requested by ${userId}`);
+    // Раньше о заявке не узнавал никто: на 2026-10-01 с мая висели 55
+    // заявок артистов. Сигнал админу — как у треков, видео и тикетов.
+    notifyAdminTelegram(
+      `✅ <b>Заявка на значок верификации</b>\n\nАртист: <b>${escapeHtml(String(rows[0].artist_name || userId))}</b>`
+      + `\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f/users">Пользователи</a>`,
+    ).catch(() => {});
     logUserAction(c, {
       action: 'artist_verification_request',
       resourceType: 'artist_profile',
