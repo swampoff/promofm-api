@@ -44,7 +44,7 @@ import { resolveUserId } from './resolve-user-id.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { requireAuth, requireRole } from './auth-middleware.tsx';
 import { profileLimiter } from './rate-limiter.tsx';
-import { notifyArtistRequest, notifyVenueRequest } from './email-helper.tsx';
+import { notifyArtistRequest, notifyVenueRequest, notifyAdminTelegram, escapeHtml } from './email-helper.tsx';
 import { logUserAction } from './audit-helper.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { RADIO_COMMISSION_RATE, splitRadioCampaignAmount } from './financial-constants.tsx';
@@ -71,6 +71,18 @@ async function getRadioUserId(c: any): Promise<string> {
 async function getStation(userId: string) {
   const data = await getRadioProfile(userId);
   return data || null;
+}
+
+// Название станции для отчётов об эфире и логов скачиваний. Раньше брали
+// profiles.data.stationName (таблица профилей артистов — там его нет) и
+// users.full_name — отчёты подписывались именем контактного лица
+// («Vladimir» вместо станции, аудит 10-02). Если название не заполнено —
+// домен сайта станции, но не имя человека.
+async function stationDisplayName(userId: string): Promise<string> {
+  const st: any = await getRadioProfile(userId).catch(() => null);
+  if (st?.name) return String(st.name);
+  try { if (st?.website) return new URL(String(st.website)).hostname.replace(/^www\./, ''); } catch { /* not a URL */ }
+  return 'Радиостанция';
 }
 
 // =====================================================
@@ -1432,8 +1444,7 @@ app.get('/tracks/:id/download', requireAuth, requireRole('radio_station'), async
     const weeklyReleaseId = wr.rows[0]?.id || null;
 
     // Get station name from radio profile (best effort)
-    const sp = await pool.query(`SELECT data->>'stationName' as station_name FROM profiles WHERE user_id = $1`, [userId]);
-    const stationName = sp.rows[0]?.station_name || null;
+    const stationName = await stationDisplayName(userId);
 
     // Log download
     await pool.query(
@@ -1486,8 +1497,7 @@ app.get('/mixes/:id/download', requireAuth, requireRole('radio_station'), async 
       weeklyReleaseId = wr.rows[0]?.id || null;
     } catch { /* mix_ids колонки нет до migration 104 — лог без release id */ }
 
-    const sp = await pool.query(`SELECT data->>'stationName' as station_name FROM profiles WHERE user_id = $1`, [userId]);
-    const stationName = sp.rows[0]?.station_name || null;
+    const stationName = await stationDisplayName(userId);
 
     try {
       await pool.query(
@@ -1528,11 +1538,7 @@ app.post('/rotations/report', requireAuth, requireRole('radio_station'), async (
     if (trackCheck.rows.length === 0) return c.json({ success: false, error: 'Трек не найден' }, 404);
 
     // Get station name from profile if not provided
-    let finalStationName = stationName;
-    if (!finalStationName) {
-      const sp = await pool.query(`SELECT data->>'stationName' as station_name, full_name FROM users u LEFT JOIN profiles p ON p.user_id = u.id::text WHERE u.id = $1`, [userId]);
-      finalStationName = sp.rows[0]?.station_name || sp.rows[0]?.full_name || 'Радиостанция';
-    }
+    const finalStationName = stationName || await stationDisplayName(userId);
 
     // Download-gate (2026-07-13): отчёт станции, которая реально скачала
     // трек через кабинет (track_downloads_by_radio), подтверждается сразу
@@ -1566,6 +1572,17 @@ app.post('/rotations/report', requireAuth, requireRole('radio_station'), async (
       [trackId, finalStationName, city || null, region || null, rc, airedAt, autoConfirm ? 'confirmed' : 'pending', userId]
     );
     const finalStatus = insRes.rows[0].report_status as string;
+
+    // Отчёт без скачивания ждёт модерации — раньше админ о нём не узнавал
+    // (3 отчёта висели с 25.09, аудит 10-02).
+    if (finalStatus === 'pending') {
+      notifyAdminTelegram(
+        `📻 <b>Отчёт об эфире ждёт проверки</b>\n\nСтанция: <b>${escapeHtml(finalStationName)}</b>`
+        + `\nТрек: <b>${escapeHtml(String(trackCheck.rows[0].artist_name || ''))} — ${escapeHtml(String(trackCheck.rows[0].title || ''))}</b>`
+        + `${city ? `\nГород: ${escapeHtml(String(city))}` : ''}`
+        + `\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f/rotation_reports">Отчёты об эфире</a>`,
+      ).catch(() => {});
+    }
 
     // Живое уведомление артисту о подтверждённом эфире (best-effort).
     if (finalStatus === 'confirmed' && trackCheck.rows[0].user_id) {

@@ -897,6 +897,15 @@ app.post('/services/:id/order', requireAuth, async (c) => {
     if (service.status !== 'active') {
       return c.json({ success: false, error: 'Service is not available' }, 400);
     }
+    // «Режим отпуска» продюсера раньше ни на что не влиял (только AI-анализ),
+    // хотя обещал «Приостановить приём заказов» (аудит 10-02).
+    {
+      const { getProducerSettings } = await import('./db.tsx');
+      const ps: any = await getProducerSettings(String(service.producerId)).catch(() => null);
+      if (ps?.vacationMode) {
+        return c.json({ success: false, error: 'Продюсер сейчас в отпуске и не принимает заказы' }, 409);
+      }
+    }
 
     const basePrice = service.basePrice || service.price || 0;
     const urgencyMult = urgency === 'urgent' ? 2 : urgency === 'fast' ? 1.5 : 1;
