@@ -23,12 +23,12 @@
  */
 
 import { Hono } from 'hono';
-import { requireAuth } from './auth-middleware.tsx';
+import { requireAuth, optionalAuth } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { getPublicationPrice } from './pricing.tsx';
 import { notifyCrossCabinet } from './cross-cabinet-notify.tsx';
-import { sendLabelInvitationEmail } from './email-helper.tsx';
+import { sendLabelInvitationEmail, escapeHtml } from './email-helper.tsx';
 import { saveUpload, IMAGE_EXTS, MAX_IMAGE_BYTES } from './cabinet-uploads.tsx';
 
 const app = new Hono();
@@ -642,10 +642,174 @@ app.delete('/roster/linked/:id', requireAuth, async (c) => {
 
 // ── Invitations (label side) ──────────────────────────────────────────────────
 
-function makeAcceptUrl(): string {
+// Ссылка в письме ведёт на страницу приглашения (GET /invite/:id ниже), а не сразу
+// в настройки артиста. Тикет 05.10.2026 (Monisha Star): артистка открыла ссылку в
+// браузере, где был вход в кабинет её лейбла, охрана кабинета артиста молча
+// перевела её в кабинет лейбла, приглашение осталось непринятым.
+function makeAcceptUrl(invitationId: string): string {
   const base = process.env.PUBLIC_URL || 'https://promo-music.ru';
-  return `${base}/artist/settings?tab=labels`;
+  return `${base}/server/api/label/invite/${invitationId}`;
 }
+
+// ── Страница приглашения из письма (05.10.2026) ───────────────────────────────
+//
+// Смотрит, кто сейчас вошёл в браузере:
+//   - артист, которому адресовано приглашение → кнопка «Принять приглашение»
+//     (POST /invitations/:id/accept, та же логика, что в настройках артиста);
+//   - вход под другим аккаунтом (лейбл, другой артист, другая роль) → объяснение
+//     и «Выйти и войти как артист»;
+//   - никто не вошёл → «Войти»; после входа артист попадает в «Настройки → Лейблы».
+// Возврат после входа — тот же механизм, что у кабинетов: sessionStorage
+// 'pf_return_to' (frontend utils/auth/return-path.ts).
+
+const ROLE_NAMES: Record<string, string> = {
+  artist: 'артиста', label: 'лейбла', dj: 'диджея', producer: 'продюсера', radio_station: 'радиостанции',
+  venue: 'заведения', engineer: 'звукорежиссёра', admin: 'администратора', superadmin: 'администратора',
+};
+
+function maskEmail(email: string): string {
+  const [local, domain] = String(email || '').split('@');
+  if (!domain) return '';
+  const keep = local.length <= 2 ? local.slice(0, 1) : local.slice(0, 2);
+  return `${keep}${'*'.repeat(Math.max(1, Math.min(6, local.length - keep.length)))}@${domain}`;
+}
+
+function invitePage(c: any, status: number, title: string, body: string) {
+  const html = `<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>${escapeHtml(title)} · ПРОМО.МУЗЫКА</title>
+<style>
+ *{box-sizing:border-box}
+ body{margin:0;background:#0a0a1a;color:#e6e6f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+      display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px 16px}
+ .card{max-width:520px;width:100%;background:#14142a;border:1px solid rgba(255,255,255,.1);border-radius:18px;padding:28px}
+ .brand{font-size:12px;letter-spacing:2px;text-transform:uppercase;color:#a5a5c0;margin:0 0 14px}
+ .brand b{color:#fff}
+ h1{font-size:21px;line-height:1.3;margin:0 0 12px;color:#fff}
+ p{font-size:15px;line-height:1.6;color:#c8c8d8;margin:0 0 14px}
+ b{color:#fff}
+ .msg{border-left:3px solid #FF577F;margin:0 0 16px;padding:4px 14px;color:#c8c8d8;font-style:italic}
+ .btn{display:block;width:100%;padding:14px 18px;margin:10px 0 0;border:0;border-radius:12px;font-size:15px;font-weight:700;
+      cursor:pointer;text-align:center;text-decoration:none}
+ .primary{background:linear-gradient(135deg,#FF577F,#7C3AED);color:#fff}
+ .ghost{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#e6e6f0;font-weight:600}
+ .note{font-size:13px;color:#8a8aa0;margin-top:14px}
+ .ok{color:#6EE7B7}
+ .err{color:#FCA5A5}
+ button:disabled{opacity:.6;cursor:default}
+</style></head><body><div class="card">
+<p class="brand"><b>ПРОМО.МУЗЫКА</b> · приглашение в лейбл</p>
+${body}
+</div></body></html>`;
+  c.header('Cache-Control', 'no-store');
+  c.header('X-Robots-Tag', 'noindex, nofollow');
+  return c.html(html, status);
+}
+
+app.get('/invite/:id', optionalAuth, async (c) => {
+  try {
+    await ensureSchema();
+    const id = c.req.param('id');
+    if (!/^[0-9a-f-]{36}$/i.test(id)) {
+      return invitePage(c, 404, 'Приглашение не найдено', '<h1>Приглашение не найдено</h1><p>Проверьте ссылку из письма.</p>');
+    }
+    const r = await pool.query(
+      `SELECT li.id, li.status, li.invited_email, li.artist_user_id::text AS artist_user_id, li.expires_at, li.message,
+              lp.display_name AS label_name
+         FROM label_invitations li
+         LEFT JOIN label_profiles lp ON lp.id = li.label_id
+        WHERE li.id = $1`,
+      [id],
+    );
+    const inv = r.rows[0];
+    if (!inv) {
+      return invitePage(c, 404, 'Приглашение не найдено', '<h1>Приглашение не найдено</h1><p>Возможно, лейбл отозвал его. Проверьте ссылку из письма.</p>');
+    }
+    const labelName = escapeHtml(inv.label_name || 'Лейбл');
+    const invitedMasked = escapeHtml(maskEmail(inv.invited_email));
+    const cabinet = '<a class="btn ghost" href="/artist">Открыть кабинет артиста</a>';
+
+    if (inv.status === 'accepted') {
+      return invitePage(c, 200, 'Приглашение принято',
+        `<h1>Приглашение уже принято</h1><p>Аккаунт артиста состоит в лейбле <b>«${labelName}»</b>.</p>${cabinet}`);
+    }
+    if (inv.status !== 'pending') {
+      return invitePage(c, 200, 'Приглашение недействительно',
+        `<h1>Приглашение недействительно</h1><p>Оно уже отклонено или отозвано. Если это ошибка, попросите лейбл <b>«${labelName}»</b> отправить новое.</p>`);
+    }
+    if (inv.expires_at && new Date(inv.expires_at) < new Date()) {
+      return invitePage(c, 200, 'Срок приглашения истёк',
+        `<h1>Срок приглашения истёк</h1><p>Попросите лейбл <b>«${labelName}»</b> отправить новое приглашение.</p>`);
+    }
+
+    const head = `<h1>Лейбл «${labelName}» приглашает вас в свой ростер</h1>
+${inv.message ? `<p class="msg">${escapeHtml(String(inv.message))}</p>` : ''}
+<p>После принятия лейбл сможет выпускать ваши релизы через модерацию платформы. Выйти из лейбла можно в любой момент в настройках кабинета артиста.</p>`;
+    const returnPath = '/artist/settings?tab=labels';
+    const relogin = `<script>
+(function(){
+  var b=document.getElementById('relogin'); if(!b) return;
+  b.addEventListener('click',function(){
+    b.disabled=true;
+    try{sessionStorage.setItem('pf_return_to',${JSON.stringify(returnPath)});}catch(e){}
+    var go=function(){location.href='/login';};
+    if(b.getAttribute('data-signout')==='1'){
+      fetch('/server/auth/signout',{method:'POST',credentials:'include'}).then(go,go);
+    } else { go(); }
+  });
+})();
+</script>`;
+
+    const userId = c.get('userId') as string | undefined;
+    const role = (c.get('userRole') as string | undefined) || '';
+    if (!userId) {
+      return invitePage(c, 200, 'Приглашение в лейбл', `${head}
+<p>Чтобы принять приглашение, войдите в аккаунт артиста с почтой <b>${invitedMasked}</b>. Если аккаунта ещё нет, зарегистрируйтесь как артист с этой почтой.</p>
+<button type="button" class="btn primary" id="relogin">Войти как артист</button>
+<p class="note">После входа откроется раздел «Настройки → Лейблы» с этим приглашением.</p>${relogin}`);
+    }
+
+    const me = await pool.query(`SELECT lower(email) AS email FROM users WHERE id = $1`, [userId]);
+    const myEmail = me.rows[0]?.email || '';
+    const isTarget = role === 'artist'
+      && (inv.artist_user_id === userId || (myEmail && myEmail === String(inv.invited_email || '').toLowerCase()));
+
+    if (!isTarget) {
+      const who = role === 'artist'
+        ? `в другой аккаунт артиста (${escapeHtml(maskEmail(myEmail))})`
+        : `в кабинет ${ROLE_NAMES[role] || 'другой роли'}${myEmail ? ` (${escapeHtml(maskEmail(myEmail))})` : ''}`;
+      return invitePage(c, 200, 'Приглашение в лейбл', `${head}
+<p>Сейчас в этом браузере выполнен вход ${who}. Приглашение адресовано артисту с почтой <b>${invitedMasked}</b>, принять его можно только из этого аккаунта.</p>
+<button type="button" class="btn primary" id="relogin" data-signout="1">Выйти и войти как артист</button>
+<p class="note">Совет: если вы работаете и в кабинете артиста, и в кабинете лейбла, открывайте их в разных браузерах.</p>${relogin}`);
+    }
+
+    return invitePage(c, 200, 'Приглашение в лейбл', `${head}
+<button type="button" class="btn primary" id="accept">Принять приглашение</button>
+<a class="btn ghost" href="${returnPath}">Посмотреть в настройках</a>
+<p class="note" id="res"></p>
+<script>
+(function(){
+  var b=document.getElementById('accept'), res=document.getElementById('res');
+  var LN=${JSON.stringify(String(inv.label_name || 'Лейбл')).replace(/</g, '\\u003c')};
+  b.addEventListener('click',function(){
+    b.disabled=true;
+    fetch('/server/api/label/invitations/${id}/accept',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'})
+      .then(function(r){return r.json();})
+      .then(function(j){
+        if(j.success){res.className='note ok';res.textContent='Готово! Вы в лейбле «'+LN+'». Лейбл сможет выпускать ваши релизы.';b.style.display='none';}
+        else{res.className='note err';res.textContent=j.error||'Не получилось принять приглашение';b.disabled=false;}
+      })
+      .catch(function(){res.className='note err';res.textContent='Не получилось принять приглашение, попробуйте ещё раз';b.disabled=false;});
+  });
+})();
+</script>`);
+  } catch (error: any) {
+    console.error('[label] invite page failed:', error?.message || error);
+    return invitePage(c, 500, 'Ошибка', '<h1>Что-то пошло не так</h1><p>Попробуйте открыть ссылку ещё раз через минуту.</p>');
+  }
+});
 
 app.post('/invitations', requireAuth, async (c) => {
   try {
@@ -731,7 +895,7 @@ app.post('/invitations', requireAuth, async (c) => {
 
     // Email — fires for both registered and not-yet-registered artists.
     try {
-      await sendLabelInvitationEmail(invitedEmail, labelName, message, makeAcceptUrl());
+      await sendLabelInvitationEmail(invitedEmail, labelName, message, makeAcceptUrl(invitationId));
     } catch (e: any) {
       console.warn('[label] invitation email failed:', e?.message);
     }

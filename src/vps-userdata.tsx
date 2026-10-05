@@ -135,7 +135,19 @@ export async function vpsSaveProfile(userId: string, data: Record<string, unknow
     // fullName always won, which silently overwrote the stage name with
     // the Latin passport transliteration for artists like "Надежда Гуськова".
     const artistName = (data.artistName as string) || (data.fullName as string) || (data.name as string) || null;
-    if (artistName) {
+    // Лейблу своя карточка артиста не нужна (05.10.2026): треки он выпускает от
+    // имени артистов ростера (actingForArtistId → их artist_profiles). Раньше эта
+    // функция — она зовётся и при регистрации, и при каждом входе — заводила каждому
+    // лейблу карточку артиста с его именем: в каталоге появлялись двойники
+    // («Monisha Star» у артистки и у её лейбла, «monisha-star-2»).
+    let roleNow = typeof data.role === 'string' ? data.role : '';
+    if (!roleNow) {
+      try {
+        const r = await pool.query(`SELECT role::text AS role FROM users WHERE id = $1`, [userId]);
+        roleNow = r.rows[0]?.role || '';
+      } catch { /* роль не узнали — ведём себя как раньше */ }
+    }
+    if (artistName && roleNow !== 'label') {
       const genre = (data.genre as string) || (Array.isArray(data.genres) && data.genres.length > 0 ? (data.genres as string[])[0] : null);
       const subGenres = Array.isArray(data.genres) ? (data.genres as string[]) : (data.genre ? [data.genre as string] : []);
       // Уникальный slug. Инцидент 2026-08-07: slug строился только из имени,
