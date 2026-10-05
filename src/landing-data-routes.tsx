@@ -9,7 +9,7 @@ import { Hono } from 'hono';
 import * as typed from './db-typed.tsx';
 import { pool } from './db-client.tsx';
 import { logAdminAction } from './audit-helper.tsx';
-import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, listChartSources, createInvestorInquiry, listNewsPublic, listAllNewsPublic, getNewsPublic, upsertNewsPublic, deleteNewsPublic, paymentBalancesStore, getPlatformStats, setPlatformStats, listProducerServices, listServiceOrdersByProducer } from './db.tsx';
+import { getAllArtistProfiles, getAllProducerProfiles, getArtistProfile, getProducerProfile, upsertProducerProfile, getBeats, listAllBeatReviews, listConcertAgentItems, listChartSources, createInvestorInquiry, listNewsPublic, listAllNewsPublic, getNewsPublic, upsertNewsPublic, deleteNewsPublic, paymentBalancesStore, getPlatformStats, setPlatformStats, listProducerServices, listServiceOrdersByProducer } from './db.tsx';
 import { reseedDemoData } from './demo-seed.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { sanitizeString, sanitizeUrl } from './security.tsx';
@@ -1558,7 +1558,27 @@ landing.get('/producer-profiles', async (c) => {
 landing.get('/producer-profile/:id', async (c) => {
   try {
     const id = c.req.param('id');
-    const raw = await getProducerProfile(id);
+    let raw = await getProducerProfile(id);
+    if (!raw) {
+      // Строку producer_profiles создавали только PUT профиля и загрузка
+      // картинки — у 27 из 28 продюсеров её не было, кабинет получал 404 и
+      // показывал пустой профиль (аудит 10-02). Создаём её для настоящего
+      // продюсера из черновика редактора (старые профили жили только там)
+      // или из имени пользователя.
+      const { rows } = await pool.query(
+        `SELECT u.full_name, e.data AS edit
+           FROM users u
+           LEFT JOIN producer_profile_edit e ON e.user_id::text = u.id::text
+          WHERE u.id::text = $1 AND u.role = 'producer' AND u.deleted_at IS NULL
+          LIMIT 1`,
+        [id],
+      ).catch(() => ({ rows: [] as any[] }));
+      if (rows.length) {
+        const edit = (rows[0].edit || {}) as Record<string, any>;
+        await upsertProducerProfile(id, { ...edit, name: edit.name || rows[0].full_name || null });
+        raw = await getProducerProfile(id);
+      }
+    }
     if (!raw) {
       return c.json({ success: false, error: 'Producer profile not found' }, 404);
     }

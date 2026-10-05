@@ -248,12 +248,17 @@ auth.post("/signup", async (c) => {
     // position/broadcastType в data jsonb — чтобы админ верифицировал перед approve.
     if (radioApp) {
       try {
+        // INSERT … ON CONFLICT, а не UPDATE: строки radio_profiles при
+        // регистрации ещё нет, UPDATE обновлял 0 строк без ошибки — заявка
+        // (название, сайт, поток, частота, телефон) терялась у всех станций
+        // (аудит 10-02: 0/882 строк с data.application).
         await sql(
-          `UPDATE radio_profiles
-              SET station_name = $2, name = $2, website = $3,
-                  stream_url = NULLIF($4, ''), frequency = NULLIF($5, ''), phone = $6,
-                  data = COALESCE(data, '{}'::jsonb) || $7::jsonb, updated_at = now()
-            WHERE user_id = $1`,
+          `INSERT INTO radio_profiles (user_id, station_name, name, website, stream_url, frequency, phone, data, updated_at)
+           VALUES ($1, $2, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6, $7::jsonb, now())
+           ON CONFLICT (user_id) DO UPDATE
+              SET station_name = EXCLUDED.station_name, name = EXCLUDED.name, website = EXCLUDED.website,
+                  stream_url = EXCLUDED.stream_url, frequency = EXCLUDED.frequency, phone = EXCLUDED.phone,
+                  data = COALESCE(radio_profiles.data, '{}'::jsonb) || EXCLUDED.data, updated_at = now()`,
           [userId, radioApp.stationName, radioApp.website, radioApp.streamUrl, radioApp.frequency, radioApp.phone,
            JSON.stringify({ application: { position: radioApp.position, broadcastType: radioApp.broadcastType, submittedAt: new Date().toISOString() } })]
         );

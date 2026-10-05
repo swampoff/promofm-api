@@ -288,7 +288,7 @@ async function ownsRadioProfile(c: any, radioId: string): Promise<boolean> {
 async function persistRadioImage(radioId: string, field: 'logoUrl' | 'coverUrl', url: string) {
   const column = field === 'logoUrl' ? 'logo_url' : 'cover_url';
   await pool.query(
-    `UPDATE radio_profiles SET ${column} = $1, updated_at = NOW() WHERE id::text = $2`,
+    `UPDATE radio_profiles SET ${column} = $1, updated_at = NOW() WHERE user_id::text = $2`, // radioId = userId владельца (см. ownsRadioProfile); по id строка не находилась
     [url, radioId],
   );
   // Merge в data jsonb тоже — editor / GET читают именно оттуда.

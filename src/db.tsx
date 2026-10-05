@@ -1366,7 +1366,9 @@ export async function getRadioProfile(userId: string) {
     .select('*')
     .eq('user_id', userId)
     .maybeSingle();
-  if (error) console.error('[db] getRadioProfile:', error);
+  // Ошибку чтения пробрасываем: раньше null при сбое БД означал «профиля
+  // нет», и PUT собирал профиль из дефолтов поверх живой строки (аудит 10-02).
+  if (error) { console.error('[db] getRadioProfile:', error); throw new Error('getRadioProfile failed'); }
   if (!data) return null;
 
   // Overlay native columns (migration 060) on top of legacy `data` jsonb.
@@ -1376,6 +1378,13 @@ export async function getRadioProfile(userId: string) {
   // ...) which are managed by radio_stats helpers and never get native
   // columns.
   const inner = (data.data || {}) as Record<string, any>;
+  // Название станции: name из кабинета, иначе station_name (регистрация,
+  // импорт, radio-get), но не обрезок почты — импорт клал туда local-part
+  // адреса. Раньше station_name игнорировался: 880/882 кабинетов показывали
+  // «Радиостанция», а PROMO.CHECK искал несуществующий stationName.
+  const looksLikeMailbox = (v: unknown) => typeof v === 'string' && /^[a-z0-9._-]+$/.test(v);
+  const stationName: string | undefined = data.name || inner.name || inner.stationName
+    || (data.station_name && !looksLikeMailbox(data.station_name) ? data.station_name : undefined);
   return {
     ...inner,
     // Identity — обязательно для callers, которые используют
@@ -1385,7 +1394,8 @@ export async function getRadioProfile(userId: string) {
     // 42 одинаковых TS2339 'Property "id" does not exist' в radio-routes).
     id:               data.id,
     user_id:          data.user_id,
-    name:             data.name              ?? inner.name,
+    name:             stationName,
+    stationName:      stationName,
     city:             data.city              ?? inner.city,
     country:          data.country           ?? inner.country,
     frequency:        data.frequency         ?? inner.frequency,
@@ -1453,13 +1463,20 @@ export async function upsertRadioProfile(userId: string, profile: Record<string,
                          ? profile.socials : {},
     logo_url:          profile.logoUrl  ?? profile.logo_url  ?? null,
     cover_url:         profile.coverUrl ?? profile.cover_url ?? null,
+    // email/phone: GET отдаёт нативные колонки первыми, а запись шла только в
+    // jsonb — правка email в кабинете откатывалась сразу после сохранения.
+    email:             profile.email ?? null,
+    phone:             profile.phone ?? null,
+    // station_name читают регистрация, PROMO.CHECK и письма станциям.
+    ...(profile.name ? { station_name: profile.name } : {}),
     data:              profile,
     updated_at:        new Date().toISOString(),
   };
   const { error } = await db()
     .from('radio_profiles')
     .upsert(row, { onConflict: 'user_id' });
-  if (error) console.error('[db] upsertRadioProfile:', error);
+  // Пробрасываем: раньше PUT отвечал «сохранён» после неудачной записи.
+  if (error) { console.error('[db] upsertRadioProfile:', error); throw new Error('upsertRadioProfile failed'); }
 }
 
 // ─── Producer Profiles ───
@@ -1527,7 +1544,8 @@ export async function upsertProducerProfile(userId: string, profile: Record<stri
   const { error } = await db()
     .from('producer_profiles')
     .upsert(row, { onConflict: 'user_id' });
-  if (error) console.error('[db] upsertProducerProfile:', error);
+  // Пробрасываем: раньше PUT отвечал 200, даже если публичная строка не записалась.
+  if (error) { console.error('[db] upsertProducerProfile:', error); throw new Error('upsertProducerProfile failed'); }
 }
 
 export async function getAllProducerProfiles() {

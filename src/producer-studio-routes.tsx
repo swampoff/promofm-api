@@ -539,9 +539,18 @@ async function syncServiceToMarketplace(svc: CustomService, producerName?: strin
     try { await deleteProducerService(svc.id); } catch {}
     return;
   }
+  if (!producerName) {
+    // Вызовы из create/update имя не передавали — в маркетплейс уходил UUID.
+    const pub: any = await db.getProducerProfile(svc.producerId).catch(() => null);
+    producerName = pub?.name || undefined;
+    if (!producerName) {
+      const { rows } = await pool.query(`SELECT full_name FROM users WHERE id::text = $1`, [svc.producerId]).catch(() => ({ rows: [] as any[] }));
+      producerName = rows[0]?.full_name || undefined;
+    }
+  }
   await upsertProducerService(svc.id, {
     producerId: svc.producerId,
-    producer: producerName || svc.producerId,
+    producer: producerName || 'Продюсер',
     title: svc.title,
     type: svc.type,
     basePrice: svc.basePrice,
@@ -1000,7 +1009,10 @@ app.put('/profile/update/:producerId', requireAuth, async (c) => {
       const pubExisting = (await db.getProducerProfile(producerId)) || {};
       await db.upsertProducerProfile(producerId, { ...(pubExisting as any), ...body });
     } catch (mirrorErr) {
-      console.log(`[producer-profile] mirror to producer_profiles failed (non-fatal):`, mirrorErr);
+      // Раньше ошибка глоталась, PUT отвечал 200, и кабинет писал «Профиль
+      // сохранён», хотя публичная страница не обновилась.
+      console.error(`[producer-profile] mirror to producer_profiles failed:`, mirrorErr);
+      return c.json({ success: false, error: 'Профиль не сохранился — попробуйте ещё раз' }, 500);
     }
 
     // Audit A-P1 (2026-05-31): forensic trail на изменения профиля —
