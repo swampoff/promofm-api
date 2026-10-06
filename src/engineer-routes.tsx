@@ -93,6 +93,7 @@ app.put('/profile', requireAuth, async (c) => {
         delete body.is_verified;
         if (body.profile && typeof body.profile === 'object') {
           delete body.profile.verified;
+          delete body.profile.isVerified;
         }
       }
     }

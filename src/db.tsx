@@ -1193,6 +1193,24 @@ export async function getDjProfile(djId: string) {
   return data ? (data.data || data) : null;
 }
 
+// Слить сохранённый jsonb профиля кабинета с пришедшим. Частичные записи
+// (загрузка аватара пишет {profile:{avatarUrl}}, автосейв настроек диджея —
+// {profile:{generalSettings,…}}) раньше заменяли jsonb целиком и стирали
+// имя, био, портфолио (аудит ролей 2026-10-05). Отсутствующие ключи теперь
+// сохраняются; profile/booking/contacts сливаются на уровень глубже.
+function mergeCabinetData(prev: any, next: any): any {
+  if (!prev || typeof prev !== 'object' || Array.isArray(prev)) return next;
+  if (!next || typeof next !== 'object' || Array.isArray(next)) return next;
+  const out: Record<string, any> = { ...prev, ...next };
+  for (const k of ['profile', 'booking', 'contacts']) {
+    const a = prev[k], b = next[k];
+    if (a && typeof a === 'object' && !Array.isArray(a) && b && typeof b === 'object' && !Array.isArray(b)) {
+      out[k] = { ...a, ...b };
+    }
+  }
+  return out;
+}
+
 export async function upsertDjProfile(djId: string, profile: Record<string, any>) {
   // Source-of-truth shape from the DJ profile editor (frontend
   // `gatherAllData()` in `src/dj/components/DjProfileEditor.tsx:164`)
@@ -1220,9 +1238,18 @@ export async function upsertDjProfile(djId: string, profile: Record<string, any>
   // flat input for legacy callers. Discovered 2026-05-25 when a
   // fresh QA DJ kept seeing «Имя ещё не задано» on the public side
   // even after saving everything in the editor.
+  const { data: existingDj } = await db()
+    .from('dj_profiles')
+    .select('data, rating, total_reviews, is_verified, completed_gigs')
+    .eq('user_id', djId)
+    .maybeSingle();
+  profile = mergeCabinetData(existingDj?.data, profile);
   const inner: Record<string, any> = (profile?.profile && typeof profile.profile === 'object')
     ? { ...profile, ...profile.profile }   // nested envelope wins for editor-side fields
     : profile;
+  // Ставка и «принимаю заказы» редактор шлёт в booking — раньше они не
+  // доходили до колонок, по которым фильтрует каталог (аудит 10-05).
+  const bk: Record<string, any> = (profile?.booking && typeof profile.booking === 'object') ? profile.booking : {};
 
   // Don't pin `id`: callers pass djId === user_id, but dj_profiles.id is
   // a separate uuid (auto-generated) and user_id carries the UNIQUE
@@ -1237,18 +1264,21 @@ export async function upsertDjProfile(djId: string, profile: Record<string, any>
     bio: inner.bio || inner.about || null,
     avatar_url: inner.avatarUrl || inner.avatar_url || null,
     location: inner.city || inner.location || null,
-    hourly_rate: inner.hourlyRate || inner.hourly_rate || inner.ratePerHour || 0,
+    hourly_rate: Math.round(Number(bk.ratePerHour || inner.hourlyRate || inner.hourly_rate || inner.ratePerHour || 0)) || 0,
     experience_years: inner.experienceYears || inner.experience_years || 0,
     equipment: inner.equipment || null,
-    is_available: inner.isAvailable !== undefined
-      ? inner.isAvailable
-      : (inner.openForBookings !== undefined ? inner.openForBookings : true),
-    rating: inner.rating || 0,
-    total_reviews: inner.totalReviews || inner.total_reviews || 0,
-    is_verified: inner.verified || inner.is_verified || false,
-    completed_gigs: inner.completedGigs || inner.completed_gigs || 0,
+    is_available: bk.openForBookings !== undefined
+      ? bk.openForBookings !== false
+      : (inner.isAvailable !== undefined ? inner.isAvailable
+        : (inner.openForBookings !== undefined ? inner.openForBookings : true)),
+    // Рейтинг, отзывы, выступления и значок — серверные: раньше их брали из
+    // payload (диджей мог накрутить), а значок сбрасывался каждым сохранением.
+    rating: existingDj ? (existingDj.rating ?? 0) : 0,
+    total_reviews: existingDj ? (existingDj.total_reviews ?? 0) : 0,
+    is_verified: existingDj ? !!existingDj.is_verified : false,
+    completed_gigs: existingDj ? (existingDj.completed_gigs ?? 0) : 0,
     tags: inner.tags || inner.specializations || [],
-    price_from: inner.priceFrom || inner.price_from || inner.ratePerHour || inner.ratePerEvent || 0,
+    price_from: Math.round(Number(bk.ratePerHour || bk.ratePerEvent || inner.priceFrom || inner.price_from || inner.ratePerHour || inner.ratePerEvent || 0)) || 0,
     photo_url: inner.photo || inner.photo_url || inner.avatarUrl || null,
     // Preserve the ORIGINAL payload shape in jsonb so the cabinet's
     // own editor can rehydrate via getDjProfile() unchanged.
@@ -1258,10 +1288,36 @@ export async function upsertDjProfile(djId: string, profile: Record<string, any>
   const { error } = await db()
     .from('dj_profiles')
     .upsert(row, { onConflict: 'user_id' });
-  if (error) console.error('[db] upsertDjProfile:', error);
+  // Пробрасываем: раньше PUT и загрузки отвечали «сохранено» после неудачи.
+  if (error) { console.error('[db] upsertDjProfile:', error); throw new Error('upsertDjProfile failed'); }
 }
 
 // ─── Venue Profiles ───
+
+/**
+ * Строку venue_profiles раньше создавал только GET /venue/profile — без визита
+ * в «Профиль» анкета «Формат и точки», привязка карты и брендинг отдавали 404,
+ * а админ не узнавал о новом заведении (аудит 10-05). Создаём заготовку для
+ * пользователя с ролью venue при первом обращении любого из этих разделов.
+ */
+export async function ensureVenueProfile(userId: string) {
+  const existing = await getVenueProfile(userId);
+  if (existing) return existing;
+  const { data: u } = await db().from('users').select('role, email, full_name').eq('id', userId).maybeSingle();
+  if (!u || String(u.role) !== 'venue') return null;
+  const now = new Date().toISOString();
+  await upsertVenueProfile(userId, {
+    id: `venue-${userId}`, userId, venueName: 'Мое заведение', description: null, venueType: 'bar',
+    address: '', city: 'Москва', country: 'Россия', capacity: null, logoUrl: null, coverImageUrl: null,
+    genres: [], socialLinks: {}, workingHours: null, status: 'active', verified: false,
+    // Пробные 2 недели — только после привязки карты (см. GET /venue/profile).
+    subscriptionStatus: 'pending_card', subscriptionPlan: 'start', createdAt: now, updatedAt: now,
+  });
+  import('./email-helper.tsx')
+    .then((m: any) => m.notifyAdminNewVenue?.({ venueName: 'Мое заведение', city: 'Москва', venueType: 'bar', email: u.email, userId, stage: 'registered' }))
+    .catch(() => {});
+  return getVenueProfile(userId);
+}
 
 export async function getVenueProfile(userId: string) {
   const { data, error } = await db()
@@ -1300,7 +1356,7 @@ export async function getVenueProfile(userId: string) {
                       ? data.genres : (inner.genres || []),
     socialLinks:    (data.social_links && Object.keys(data.social_links).length > 0)
                       ? data.social_links : (inner.socialLinks || {}),
-    workingHours:   data.working_hours   ?? inner.workingHours,
+    workingHours:   (() => { const w = data.working_hours ?? inner.workingHours; if (typeof w === 'string') { try { return JSON.parse(w); } catch { return w; } } return w; })(),
     isVerified:     data.is_verified     ?? inner.isVerified     ?? false,
     email:          data.email           ?? inner.email,
     phone:          data.phone           ?? inner.phone,
@@ -1348,14 +1404,17 @@ export async function upsertVenueProfile(userId: string, profile: Record<string,
     genres:          Array.isArray(profile.genres) ? profile.genres : [],
     social_links:    (profile.socialLinks && typeof profile.socialLinks === 'object')
                        ? profile.socialLinks : {},
-    working_hours:   profile.workingHours   ?? null,
+    // working_hours — TEXT: объект часов сохраняем JSON-строкой (читается обратно в getVenueProfile).
+    working_hours:   profile.workingHours == null ? null
+                       : (typeof profile.workingHours === 'string' ? profile.workingHours : JSON.stringify(profile.workingHours)),
     data:            profile,
     updated_at:      new Date().toISOString(),
   };
   const { error } = await db()
     .from('venue_profiles')
     .upsert(row, { onConflict: 'user_id' });
-  if (error) console.error('[db] upsertVenueProfile:', error);
+  // Пробрасываем: раньше PUT /venue/profile отвечал 200 после неудачной записи.
+  if (error) { console.error('[db] upsertVenueProfile:', error); throw new Error('upsertVenueProfile failed'); }
 }
 
 // ─── Radio Profiles ───
@@ -1582,6 +1641,12 @@ export async function upsertEngineerProfile(userId: string, profile: Record<stri
   // nested `data.profile.avatarUrl`. Денормализуем верхнеуровневые
   // колонки чтобы public-маркетплейс мог фильтровать без распаковки
   // jsonb (тот же паттерн что у upsertDjProfile / upsertProducerProfile).
+  const { data: existingEng } = await db()
+    .from('engineer_profiles')
+    .select('data')
+    .eq('user_id', userId)
+    .maybeSingle();
+  profile = mergeCabinetData(existingEng?.data, profile);
   const inner: Record<string, any> = (profile?.profile && typeof profile.profile === 'object')
     ? { ...profile, ...profile.profile }
     : profile;
@@ -1595,7 +1660,8 @@ export async function upsertEngineerProfile(userId: string, profile: Record<stri
     cover_url: inner.coverUrl || inner.cover_url || null,
     bio: inner.bio || inner.about || null,
     specializations: inner.specializations || inner.tags || [],
-    hourly_rate: inner.hourlyRate || inner.hourly_rate || 0,
+    // hourly_rate — INTEGER: дробная ставка роняла всю запись (аудит 10-05).
+    hourly_rate: Math.max(0, Math.min(10_000_000, Math.round(Number(inner.hourlyRate || inner.hourly_rate || 0) || 0))),
     is_available: inner.isAvailable !== undefined
       ? inner.isAvailable
       : (inner.openForOrders !== undefined ? inner.openForOrders : true),
@@ -1610,7 +1676,7 @@ export async function upsertEngineerProfile(userId: string, profile: Record<stri
   const { error } = await db()
     .from('engineer_profiles')
     .upsert(row, { onConflict: 'user_id' });
-  if (error) console.error('[db] upsertEngineerProfile:', error);
+  if (error) { console.error('[db] upsertEngineerProfile:', error); throw new Error('upsertEngineerProfile failed'); }
 }
 
 export async function getAllEngineerProfiles() {

@@ -53,7 +53,7 @@ import { Hono } from 'hono';
 import crypto from 'crypto';
 import { pool } from './db-client.tsx';
 import { requireAuth } from './auth-middleware.tsx';
-import { getVenueProfile as dbGetVenueProfile, upsertVenueProfile, getPaymentMethods, upsertPaymentSession, getPaymentSession, insertPaymentTx } from './db.tsx';
+import { ensureVenueProfile, getVenueProfile as dbGetVenueProfile, upsertVenueProfile, getPaymentMethods, upsertPaymentSession, getPaymentSession, insertPaymentTx } from './db.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { emitSSE } from './sse-routes.tsx';
@@ -90,7 +90,8 @@ function parse(data: any): any {
 }
 
 async function loadVenueProfile(userId: string): Promise<any | null> {
-  const data = await dbGetVenueProfile(userId);
+  // ensure: строка создаётся и без визита в «Профиль» (раньше здесь был 404).
+  const data = await ensureVenueProfile(userId);
   return parse(data);
 }
 

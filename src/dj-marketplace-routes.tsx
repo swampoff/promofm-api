@@ -43,7 +43,11 @@ function mapRow(row: any) {
     // Social/streaming links — stored in the jsonb profile. Public page
     // renders only the platforms that are actually set (camelCase keys,
     // same shape as artist/label). Was previously dropped here entirely.
-    socials: p.socials || p.socialLinks || d.socials || d.socialLinks || row.social_links || {},
+    // Редактор пишет соцсети в contacts.{instagram,telegram,vk,website} —
+    // раньше публичная страница их не видела (аудит 10-05). email/phone не отдаём.
+    socials: p.socials || p.socialLinks || d.socials || d.socialLinks || row.social_links
+      || Object.fromEntries(['instagram', 'telegram', 'vk', 'website', 'youtube', 'soundcloud']
+        .map((k) => [k, (d.contacts || {})[k]]).filter(([, v]) => typeof v === 'string' && v.trim())),
     city: row.location || p.city || d.city || '',
     genres: row.genres || p.genres || d.genres || [],
     rating: parseFloat(row.rating) || 0,

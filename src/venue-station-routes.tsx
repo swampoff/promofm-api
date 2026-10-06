@@ -32,7 +32,7 @@ import { Hono } from 'hono';
 import crypto from 'crypto';
 import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { getVenueProfile as dbGetVenueProfile } from './db.tsx';
+import { ensureVenueProfile, getVenueProfile as dbGetVenueProfile } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { sendVenueRadioReadyEmail, sendVenueRadioChangesRequestedEmail } from './email-helper.tsx';
 
@@ -53,7 +53,8 @@ function parse(data: any): any {
 }
 
 async function loadVenueProfile(userId: string): Promise<any | null> {
-  const data = await dbGetVenueProfile(userId);
+  // ensure: строка создаётся и без визита в «Профиль» (раньше здесь был 404).
+  const data = await ensureVenueProfile(userId);
   return parse(data);
 }
 

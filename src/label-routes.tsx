@@ -368,6 +368,15 @@ app.get('/roster', requireAuth, async (c) => {
          ap.city          AS city,
          ap.is_verified   AS is_verified,
          ap.is_managed    AS is_managed,
+         -- Поля для формы правки артиста ростера: без них форма открывалась
+         -- пустой, и каждое сохранение затирало поджанры и соцсети (аудит 10-05).
+         ap.genre         AS genre,
+         ap.sub_genres    AS sub_genres,
+         ap.country       AS country,
+         ap.bio           AS bio,
+         ap.cover_url     AS cover_url,
+         ap.social_links  AS social_links,
+         ap.data          AS data,
          CASE
            WHEN ap.managed_by_label_id = $1 THEN 'managed'
            WHEN ap.label_id = $1 THEN 'linked'
@@ -478,6 +487,18 @@ app.put('/roster/managed/:id', requireAuth, async (c) => {
     }
 
     const body = await c.req.json();
+    // slug раньше писался как есть: пустой, с пробелами и заглавными, а занятый
+    // ронял UPDATE на уникальности (аудит 10-05). Нормализуем как при создании.
+    if (Object.prototype.hasOwnProperty.call(body, 'slug')) {
+      const raw = String(body.slug ?? '').trim();
+      if (!raw) {
+        delete body.slug; // пустое поле — оставляем прежний адрес
+      } else {
+        body.slug = slugify(raw);
+        const taken = await pool.query(`SELECT 1 FROM artist_profiles WHERE slug = $1 AND id::text <> $2 LIMIT 1`, [body.slug, id]);
+        if (taken.rows.length) return c.json({ success: false, error: 'Этот адрес (slug) уже занят — выберите другой' }, 409);
+      }
+    }
     const sets: string[] = [];
     const args: any[] = [];
     let i = 1;
