@@ -34,7 +34,7 @@ import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { ensureVenueProfile, getVenueProfile as dbGetVenueProfile } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
-import { sendVenueRadioReadyEmail, sendVenueRadioChangesRequestedEmail } from './email-helper.tsx';
+import { sendVenueRadioReadyEmail, sendVenueRadioChangesRequestedEmail, sendVenueRadioRejectedEmail } from './email-helper.tsx';
 
 const app = new Hono();
 
@@ -210,10 +210,11 @@ app.get('/me', requireAuth, async (c) => {
       return c.json({ success: true, request: null, streams: [] });
     }
 
+    // Последняя заявка, включая отклонённую: раньше отклонённые отфильтровывались,
+    // и кабинет вместо причины отказа показывал «Заполнить анкету» (аудит 10-05).
     const reqRes = await pool.query(
       `SELECT * FROM venue_station_requests
         WHERE venue_id = $1
-          AND status NOT IN ('rejected')
         ORDER BY created_at DESC LIMIT 1`,
       [profile.id]
     );
@@ -358,6 +359,12 @@ app.put('/', requireAuth, async (c) => {
       ]
     );
 
+    // Анкета вернулась от заведения после «нужны правки» — сообщаем админу,
+    // как при первой подаче (раньше повторная подача проходила молча).
+    if (cur.status === 'changes_requested' && nextStatus === 'pending_admin') {
+      notifyAdminNewRequest(profile, r.rows[0]).catch((err) =>
+        console.error('notifyAdminNewRequest (resubmit) failed:', err?.message));
+    }
     return c.json({ success: true, request: rowToRequest(r.rows[0]) });
   } catch (error: any) {
     console.error('PUT /venue-station:', error);
@@ -529,6 +536,13 @@ app.post('/admin/:requestId/reject', requireAuth, requireAdmin, async (c) => {
     if (r.rowCount === 0) {
       return c.json({ success: false, error: 'Request not found' }, 404);
     }
+    // Сообщаем заведению причину — раньше отказ был молчаливым.
+    const rejectedRow = r.rows[0];
+    loadVenueContact(rejectedRow.user_id).then((contact) => {
+      if (contact) {
+        return sendVenueRadioRejectedEmail({ toEmail: contact.email, venueName: contact.name, reason });
+      }
+    }).catch((err) => console.error('[venue-station] rejected email failed:', err?.message));
     return c.json({ success: true, request: rowToRequest(r.rows[0]) });
   } catch (error: any) {
     console.error('POST /venue-station/admin/:requestId/reject:', error);

@@ -854,6 +854,28 @@ export async function sendVenueRadioChangesRequestedEmail(data: { toEmail: strin
   });
 }
 
+// Заявку на эфир отклонили. Раньше отказ заведению не сообщался вовсе:
+// статус менялся молча, а кабинет показывал «Заполнить анкету» как в первый
+// раз (аудит 10-05). Ответы на noreply не доходят — даём адрес поддержки.
+export async function sendVenueRadioRejectedEmail(data: { toEmail: string; venueName: string; reason: string; }) {
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Заявка на эфир не принята</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
+    <p>Мы посмотрели вашу анкету для эфира ПРОМО.ЭИР и пока не можем её принять. Причина:</p>
+    <p style="padding:14px;background:#1a1a2e;border-left:3px solid #EF4444;border-radius:6px;color:#e0e0e0;">${escapeHtml(data.reason)}</p>
+    <p>Если это можно исправить — заполните анкету заново, и мы рассмотрим её ещё раз.</p>
+    <p style="text-align:center;margin:24px 0;">
+      <a href="${SITE_URL}/venue/onboarding" style="${buttonStyle}">Заполнить анкету заново</a>
+    </p>
+    <p style="color:#888;font-size:13px;">Остались вопросы — напишите нам на info@promofm.ru.</p>
+  `);
+  return sendEmail({
+    to: data.toEmail,
+    subject: 'ПРОМО.ЭИР: заявка на эфир не принята',
+    html,
+  });
+}
+
 // ─── Engineer marketplace notifications ────────────────────────────
 //
 // Жизненный цикл engineer-order'а (см. engineer-routes.tsx):

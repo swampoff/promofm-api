@@ -157,7 +157,12 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
             SET moderation_status        = 'approved',
                 moderation_comment       = $1,
                 moderated_at             = $2,
-                is_hidden                = TRUE,
+                -- Одобренный микс возвращается в профиль диджея: раньше он
+                -- прятался и оттуда до оплаты 10 000 ₽ (решение владельца
+                -- 2026-10-06). Эфир, недельные пакеты и «Миксы недели» по-
+                -- прежнему требуют оплаты: им нужен статус 'published' или
+                -- payment_completed, а здесь остаётся 'approved'.
+                is_hidden                = FALSE,
                 status                   = 'draft',
                 requires_payment         = TRUE,
                 payment_amount           = $3,

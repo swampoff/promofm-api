@@ -99,11 +99,14 @@ app.get('/djs', async (c) => {
     let paramIdx = 1;
 
     // Only show profiles with a name set (real registrations)
+    // Редактор хранит имя и город в data.profile — диджеи, сохранявшиеся до
+    // фикса upsert (май), без этого не попадали в каталог (аудит 10-05).
     conditions.push(`(dj_name IS NOT NULL AND dj_name != ''
-                      OR data->>'djName' IS NOT NULL AND data->>'djName' != '')`);
+                      OR data->>'djName' IS NOT NULL AND data->>'djName' != ''
+                      OR COALESCE(data->'profile'->>'djName', '') != '')`);
 
     if (query.city) {
-      conditions.push(`(location = $${paramIdx} OR data->>'city' = $${paramIdx})`);
+      conditions.push(`(location = $${paramIdx} OR data->>'city' = $${paramIdx} OR data->'profile'->>'city' = $${paramIdx})`);
       params.push(query.city);
       paramIdx++;
     }
@@ -198,7 +201,8 @@ app.get('/djs/:id/mixes', async (c) => {
          WHERE (m.dj_id = $1 OR m.dj_id = (
                 SELECT user_id FROM dj_profiles
                  WHERE id::text = $1 OR user_id = $1 LIMIT 1))
-           AND m.moderation_status IN ('upcoming', 'published')
+           -- 'approved' = одобрен, ждёт оплаты эфира — в профиле виден (10-06)
+           AND m.moderation_status IN ('upcoming', 'published', 'approved')
            AND m.is_hidden = FALSE
          ORDER BY m.created_at DESC`,
       [id]
