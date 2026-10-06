@@ -1555,6 +1555,56 @@ landing.get('/producer-profiles', async (c) => {
   }
 });
 
+// GET /hit-parade — «Хит-парад ПРОМО» в правой колонке главной (владелец
+// 2026-10-06). Только треки наших артистов: опубликованные и оплаченные.
+// Закреплённые места (hit_parade_pins, миграция 158) идут первыми; остальные —
+// по активности: прослушивания на сайте за 30 дней + подтверждённые радиоотчёты
+// (source <> 'auto' — декоративные пикапы в рейтинг не идут).
+landing.get('/hit-parade', async (c) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT t.id, t.title, t.cover_url, t.audio_url, t.duration,
+              COALESCE(NULLIF(ap.artist_name, ''), t.artist_name) AS artist,
+              ap.slug AS artist_slug,
+              hp.position AS pin,
+              (SELECT count(*)::int FROM track_plays p
+                WHERE p.track_id = t.id AND p.played_at > now() - interval '30 days') AS plays30,
+              (SELECT count(*)::int FROM track_radio_pickups r
+                WHERE r.track_id = t.id AND r.source <> 'auto'
+                  AND COALESCE(r.report_status, 'confirmed') = 'confirmed') AS radio
+         FROM tracks t
+         LEFT JOIN artist_profiles ap ON ap.id = t.artist_id
+         LEFT JOIN hit_parade_pins hp ON hp.track_id = t.id
+        WHERE t.moderation_status = 'published'
+          AND NOT COALESCE(t.is_hidden, false)
+          AND (t.payment_completed = true OR hp.track_id IS NOT NULL)
+        ORDER BY hp.position ASC NULLS LAST,
+                 (SELECT count(*) FROM track_plays p WHERE p.track_id = t.id AND p.played_at > now() - interval '30 days')
+               + (SELECT count(*) FROM track_radio_pickups r WHERE r.track_id = t.id AND r.source <> 'auto'
+                    AND COALESCE(r.report_status, 'confirmed') = 'confirmed') DESC,
+                 t.created_at DESC
+        LIMIT 10`,
+    );
+    const tracks = rows.map((r: any, i: number) => ({
+      position: i + 1,
+      id: String(r.id),
+      title: r.title,
+      artist: r.artist,
+      artistSlug: r.artist_slug || null,
+      coverUrl: r.cover_url || '',
+      audioUrl: r.audio_url || '',
+      duration: r.duration ?? null,
+      pinned: r.pin != null,
+      plays: Number(r.plays30 || 0),
+      radio: Number(r.radio || 0),
+    }));
+    return c.json({ success: true, data: { tracks } });
+  } catch (error) {
+    console.error('[landing] hit-parade:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 landing.get('/producer-profile/:id', async (c) => {
   try {
     const id = c.req.param('id');
