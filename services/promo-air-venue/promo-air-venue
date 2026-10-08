@@ -1,20 +1,61 @@
 #!/bin/bash
 # PROMO.AIR — управление отдельными потоками заведений (26.09.2026).
-#   promo-air-venue create <slug> [--music-dir DIR] [--name "Заведение · Точка"] [--jingle-every N]
+#   promo-air-venue create <slug> [--music-dir DIR] [--catalog ЖАНРЫ|none] [--name "Заведение · Точка"] [--jingle-every N]
+#   promo-air-venue catalog <slug> ЖАНРЫ|none — сменить жанры фонового каталога у потока
 #   promo-air-venue list
 #   promo-air-venue start|stop|restart|status <slug>
 #   promo-air-venue rebuild <slug>      — пересобрать список треков после смены музыки
 #   promo-air-venue remove <slug>       — остановить и выключить (данные остаются)
 # Поток заведения: https://promo-music.ru/air/live/venue-<slug>
 # Этот адрес админ вставляет в «Провижининг» заявки (поток на точку).
+# Фоновый каталог PROMO.AIR (08.10.2026): без --music-dir в папку музыки
+# заведения ссылками подключаются жанры каталога (по умолчанию $CATALOG_DEFAULT).
+# Жанры: lounge cafe deep-house chillout sport workout meditation focus
+# restaurant hotel spa. Ссылки названы «PROMO.AIR - Lounge 0001.mp3» —
+# так их показывает «Сейчас играет», служебные имена файлов наружу не идут.
+# Треки артистов с отметкой «в заведениях» API кладёт в ту же папку сам.
 set -euo pipefail
 ENV_DIR=/etc/promo-air/venues
 DATA_ROOT=/var/lib/promo-air
 PUBLIC=https://promo-music.ru/air/live
+CATALOG_DIR=/mnt/data/promo-air-catalog
+CATALOG_GENRES="lounge cafe deep-house chillout sport workout meditation focus restaurant hotel spa"
+CATALOG_DEFAULT=lounge,cafe,chillout,restaurant,hotel
 
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
 need_slug() { [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]] || die "slug: латиница в нижнем регистре, цифры и дефис (например zagorami-veranda)"; }
 envfile() { echo "$ENV_DIR/$1.env"; }
+
+genre_label() {
+  case "$1" in deep-house) echo "Deep House";; *) echo "${1^}";; esac
+}
+
+# Подключить жанры каталога к папке музыки: старые ссылки на каталог
+# убираем, новые ставим по базе (air_catalog_tracks, без status='rejected').
+link_catalog() {
+  local dir=$1 genres=$2 g n=0 list="" fp genre pid var num base name k
+  [ "$(realpath "$dir")" = "$(realpath /mnt/data/promofm-music/tracks)" ] && die "папка $dir — общий эфир ПРОМО.ФМ, каталог туда не кладём"
+  find "$dir" -maxdepth 1 -type l -lname "$CATALOG_DIR/*" -delete
+  [ "$genres" = none ] && { echo "Каталог отключён"; return 0; }
+  [[ "$genres" =~ ^[a-z-]+(,[a-z-]+)*$ ]] || die "жанры каталога через запятую, например lounge,cafe"
+  for g in ${genres//,/ }; do
+    [[ " $CATALOG_GENRES " == *" $g "* ]] || die "нет жанра каталога $g (есть: $CATALOG_GENRES)"
+    list+="${list:+,}'$g'"
+  done
+  while IFS='|' read -r fp genre pid var; do
+    [ -f "$fp" ] || continue
+    num=$(( 10#${pid##*-p} * 20 + var + 1 ))
+    base="PROMO.AIR - $(genre_label "$genre") $(printf %04d "$num")"
+    name="$base.mp3"; k=2
+    while [ -e "$dir/$name" ] || [ -L "$dir/$name" ]; do name="$base-$k.mp3"; k=$((k+1)); done
+    ln -s "$fp" "$dir/$name"; n=$((n+1))
+  done < <(sudo -u postgres psql -d promofm -At -F'|' -c \
+    "SELECT file_path, genre, prompt_id, variation FROM air_catalog_tracks
+      WHERE genre IN ($list) AND status IS DISTINCT FROM 'rejected' ORDER BY genre, prompt_id, variation")
+  [ "$n" -gt 0 ] || die "каталог: нет треков для $genres (или база недоступна)"
+  chown -h promofm:promofm "$dir"/*.mp3 2>/dev/null || true
+  echo "Каталог: $n треков ($genres)"
+}
 
 rebuild() {
   local slug=$1 f; f=$(envfile "$slug"); [ -f "$f" ] || die "нет потока $slug"
@@ -30,16 +71,17 @@ cmd=${1:-}; shift || true
 case "$cmd" in
   create)
     slug=${1:-}; need_slug "$slug"; shift
-    music=""; name=""; jingle_every=3
+    music=""; name=""; jingle_every=3; catalog=""
     while [ $# -gt 0 ]; do case "$1" in
       --music-dir) music=$2; shift 2;; --name) name=$2; shift 2;; --jingle-every) jingle_every=$2; shift 2;;
+      --catalog) catalog=$2; shift 2;;
       *) die "неизвестный параметр $1";; esac; done
     [ -f "$(envfile "$slug")" ] && die "поток $slug уже есть (promo-air-venue list)"
     mkdir -p "$ENV_DIR"
     station_name=${name:-$slug}
     data="$DATA_ROOT/$slug"
     mkdir -p "$data"/{music,jingles,announcements,news,podcasts}
-    [ -n "$music" ] || music="$data/music"
+    if [ -z "$music" ]; then music="$data/music"; catalog=${catalog:-$CATALOG_DEFAULT}; fi
     [ -d "$music" ] || die "нет папки с музыкой: $music"
     port=""
     for p in $(seq 8101 8199); do
@@ -65,6 +107,7 @@ VENUE_JINGLE_EVERY=$jingle_every
 VENUE_DJ_VOICE=0
 VENUE_REPORT_PLAY=0
 ENV
+    [ -n "$catalog" ] && link_catalog "$music" "$catalog"
     chown -R promofm:promofm "$data"
     rebuild "$slug"
     systemctl daemon-reload
@@ -85,10 +128,16 @@ ENV
     done ;;
   start|stop|restart|status) slug=${1:-}; need_slug "$slug"; systemctl "$cmd" "promo-air-venue@$slug" ;;
   rebuild) slug=${1:-}; need_slug "$slug"; rebuild "$slug" ;;
+  catalog)
+    slug=${1:-}; need_slug "$slug"; f=$(envfile "$slug"); [ -f "$f" ] || die "нет потока $slug"
+    [ -n "${2:-}" ] || die "укажите жанры, например: promo-air-venue catalog $slug lounge,cafe (или none)"
+    dir=$(grep ^VENUE_MUSIC_DIR= "$f" | cut -d= -f2-)
+    link_catalog "$dir" "$2"
+    rebuild "$slug" ;;
   remove)
     slug=${1:-}; need_slug "$slug"
     systemctl disable --now "promo-air-venue@$slug" >/dev/null 2>&1 || true
     mv "$(envfile "$slug")" "$(envfile "$slug").removed.$(date +%s)" 2>/dev/null || true
     echo "Поток $slug выключен (данные в $DATA_ROOT/$slug сохранены)." ;;
-  *) sed -n '2,10p' "$0"; exit 1 ;;
+  *) sed -n '2,18p' "$0"; exit 1 ;;
 esac
