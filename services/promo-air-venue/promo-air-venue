@@ -30,18 +30,25 @@ genre_label() {
   case "$1" in deep-house) echo "Deep House";; *) echo "${1^}";; esac
 }
 
+# Проверить жанры и папку до любых изменений.
+check_catalog() {
+  local dir=$1 genres=$2 g
+  [ "$(realpath -m "$dir")" = "$(realpath /mnt/data/promofm-music/tracks)" ] && die "папка $dir — общий эфир ПРОМО.ФМ, каталог туда не кладём"
+  [ "$genres" = none ] && return 0
+  [[ "$genres" =~ ^[a-z-]+(,[a-z-]+)*$ ]] || die "жанры каталога через запятую, например lounge,cafe"
+  for g in ${genres//,/ }; do
+    [[ " $CATALOG_GENRES " == *" $g "* ]] || die "нет жанра каталога $g (есть: $CATALOG_GENRES)"
+  done
+}
+
 # Подключить жанры каталога к папке музыки: старые ссылки на каталог
 # убираем, новые ставим по базе (air_catalog_tracks, без status='rejected').
 link_catalog() {
   local dir=$1 genres=$2 g n=0 list="" fp genre pid var num base name k
-  [ "$(realpath "$dir")" = "$(realpath /mnt/data/promofm-music/tracks)" ] && die "папка $dir — общий эфир ПРОМО.ФМ, каталог туда не кладём"
+  check_catalog "$dir" "$genres"
   find "$dir" -maxdepth 1 -type l -lname "$CATALOG_DIR/*" -delete
   [ "$genres" = none ] && { echo "Каталог отключён"; return 0; }
-  [[ "$genres" =~ ^[a-z-]+(,[a-z-]+)*$ ]] || die "жанры каталога через запятую, например lounge,cafe"
-  for g in ${genres//,/ }; do
-    [[ " $CATALOG_GENRES " == *" $g "* ]] || die "нет жанра каталога $g (есть: $CATALOG_GENRES)"
-    list+="${list:+,}'$g'"
-  done
+  for g in ${genres//,/ }; do list+="${list:+,}'$g'"; done
   while IFS='|' read -r fp genre pid var; do
     [ -f "$fp" ] || continue
     num=$(( 10#${pid##*-p} * 20 + var + 1 ))
@@ -80,8 +87,9 @@ case "$cmd" in
     mkdir -p "$ENV_DIR"
     station_name=${name:-$slug}
     data="$DATA_ROOT/$slug"
-    mkdir -p "$data"/{music,jingles,announcements,news,podcasts}
     if [ -z "$music" ]; then music="$data/music"; catalog=${catalog:-$CATALOG_DEFAULT}; fi
+    [ -n "$catalog" ] && check_catalog "$music" "$catalog"
+    mkdir -p "$data"/{music,jingles,announcements,news,podcasts}
     [ -d "$music" ] || die "нет папки с музыкой: $music"
     port=""
     for p in $(seq 8101 8199); do
