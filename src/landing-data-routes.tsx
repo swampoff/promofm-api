@@ -348,22 +348,37 @@ landing.get('/new-releases', async (c) => {
     // source='auto' (daily-radio-growth). Решение владельца 24.09.2026: это
     // устоявшаяся формула — партнёры качают трек сразу; не фильтровать.
     // Подпись на фронте — «взяли в ротацию».
+    // Плюс станции, скачавшие трек (track_downloads_by_radio): без них у
+    // треков реальных артистов, где auto-строк нет, витрина показывала 0
+    // (владелец 08.10.2026). Скачавшие идут отдельным списком — на фронте
+    // они подписаны «скачали», а не «взяли в ротацию». Анонимные скачивания
+    // без названия станции не считаем.
     const pickupsResult = await pool.query(
       `SELECT track_id,
         COUNT(DISTINCT station_name)::int as stations_count,
         COUNT(DISTINCT city)::int as cities_count,
-        array_agg(DISTINCT station_name) as stations
-       FROM track_radio_pickups WHERE track_id = ANY($1)
+        array_agg(DISTINCT station_name) FILTER (WHERE kind = 'rotation') as stations,
+        array_agg(DISTINCT station_name) FILTER (WHERE kind = 'download') as downloaded_stations
+       FROM (
+         SELECT track_id, station_name, city, 'rotation' AS kind
+           FROM track_radio_pickups WHERE track_id = ANY($1)
+         UNION ALL
+         SELECT track_id, TRIM(station_name), NULLIF(TRIM(city), ''), 'download'
+           FROM track_downloads_by_radio
+          WHERE track_id = ANY($1) AND NULLIF(TRIM(station_name), '') IS NOT NULL
+       ) s
        GROUP BY track_id`,
       [tids]
     );
 
     const pickupsMap: Record<string, any> = {};
     for (const row of pickupsResult.rows) {
+      const stations: string[] = row.stations || [];
       pickupsMap[row.track_id] = {
         stationsCount: row.stations_count,
         broadcastCitiesCount: row.cities_count,
-        stations: row.stations || [],
+        stations,
+        downloadedStations: (row.downloaded_stations || []).filter((s: string) => !stations.includes(s)),
       };
     }
 
@@ -390,6 +405,7 @@ landing.get('/new-releases', async (c) => {
       isAiGenerated: t.is_ai_generated === true,
       aiTool: t.ai_tool || null,
       stations: pickupsMap[t.id]?.stations || [],
+      downloadedStations: pickupsMap[t.id]?.downloadedStations || [],
       // Streaming-сервисы (migration 095) — null если артист не заполнил.
       // Player на лендинге рендерит кнопку только для непустых.
       yandexMusicUrl: t.yandex_music_url || null,
