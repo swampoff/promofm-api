@@ -8,6 +8,20 @@ import { listAllNewsPublic, upsertNewsPublic } from './db.tsx';
 import { isUrlSafe } from './security.tsx';
 
 
+
+/**
+ * Дата публикации новости (09.10.2026). Нейросеть подставляла в publishedAt даты событий из
+ * текста («ноябрь 2026») — такие «новости из будущего» висели наверху ленты (ORDER BY published_at),
+ * а свежие уходили вниз. Дата из будущего или нечитаемая → момент добавления.
+ */
+function sanePublishedAt(raw: unknown): string {
+  const now = new Date();
+  if (typeof raw !== 'string' || !raw.trim()) return now.toISOString();
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime()) || d.getTime() > now.getTime()) return now.toISOString();
+  return d.toISOString();
+}
+
 // ─── Poster Personas — у каждого свой стиль и специализация ────────
 const POSTERS = [
   { name: 'DJ Den', avatar: '/avatars/avatar_dj_den.png', style: 'клубная культура, электроника, DJ-сцена. Пишет энергично и с инсайдерским знанием клубной жизни' },
@@ -740,7 +754,7 @@ SEO-ПРАВИЛА:
         sourceUrl: n.sourceUrl || source.url,
         // Use LLM-selected image (LLM picks correct image per article from prompt)
         imageUrl: n.imageUrl && n.imageUrl.startsWith('http') ? n.imageUrl : '',
-        publishedAt: n.publishedAt || new Date().toISOString(),
+        publishedAt: sanePublishedAt(n.publishedAt),
       }))
       .map((n: any) => {
         // Guarantee source attribution in content (post-processing)
