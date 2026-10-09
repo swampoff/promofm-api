@@ -137,7 +137,7 @@ import { createLogger } from './logger.tsx';
 import { requestIdMiddleware } from './request-id.tsx';
 
 const log = createLogger('server');
-import { authLimiter, uploadLimiter, apiLimiter } from './rate-limiter.tsx';
+import { authLimiter, sessionLimiter, uploadLimiter, apiLimiter } from './rate-limiter.tsx';
 import { safeErrorMessage, scanForSqlInjection } from './security.tsx';
 import { wafMiddleware, honeypotMiddleware } from './threat-detector.tsx';
 import { rlsMiddleware } from './db-client.tsx';
@@ -244,8 +244,11 @@ app.use('*', async (c, next) => {
   c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
 });
 
-// Rate limiting: auth endpoints (10 req/min per IP)
-app.use('/server/auth/*', authLimiter);
+// Rate limiting: auth endpoints (10 req/min per IP); /me и /refresh — свой
+// лимит 120/мин (sessionLimiter), чтобы не съедать попытки входа.
+const SESSION_PATHS = new Set(['/server/auth/me', '/server/auth/refresh']);
+app.use('/server/auth/*', (c, next) =>
+  SESSION_PATHS.has(c.req.path) ? sessionLimiter(c, next) : authLimiter(c, next));
 
 // Rate limiting: upload endpoints (15 req/min per IP)
 app.use('/server/storage/*', uploadLimiter);

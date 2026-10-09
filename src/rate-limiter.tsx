@@ -105,6 +105,16 @@ export const authLimiter = createRateLimiter('auth', {
   message: 'Too many authentication attempts, please try again in a minute',
 });
 
+// /server/auth/me и /refresh каждая страница вызывает сама (проверка и
+// продление сессии) — это не попытки входа. На общем лимите 10/мин они
+// съедали его у людей за общим IP оператора, и вход/регистрация получали
+// 429 (09.10.2026). Свой мягкий лимит — только против злоупотреблений.
+export const sessionLimiter = createRateLimiter('session', {
+  windowMs: 60000,
+  max: 120,
+  message: 'Too many session requests, please slow down',
+});
+
 export const uploadLimiter = createRateLimiter('upload', {
   windowMs: 60000,
   max: 15,
