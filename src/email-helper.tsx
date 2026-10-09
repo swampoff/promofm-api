@@ -358,6 +358,9 @@ export async function notifyBookingRequest(data: {
 
 export async function notifyNewUser(data: { email: string; name: string; role: string; via?: string; needsApproval?: boolean; application?: any }) {
   const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: ${data.needsApproval ? '#F59E0B' : '#3B82F6'};">${data.needsApproval ? 'Заявка — требует одобрения' : 'Новый пользователь'}</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Имя:</td><td>${escapeHtml(data.name)}</td></tr><tr><td style="padding: 8px;">Email:</td><td>${escapeHtml(data.email)}</td></tr><tr><td style="padding: 8px;">Роль:</td><td>${escapeHtml(data.role)}</td></tr>${data.via ? `<tr><td style="padding: 8px;">Через:</td><td>${escapeHtml(data.via)}</td></tr>` : ''}${data.application ? `<tr><td style="padding: 8px;">Заявка:</td><td>${escapeHtml(JSON.stringify(data.application))}</td></tr>` : ''}</table></div>`;
+  // 09.10.2026: дубль в Telegram — после переезда письма на info@promofm.ru до владельца не доходят
+  // (Яндекс принимает, но в ящик не кладёт); Telegram не зависит от почты.
+  notifyAdminTelegram(`${data.needsApproval ? '📝 Заявка на модерацию' : '👤 Новая регистрация'}: <b>${escapeHtml(data.name)}</b>\nРоль: ${escapeHtml(data.role)}\nEmail: ${escapeHtml(data.email)}${data.via ? `\nЧерез: ${escapeHtml(data.via)}` : ''}`).catch(() => {});
   await sendEmail({ to: ADMIN_EMAIL, subject: data.needsApproval ? `[ПРОМО] ЗАЯВКА: ${escapeHtml(data.role)} ${escapeHtml(data.name)}` : `[ПРОМО] Новый ${escapeHtml(data.role)}: ${escapeHtml(data.name)}`, html });
 }
 
@@ -1108,6 +1111,7 @@ export async function notifyAdminChatMessage(data: {
       <a href="${SITE_URL}/ctrl-pm7k2f" style="display:inline-block;padding:13px 30px;background:linear-gradient(135deg,#FF577F 0%,#7C3AED 100%);color:#fff;text-decoration:none;border-radius:8px;font-weight:700;">Открыть чат</a>
     </p>
   `);
+  notifyAdminTelegram(`💬 Чат поддержки: <b>${escapeHtml(data.senderName || 'Гость')}</b>${data.contact ? ` (${escapeHtml(data.contact)})` : ''} ждёт ответа\n${escapeHtml(data.body.slice(0, 500))}\n${SITE_URL}/ctrl-pm7k2f`).catch(() => {});
   await sendEmail({
     to: ADMIN_EMAIL,
     subject: `[ПРОМО] Чат: ${escapeHtml((data.senderName || 'Гость'))} ждёт ответа`,
