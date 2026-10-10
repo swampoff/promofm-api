@@ -768,6 +768,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
       }
 
       if (track.user_id) {
+        const cabinetPath = await cabinetTracksPath(track.user_id);
         const rejectTitle = `Трек «${track.title}» отклонён`;
         const rejectMsg = rejection_type === 'profanity'
           ? 'Трек «' + track.title + '» отклонён: ненормативная лексика. Примем clean version.'
