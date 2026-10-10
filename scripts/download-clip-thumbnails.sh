@@ -1,36 +1,30 @@
 #!/bin/bash
-# Download YouTube clip thumbnails via external proxy
-# Called after build-clips to ensure thumbnails are available locally
-# YouTube CDN (i.ytimg.com) is blocked from Russian VPS
-
+# Скачивает миниатюры YouTube-клипов с главной (newClips) в THUMBS_DIR.
+# i.ytimg.com с российского VPS недоступен → через форвард-прокси Soul FM (OPENROUTER_PROXY в .env).
+# Крон: после videos-agent (пн/сб 07:15) + ежедневно 09:15. Безопасно запускать вручную.
+set -u
 THUMBS_DIR="/var/www/promofm/html/thumbnails"
-API_URL="https://promo-music.ru/server/api/videos/newClips?limit=30"
-
+API_URL="https://promo-music.ru/server/api/videos/newClips?limit=40"
+PROXY="$(grep -oP '^OPENROUTER_PROXY=\K.*' /opt/promofm-api/.env 2>/dev/null | tr -d '"' )"
 mkdir -p "$THUMBS_DIR"
-
-# Get current clips from API
-clips=$(curl -s "$API_URL" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for c in data.get('clips', []):
-    vid = c.get('videoId', '')
-    if vid:
-        print(vid)
-" 2>/dev/null)
-
-missing=0
+clips=$(curl -s -m 20 "$API_URL" | python3 -c '
+import sys, json, re
+try: data = json.load(sys.stdin)
+except Exception: sys.exit(0)
+for c in data.get("clips", []):
+    vid = str(c.get("videoId") or "")
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid): print(vid)
+')
+ok=0; miss=0; fail=0
 for vid in $clips; do
-    if [ ! -f "$THUMBS_DIR/thumb_${vid}.jpg" ]; then
-        missing=$((missing + 1))
-        echo "Missing: $vid"
-    fi
+  f="$THUMBS_DIR/thumb_${vid}.jpg"
+  [ -s "$f" ] && { ok=$((ok+1)); continue; }
+  miss=$((miss+1))
+  for q in mqdefault hqdefault default; do
+    curl -s -m 20 ${PROXY:+-x "$PROXY"} -o "$f.tmp" "https://i.ytimg.com/vi/${vid}/${q}.jpg" || true
+    if [ -s "$f.tmp" ] && file -b --mime-type "$f.tmp" | grep -q '^image/jpeg$' && [ "$(stat -c %s "$f.tmp")" -lt 524288 ]; then mv "$f.tmp" "$f"; chmod 644 "$f"; ok=$((ok+1)); break; fi
+    rm -f "$f.tmp"
+  done
+  [ -s "$f" ] || { fail=$((fail+1)); echo "не скачалась: $vid"; }
 done
-
-if [ "$missing" -gt 0 ]; then
-    echo "WARNING: $missing thumbnails missing. Upload via:"
-    echo "  curl -X POST https://promo-music.ru/server/api/videos/download-thumbnails \\"
-    echo "    -H 'x-internal-key: KEY' -H 'Content-Type: application/json' \\"
-    echo "    -d '{\"thumbnails\": [{\"videoId\": \"VID\", \"url\": \"https://i.ytimg.com/vi/VID/mqdefault.jpg\"}]}'"
-else
-    echo "All thumbnails present ($( echo "$clips" | wc -w | tr -d ' ') clips)"
-fi
+echo "$(date '+%F %T') clips=$(echo "$clips" | wc -w | tr -d ' ') есть=$ok скачивали=$miss ошибок=$fail"
