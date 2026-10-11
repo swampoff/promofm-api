@@ -1195,10 +1195,12 @@ app.post('/promote-upcoming', async (c) => {
       // до следующей пятницы. Теперь cron сразу добавляет id в начало
       // track_ids текущего активного release (защита от дублей через
       // NOT t.id = ANY(track_ids)).
+      // Закон владельца (11.10.2026): в выпуске всегда ровно 10 треков —
+      // новый оплаченный встаёт первым, последний вытесняется.
       try {
         await (await import('./db-client.tsx')).pool.query(
           `UPDATE weekly_releases
-              SET track_ids = ARRAY[$1::uuid] || track_ids
+              SET track_ids = (ARRAY[$1::uuid] || track_ids)[1:10]
             WHERE id = (
               SELECT id FROM weekly_releases
                WHERE is_published = true
