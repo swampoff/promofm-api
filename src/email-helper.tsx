@@ -73,9 +73,11 @@ const smtpConfig: any = {
   port: parseInt(process.env.SMTP_PORT || '25'),
   secure: false,
   tls: { rejectUnauthorized: false },
-  connectionTimeout: 5000,
-  greetingTimeout: 5000,
-  socketTimeout: 10000,
+  // 11.10.2026: основной сервер теперь внешний (reg.ru) — таймауты с запасом, на 587 только STARTTLS.
+  requireTLS: parseInt(process.env.SMTP_PORT || '25') === 587,
+  connectionTimeout: 15000,
+  greetingTimeout: 15000,
+  socketTimeout: 30000,
 };
 // Only add auth if SMTP_PASS is set (external relay like mail.hosting.reg.ru)
 if (process.env.SMTP_PASS) {
@@ -85,6 +87,14 @@ if (process.env.SMTP_PASS) {
   };
 }
 const smtpTransport = nodemailer.createTransport(smtpConfig);
+// 11.10.2026: основной SMTP — почтовый сервер reg.ru (ящик noreply@promo-music.ru, SMTP_HOST/SMTP_PASS
+// в .env): Яндекс перестал принимать письма с наших IP. Если reg.ru отказал или недоступен —
+// местный exim (127.0.0.1:25 → релей Soul FM): Gmail и большинство почтовиков его принимают.
+const SMTP_IS_LOCAL = ['127.0.0.1', 'localhost', '::1'].includes(String(smtpConfig.host));
+const localTransport = SMTP_IS_LOCAL ? null : nodemailer.createTransport({
+  host: '127.0.0.1', port: 25, secure: false, tls: { rejectUnauthorized: false },
+  connectionTimeout: 5000, greetingTimeout: 5000, socketTimeout: 15000,
+});
 
 interface EmailOptions {
   to: string;
@@ -106,26 +116,36 @@ export async function sendEmail(opts: EmailOptions): Promise<boolean> {
     console.warn('[Email] skip placeholder recipient:', opts.to);
     return false;
   }
-  // Try SMTP first (localhost Postfix works without auth)
+  // Основной SMTP (reg.ru), затем местный exim; Resend — последний запасной канал.
   {
+    const mailOpts = {
+      from: opts.from || FROM_EMAIL,
+      replyTo: REPLY_TO,
+      to: opts.to,
+      subject: opts.subject,
+      html: opts.html,
+      headers: {
+        'X-Mailer': 'PROMO.MUSIC Platform',
+        // NOTE: 'Precedence: bulk' и 'List-Unsubscribe' убраны —
+        // Yandex.Mail отправлял всё в папку «Рассылки», админ не видел уведомления.
+        // Транзакционные письма (moderation/payment/seo) теперь идут в Inbox.
+      },
+    };
     try {
-      const info = await smtpTransport.sendMail({
-        from: opts.from || FROM_EMAIL,
-        replyTo: REPLY_TO,
-        to: opts.to,
-        subject: opts.subject,
-        html: opts.html,
-        headers: {
-          'X-Mailer': 'PROMO.MUSIC Platform',
-          // NOTE: 'Precedence: bulk' и 'List-Unsubscribe' убраны —
-          // Yandex.Mail отправлял всё в папку «Рассылки», админ не видел уведомления.
-          // Транзакционные письма (моderation/payment/seo) теперь идут в Inbox.
-        },
-      });
+      const info = await smtpTransport.sendMail(mailOpts);
       console.log('[Email] Sent via SMTP:', info.messageId, 'to:', opts.to);
       return true;
     } catch (err: any) {
       console.error('[Email] SMTP failed:', err.message);
+    }
+    if (localTransport) {
+      try {
+        const info = await localTransport.sendMail(mailOpts);
+        console.log('[Email] Sent via local relay (fallback):', info.messageId, 'to:', opts.to);
+        return true;
+      } catch (err: any) {
+        console.error('[Email] local relay failed:', err.message);
+      }
     }
   }
 

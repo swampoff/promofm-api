@@ -113,6 +113,20 @@ function getTransporter() {
   return transporter;
 }
 
+// 11.10.2026: основной SMTP — reg.ru (см. email-helper.tsx). При его отказе (недоступен,
+// суточный лимит 3000 писем, отказ получателю) пробуем местный exim → релей Soul FM.
+const SMTP_IS_LOCAL = ['127.0.0.1', 'localhost', '::1'].includes(DEFAULT_SMTP_HOST);
+let localTransporter: ReturnType<typeof nodemailer.createTransport> | null = null;
+function getLocalTransporter() {
+  if (!localTransporter) {
+    localTransporter = nodemailer.createTransport({
+      host: '127.0.0.1', port: 25, secure: false, tls: { rejectUnauthorized: false },
+      connectionTimeout: 15000, greetingTimeout: 10000, socketTimeout: 30000,
+    });
+  }
+  return localTransporter;
+}
+
 export async function smtpSendEmail(opts: SmtpSendOptions, retries = 2): Promise<SmtpResult> {
   let lastError = 'Max retries exceeded';
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -167,6 +181,7 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
     unsubLinkUrl = unsubUrl;
   }
 
+  let mailOpts: any = null;
   try {
     const transport = getTransporter();
 
@@ -180,7 +195,7 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
       }
     }
 
-    const info = await transport.sendMail({
+    mailOpts = {
       from,
       to: recipients.join(', '),
       subject: opts.subject,
@@ -188,7 +203,8 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
       text: htmlToPlainText(opts.html),
       replyTo: opts.replyTo || SMTP_REPLY_TO,
       headers,
-    });
+    };
+    const info = await transport.sendMail(mailOpts);
 
     console.log(`[SMTP] Sent to ${recipients.join(', ')}, msgId: ${info.messageId}`);
     return { success: true, messageId: info.messageId };
@@ -198,6 +214,16 @@ async function smtpSendEmailOnce(opts: SmtpSendOptions): Promise<SmtpResult> {
     console.error(`[SMTP] Failed to send to ${recipients.join(', ')}:`, errMsg);
     if (errMsg.includes('ECONNREFUSED') || errMsg.includes('ECONNRESET') || errMsg.includes('timeout')) {
       transporter = null;
+    }
+
+    if (!SMTP_IS_LOCAL && mailOpts) {
+      try {
+        const info = await getLocalTransporter().sendMail(mailOpts);
+        console.log(`[SMTP] Sent via local relay (fallback) to ${recipients.join(', ')}, msgId: ${info.messageId}`);
+        return { success: true, messageId: info.messageId };
+      } catch (e2) {
+        console.error(`[SMTP] local relay fallback failed for ${recipients.join(', ')}:`, e2 instanceof Error ? e2.message : String(e2));
+      }
     }
 
     // Перманентный SMTP-отказ (auth misconfig / 550 rejected) — НЕ маскируем
