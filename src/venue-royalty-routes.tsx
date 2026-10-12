@@ -17,6 +17,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
+import { scopeTracksSql } from './radio-scope.tsx';
 import { venueDjPort, venueNameFor, VENUE_MOUNT_RE } from './venue-station-routes.tsx';
 
 export const VENUE_ROYALTY_PER_PLAY = 20;
@@ -218,37 +219,50 @@ async function balanceFor(userId: string, client: { query: typeof pool.query } =
   return { earned: money(earned), withdrawn: money(withdrawn), available: money(Math.max(0, earned - withdrawn)) };
 }
 
+// ?scope=label (12.10.2026, «учёт ростера для лейблов»): треки лейбла и всех
+// артистов его ростера (radio-scope.tsx) с их проигрываниями в заведениях.
+// Только просмотр: отметку «в заведениях» ставит владелец трека (own), а
+// баланс и выводы остаются личными — начисления идут тому, кто загрузил трек.
 app.get('/my', requireAuth, async (c) => {
   try {
     const userId = String(c.get('userId'));
+    const roster = c.req.query('scope') === 'label';
+    const withSc = roster ? `WITH sc AS (${scopeTracksSql('label')})` : '';
+    const playsOf = roster ? 'p.track_id IN (SELECT id FROM sc)' : 'p.artist_user_id = $1';
     const [tracks, venues, recent, totals, wds, balance] = await Promise.all([
       pool.query(
-        `SELECT t.id, t.title, t.artist_name, t.moderation_status, t.venue_opt_in, t.venue_agreement_at,
+        `${withSc}
+         SELECT t.id, t.title, t.artist_name, t.moderation_status, t.venue_opt_in, t.venue_agreement_at,
+                (t.user_id::text = $1) AS own,
                 (t.payment_completed = true OR t.is_paid = true) AS paid,
-                COALESCE(p.plays, 0)::int AS plays, COALESCE(p.earned, 0)::numeric AS earned, p.last_at
+                COALESCE(pp.plays, 0)::int AS plays, COALESCE(pp.earned, 0)::numeric AS earned, pp.last_at
            FROM tracks t
-           LEFT JOIN (SELECT track_id, count(*) AS plays, sum(amount) AS earned, max(played_at) AS last_at
-                        FROM venue_track_plays WHERE artist_user_id = $1 GROUP BY track_id) p ON p.track_id = t.id
-          WHERE t.user_id::text = $1 AND COALESCE(t.is_legacy, false) = false
+           LEFT JOIN (SELECT p.track_id, count(*) AS plays, sum(p.amount) AS earned, max(p.played_at) AS last_at
+                        FROM venue_track_plays p WHERE ${playsOf} GROUP BY p.track_id) pp ON pp.track_id = t.id
+          WHERE ${roster ? 't.id IN (SELECT id FROM sc)' : 't.user_id::text = $1'}
+            AND COALESCE(t.is_legacy, false) = false
             AND COALESCE(t.moderation_status, '') NOT IN ('rejected', 'deleted')
           ORDER BY t.created_at DESC
           LIMIT 200`,
         [userId],
       ),
       pool.query(
-        `SELECT venue_name, point_name, count(*)::int AS plays, sum(amount)::numeric AS earned, max(played_at) AS last_at
-           FROM venue_track_plays WHERE artist_user_id = $1
-          GROUP BY venue_name, point_name ORDER BY plays DESC LIMIT 50`,
+        `${withSc}
+         SELECT p.venue_name, p.point_name, count(*)::int AS plays, sum(p.amount)::numeric AS earned, max(p.played_at) AS last_at
+           FROM venue_track_plays p WHERE ${playsOf}
+          GROUP BY p.venue_name, p.point_name ORDER BY plays DESC LIMIT 50`,
         [userId],
       ),
       pool.query(
-        `SELECT p.played_at, p.venue_name, p.point_name, p.amount, t.title
+        `${withSc}
+         SELECT p.played_at, p.venue_name, p.point_name, p.amount, t.title, t.artist_name
            FROM venue_track_plays p LEFT JOIN tracks t ON t.id = p.track_id
-          WHERE p.artist_user_id = $1 ORDER BY p.played_at DESC LIMIT 50`,
+          WHERE ${playsOf} ORDER BY p.played_at DESC LIMIT 50`,
         [userId],
       ),
       pool.query(
-        `SELECT count(*)::int AS plays, count(DISTINCT venue_user_id)::int AS venues FROM venue_track_plays WHERE artist_user_id = $1`,
+        `${withSc}
+         SELECT count(*)::int AS plays, count(DISTINCT p.venue_user_id)::int AS venues FROM venue_track_plays p WHERE ${playsOf}`,
         [userId],
       ),
       pool.query(
@@ -268,7 +282,7 @@ app.get('/my', requireAuth, async (c) => {
         totals: { plays: totals.rows[0]?.plays || 0, venues: totals.rows[0]?.venues || 0 },
         tracks: tracks.rows.map((r: any) => ({
           id: String(r.id), title: r.title || 'Без названия', artist: r.artist_name || '',
-          status: r.moderation_status || 'pending', paid: !!r.paid,
+          own: !!r.own, status: r.moderation_status || 'pending', paid: !!r.paid,
           optIn: !!r.venue_opt_in, agreedAt: iso(r.venue_agreement_at),
           plays: Number(r.plays || 0), earned: money(Number(r.earned || 0)), lastPlayedAt: iso(r.last_at),
         })),
@@ -277,7 +291,7 @@ app.get('/my', requireAuth, async (c) => {
           plays: Number(r.plays || 0), earned: money(Number(r.earned || 0)), lastPlayedAt: iso(r.last_at),
         })),
         recent: recent.rows.map((r: any) => ({
-          title: r.title || '', venueName: r.venue_name || 'Заведение', pointName: r.point_name || null,
+          title: r.title || '', artist: r.artist_name || '', venueName: r.venue_name || 'Заведение', pointName: r.point_name || null,
           amount: Number(r.amount || 0), playedAt: iso(r.played_at),
         })),
         withdrawals: wds.rows.map((r: any) => ({

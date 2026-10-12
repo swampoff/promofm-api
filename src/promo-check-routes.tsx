@@ -9,6 +9,7 @@ import { pool } from "./db-client.tsx";
 import { requireAuth, requireOwner, requireRole } from "./auth-middleware.tsx";
 import { getRadioProfile } from "./db.tsx";
 import { isAdminEmail } from "./roles.tsx";
+import { parseRadioScope, scopeItemsSql, scopeTracksSql } from "./radio-scope.tsx";
 
 const app = new Hono();
 
@@ -26,35 +27,42 @@ async function query<T = Record<string, unknown>>(
 app.get("/stats/:trackId", requireAuth, async (c) => {
   const { trackId } = c.req.param();
   const days = Number(c.req.query("days") || "30");
+  // DJ-миксы (id 'mix-…', 12.10.2026): детекции — dj_mix_detections,
+  // отпечаток — dj_mix_fingerprints; у треков — promo_check_*.
+  const isMix = trackId.startsWith("mix-");
+  const detTable = isMix ? "dj_mix_detections" : "promo_check_detections";
+  const idCol = isMix ? "mix_id" : "track_id";
 
   const [totals, byStation, timeline, fingerprinted] = await Promise.all([
     query<{ total: string; confirmed: string }>(
       `SELECT COUNT(*) as total,
               COUNT(*) FILTER (WHERE watermark_confirmed = true) as confirmed
-       FROM promo_check_detections
-       WHERE track_id = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}`,
+       FROM ${detTable}
+       WHERE ${idCol} = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}`,
       [trackId]
     ),
     query<{ station_name: string; count: string; last_detected: string }>(
       `SELECT station_name,
               COUNT(*) as count,
               MAX(detected_at) as last_detected
-       FROM promo_check_detections
-       WHERE track_id = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}
+       FROM ${detTable}
+       WHERE ${idCol} = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}
        GROUP BY station_name
        ORDER BY count DESC`,
       [trackId]
     ),
     query<{ day: string; count: string }>(
       `SELECT DATE(detected_at) as day, COUNT(*) as count
-       FROM promo_check_detections
-       WHERE track_id = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}
+       FROM ${detTable}
+       WHERE ${idCol} = $1 AND detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}
        GROUP BY DATE(detected_at)
        ORDER BY day ASC`,
       [trackId]
     ),
     query<{ fingerprinted_at: string; status: string }>(
-      `SELECT fingerprinted_at, status FROM promo_check_fingerprints WHERE track_id = $1`,
+      isMix
+        ? `SELECT fingerprinted_at, status FROM dj_mix_fingerprints WHERE mix_id = $1`
+        : `SELECT fingerprinted_at, status FROM promo_check_fingerprints WHERE track_id = $1`,
       [trackId]
     ),
   ]);
@@ -74,27 +82,41 @@ app.get("/stats/:trackId", requireAuth, async (c) => {
 
 // ─── All tracks for an artist ─────────────────────────────────────────────────
 
+// ?scope=label — треки всего ростера лейбла, ?scope=dj — треки и миксы
+// диджея (radio-scope.tsx, 12.10.2026); без scope — треки артиста.
 app.get("/artist/:artistId", requireAuth, requireOwner("artistId"), async (c) => {
   const { artistId } = c.req.param();
   const days = Number(c.req.query("days") || "30");
+  const scope = parseRadioScope(c.req.query("scope"));
+  const span = Math.max(1, Math.min(Number(days) || 30, 365));
+  // Audit 2026-06-04: caller passes userId (text), so filter tracks.user_id,
+  // not tracks.artist_id (uuid) → was 0 rows → empty Promo.check feed.
+  const mixes = scope === "dj" ? `
+       UNION ALL
+       SELECT m.id, 'Микс: ' || m.title, 'mix', m.created_at,
+              COUNT(x.id), COUNT(x.id) FILTER (WHERE x.watermark_confirmed = true), MAX(x.detected_at)
+         FROM dj_mixes m
+         LEFT JOIN dj_mix_detections x
+           ON x.mix_id = m.id AND x.detected_at >= NOW() - INTERVAL '1 day' * ${span}
+        WHERE m.dj_id = $1 AND NOT COALESCE(m.is_hidden, false)
+        GROUP BY m.id, m.title, m.created_at` : "";
 
   const result = await query<{
-    track_id: string; title: string;
+    track_id: string; title: string; kind: string;
     total: string; confirmed: string; last_detected: string;
   }>(
-    `SELECT t.id as track_id, t.title,
-            COUNT(d.id) as total,
-            COUNT(d.id) FILTER (WHERE d.watermark_confirmed = true) as confirmed,
-            MAX(d.detected_at) as last_detected
-     FROM tracks t
-     LEFT JOIN promo_check_detections d
-       ON d.track_id = t.id
-       AND d.detected_at >= NOW() - INTERVAL '1 day' * ${Math.max(1, Math.min(Number(days) || 30, 365))}
-     -- Audit 2026-06-04: caller passes userId (text), so filter tracks.user_id,
-     -- not tracks.artist_id (uuid) → was 0 rows → empty Promo.check feed.
-     WHERE t.user_id = $1
-     GROUP BY t.id, t.title
-     ORDER BY total DESC, t.created_at DESC
+    `SELECT * FROM (
+       SELECT t.id::text AS track_id, t.title, 'track' AS kind, t.created_at,
+              COUNT(d.id) AS total,
+              COUNT(d.id) FILTER (WHERE d.watermark_confirmed = true) AS confirmed,
+              MAX(d.detected_at) AS last_detected
+         FROM (${scopeTracksSql(scope)}) t
+         LEFT JOIN promo_check_detections d
+           ON d.track_id = t.id
+          AND d.detected_at >= NOW() - INTERVAL '1 day' * ${span}
+        GROUP BY t.id, t.title, t.created_at${mixes}
+     ) u
+     ORDER BY total DESC, created_at DESC
      LIMIT 50`,
     [artistId]
   );
@@ -105,6 +127,7 @@ app.get("/artist/:artistId", requireAuth, requireOwner("artistId"), async (c) =>
     tracks: result.rows.map((r) => ({
       track_id: r.track_id,
       title: r.title,
+      kind: r.kind,
       total_rotations: parseInt(r.total || "0"),
       confirmed_rotations: parseInt(r.confirmed || "0"),
       last_detected: r.last_detected || null,
@@ -123,29 +146,32 @@ app.get("/plays/artist/:artistId", requireAuth, requireOwner("artistId"), async 
   const raw = c.req.query("days") || "30";
   const days = raw === "all" ? 3650 : Math.max(1, Math.min(Number(raw) || 30, 3650));
   const params = [artistId, String(days)];
-  const since = `p.started_at >= NOW() - ($2 || ' days')::interval`;
+  // ?scope=label — ростер лейбла, ?scope=dj — ещё и миксы диджея (radio-scope.tsx).
+  // Эфир микса пишется в promo_check_plays.mix_id, трека — в track_id.
+  const pl = `WITH items AS (${scopeItemsSql(parseRadioScope(c.req.query("scope")))}),
+    pl AS (SELECT p.*, i.id AS item_id, i.title, i.kind
+             FROM promo_check_plays p
+             JOIN items i ON i.id = COALESCE(p.track_id::text, p.mix_id)
+            WHERE p.started_at >= NOW() - ($2 || ' days')::interval)`;
   try {
     const [totals, byStation, byTrack, recent, monitored] = await Promise.all([
       query<{ plays: string; stations: string; tracks: string; first_play: string | null; last_play: string | null }>(
-        `SELECT COUNT(*) AS plays, COUNT(DISTINCT p.station_id) AS stations, COUNT(DISTINCT p.track_id) AS tracks,
-                MIN(p.started_at) AS first_play, MAX(p.started_at) AS last_play
-           FROM promo_check_plays p JOIN tracks t ON t.id = p.track_id
-          WHERE t.user_id = $1 AND ${since}`, params),
+        `${pl}
+         SELECT COUNT(*) AS plays, COUNT(DISTINCT station_id) AS stations, COUNT(DISTINCT item_id) AS tracks,
+                MIN(started_at) AS first_play, MAX(started_at) AS last_play
+           FROM pl`, params),
       query<{ station_name: string; plays: string; last_play: string }>(
-        `SELECT p.station_name, COUNT(*) AS plays, MAX(p.started_at) AS last_play
-           FROM promo_check_plays p JOIN tracks t ON t.id = p.track_id
-          WHERE t.user_id = $1 AND ${since}
-          GROUP BY p.station_name ORDER BY plays DESC, last_play DESC`, params),
-      query<{ track_id: string; title: string; plays: string; last_play: string }>(
-        `SELECT t.id AS track_id, t.title, COUNT(*) AS plays, MAX(p.started_at) AS last_play
-           FROM promo_check_plays p JOIN tracks t ON t.id = p.track_id
-          WHERE t.user_id = $1 AND ${since}
-          GROUP BY t.id, t.title ORDER BY plays DESC, last_play DESC`, params),
-      query<{ track_id: string; title: string; station_name: string; started_at: string; last_heard_at: string; hits: number }>(
-        `SELECT t.id AS track_id, t.title, p.station_name, p.started_at, p.last_heard_at, p.hits
-           FROM promo_check_plays p JOIN tracks t ON t.id = p.track_id
-          WHERE t.user_id = $1 AND ${since}
-          ORDER BY p.started_at DESC LIMIT 100`, params),
+        `${pl}
+         SELECT station_name, COUNT(*) AS plays, MAX(started_at) AS last_play
+           FROM pl GROUP BY station_name ORDER BY plays DESC, last_play DESC`, params),
+      query<{ track_id: string; title: string; kind: string; plays: string; last_play: string }>(
+        `${pl}
+         SELECT item_id AS track_id, title, kind, COUNT(*) AS plays, MAX(started_at) AS last_play
+           FROM pl GROUP BY item_id, title, kind ORDER BY plays DESC, last_play DESC`, params),
+      query<{ track_id: string; title: string; kind: string; station_name: string; started_at: string; last_heard_at: string; hits: number }>(
+        `${pl}
+         SELECT item_id AS track_id, title, kind, station_name, started_at, last_heard_at, hits
+           FROM pl ORDER BY started_at DESC LIMIT 100`, params),
       query<{ n: string }>(
         `SELECT COUNT(*) AS n FROM promo_check_live_status WHERE capture_state = 'running'`),
     ]);
@@ -161,7 +187,7 @@ app.get("/plays/artist/:artistId", requireAuth, requireOwner("artistId"), async 
       last_play: t?.last_play || null,
       monitored_stations: parseInt(monitored.rows[0]?.n || "0"),
       by_station: byStation.rows.map((r) => ({ station_name: r.station_name, plays: parseInt(r.plays), last_play: r.last_play })),
-      by_track: byTrack.rows.map((r) => ({ track_id: r.track_id, title: r.title, plays: parseInt(r.plays), last_play: r.last_play })),
+      by_track: byTrack.rows.map((r) => ({ track_id: r.track_id, title: r.title, kind: r.kind, plays: parseInt(r.plays), last_play: r.last_play })),
       recent: recent.rows,
     });
   } catch (err: any) {

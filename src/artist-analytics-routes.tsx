@@ -34,6 +34,7 @@
 import { Hono } from 'hono';
 import { requireAuth, requireOwner } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
+import { type RadioScope, parseRadioScope, scopeTracksSql, scopeItemsSql } from './radio-scope.tsx';
 
 // Cache TTL для overview-аналитики. 5 минут — баланс между скоростью
 // и свежестью: COUNT/SUM по tracks дёшев (≤500мс), но повторы внутри
@@ -400,40 +401,56 @@ app.get('/platforms/:artistId', requireAuth, requireOwner('artistId'), async (c)
 //   - venue rotations  → no per-artist play log table exists; venue_ad_campaigns
 //     holds campaign config (not per-artist plays). Reporting honest
 //     null so the UI can show "Скоро" instead of inventing a number.
-// Радиостанции в кабинете артиста ($1 = tracks.user_id): подтверждённые
-// отчёты о ротации (track_radio_pickups без source='auto' — витринный декор,
-// инцидент 2026-07-13) + станции, скачавшие трек (track_downloads_by_radio;
-// владелец 08.10.2026: «добавляй в личный кабинет эти радио и их ротации»).
+// Радиостанции в кабинете ($1 = users.id владельца, состав — radio-scope.tsx):
+// подтверждённые отчёты о ротации (track_radio_pickups без source='auto' —
+// витринный декор, инцидент 2026-07-13) + станции, скачавшие трек
+// (track_downloads_by_radio; владелец 08.10.2026: «добавляй в личный кабинет
+// эти радио и их ротации»), а у диджея ещё и станции, скачавшие его микс
+// (mix_downloads_by_radio, 12.10.2026).
 // Скачивание — не ротация: такие строки идут с rotation_count = 0,
 // reported = false; ротации приходят из отчётов станции, эфиры PROMO.CHECK
 // кабинет показывает отдельным блоком. airplay_verified — только водяной
-// знак: детекции по одному отпечатку — шум (проверка 01.10.2026).
-const ARTIST_RADIO_ROWS = `
-  WITH my AS (SELECT id, title FROM tracks WHERE user_id = $1),
+// знак (детекции с watermark_confirmed и эфиры PROMO.CHECK Live):
+// детекции по одному отпечатку — шум (проверка 01.10.2026).
+// track_id в radio_rows — text: uuid трека или id микса ('mix-…').
+function radioRowsSql(scope: RadioScope): string {
+  const mixDownloads = scope === 'dj' ? `
+    UNION
+    SELECT DISTINCT NULL::uuid, md.mix_id, TRIM(md.station_name), NULLIF(TRIM(md.city), '')
+      FROM mix_downloads_by_radio md JOIN dj_mixes m ON m.id = md.mix_id
+     WHERE m.dj_id = $1 AND NULLIF(TRIM(md.station_name), '') IS NOT NULL` : '';
+  return `
+  WITH my AS (${scopeTracksSql(scope)}),
+  items AS (${scopeItemsSql(scope)}),
   rep AS (
-    SELECT rp.track_id, rp.station_name, NULLIF(rp.city, '') AS city,
+    SELECT rp.track_id AS tid, NULL::text AS mid, rp.station_name, NULLIF(rp.city, '') AS city,
            COALESCE(rp.rotation_count, 0)::int AS rotation_count
       FROM track_radio_pickups rp JOIN my ON my.id = rp.track_id
      WHERE rp.report_status = 'confirmed' AND rp.source IS DISTINCT FROM 'auto'
   ),
   dl AS (
-    SELECT DISTINCT d.track_id, TRIM(d.station_name) AS station_name, NULLIF(TRIM(d.city), '') AS city
+    SELECT DISTINCT d.track_id AS tid, NULL::text AS mid, TRIM(d.station_name) AS station_name, NULLIF(TRIM(d.city), '') AS city
       FROM track_downloads_by_radio d JOIN my ON my.id = d.track_id
-     WHERE NULLIF(TRIM(d.station_name), '') IS NOT NULL
+     WHERE NULLIF(TRIM(d.station_name), '') IS NOT NULL${mixDownloads}
   ),
   radio_rows AS (
-    SELECT r.*,
-           EXISTS (SELECT 1 FROM dl WHERE dl.track_id = r.track_id AND dl.station_name = r.station_name) AS downloaded,
-           EXISTS (SELECT 1 FROM promo_check_detections d
-                    WHERE d.track_id = r.track_id AND d.station_name = r.station_name
-                      AND d.watermark_confirmed) AS airplay_verified
+    SELECT COALESCE(r.tid::text, r.mid) AS track_id, r.station_name, r.city, r.rotation_count, r.reported,
+           EXISTS (SELECT 1 FROM dl WHERE (dl.tid = r.tid OR dl.mid = r.mid) AND dl.station_name = r.station_name) AS downloaded,
+           (EXISTS (SELECT 1 FROM promo_check_detections d
+                     WHERE d.track_id = r.tid AND d.station_name = r.station_name AND d.watermark_confirmed)
+            OR EXISTS (SELECT 1 FROM promo_check_plays p
+                        WHERE (p.track_id = r.tid OR p.mix_id = r.mid) AND p.station_name = r.station_name)
+            OR EXISTS (SELECT 1 FROM dj_mix_detections x
+                        WHERE x.mix_id = r.mid AND x.station_name = r.station_name AND x.watermark_confirmed)
+           ) AS airplay_verified
       FROM (
-        SELECT track_id, station_name, city, rotation_count, true AS reported FROM rep
+        SELECT tid, mid, station_name, city, rotation_count, true AS reported FROM rep
         UNION ALL
-        SELECT dl.track_id, dl.station_name, dl.city, 0, false FROM dl
-         WHERE NOT EXISTS (SELECT 1 FROM rep WHERE rep.track_id = dl.track_id AND rep.station_name = dl.station_name)
+        SELECT dl.tid, dl.mid, dl.station_name, dl.city, 0, false FROM dl
+         WHERE NOT EXISTS (SELECT 1 FROM rep WHERE rep.tid = dl.tid AND rep.station_name = dl.station_name)
       ) r
   )`;
+}
 
 app.get('/home/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   const artistId = c.req.param('artistId');
@@ -472,14 +489,14 @@ app.get('/home/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
       console.warn('[home-stats] artist_profiles read failed:', err);
     }
 
-    // ── 3. Radio rotations + stations (ARTIST_RADIO_ROWS) ──
+    // ── 3. Radio rotations + stations (radioRowsSql) ──
     // Ротации — только подтверждённые отчёты станций; в число станций
     // входят и станции, скачавшие трек.
     let radioRotations = 0;
     let radioStationsCount = 0;
     try {
       const { rows } = await pool.query(
-        `${ARTIST_RADIO_ROWS}
+        `${radioRowsSql('artist')}
          SELECT COALESCE(SUM(rotation_count), 0)::bigint AS rotations,
                 COUNT(DISTINCT station_name)::int        AS stations
            FROM radio_rows`,
@@ -561,11 +578,13 @@ app.get('/home/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
 // breakdown the artist cabinet renders (station names + broadcast
 // cities + rotation graph). DISTINCT from /downloads (which counts
 // download EVENTS): this lists stations — confirmed rotation reports plus
-// stations that downloaded the track (ARTIST_RADIO_ROWS, 08.10.2026).
+// stations that downloaded the track (radioRowsSql, 08.10.2026).
 //
-// Reads the same ARTIST_RADIO_ROWS as /home, so the detail rows are
+// Reads the same radioRowsSql as /home, so the detail rows are
 // consistent with the SUM/COUNT totals already shown on the home page —
 // /home only aggregates these same rows, this endpoint returns them.
+// ?scope=label — треки всего ростера лейбла, ?scope=dj — треки и миксы
+// диджея (radio-scope.tsx, 12.10.2026); без scope — треки артиста.
 //
 // COLUMN TYPES (same cabinet schema as /home):
 //   track_radio_pickups.track_id       : uuid (FK → tracks.id, no cast on JOIN)
@@ -576,15 +595,16 @@ app.get('/home/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
 //   tracks.user_id                     : text → text=text compare, no cast
 app.get('/radio-details/:artistId', requireAuth, requireOwner('artistId'), async (c) => {
   const artistId = c.req.param('artistId');
+  const rows = radioRowsSql(parseRadioScope(c.req.query('scope')));
 
   try {
-    // Run the three aggregations in parallel over ARTIST_RADIO_ROWS —
+    // Run the three aggregations in parallel over radioRowsSql —
     // confirmed reports + stations that downloaded the track.
     const [byStationRes, byCityRes, perTrackRes] = await Promise.all([
       // By station: each station, with how many distinct cities and total
       // rotations; reported/downloaded tell a rotation from a download.
       pool.query(
-        `${ARTIST_RADIO_ROWS}
+        `${rows}
          SELECT station_name,
                 COUNT(DISTINCT city)::int AS city_count,
                 COALESCE(SUM(rotation_count), 0)::int AS total_rotations,
@@ -599,7 +619,7 @@ app.get('/radio-details/:artistId', requireAuth, requireOwner('artistId'), async
       // By city: cities, with how many distinct stations and total
       // rotations in each.
       pool.query(
-        `${ARTIST_RADIO_ROWS}
+        `${rows}
          SELECT COALESCE(city, '(не указан)') AS city,
                 COUNT(DISTINCT station_name)::int AS station_count,
                 COALESCE(SUM(rotation_count), 0)::int AS total_rotations
@@ -611,22 +631,22 @@ app.get('/radio-details/:artistId', requireAuth, requireOwner('artistId'), async
       // Per track: each row (station + city + rotations) so the UI can show
       // a per-release breakdown.
       pool.query(
-        `${ARTIST_RADIO_ROWS}
-         SELECT r.track_id, my.title, r.station_name, r.city, r.rotation_count,
+        `${rows}
+         SELECT r.track_id, items.title, items.kind, r.station_name, r.city, r.rotation_count,
                 r.airplay_verified, r.reported, r.downloaded
            FROM radio_rows r
-           JOIN my ON my.id = r.track_id
-          ORDER BY my.title ASC, r.rotation_count DESC`,
+           JOIN items ON items.id = r.track_id
+          ORDER BY items.title ASC, r.rotation_count DESC`,
         [artistId],
       ),
     ]);
 
     // Group per-track rows into { track_id, title, pickups: [...] }.
     type Pickup = { station_name: string; city: string | null; rotation_count: number; airplay_verified: boolean; reported: boolean; downloaded: boolean };
-    const trackMap = new Map<string, { track_id: string; title: string; pickups: Pickup[] }>();
+    const trackMap = new Map<string, { track_id: string; title: string; kind: string; pickups: Pickup[] }>();
     for (const r of perTrackRes.rows) {
       if (!trackMap.has(r.track_id)) {
-        trackMap.set(r.track_id, { track_id: r.track_id, title: r.title || 'Без названия', pickups: [] });
+        trackMap.set(r.track_id, { track_id: r.track_id, title: r.title || 'Без названия', kind: r.kind || 'track', pickups: [] });
       }
       trackMap.get(r.track_id)!.pickups.push({
         station_name: r.station_name || '(без названия)',
