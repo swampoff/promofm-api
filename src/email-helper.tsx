@@ -101,6 +101,8 @@ interface EmailOptions {
   subject: string;
   html: string;
   from?: string;
+  /** Куда уйдёт «Ответить» (по умолчанию noreply). Для писем админу — адрес автора обращения. */
+  replyTo?: string;
 }
 
 /**
@@ -120,7 +122,7 @@ export async function sendEmail(opts: EmailOptions): Promise<boolean> {
   {
     const mailOpts = {
       from: opts.from || FROM_EMAIL,
-      replyTo: REPLY_TO,
+      replyTo: opts.replyTo || REPLY_TO,
       to: opts.to,
       subject: opts.subject,
       html: opts.html,
@@ -160,7 +162,7 @@ export async function sendEmail(opts: EmailOptions): Promise<boolean> {
         },
         body: JSON.stringify({
           from: opts.from || FROM_EMAIL,
-          reply_to: REPLY_TO,
+          reply_to: opts.replyTo || REPLY_TO,
           to: [opts.to],
           subject: opts.subject,
           html: opts.html,
@@ -559,6 +561,26 @@ export async function notifySupportTicket(data: { ticketId: string; subject: str
   `);
   notifyAdminTelegram(`🆘 <b>Новый тикет поддержки</b>\n\nТема: <b>${stripHtml(data.subject)}</b>\nОт: ${stripHtml(userLabel)}${data.category ? `\nКатегория: ${stripHtml(data.category)}` : ''}${data.priority ? `\nПриоритет: ${stripHtml(data.priority)}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f/support">Открыть</a>`).catch(() => {});
   await sendAdminEmail({subject: `[ПРОМО] Тикет: ${escapeHtml(data.subject)}`, html });
+}
+
+// Сообщение из плашки «Заметили ошибку? Напишите нам» (12.10.2026): раньше
+// уходило только в Telegram, на info@ и в поддержку не попадало. «Ответить»
+// в письме — сразу автору, если он оставил почту.
+export async function notifyBugReport(data: { reportId: string; ticketId?: string | null; message: string; page?: string | null; email?: string | null; userName?: string | null }) {
+  const from = data.userName ? `${data.userName}${data.email ? ` <${data.email}>` : ''}` : (data.email || 'гость без почты');
+  const html = emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #FF577F;">Сообщение об ошибке с сайта</h2>
+    <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
+      <tr><td style="padding: 8px; color: #999;">От:</td><td style="padding: 8px;">${escapeHtml(from)}</td></tr>
+      ${data.page ? `<tr><td style="padding: 8px; color: #999;">Страница:</td><td style="padding: 8px;">${escapeHtml(data.page)}</td></tr>` : ''}
+      <tr><td style="padding: 8px; color: #999;">Тикет:</td><td style="padding: 8px;">${data.ticketId ? escapeHtml(data.ticketId) : 'не создан — автор не вошёл на сайт'}</td></tr>
+      <tr><td style="padding: 8px; color: #999; vertical-align: top;">Сообщение:</td><td style="padding: 8px; white-space: pre-wrap;">${escapeHtml(data.message)}</td></tr>
+    </table>
+    <p style="margin: 20px 0 0; color: #999; font-size: 13px;">${data.email ? 'Кнопка «Ответить» в почте отправит ответ автору.' : 'Автор не оставил почту.'}${data.ticketId ? ' Ответ в тикете автор увидит в кабинете.' : ''}</p>
+    ${data.ticketId ? `<p style="text-align: center; margin: 28px 0;"><a href="${SITE_URL}/ctrl-pm7k2f/support" style="${buttonStyle}">Открыть в поддержке</a></p>` : ''}
+  `);
+  const subjectLine = data.message.split('\n')[0].slice(0, 70);
+  await sendAdminEmail({ subject: `[ПРОМО] Ошибка на сайте: ${subjectLine}`, html, replyTo: data.email || undefined });
 }
 
 export async function notifyPaymentReceived(data: { amount: number; currency?: string; type: string; description?: string; gateway?: string; userName?: string; userEmail?: string; orderId?: string; }) {

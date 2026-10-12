@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { classifyAndLog } from './error-classifier.ts';
-import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { requireAuth, requireAdmin, optionalAuth } from './auth-middleware.tsx';
 import { apiError } from './error-codes.tsx';
 
 const feedbackRoutes = new Hono();
@@ -154,9 +154,15 @@ async function notifyTelegram(text: string) {
 }
 
 // ─── POST /bug-report (PUBLIC — no auth required) ─────────────────────────────
-// For the test mode banner on login page
+// Плашка «Заметили ошибку? Напишите нам» на всех страницах (BugReportWidget).
+// 12.10.2026: раньше сообщение попадало только в feedback_reports и Telegram —
+// владелец не видел его ни в почте, ни в поддержке. Теперь ещё:
+//  - тикет в поддержке на аккаунт автора, если он вошёл на сайт (по сессии).
+//    Гостю тикет не создаём: по одной лишь почте из формы нельзя подкладывать
+//    обращения в чужой кабинет, а у тикета обязателен user_id;
+//  - колокольчик админам и письмо на info@promofm.ru, «Ответить» — автору.
 
-feedbackRoutes.post('/bug-report', async (c) => {
+feedbackRoutes.post('/bug-report', optionalAuth, async (c) => {
   try {
     const body = await c.req.json().catch(() => null);
     if (!body || !body.message || body.message.trim().length < 3) {
@@ -165,7 +171,8 @@ feedbackRoutes.post('/bug-report', async (c) => {
 
     const message = body.message.trim().slice(0, 2000);
     const page = body.page || 'login';
-    const email = body.email || null;
+    const rawEmail = typeof body.email === 'string' ? body.email.trim().slice(0, 200) : '';
+    const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail) ? rawEmail : null;
 
     // Rate limit: max 5 per IP per hour (simple check via DB)
     const ip = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || 'unknown';
@@ -178,11 +185,53 @@ feedbackRoutes.post('/bug-report', async (c) => {
       return c.json({ error: 'Слишком много сообщений. Попробуйте позже.' }, 429);
     }
 
+    // Автор — только вошедший пользователь (сессия).
+    let author: { id: string; email: string | null; name: string | null } | null = null;
+    try {
+      const sessionUserId = c.get('userId') as string | undefined;
+      if (sessionUserId) {
+        const r = await pool.query(
+          `SELECT id::text AS id, email, COALESCE(NULLIF(full_name, ''), NULLIF(display_name, '')) AS name
+             FROM users WHERE id::text = $1 LIMIT 1`,
+          [String(sessionUserId)]
+        );
+        author = r.rows[0] || null;
+      }
+    } catch (e: any) {
+      console.error('[bug-report] author lookup failed:', e?.message);
+    }
+    // vk<id>@promo-music.ru — заглушки VK-входа, ответить на них нельзя.
+    const accountEmail = author?.email && !/@promo-music\.ru$/i.test(author.email) ? author.email : null;
+    const replyEmail = email || accountEmail;
+
+    // Тикет в поддержке
+    let ticketId: string | null = null;
+    if (author) {
+      ticketId = `TKT-${crypto.randomUUID()}`;
+      const firstMessage = {
+        id: `msg-${crypto.randomUUID()}`, ticket_id: ticketId, sender_id: author.id, sender_type: 'user',
+        message, attachments: [], created_at: new Date().toISOString(), internal_note: false,
+      };
+      try {
+        await pool.query(
+          `INSERT INTO support_tickets (id, user_id, subject, description, category, priority, status,
+                                        attachments, tags, messages, sla_due_date)
+           VALUES ($1, $2, $3, $4, 'technical', 'medium', 'open',
+                   '[]'::jsonb, '["bug-report"]'::jsonb, $5::jsonb, NOW() + INTERVAL '48 hours')`,
+          [ticketId, author.id, `Ошибка на сайте: ${message.split('\n')[0].slice(0, 80)}`, message, JSON.stringify([firstMessage])]
+        );
+      } catch (e: any) {
+        console.error('[bug-report] ticket create failed:', e?.message);
+        ticketId = null;
+      }
+    }
+
     // Store in DB
     const res = await pool.query(
-      `INSERT INTO feedback_reports (type, message, page_url, context)
-       VALUES ('bug', $1, $2, $3) RETURNING id, created_at`,
-      [message, page, JSON.stringify({ ip, email, source: 'test_mode_banner' })]
+      `INSERT INTO feedback_reports (type, message, page_url, user_id, user_email, context)
+       VALUES ('bug', $1, $2, $3, $4, $5) RETURNING id, created_at`,
+      [message, page, author?.id || null, replyEmail,
+       JSON.stringify({ ip, email, source: 'test_mode_banner', ticketId })]
     );
 
     const reportId = res.rows[0].id;
@@ -193,11 +242,28 @@ feedbackRoutes.post('/bug-report', async (c) => {
     // Send to Telegram
     const tgText = `<b>🐛 Баг-репорт #${reportId}</b>\n\n` +
       `<b>Сообщение:</b> ${message}\n` +
-      (email ? `<b>Email:</b> ${email}\n` : '') +
+      (replyEmail ? `<b>Email:</b> ${replyEmail}\n` : '') +
+      (author ? `<b>Аккаунт:</b> ${author.name || author.email || author.id}\n` : '') +
+      (ticketId ? `<b>Тикет:</b> ${ticketId} (поддержка в админке)\n` : '') +
       `<b>Страница:</b> ${page}\n` +
       `<b>IP:</b> ${ip}\n` +
       `<b>Время:</b> ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`;
     notifyTelegram(tgText).catch(() => {});
+
+    // Письмо на info@promofm.ru и колокольчик админам — не задерживают ответ.
+    import('./email-helper.tsx')
+      .then((m) => m.notifyBugReport({ reportId, ticketId, message, page, email: replyEmail, userName: author?.name || null }))
+      .catch((e) => console.error('[bug-report] admin email failed:', e?.message));
+    import('./cross-cabinet-notify.tsx')
+      .then((m) => m.notifyAllAdmins({
+        sourceRole: 'artist',
+        type: 'support_ticket_new',
+        title: `Ошибка на сайте: ${message.split('\n')[0].slice(0, 120)}`,
+        message: `${author?.name || replyEmail || 'Гость'}: ${message}`.slice(0, 400),
+        link: ticketId ? `/ctrl-pm7k2f?tab=tickets&id=${ticketId}` : '/ctrl-pm7k2f',
+        metadata: { ticketId, reportId, source: 'bug_report' },
+      }))
+      .catch((e) => console.error('[bug-report] bell notify failed:', e?.message));
 
     return c.json({
       success: true,
