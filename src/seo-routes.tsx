@@ -243,7 +243,7 @@ ${orgLd}${breadcrumbs}${opts.jsonLd || ''}
 </nav></header>
 <main>${opts.body}</main>
 <footer>
-<p>&copy; 2026 ${SITE_NAME} (<a href="${DOMAIN}/">Промо Музыка</a>) — платформа продвижения музыки для артистов, DJ, продюсеров и заведений.</p>
+<p>&copy; 2026 ${SITE_NAME} (<a href="${DOMAIN}/">Промо Музыка</a>): платформа продвижения музыки для артистов, DJ, продюсеров и заведений.</p>
 <nav aria-label="Артистам"><strong>Артистам:</strong>
 <a href="${DOMAIN}/pesnya-na-radio">Песня на радио</a> ·
 <a href="${DOMAIN}/tv-rotation">Клип на ТВ</a> ·
