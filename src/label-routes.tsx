@@ -399,7 +399,11 @@ app.get('/roster', requireAuth, async (c) => {
          (SELECT COUNT(DISTINCT rp.station_name)::int
             FROM track_radio_pickups rp JOIN tracks t ON t.id = rp.track_id
            WHERE t.artist_id = ap.id AND rp.report_status = 'confirmed'
-             AND rp.source IS DISTINCT FROM 'auto') AS radio_stations
+             AND rp.source IS DISTINCT FROM 'auto') AS radio_stations,
+         -- 14.10.2026: станции, скачавшие треки артиста (скачивание ещё не ротация, но это результат)
+         (SELECT COUNT(DISTINCT d.station_name)::int
+            FROM track_downloads_by_radio d JOIN tracks t ON t.id = d.track_id
+           WHERE t.artist_id = ap.id AND d.station_name IS NOT NULL AND d.station_name <> '') AS radio_downloads
        FROM artist_profiles ap
        WHERE ap.managed_by_label_id = $1 OR ap.label_id = $1
        ORDER BY ap.created_at DESC`,
@@ -1539,9 +1543,34 @@ app.get('/analytics/overview', requireAuth, async (c) => {
       [gate.labelId]
     );
 
+    // 14.10.2026: станции и города считаем вместе со скачиваниями (track_downloads_by_radio).
+    // Раньше «Станций / городов» было 0, хотя станции уже скачали трек ростера (кейс лейбла Арины).
+    const reach = await pool.query(
+      `SELECT COUNT(DISTINCT s.station_name)::int AS stations,
+              COUNT(DISTINCT s.city) FILTER (WHERE s.city IS NOT NULL AND s.city <> '')::int AS cities,
+              COUNT(DISTINCT s.station_name) FILTER (WHERE s.kind = 'dl')::int AS downloaded
+         FROM (
+           SELECT rp.station_name, rp.city, 'rp' AS kind
+             FROM track_radio_pickups rp
+             JOIN tracks t ON t.id = rp.track_id
+             JOIN artist_profiles ap ON ap.id = t.artist_id
+            WHERE (ap.managed_by_label_id = $1 OR ap.label_id = $1)
+              AND rp.report_status = 'confirmed' AND rp.source IS DISTINCT FROM 'auto'
+           UNION ALL
+           SELECT d.station_name, d.city, 'dl'
+             FROM track_downloads_by_radio d
+             JOIN tracks t ON t.id = d.track_id
+             JOIN artist_profiles ap ON ap.id = t.artist_id
+            WHERE (ap.managed_by_label_id = $1 OR ap.label_id = $1)
+              AND d.station_name IS NOT NULL AND d.station_name <> ''
+         ) s`,
+      [gate.labelId]
+    );
+
     const row = cnt.rows[0] || {};
     const trRow = tr.rows[0] || {};
     const radioRow = radio.rows[0] || {};
+    const reachRow = reach.rows[0] || {};
     return c.json({
       success: true,
       overview: {
@@ -1555,8 +1584,9 @@ app.get('/analytics/overview', requireAuth, async (c) => {
         radioRotations: Number(radioRow.rotations) || 0,
         radioRotationsVerified: Number(radioRow.rotations_verified) || 0,
         radioRotationsDeclared: (Number(radioRow.rotations) || 0) - (Number(radioRow.rotations_verified) || 0),
-        radioStations: Number(radioRow.stations) || 0,
-        radioCities: Number(radioRow.cities) || 0,
+        radioStations: Math.max(Number(reachRow.stations) || 0, Number(radioRow.stations) || 0),
+        radioCities: Math.max(Number(reachRow.cities) || 0, Number(radioRow.cities) || 0),
+        radioStationsDownloaded: Number(reachRow.downloaded) || 0,
         topArtists: top.rows,
       },
     });
