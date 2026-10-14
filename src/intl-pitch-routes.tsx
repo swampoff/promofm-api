@@ -173,7 +173,7 @@ export function digestEmail(contact: { email: string; lang: string; id: string }
     : `Новинки для эфира: ${trackCount(tracks.length, 'ru')} · ПРОМО.МУЗЫКА`;
   const intro = en
     ? `Hello! We are Promo.Music, a platform where independent artists from Russia and the CIS release their music for radio. Here are this week's new releases picked for your format. Every artist has cleared their track for airplay: you can listen and download it in one click, no sign-up needed.`
-    : `Здравствуйте! Мы — ПРОМО.МУЗЫКА, платформа, где независимые артисты выпускают музыку для радио. Ниже — новинки этой недели под ваш формат. Каждый артист разрешил ставить свой трек в эфир: послушать и скачать можно в один клик, без регистрации.`;
+    : `Здравствуйте! Мы ПРОМО.МУЗЫКА, платформа, где независимые артисты выпускают музыку для радио. Ниже новинки этой недели под ваш формат. Каждый артист разрешил ставить свой трек в эфир: послушать и скачать можно в один клик, без регистрации.`;
   const rows = tracks.map((t) => {
     const url = `${API_URL}/get/${t.id}?k=${encodeURIComponent(key)}`;
     const cover = abs(t.cover_url);
@@ -185,14 +185,14 @@ export function digestEmail(contact: { email: string; lang: string; id: string }
 <td valign="top" style="font-family:Arial,sans-serif">
 <div style="font-size:17px;font-weight:700;color:#ffffff">${escapeHtml(t.title || (en ? 'Untitled' : 'Без названия'))}</div>
 <div style="font-size:15px;color:#FF8FA8;margin:2px 0 4px">${escapeHtml(t.artist_name || '')}</div>
-${en && HAS_CYR.test(`${t.title} ${t.artist_name}`) ? `<div style="font-size:12px;color:#b9b9cc;margin:0 0 4px">${escapeHtml(translit(t.title || ''))} — ${escapeHtml(translit(t.artist_name || ''))}</div>` : ''}
+${en && HAS_CYR.test(`${t.title} ${t.artist_name}`) ? `<div style="font-size:12px;color:#b9b9cc;margin:0 0 4px">${escapeHtml(translit(t.title || ''))} · ${escapeHtml(translit(t.artist_name || ''))}</div>` : ''}
 <div style="font-size:13px;color:#9a9ab0;margin-bottom:10px">${meta}</div>
 <a href="${escapeHtml(url)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:linear-gradient(135deg,#FF577F,#7C3AED);background-color:#FF577F;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700">${en ? 'Listen &amp; download' : 'Слушать и скачать'}</a>
 </td></tr></table></td></tr>`;
   }).join('');
   const footer = en
-    ? `You are receiving this because your station publishes this address for music submissions. We send at most one selection a week. <a href="${escapeHtml(unsubscribeLink(contact.email))}" style="color:#FF8FA8">Unsubscribe</a> — one click. Questions or feedback: just reply to this email.<br>Promo.Music (OOO «Promo FM», Russia) · <a href="${SITE_URL}" style="color:#FF8FA8">promo-music.ru</a>`
-    : `Вы получили это письмо, потому что станция публикует этот адрес для присылки музыки. Мы присылаем не больше одной подборки в неделю. <a href="${escapeHtml(unsubscribeLink(contact.email))}" style="color:#FF8FA8">Отписаться</a> — в один клик. Вопросы и обратная связь — просто ответьте на это письмо.<br>ПРОМО.МУЗЫКА (ООО «Промо Фм») · <a href="${SITE_URL}" style="color:#FF8FA8">promo-music.ru</a>`;
+    ? `You are receiving this because your station publishes this address for music submissions. We send at most one selection a week. <a href="${escapeHtml(unsubscribeLink(contact.email))}" style="color:#FF8FA8">Unsubscribe</a> in one click. Questions or feedback: just reply to this email.<br>Promo.Music (OOO «Promo FM», Russia) · <a href="${SITE_URL}" style="color:#FF8FA8">promo-music.ru</a>`
+    : `Вы получили это письмо, потому что станция публикует этот адрес для присылки музыки. Мы присылаем не больше одной подборки в неделю. <a href="${escapeHtml(unsubscribeLink(contact.email))}" style="color:#FF8FA8">Отписаться</a> можно в один клик. С вопросами и отзывами просто ответьте на это письмо.<br>ПРОМО.МУЗЫКА (ООО «Промо Фм») · <a href="${SITE_URL}" style="color:#FF8FA8">promo-music.ru</a>`;
   const html = `<!DOCTYPE html><html lang="${en ? 'en' : 'ru'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;padding:0;background:#0a0a1a">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0a0a1a;padding:28px 12px"><tr><td align="center">
@@ -304,7 +304,7 @@ app.post('/my/:trackId/request', requireAuth, async (c) => {
        ON CONFLICT (track_id) DO UPDATE SET status = CASE WHEN intl_pitch_requests.status IN ('withdrawn') THEN 'queued' ELSE intl_pitch_requests.status END,
                                             consent_at = NOW(), updated_at = NOW()
        RETURNING id::text, status`, [trackId, userId, g]);
-    notifyAdminTelegram(`🌍 <b>Международный питчинг: новая заявка</b>\n${escapeHtml(t.artist_name || '')} — «${escapeHtml(t.title || '')}» (${GENRE_GROUPS[g]?.ru})\n\n→ <a href="${SITE_URL}/ctrl-pm7k2f/intl_pitching">Подборка в админке</a>`).catch(() => {});
+    notifyAdminTelegram(`🌍 <b>Международный питчинг: новая заявка</b>\n${escapeHtml(t.artist_name || '')}, «${escapeHtml(t.title || '')}» (${GENRE_GROUPS[g]?.ru})\n\n→ <a href="${SITE_URL}/ctrl-pm7k2f/intl_pitching">Подборка в админке</a>`).catch(() => {});
     return c.json({ success: true, data: r.rows[0] });
   } catch (e: any) {
     console.error('[intl-pitch] request:', e?.message);
@@ -375,14 +375,14 @@ app.get('/get/:trackId', async (c) => {
 <div class="t"><div>${escapeHtml(o.title || '')}</div><div class="a">${escapeHtml(o.artist_name || '')}</div></div>
 <a class="btn ghost" href="${API_URL}/get/${o.id}?k=${encodeURIComponent(key)}">${en ? 'Open' : 'Открыть'}</a></div>`).join('');
   const dl = `${API_URL}/get/${t.id}/file?k=${encodeURIComponent(key)}&go=1`;
-  return stationPage(c, en, `${t.artist_name || ''} — ${t.title || ''}`, `
+  return stationPage(c, en, `${t.artist_name || ''} · ${t.title || ''}`, `
 <div class="card"><div class="track">${cover ? `<img class="cover" src="${escapeHtml(cover)}" alt="">` : '<div class="cover"></div>'}
-<div><h1>${escapeHtml(t.title || '')}</h1><p class="artist">${escapeHtml(t.artist_name || '')}</p>${en && HAS_CYR.test(`${t.title} ${t.artist_name}`) ? `<div class="meta" style="margin-bottom:4px">${escapeHtml(translit(t.title || ''))} — ${escapeHtml(translit(t.artist_name || ''))}</div>` : ''}<div class="meta">${meta}</div></div></div>
+<div><h1>${escapeHtml(t.title || '')}</h1><p class="artist">${escapeHtml(t.artist_name || '')}</p>${en && HAS_CYR.test(`${t.title} ${t.artist_name}`) ? `<div class="meta" style="margin-bottom:4px">${escapeHtml(translit(t.title || ''))} · ${escapeHtml(translit(t.artist_name || ''))}</div>` : ''}<div class="meta">${meta}</div></div></div>
 <audio controls preload="none" src="${escapeHtml(abs(t.audio_url))}"></audio>
 <a class="btn primary" href="${escapeHtml(dl)}" rel="nofollow">&#8681; ${en ? 'Download for airplay' : 'Скачать для эфира'}</a>
 <p class="note">${en
-    ? 'The artist released this track on Promo.Music and cleared it for radio airplay. Full-quality file, free of charge. If you play it, just reply to our email — the artist will be happy to know.'
-    : 'Артист выпустил трек на ПРОМО.МУЗЫКЕ и разрешил ставить его в эфир. Файл в полном качестве, бесплатно. Если поставите трек в эфир — ответьте на наше письмо, артисту будет важно это знать.'}</p></div>
+    ? 'The artist released this track on Promo.Music and cleared it for radio airplay. Full-quality file, free of charge. If you play it, just reply to our email: the artist will be happy to know.'
+    : 'Артист выпустил трек на ПРОМО.МУЗЫКЕ и разрешил ставить его в эфир. Файл в полном качестве, бесплатно. Если поставите трек в эфир, ответьте на наше письмо: артисту важно это знать.'}</p></div>
 ${otherRows ? `<div class="card"><h2>${en ? 'More from this selection' : 'Ещё в этой подборке'}</h2>${otherRows}</div>` : ''}`);
 });
 
@@ -569,7 +569,7 @@ async function finishDigests() {
         await notifyCrossCabinet({
           targetUserId: r.user_id, targetRole: 'artist', sourceRole: 'system', type: 'pitching_update',
           title: `Трек «${String(r.title || '').slice(0, 80)}» отправлен радиостанциям`,
-          message: `Международный питчинг (бета): трек ушёл на ${s.rows[0].n} радиостанций в ${s.rows[0].k} странах. Кто скачал — увидите в кабинете.`,
+          message: `Международный питчинг (бета): трек ушёл на ${s.rows[0].n} радиостанций в ${s.rows[0].k} странах. Кто скачал, увидите в кабинете.`,
           link: '/artist/pitching?tab=world', metadata: { trackId: r.track_id, digestId: id },
         });
       } catch (e: any) {
