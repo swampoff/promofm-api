@@ -375,11 +375,10 @@ app.post('/request', async (c) => {
       message: message || undefined,
     }).catch((err: any) => log.warn({ err }, 'booking_notify_failed'));
 
-    // Исполнителю — уведомление в кабинет.
-    try {
+    // Исполнителю — уведомление в кабинет (у заявки на подбор исполнителя нет).
+    if (!performer.pick) try {
       // Импортированному аккаунту уведомление слать некуда: в кабинет
       // никто не заходит, почты не существует. Заявку разбирает площадка.
-      if (performer.pick) throw new Error('pick_request_no_performer');
       if (!performer.contactable) throw new Error('performer_not_contactable');
       const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
       await notifyCrossCabinet({
