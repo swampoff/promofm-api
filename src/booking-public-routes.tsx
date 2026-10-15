@@ -264,9 +264,12 @@ app.post('/request', async (c) => {
       ? Math.round(rawFee)
       : null;
 
-    if (!performerId) {
-      return c.json({ success: false, error: 'Не указан исполнитель', code: 'PERFORMER_REQUIRED' }, 400);
-    }
+    // Без исполнителя это заявка на подбор (кнопка «Оставить заявку» в шапке
+    // каталога и на пустых страницах кавер-групп и ведущих). Раньше API
+    // отвечал 400 «Не указан исполнитель», и эти лиды терялись (15.10.2026).
+    const PICK_LABELS: Record<string, string> = { artist: 'артист', dj: 'диджей', cover_band: 'кавер-группа', host: 'ведущий' };
+    const wanted = PICK_LABELS[String(body.category || '').trim()] ? String(body.category).trim() : '';
+    const pickLabel = PICK_LABELS[wanted] || 'любой исполнитель';
     // Гость обязан оставить способ связи — иначе лид бесполезен.
     if (!userId && (!clientName || !clientEmail)) {
       return c.json({ success: false, error: 'Укажите имя и email для связи', code: 'CONTACT_REQUIRED' }, 400);
@@ -297,7 +300,9 @@ app.post('/request', async (c) => {
 
     // Исполнитель должен быть реально открыт для букинга. Проверяем здесь,
     // а не полагаемся на то, что фронт показал только открытых.
-    const perf = await pool.query(
+    const perf: { rows: any[] } = !performerId
+      ? { rows: [{ user_id: null, performer_category: wanted || null, name: `Подбор: ${pickLabel}`, contactable: false, pick: true }] }
+      : await pool.query(
       `SELECT bp.user_id, bp.performer_category,
               COALESCE(NULLIF(bp.display_name, ''), ap.artist_name, dp.dj_name, 'Исполнитель') AS name,
               (u.email IS NOT NULL
@@ -322,7 +327,9 @@ app.post('/request', async (c) => {
     // С артистом из импорта связи нет — это запрос на подбор, а не бронь.
     // Пишем это прямо в заголовке, чтобы в очереди было видно без
     // дополнительных проверок.
-    const title = performer.contactable ? baseTitle : `Уточнить возможность: ${baseTitle}`;
+    const title = performer.pick
+      ? `Подбор исполнителя (${pickLabel}): ${baseTitle}`
+      : performer.contactable ? baseTitle : `Уточнить возможность: ${baseTitle}`;
 
     await pool.query(
       `INSERT INTO bookings (
@@ -336,8 +343,8 @@ app.post('/request', async (c) => {
       [
         bookingId,
         userId,
-        performerId,
-        performer.performer_category === 'dj' ? 'dj' : 'artist',
+        performerId || null,
+        performer.pick ? (wanted || 'any') : performer.performer_category === 'dj' ? 'dj' : 'artist',
         userId ? 'user' : 'guest',
         eventType,
         title,
@@ -372,6 +379,7 @@ app.post('/request', async (c) => {
     try {
       // Импортированному аккаунту уведомление слать некуда: в кабинет
       // никто не заходит, почты не существует. Заявку разбирает площадка.
+      if (performer.pick) throw new Error('pick_request_no_performer');
       if (!performer.contactable) throw new Error('performer_not_contactable');
       const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
       await notifyCrossCabinet({
