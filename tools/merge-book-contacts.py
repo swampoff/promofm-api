@@ -1,14 +1,17 @@
-"""Сводит parts/*.csv в одну базу: нормализация, дедуп, отчёт, CSV + XLSX."""
+"""Сводит parts/<0*|W*>.csv в одну базу: нормализация, дедуп, отчёт, CSV + XLSX."""
 import csv, glob, os, re, sys
 from collections import Counter
 
 base = sys.argv[1]
+# ru: parts/0*.csv -> _RU; world: parts/W*.csv -> _WORLD
+scope = sys.argv[2] if len(sys.argv) > 2 else "ru"
+pattern, suffix = ("0*.csv", "RU") if scope == "ru" else ("W*.csv", "WORLD")
 COLS = ["Категория","Подкатегория","Организация","Контактное лицо","Должность","Город","Регион","Сайт",
         "Email","Email доп.","Телефон","Соцсети/Telegram","Достоверность","Источник","Примечание"]
 FIND = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
 
 rows, seen, bad = [], set(), []
-for path in sorted(glob.glob(os.path.join(base, "parts", "*.csv"))):
+for path in sorted(glob.glob(os.path.join(base, "parts", pattern))):
     with open(path, encoding="utf-8-sig", newline="") as f:
         for r in csv.DictReader(f):
             r = {c: (r.get(c) or "").strip() for c in COLS}
@@ -31,7 +34,7 @@ for path in sorted(glob.glob(os.path.join(base, "parts", "*.csv"))):
             r["Файл"] = os.path.basename(path)
             rows.append(r)
 
-out = os.path.join(base, "book_industry_contacts_RU.csv")
+out = os.path.join(base, f"book_industry_contacts_{suffix}.csv")
 with open(out, "w", encoding="utf-8-sig", newline="") as f:
     w = csv.DictWriter(f, fieldnames=COLS, quoting=csv.QUOTE_ALL, extrasaction="ignore")
     w.writeheader(); w.writerows(rows)
@@ -60,7 +63,7 @@ try:
         s.freeze_panes = "A2"; s.auto_filter.ref = s.dimensions
         for col, wd in zip("ABCDEFGHIJKLMNO", (20,18,34,22,20,16,18,26,30,30,20,24,12,40,50)):
             s.column_dimensions[col].width = wd
-    wb.save(os.path.join(base, "book_industry_contacts_RU.xlsx"))
+    wb.save(os.path.join(base, f"book_industry_contacts_{suffix}.xlsx"))
     print("xlsx ok")
 except ImportError:
     print("openpyxl нет — только CSV")
