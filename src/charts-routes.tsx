@@ -1837,6 +1837,23 @@ charts.post('/full-update', requireAdminOrKey, async (c) => {
       results,
     });
 
+    // GEO-BLOCK GUARD: aggregateSource() returns cached tracks with a truthy
+    // `error` when live extraction fails (VPS is in RU → Anthropic/Mistral and
+    // some sources are blocked). If NOTHING was freshly extracted this run, the
+    // rebuilt chart is just the old cache restamped with a new date — and writing
+    // it would clobber the fresh data the Python agent (promofm-charts-agent.py,
+    // Mon+Sat) puts into chart:promofm. Skip the save.
+    const freshCount = results.filter(r => !r.error && (r.tracksFound || 0) > 0).length;
+    if (freshCount === 0) {
+      console.warn('[charts] full-update: 0 sources freshly extracted (all geo-blocked/cached) — skipping chart:promofm overwrite to preserve Python-agent data');
+      return c.json({
+        success: true,
+        skipped: true,
+        reason: 'all-sources-cached',
+        data: { aggregation: results, freshCount: 0 },
+      });
+    }
+
     // Step 2: Сводный чарт PromoFM
     const entries = await buildPromoFMChart();
 
