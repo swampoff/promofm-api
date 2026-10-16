@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+<head>
+ <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+ <meta name="robots" content="noindex,nofollow"><meta name="theme-color" content="#f4f8fd">
+ <title>Админка | PROMO.AIR</title><meta name="description" content="Прототип административной панели PROMO.AIR для управления заведениями и модерацией.">
+ <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+ <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+ <a class="skip" href="#main">К содержанию</a>
+ <button class="scrim" id="scrim" aria-label="Закрыть меню" hidden></button>
+ <aside class="sidebar" id="sidebar">
+  <a class="brand" href="/">PROMO<span>.AIR</span><small>У КАЖДОГО МЕСТА СВОЙ ЗВУК</small></a>
+  <button class="icon-button close-menu" id="close-menu" aria-label="Закрыть меню">×</button>
+  <nav id="nav" aria-label="Разделы администратора"></nav>
+  <div class="sidebar-bottom"><span class="demo-label">ДЕМО АДМИНКИ</span><p>Единый ритм.<br>Для всей вашей сети.</p><a href="/cabinet/">Кабинет заведения ↗</a><small>Design by <b>Promo.Art</b></small></div>
+ </aside>
+ <div class="workspace">
+  <header class="topbar"><button class="icon-button mobile-menu" id="open-menu" aria-label="Открыть меню" aria-expanded="false">☰</button><form id="global-search" role="search"><span data-icon="search"></span><input name="query" aria-label="Найти заведение, владельца или город" placeholder="Поиск по заведениям, владельцам, городам…"><button type="submit" class="search-submit" aria-label="Найти">↵</button></form><div class="account"><button class="icon-button" data-action="notifications" aria-label="Уведомления"><span data-icon="bell"></span><i></i></button><button class="profile" data-action="profile"><span class="avatar">А</span><span><strong>Алексей</strong><small>Администратор · демо</small></span><span data-icon="chevron"></span></button></div></header>
+  <main id="main" tabindex="-1"></main>
+  <footer><span>Демо: все данные вымышлены, изменения остаются в этом браузере.</span><span>Design by <b>Promo.Art</b></span></footer>
+ </div>
+ <dialog id="dialog"><form id="modal-form"><header><h2 id="modal-title"></h2><button type="button" class="icon-button" id="modal-close" aria-label="Закрыть окно">×</button></header><div id="modal-body"></div><div id="modal-actions"></div></form></dialog>
+ <div id="toast" role="status" aria-live="polite"></div>
+ <script src="admin-state.js"></script><script src="admin.js"></script>
+</body></html>
