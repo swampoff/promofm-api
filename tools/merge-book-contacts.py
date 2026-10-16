@@ -3,9 +3,9 @@ import csv, glob, os, re, sys
 from collections import Counter
 
 base = sys.argv[1]
-# ru: parts/0*.csv -> _RU; world: parts/W*.csv -> _WORLD
+# ru: parts/[0-9]*.csv -> _RU; world: parts/W*.csv -> _WORLD
 scope = sys.argv[2] if len(sys.argv) > 2 else "ru"
-pattern, suffix = ("0*.csv", "RU") if scope == "ru" else ("W*.csv", "WORLD")
+pattern, suffix = ("[0-9]*.csv", "RU") if scope == "ru" else ("W*.csv", "WORLD")
 COLS = ["Категория","Подкатегория","Организация","Контактное лицо","Должность","Город","Регион","Сайт",
         "Email","Email доп.","Телефон","Соцсети/Telegram","Достоверность","Источник","Примечание"]
 FIND = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
