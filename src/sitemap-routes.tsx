@@ -25,7 +25,8 @@ const STATIC_PAGES: { loc: string; changefreq: string; priority: string }[] = [
   // Main sections (0.9)
   { loc: '/news', changefreq: 'hourly', priority: '0.9' },
   { loc: '/charts', changefreq: 'daily', priority: '0.9' },
-  { loc: '/new-releases', changefreq: 'weekly', priority: '0.8' },   // «Новинки недели», 15.10.2026
+  { loc: '/new-releases', changefreq: 'weekly', priority: '0.8' },
+  { loc: '/events', changefreq: 'weekly', priority: '0.8' },   // «События» сцены, 16.10.2026   // «Новинки недели», 15.10.2026
   { loc: '/concerts', changefreq: 'daily', priority: '0.9' },
   // Core features (0.8)
   { loc: '/promo-air', changefreq: 'weekly', priority: '0.8' },

@@ -49,6 +49,7 @@ import pitchingRoutes from './pitching-routes.tsx';
 import labelRoutes from './label-routes.tsx';
 import bookingRoutes from './booking-routes.tsx';
 import bookingPublicRoutes from './booking-public-routes.tsx';
+import sceneEventsRoutes from './scene-events-routes.tsx';
 import bookingProfileRoutes from './booking-profile-routes.tsx';
 import contentOrdersRoutes from './content-orders-routes.tsx';
 import venueRadioApp from './venue-radio-routes.tsx';
@@ -433,6 +434,7 @@ app.route('/server/api/pitching', pitchingRoutes);
 app.route('/server/api/label', labelRoutes);
 app.route('/server/api/booking', bookingRoutes);
 app.route('/server/api/booking-public', bookingPublicRoutes);
+app.route('/server/api/scene-events', sceneEventsRoutes);   // «События» сцены, 16.10.2026
 app.route('/server/api/booking-profile', bookingProfileRoutes);
 app.route('/server/api/content-orders', contentOrdersRoutes);
 app.route('/server/api/venue-radio', venueRadioApp);
