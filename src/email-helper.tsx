@@ -743,7 +743,8 @@ export async function sendChatGuestReplyEmail(data: { toEmail: string; toName?: 
 // ── Venue trial expiration ───────────────────────────────────────
 
 /**
- * Warning sent ~3 days before a venue's 14-day trial expires.
+ * Warning sent ~3 days before a venue's trial expires (7 days since
+ * 2026-10-16, 14 for trials started earlier, so the copy names no length).
  * Gives the venue owner time to choose a tariff before access
  * downgrades from «Бизнес» (trial) to «Старт» (paid).
  */
@@ -752,7 +753,7 @@ export async function sendVenueTrialEndingEmail(data: { toEmail: string; venueNa
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Триал ПРОМО.ЭИР заканчивается</h2>
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
-    <p>Ваш 14-дневный пробный период на ПРОМО.ЭИР заканчивается <strong>${escapeHtml(expiresHuman)}</strong> (через ${data.daysRemaining} ${data.daysRemaining === 1 ? 'день' : 'дн.'}).</p>
+    <p>Ваш пробный период на ПРОМО.ЭИР заканчивается <strong>${escapeHtml(expiresHuman)}</strong> (через ${data.daysRemaining} ${data.daysRemaining === 1 ? 'день' : 'дн.'}).</p>
     <p style="padding:12px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:6px;color:#e0e0e0;">После окончания триала доступ к расширенным функциям («Бизнес» — мультизоны, расширенная аналитика, расписание, приоритетная поддержка) приостановится. Чтобы продолжить пользоваться этими возможностями — выберите тариф в кабинете.</p>
     <p style="text-align:center;margin:28px 0;">
       <a href="${SITE_URL}/venue/subscription" style="${buttonStyle}">Выбрать тариф</a>
@@ -767,7 +768,7 @@ export async function sendVenueTrialEndingEmail(data: { toEmail: string; venueNa
 }
 
 /**
- * Fired by the trial-expiry cron once the venue's 14-day trial has
+ * Fired by the trial-expiry cron once the venue's trial has
  * lapsed without payment. Lets the venue owner know their cabinet
  * has rolled back to the free tier and how to restore full access.
  */
@@ -775,7 +776,7 @@ export async function sendVenueTrialExpiredEmail(data: { toEmail: string; venueN
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Триал ПРОМО.ЭИР завершён</h2>
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
-    <p>14-дневный пробный период подошёл к концу. Доступ к расширенным функциям сейчас ограничен — заведение работает в бесплатном режиме (1 зона, до 5 плейлистов, базовый каталог треков).</p>
+    <p>Пробный период подошёл к концу. Доступ к расширенным функциям сейчас ограничен: заведение работает в бесплатном режиме (1 зона, до 5 плейлистов, базовый каталог треков).</p>
     <p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:6px;color:#e0e0e0;">Все ваши плейлисты, расписания и настройки сохранены. Чтобы вернуть полный функционал — выберите тариф «Бизнес» (₽9 990/мес) или «Сеть» (₽14 990/мес) в кабинете.</p>
     <p style="text-align:center;margin:28px 0;">
       <a href="${SITE_URL}/venue/subscription" style="${buttonStyle}">Выбрать тариф</a>
@@ -791,17 +792,20 @@ export async function sendVenueTrialExpiredEmail(data: { toEmail: string; venueN
 
 /**
  * Welcome email fired right after venue signup. Sets expectations
- * for the 14-day trial: «заполните анкету → админ соберёт эфир →
+ * for the 7-day trial (since 2026-10-16; it starts only after the
+ * venue attaches a card): «заполните анкету → админ соберёт эфир →
  * вы получите код для устройства». Deliberately frames the radio
  * as «свой эфир с ведущими» without mentioning any technology
  * (per product positioning).
  */
 export async function sendVenueRadioWelcomeEmail(data: { toEmail: string; venueName: string; trialDaysRemaining?: number; }) {
-  const days = data.trialDaysRemaining ?? 14;
+  // 7 = TRIAL_PERIOD_DAYS из venue-trial.tsx (тот импортирует этот модуль,
+  // поэтому число здесь, а не импорт).
+  const days = data.trialDaysRemaining ?? 7;
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 22px;">Добро пожаловать на ПРОМО.ЭИР!</h2>
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
-    <p>Вы получили <strong>${days} дней бесплатного доступа</strong> к собственному радио для вашего заведения — без привязки карты.</p>
+    <p>Вам доступны <strong>${days} дней бесплатного доступа</strong> к собственному радио для вашего заведения. Пробный период начинается после привязки карты в кабинете: мы списываем 1 ₽ для проверки и сразу его возвращаем, а оплата подписки спишется только по окончании пробного периода.</p>
     <p style="padding:14px;background:#1a1a2e;border-left:3px solid #6366f1;border-radius:6px;color:#e0e0e0;">
       <strong>Что дальше:</strong><br>
       1. Зайдите в кабинет и заполните анкету — какая музыка нужна, какие джинглы, какой стиль ведущих.<br>
@@ -816,7 +820,7 @@ export async function sendVenueRadioWelcomeEmail(data: { toEmail: string; venueN
   `);
   return sendEmail({
     to: data.toEmail,
-    subject: `Добро пожаловать на ПРОМО.ЭИР — ${days} дней бесплатно`,
+    subject: `Добро пожаловать на ПРОМО.ЭИР: ${days} дней бесплатно`,
     html,
   });
 }

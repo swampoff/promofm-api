@@ -1310,7 +1310,7 @@ export async function ensureVenueProfile(userId: string) {
     id: `venue-${userId}`, userId, venueName: 'Мое заведение', description: null, venueType: 'bar',
     address: '', city: 'Москва', country: 'Россия', capacity: null, logoUrl: null, coverImageUrl: null,
     genres: [], socialLinks: {}, workingHours: null, status: 'active', verified: false,
-    // Пробные 2 недели — только после привязки карты (см. GET /venue/profile).
+    // Пробный период (7 дней) только после привязки карты (см. GET /venue/profile).
     subscriptionStatus: 'pending_card', subscriptionPlan: 'start', createdAt: now, updatedAt: now,
   });
   import('./email-helper.tsx')

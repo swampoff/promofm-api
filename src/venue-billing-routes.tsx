@@ -189,14 +189,17 @@ app.post('/subscribe', requireAuth, async (c) => {
 // POST /cancel — flip status to 'cancelled' (stream runs to period end)
 // ──────────────────────────────────────────────────────────────────
 /**
- * POST /attach-card — привязка карты для старта бесплатных 2 недель.
+ * POST /attach-card: привязка карты для старта бесплатного пробного периода
+ * (TRIAL_PERIOD_DAYS из venue-trial.tsx: 7 дней с 16.10.2026, раньше 14).
  *
  * Владелец 2026-08-07: «заведение обязано привязывать карту». Раньше триал
  * выдавался просто статусом, карты не было, и крон trial_auto_charge не мог
  * ничего списать по окончании.
  *
  * Механика: проверочный платёж 1 ₽ с savePaymentMethod. После успеха вебхук
- * сохраняет payment_method_id, включает триал на 14 дней и ВОЗВРАЩАЕТ рубль.
+ * сохраняет payment_method_id, включает триал на 7 дней и ВОЗВРАЩАЕТ рубль.
+ * По окончании триала крон venue-trial списывает первый месяц с этой карты
+ * (venue-billing-helpers.tsx: tryAutoChargeAtTrialEnd).
  */
 app.post('/attach-card', requireAuth, async (c) => {
   try {

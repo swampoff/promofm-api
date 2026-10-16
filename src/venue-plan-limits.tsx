@@ -69,7 +69,7 @@ export const VENUE_PLAN_LIMITS: Record<VenuePlanId, VenuePlanLimits> = {
   },
   // 'business' — paid Бизнес tariff (₽9 990/мес) AND the entitlement
   // a trialing venue gets ("полный функционал ПРОМО.ЭИР" per the
-  // landing promise during the 14-day window).
+  // landing promise during the trial window, 7 days since 2026-10-16).
   business: {
     zones: 4, maxPlaylists: 20, maxTracks: 2000,
     libraryAccess: 'full',
@@ -119,7 +119,7 @@ export function getEffectiveVenuePlan(profile: any): VenuePlanId {
   const plan = String(profile.subscriptionPlan || 'start').toLowerCase();
 
   // 'pending_card' — заведение зарегистрировалось, но карту ещё не привязало.
-  // Доступа нет вовсе: пробные 2 недели начинаются с момента привязки
+  // Доступа нет вовсе: пробный период (7 дней) начинается с момента привязки
   // (владелец 2026-08-07). Без явной ветки статус проваливался в
   // «использовать заявленный план» и выдавал 'start' авансом.
   if (status === 'expired' || status === 'cancelled' || status === 'inactive' || status === 'pending_card') {

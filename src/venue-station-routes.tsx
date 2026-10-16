@@ -35,6 +35,7 @@ import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { ensureVenueProfile, getVenueProfile as dbGetVenueProfile } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { sendVenueRadioReadyEmail, sendVenueRadioChangesRequestedEmail, sendVenueRadioRejectedEmail } from './email-helper.tsx';
+import { TRIAL_PERIOD_DAYS } from './venue-trial.tsx';
 
 const app = new Hono();
 
@@ -656,9 +657,10 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
       [req.id, monthlyPrice]
     );
 
-    // ── 14-дневный бесплатный триал стартует с момента провижининга ──
+    // ── Бесплатный триал эфира стартует с момента провижининга ──
     // Пишем venue_radio_subscriptions строкой status='active' (без нового
-    // enum-значения → без риска CHECK), plan_id='trial', +14 дней. stream-token
+    // enum-значения → без риска CHECK), plan_id='trial', +TRIAL_PERIOD_DAYS
+    // (7 дней с 16.10.2026, раньше 14; уже созданные строки не трогаем). stream-token
     // пускает active+период → эфир играет сразу; по истечении доступ гаснет
     // по дате, дальше нужен платный абонемент. Идемпотентно: только если у
     // заведения ещё нет живой подписки (active с непросроченным периодом).
@@ -666,14 +668,14 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
       await pool.query(
         `INSERT INTO venue_radio_subscriptions
            (venue_id, plan_id, status, current_period_start, current_period_end, created_at, updated_at)
-         SELECT $1, 'trial', 'active', NOW(), NOW() + INTERVAL '14 days', NOW(), NOW()
+         SELECT $1, 'trial', 'active', NOW(), NOW() + make_interval(days => $2::int), NOW(), NOW()
           WHERE NOT EXISTS (
             SELECT 1 FROM venue_radio_subscriptions
              WHERE venue_id = $1
                AND status = 'active'
                AND (current_period_end IS NULL OR current_period_end > NOW())
           )`,
-        [req.venue_id]
+        [req.venue_id, TRIAL_PERIOD_DAYS]
       );
     } catch (trialErr: any) {
       // Триал best-effort: не валим провижининг, если подписочная таблица

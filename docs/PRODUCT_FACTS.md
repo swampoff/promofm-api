@@ -410,8 +410,12 @@ keep both in sync when prices change).
 | network    | 14 990    | 149 900    | unlimited zones, premium library, multi-location, API access |
 | enterprise | by sales  | by sales   | unlimited everything, custom contract |
 
-Trial: 14 days at `effectivePlan='business'`. Stamped on first
-GET /venue/profile (`venue-trial.tsx:applyInitialTrial`).
+Trial: 7 days at `effectivePlan='business'` (owner 2026-10-16; trials
+started before 2026-10-16 keep 14 days, see `venue-trial.tsx:trialPeriodDaysFor`).
+Starts only after the venue attaches a card: 1 ₽ check payment, refunded at
+once; the `venue_card_attach` webhook (checkout-routes.tsx) stamps
+`trial_expires_at`. At trial end the cron charges the first month to the
+saved card (`venue-billing-helpers.tsx:tryAutoChargeAtTrialEnd`).
 
 ### Radio ad campaigns — pricing & amount-gate posture
 

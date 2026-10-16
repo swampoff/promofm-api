@@ -279,7 +279,7 @@ auth.post("/signup", async (c) => {
     sendVerificationEmail(email, userName, verificationToken).catch((e) => log.warn({ err: e, email }, "verification_email_failed"));
 
     // Venue-specific welcome — fires alongside the standard
-    // verification email so the new venue understands the 14-day trial
+    // verification email so the new venue understands the 7-day trial
     // + next steps (onboarding wizard → admin queue → pairing code).
     // Other roles get only the verification email.
     if (userRole === 'venue') {

@@ -1,8 +1,16 @@
 /**
- * VENUE TRIAL — 14-day free-trial expiration mechanic.
+ * VENUE TRIAL: free-trial expiration mechanic.
  *
- * Closes the gap between the landing promise («14 дней бесплатно» on
- * ForVenuesPage:86,262) and the product reality discovered in the
+ * Trial length: 7 days for trials started on/after 2026-10-16 (owner
+ * decision 2026-10-16, was 14). Trials started before that date keep
+ * their 14 days: an explicit `trial_expires_at` is never recomputed, and
+ * the createdAt-fallback below picks the length by the start date
+ * (see `trialPeriodDaysFor`). Since 2026-08-07 the trial itself starts
+ * only after the venue attaches a card (checkout-routes.tsx,
+ * `venue_card_attach` webhook), which stamps `trial_expires_at`.
+ *
+ * Closes the gap between the landing promise («N дней бесплатно» on
+ * ForVenuesPage) and the product reality discovered in the
  * audit pass: until now, when a venue created a profile, the backend
  * stamped `subscriptionStatus: 'trial'` (venue-routes.tsx:88) but
  * NOTHING ever expired it. No trial_expires_at field, no cron, no
@@ -14,8 +22,9 @@
  *
  *   1. State derivation. `getTrialState(profile)` reads
  *      `data.trial_expires_at` if set, otherwise falls back to
- *      `createdAt + 14 days` for grandfathered venues created before
- *      this PR. Returns { isTrialing, isExpired, daysRemaining,
+ *      `createdAt + trialPeriodDaysFor(createdAt)` days (14 for
+ *      grandfathered venues created before 2026-10-16, 7 after).
+ *      Returns { isTrialing, isExpired, daysRemaining,
  *      expiresAtIso, startedAtIso } — UI surfaces these in the
  *      cabinet countdown.
  *
@@ -31,9 +40,9 @@
  *
  *   3. New profile init. `applyInitialTrial(profile)` is called from
  *      venue-routes.tsx when a fresh profile is being upserted. Sets
- *      `data.trial_expires_at` to createdAt + 14 days so we can later
- *      surface a precise countdown to the venue owner rather than
- *      reverse-deriving from createdAt every read.
+ *      `data.trial_expires_at` to createdAt + trialPeriodDaysFor(createdAt)
+ *      days so we can later surface a precise countdown to the venue
+ *      owner rather than reverse-deriving from createdAt every read.
  *
  * No schema migration is required: `venue_profiles.data jsonb` is
  * the existing column. Two new keys live inside `data`:
@@ -44,7 +53,28 @@ import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { sendVenueTrialEndingEmail, sendVenueTrialExpiredEmail, sendVenueTrialLastDayEmail } from './email-helper.tsx';
 
-export const TRIAL_PERIOD_DAYS = 14;
+// Пробный период для заведений. Владелец 2026-10-16: сокращён с 14 до 7 дней.
+// 7 дней действуют только для пробных, начатых с TRIAL_7D_START_ISO; тем, кто
+// начал раньше, срок не сокращаем (LEGACY_TRIAL_PERIOD_DAYS = 14).
+export const TRIAL_PERIOD_DAYS = 7;
+export const LEGACY_TRIAL_PERIOD_DAYS = 14;
+export const TRIAL_7D_START_ISO = '2026-10-16T00:00:00+03:00';
+const TRIAL_7D_START_MS = Date.parse(TRIAL_7D_START_ISO);
+
+/**
+ * Длительность пробного периода по дате его начала: до 16.10.2026 (МСК)
+ * 14 дней, с 16.10.2026 7 дней. Невалидная/пустая дата = новый пробный (7).
+ */
+export function trialPeriodDaysFor(start: Date | string | number | null | undefined): number {
+  if (start === null || start === undefined || start === '') return TRIAL_PERIOD_DAYS;
+  const ms = start instanceof Date ? start.getTime() : new Date(start).getTime();
+  if (Number.isNaN(ms)) return TRIAL_PERIOD_DAYS;
+  return ms < TRIAL_7D_START_MS ? LEGACY_TRIAL_PERIOD_DAYS : TRIAL_PERIOD_DAYS;
+}
+
+// T-3 warning: fires once daysRemaining is in (0, 3], i.e. on the 4th-5th
+// day of a 7-day trial. T-1 (below) fires at daysRemaining === 1. Each has
+// its own data.*_sent_at flag, so the shorter trial needs no extra logic.
 export const TRIAL_WARNING_DAYS = 3;
 // T-1 reminder fires when daysRemaining === 1 (the last full day
 // before expiry). Guarded by data.trial_last_day_sent_at so a
@@ -65,9 +95,10 @@ export interface TrialState {
  * Read trial state from a venue profile.
  *
  * Prefer the explicit `data.trial_expires_at` when present (set by
- * applyInitialTrial on fresh profile creation or by backfill). For
- * grandfathered venues without that field — derive from
- * `createdAt + 14d`. If `subscriptionStatus !== 'trial'` we still
+ * applyInitialTrial on fresh profile creation, by the card-attach
+ * webhook or by backfill). For grandfathered venues without that field,
+ * derive from `createdAt + trialPeriodDaysFor(createdAt)` (14 days for
+ * venues created before 2026-10-16, 7 after). If `subscriptionStatus !== 'trial'` we still
  * return computed expiry but `isTrialing=false`, so callers can
  * distinguish «not trialing» from «trialing & expired».
  */
@@ -85,7 +116,7 @@ export function getTrialState(profile: any): TrialState {
   } else if (profile?.createdAt) {
     const created = new Date(profile.createdAt);
     if (!Number.isNaN(created.getTime())) {
-      expiresAt = new Date(created.getTime() + TRIAL_PERIOD_DAYS * MS_PER_DAY);
+      expiresAt = new Date(created.getTime() + trialPeriodDaysFor(created) * MS_PER_DAY);
     }
   }
 
@@ -118,7 +149,7 @@ export function applyInitialTrial<P extends Record<string, any>>(profile: P): P 
 
   const start = profile.createdAt ? new Date(profile.createdAt) : new Date();
   const validStart = !Number.isNaN(start.getTime()) ? start : new Date();
-  const expiresAt = new Date(validStart.getTime() + TRIAL_PERIOD_DAYS * MS_PER_DAY);
+  const expiresAt = new Date(validStart.getTime() + trialPeriodDaysFor(validStart) * MS_PER_DAY);
 
   return {
     ...profile,

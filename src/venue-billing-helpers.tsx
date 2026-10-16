@@ -113,7 +113,7 @@ export async function tryAutoChargeAtTrialEnd(userId: string, profileData: any):
     }
 
     // Extend period. Starts from NOW (the trial expiry moment) —
-    // venue has been getting free service these 14 days, so the
+    // venue has been getting free service during the trial, so the
     // 30 paid days run from this moment forward.
     const daysToAdd = interval === 'year' ? 365 : 30;
     const newExpiry = new Date(now.getTime() + daysToAdd * 24 * 60 * 60 * 1000);

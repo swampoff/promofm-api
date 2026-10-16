@@ -9,7 +9,7 @@
  * Plan-gating: `getEffectiveVenueLimits(profile).scheduling` MUST be
  * true. Free / Старт venues hit 403 with `featureBlocked('scheduling',
  * profile)`. Trial venues are entitled (effectivePlan='business' until
- * the 14-day cron flips them to expired).
+ * the trial-expiry cron flips them to expired).
  *
  * Endpoints mounted at /server/api/venue-schedule:
  *

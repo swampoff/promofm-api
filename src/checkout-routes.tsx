@@ -361,15 +361,24 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   // Идемпотентность — orderId-keyed (COALESCE(payment_order_id,'') <> $1):
   // retry с тем же orderId апдейтит 0 строк, реальное продление (новый
   // orderId) продлевает от max(текущий конец, сейчас).
-  // Привязка карты заведением (1 ₽): включаем пробные 2 недели и возвращаем рубль.
+  // Привязка карты заведением (1 ₽): включаем пробный период и возвращаем рубль.
+  // Срок: TRIAL_PERIOD_DAYS (7 дней с 16.10.2026, раньше было 14).
   // Карта уже сохранена общим блоком savePaymentMethod выше.
   if (session.metadata?.type === 'venue_card_attach') {
     const venueUserId = String(session.metadata.userId || session.userId || '');
     try {
       const { getVenueProfile, upsertVenueProfile } = await import('./db.tsx');
+      const { TRIAL_PERIOD_DAYS } = await import('./venue-trial.tsx');
       const prof: any = await getVenueProfile(venueUserId);
       if (prof && prof.subscriptionStatus !== 'active') {
-        const until = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+        let untilMs = Date.now() + TRIAL_PERIOD_DAYS * 24 * 60 * 60 * 1000;
+        // Повторная привязка (смена карты) во время идущего пробного не
+        // должна сокращать уже выданный срок (например, 14 дней до 16.10).
+        if (prof.subscriptionStatus === 'trial' && prof.trial_expires_at) {
+          const prevMs = new Date(prof.trial_expires_at).getTime();
+          if (!Number.isNaN(prevMs) && prevMs > untilMs) untilMs = prevMs;
+        }
+        const until = new Date(untilMs).toISOString();
         await upsertVenueProfile(venueUserId, {
           ...prof,
           subscriptionStatus: 'trial',

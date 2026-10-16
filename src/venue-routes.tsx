@@ -94,7 +94,7 @@ app.get('/profile', requireAuth, async (c) => {
         workingHours: null,
         status: 'active',
         verified: false,
-        // Пробные 2 недели включаются ТОЛЬКО после привязки карты
+        // Пробный период (7 дней с 16.10.2026) включается ТОЛЬКО после привязки карты
         // (POST /venue-billing/attach-card → вебхук ставит 'trial').
         // Владелец 2026-08-07: «заведение обязано привязывать карту».
         // 'pending_card' не распознаётся getEffectiveVenuePlan → план 'free',
@@ -154,7 +154,7 @@ app.put('/profile', requireAuth, async (c) => {
       profile = applyInitialTrial({
         id: `venue-${userId}`,
         userId,
-        // Пробные 2 недели включаются ТОЛЬКО после привязки карты
+        // Пробный период (7 дней с 16.10.2026) включается ТОЛЬКО после привязки карты
         // (POST /venue-billing/attach-card → вебхук ставит 'trial').
         // Владелец 2026-08-07: «заведение обязано привязывать карту».
         // 'pending_card' не распознаётся getEffectiveVenuePlan → план 'free',
@@ -1052,7 +1052,8 @@ app.get('/bookings', requireAuth, async (c) => {
 });
 
 // ── POST /cron/expire-trials ──────────────────────────────────────
-// Cron endpoint that processes venue 14-day-trial expirations and
+// Cron endpoint that processes venue trial expirations (7-day trial since
+// 2026-10-16, 14 days for trials started earlier) and
 // warnings. Same auth pattern as /subscriptions/charge-recurring:
 // the caller (systemd timer / external scheduler) must send the
 // CRON_SECRET via header `X-Cron-Secret` (or `Authorization: Bearer
