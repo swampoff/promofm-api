@@ -95,7 +95,9 @@ function normalize(body: any): { ok: true; row: Record<string, any> } | { ok: fa
 }
 
 const COLS = 'id, month, title, starts_on, ends_on, city, venue, kind, audience, summary, why, price, deadline, url, source_url, is_published, sort';
-const iso = (d: any) => (d instanceof Date ? d.toISOString().slice(0, 10) : d ? String(d).slice(0, 10) : null);
+// DATE приходит из pg как Date на полночь в поясе сервера: toISOString() сдвинул бы день назад.
+const p2 = (n: number) => String(n).padStart(2, '0');
+const iso = (d: any) => (d instanceof Date ? `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}` : d ? String(d).slice(0, 10) : null);
 function toJson(r: any) {
   return {
     id: r.id, month: r.month, title: r.title, start: iso(r.starts_on), end: iso(r.ends_on) || iso(r.starts_on),
