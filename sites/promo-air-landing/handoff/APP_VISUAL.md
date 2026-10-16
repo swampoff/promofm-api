@@ -1,0 +1,4 @@
+# PROMO.AIR mobile app visual prototype
+Route /app/. Standalone HTML/CSS/JS, shared v5 artwork. Six screens: Home, Music, Player, Schedule, Zones, Profile. Desktop presentation frame; mobile full viewport, safe-area insets. Persistent mini player, four playable sketches, local schedule storage with schema validation, demo zone controls, temporary favorites. No backend/device control/authentication or native app package. Maintain explicit demo labels until production integration.
+Single audio element persists across screens. Playback request counter avoids stale play-promise handling. Navigation and controls use semantic buttons and accessible names, keyboard focus and reduced-motion. Browser screenshot QA unavailable in managed environment; perform iOS Safari and Android Chrome visual/audio checks before integration.
+Design by Promo.Art. Art assets are inherited from approved site version. No new generated imagery required.

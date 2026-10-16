@@ -1,5 +1,7 @@
 node_modules/
 dist/
+!sites/promo-air-landing/dist/
+!sites/promo-air-landing/dist/**
 .env
 *.bak
 *.log
