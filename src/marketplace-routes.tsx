@@ -1370,6 +1370,337 @@ app.put('/contracts/:id/milestones/:mid', requireAuth, async (c) => {
 });
 
 // ═══════════════════════════════════════════════
+//  C O N T R A C T S  -  E S C A P E   V A L V E S
+//  (migration 103: cancel + dispute lifecycle)
+// ═══════════════════════════════════════════════
+//
+// Service contracts на main не имели escape valves для broken workflow:
+//   - Producer перестал submit'ать → client заперт (active forever)
+//   - Producer submit'ает мусор → client может только бесконечный
+//     revision-цикл или approve (платит за плохую работу)
+// Этот блок добавляет 3 endpoint'а:
+//   POST /contracts/:id/cancel — обе стороны могут cancel если 0 approved
+//   POST /contracts/:id/milestones/:mid/dispute — client эскалирует
+//   POST /admin/contracts/:id/disputes/:mid/resolve — admin разрешает
+//
+// Архитектурное решение: НЕ refund-flow. Escrow на contracts на main
+// не существует (paidAt в milestone — счётчик, не реальные деньги).
+// Cancel и dispute — admin moderation / coordination tool, не движение
+// денег. Если кто-то добавит escrow позже — refund'у тут есть место.
+
+/**
+ * POST /contracts/:id/cancel — выход из active contract'а.
+ *
+ * Body: { reason? }
+ *
+ * Auth + role check:
+ *   - userId === contract.clientId   → cancelled_by_role='client'
+ *   - userId === contract.producerId → cancelled_by_role='producer'
+ *   - Прочие → 403
+ *
+ * Условие: 0 approved milestones. Если кто-то уже одобрил milestone
+ * (paidAmount > 0) — cancel заблокирован (paidAmount это «вознаграждение»
+ * producer'у уже зафиксировано в commission/payout ledger, отменить
+ * нельзя без рефанда, которого тут нет).
+ *
+ * Идемпотентность: повторный cancel того же contract'а → 409
+ * (status уже 'cancelled').
+ */
+app.post('/contracts/:id/cancel', requireAuth, async (c) => {
+  try {
+    const orderId = c.req.param('id');
+    const userId = c.get('userId') as string;
+    const body = await c.req.json().catch(() => ({}));
+    const reason = String(body.reason || '').slice(0, 250);
+
+    const contract = await getContractByOrderId(orderId);
+    if (!contract) return c.json({ success: false, error: 'Contract not found' }, 404);
+    if (contract.status !== 'active') {
+      return c.json({ success: false, error: `Contract status is ${contract.status} (must be active)` }, 409);
+    }
+
+    let role: 'client' | 'producer';
+    if (userId === contract.clientId)   role = 'client';
+    else if (userId === contract.producerId) role = 'producer';
+    else return c.json({ success: false, error: 'Только client или producer контракта могут отменить' }, 403);
+
+    // Гейт: нельзя cancel если хотя бы один milestone уже approved
+    // (commission/payout по нему уже записан в ledger).
+    const approvedCount = (contract.milestones || []).filter((m: any) => m.status === 'approved').length;
+    if (approvedCount > 0) {
+      return c.json({
+        success: false,
+        error: `Контракт нельзя отменить: ${approvedCount} этапов уже одобрено. Используйте dispute для оспаривания.`,
+      }, 409);
+    }
+
+    const now = new Date().toISOString();
+    // Atomic UPDATE — race-free vs read-modify-write.
+    await mpPool.query(
+      `UPDATE contracts
+          SET status              = 'cancelled',
+              cancelled_at        = NOW(),
+              cancelled_by        = $2,
+              cancelled_by_role   = $3,
+              cancellation_reason = $4,
+              completed_at        = NOW(),
+              updated_at          = NOW()
+        WHERE order_id = $1 AND status = 'active'`,
+      [orderId, userId, role, reason]
+    );
+
+    // Service order → отзыв в cancelled тоже, чтобы dashboard не показывал
+    // active progress на отмененном контракте.
+    try {
+      const order = await getServiceOrder(orderId);
+      if (order) {
+        order.status = 'cancelled';
+        order.cancelledAt = now;
+        order.cancelledBy = userId;
+        order.cancellationReason = reason;
+        await upsertServiceOrder(orderId, order);
+      }
+    } catch (orderErr: any) {
+      console.warn('[contract-cancel] service order update failed:', orderErr?.message);
+    }
+
+    // SSE обоим сторонам (тот кто отменил уже знает, но второй — нет).
+    const counterpartyId = role === 'client' ? contract.producerId : contract.clientId;
+    if (counterpartyId) {
+      try {
+        emitSSE(counterpartyId, {
+          type: 'contract_cancelled',
+          data: {
+            title: 'Контракт отменён',
+            message: `${role === 'client' ? 'Клиент' : 'Продюсер'} отменил контракт "${contract.serviceTitle || ''}"${reason ? ': ' + reason : ''}`,
+            orderId,
+            cancelledByRole: role,
+            reason,
+          },
+        });
+      } catch {}
+    }
+
+    return c.json({
+      success: true,
+      data: { orderId, status: 'cancelled', cancelledBy: userId, cancelledByRole: role, cancellationReason: reason },
+    });
+  } catch (error: any) {
+    console.error('POST /contracts/:id/cancel error:', error);
+    return c.json({ success: false, error: 'Не удалось отменить контракт' }, 500);
+  }
+});
+
+/**
+ * POST /contracts/:id/milestones/:mid/dispute — client эскалирует
+ * submitted milestone как «spor».
+ *
+ * Body: { reason }  (обязателен — admin'у нужно объяснение)
+ *
+ * Условия:
+ *   - userId === contract.clientId (только client может dispute)
+ *   - contract.status === 'active'
+ *   - milestone.status === 'submitted' (нельзя dispute pending /
+ *     in_progress / approved milestone)
+ *
+ * Эффект:
+ *   - milestone.status = 'disputed' (новый state)
+ *   - contract.has_dispute = TRUE
+ *   - notifyAllAdmins (cross-cabinet) для admin-кабинета
+ *   - SSE producer о споре
+ *
+ * Admin разрешает через POST /admin/contracts/:id/disputes/:mid/resolve
+ * (см. ниже).
+ */
+app.post('/contracts/:id/milestones/:mid/dispute', requireAuth, async (c) => {
+  try {
+    const orderId = c.req.param('id');
+    const mid = c.req.param('mid');
+    const userId = c.get('userId') as string;
+    const body = await c.req.json().catch(() => ({}));
+    const reason = String(body.reason || '').trim().slice(0, 500);
+
+    if (!reason) {
+      return c.json({ success: false, error: 'reason обязателен (минимум описание спора)' }, 400);
+    }
+
+    const contract = await getContractByOrderId(orderId);
+    if (!contract) return c.json({ success: false, error: 'Contract not found' }, 404);
+    if (contract.status !== 'active') {
+      return c.json({ success: false, error: `Contract status is ${contract.status}` }, 409);
+    }
+    if (userId !== contract.clientId) {
+      return c.json({ success: false, error: 'Только client контракта может эскалировать спор' }, 403);
+    }
+
+    const milestone = (contract.milestones || []).find((m: any) => m.id === mid);
+    if (!milestone) return c.json({ success: false, error: 'Milestone not found' }, 404);
+    if (milestone.status !== 'submitted') {
+      return c.json({ success: false, error: `Disputing milestone в статусе ${milestone.status} невозможно (только submitted)` }, 400);
+    }
+
+    milestone.status = 'disputed';
+    milestone.disputedAt = new Date().toISOString();
+    milestone.disputeReason = reason;
+    milestone.updatedAt = milestone.disputedAt;
+
+    await updateContractByOrderId(orderId, {
+      milestones: contract.milestones,
+    });
+    // has_dispute флаг — отдельный inline UPDATE (updateContractByOrderId
+    // не знает о новой колонке). Безопасно — те же id, atomic on row.
+    await mpPool.query(
+      `UPDATE contracts SET has_dispute = TRUE, updated_at = NOW() WHERE order_id = $1`,
+      [orderId]
+    );
+
+    // Persistent admin notification
+    try {
+      const { notifyAllAdmins } = await import('./cross-cabinet-notify.tsx');
+      await notifyAllAdmins({
+        sourceRole: 'admin',
+        type: 'system_alert',
+        title: 'Marketplace: dispute по milestone',
+        message: `Клиент ${contract.clientName || contract.clientId} оспаривает этап "${milestone.title}" контракта "${contract.serviceTitle || ''}". Причина: ${reason.slice(0, 200)}`,
+        link: '/ctrl-pm7k2f/marketplace',
+        metadata: { kind: 'contract_milestone_dispute', orderId, milestoneId: mid, clientId: contract.clientId, producerId: contract.producerId },
+      }).catch(() => {});
+    } catch {}
+
+    // SSE producer
+    if (contract.producerId) {
+      try {
+        emitSSE(contract.producerId, {
+          type: 'milestone_disputed',
+          data: {
+            title: 'Спор по этапу',
+            message: `Клиент оспорил этап "${milestone.title}" — ожидайте решения admin'а`,
+            orderId, milestoneId: mid, reason: reason.slice(0, 200),
+          },
+        });
+      } catch {}
+    }
+
+    return c.json({
+      success: true,
+      data: { orderId, milestoneId: mid, status: 'disputed' },
+    });
+  } catch (error: any) {
+    console.error('POST /contracts/:id/milestones/:mid/dispute error:', error);
+    return c.json({ success: false, error: 'Не удалось эскалировать спор' }, 500);
+  }
+});
+
+/**
+ * POST /admin/contracts/:id/disputes/:mid/resolve — admin разрешает спор.
+ *
+ * Body: { resolution: 'approve' | 'revoke', note? }
+ *   - 'approve' → milestone status='approved' (платёж как обычный approve flow,
+ *                  но без role-check). paidAmount растёт.
+ *   - 'revoke'  → milestone status='revision' (вернуть producer'у на
+ *                  доработку, без commission).
+ *
+ * Если ни один milestone больше не в disputed-state → has_dispute=FALSE.
+ */
+app.post('/admin/contracts/:id/disputes/:mid/resolve', requireAuth, requireAdmin, async (c) => {
+  try {
+    const orderId = c.req.param('id');
+    const mid = c.req.param('mid');
+    const userId = c.get('userId') as string;
+    const body = await c.req.json().catch(() => ({}));
+    const resolution = String(body.resolution || '').toLowerCase();
+    const note = String(body.note || '').slice(0, 500);
+
+    if (!['approve', 'revoke'].includes(resolution)) {
+      return c.json({ success: false, error: "resolution должен быть 'approve' или 'revoke'" }, 400);
+    }
+
+    const contract = await getContractByOrderId(orderId);
+    if (!contract) return c.json({ success: false, error: 'Contract not found' }, 404);
+    if (contract.status !== 'active') {
+      return c.json({ success: false, error: `Contract status is ${contract.status}` }, 409);
+    }
+
+    const milestone = (contract.milestones || []).find((m: any) => m.id === mid);
+    if (!milestone) return c.json({ success: false, error: 'Milestone not found' }, 404);
+    if (milestone.status !== 'disputed') {
+      return c.json({ success: false, error: `Milestone в статусе ${milestone.status} (только disputed разрешается)` }, 400);
+    }
+
+    const now = new Date().toISOString();
+    let updatedPaidAmount = contract.paidAmount;
+    let updatedContractStatus = contract.status;
+    let updatedCompletedAt: string | null = contract.completedAt || null;
+
+    if (resolution === 'approve') {
+      milestone.status = 'approved';
+      milestone.paidAt = now;
+      milestone.completedAt = now;
+      updatedPaidAmount = (contract.paidAmount || 0) + Number(milestone.amount || 0);
+
+      // commission ledger — тот же flow что у обычного client-approve.
+      const msCommission = Math.round(milestone.amount * 0.1);
+      const msPayout = milestone.amount - msCommission;
+      await recordPlatformCommission(
+        'service',
+        `${contract.serviceTitle} - ${milestone.title} (admin-resolved)`,
+        milestone.amount, msCommission, msPayout,
+        {
+          producerId: contract.producerId, producerName: contract.producerName,
+          buyerId: contract.clientId, buyerName: contract.clientName,
+          orderId, milestoneId: mid, contractId: contract.id, adminResolved: true,
+        }
+      );
+
+      // Если все milestones approved → contract completed.
+      const allApproved = contract.milestones.every((m: any) => m.status === 'approved');
+      if (allApproved) {
+        updatedContractStatus = 'completed';
+        updatedCompletedAt = now;
+      }
+    } else {
+      // revoke — отправить producer'у на доработку без commission.
+      milestone.status = 'revision';
+    }
+    milestone.resolvedAt = now;
+    milestone.resolvedBy = userId;
+    milestone.adminResolution = resolution as 'approve' | 'revoke';
+    milestone.adminNote = note;
+    milestone.updatedAt = now;
+
+    // Persist + has_dispute recompute.
+    const stillDisputed = contract.milestones.some((m: any) => m.status === 'disputed');
+    await updateContractByOrderId(orderId, {
+      milestones: contract.milestones,
+      paidAmount: updatedPaidAmount,
+      status: updatedContractStatus,
+      completedAt: updatedCompletedAt,
+    });
+    await mpPool.query(
+      `UPDATE contracts SET has_dispute = $2, updated_at = NOW() WHERE order_id = $1`,
+      [orderId, stillDisputed]
+    );
+
+    // SSE обоим — admin resolved
+    try {
+      const msg = resolution === 'approve'
+        ? `Admin одобрил оспоренный этап "${milestone.title}"`
+        : `Admin отправил оспоренный этап "${milestone.title}" на доработку`;
+      if (contract.clientId)   emitSSE(contract.clientId,   { type: 'milestone_dispute_resolved', data: { title: 'Спор разрешён', message: msg, orderId, milestoneId: mid, resolution } });
+      if (contract.producerId) emitSSE(contract.producerId, { type: 'milestone_dispute_resolved', data: { title: 'Спор разрешён', message: msg, orderId, milestoneId: mid, resolution } });
+    } catch {}
+
+    return c.json({
+      success: true,
+      data: { orderId, milestoneId: mid, milestoneStatus: milestone.status, contractStatus: updatedContractStatus, resolution },
+    });
+  } catch (error: any) {
+    console.error('POST /admin/contracts/:id/disputes/:mid/resolve error:', error);
+    return c.json({ success: false, error: 'Не удалось разрешить спор' }, 500);
+  }
+});
+
+// ═══════════════════════════════════════════════
 //  D I G I T A L   G O O D S  (native cols since migration 075)
 // ═══════════════════════════════════════════════
 
