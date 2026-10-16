@@ -862,13 +862,16 @@ app.post('/notifications/read', requireAuth, requireDjRole, async (c) => {
 // TARIFF PLANS & SUBSCRIPTIONS
 // ════════════════════════════════════════
 
-const DJ_PLANS = [
-  {
-    id: 'starter',
-    name: 'Starter',
-    price: 0,
-    priceYear: 0,
-    currency: '₽',
+// Money + limits — shared с checkout-routes.tsx (webhook subscription).
+// Маркетинговые поля (description / features / popular / color) живут
+// здесь рядом с GET /plans — их правит маркетинг без касания webhook'а.
+import { DJ_PLANS_CORE } from './dj-plans-constants.tsx';
+
+const DJ_PLANS_MARKETING: Record<
+  keyof typeof DJ_PLANS_CORE,
+  { description: string; features: string[]; popular: boolean; color: string }
+> = {
+  starter: {
     description: 'Базовый бесплатный план для начинающих DJ',
     features: [
       'Профиль на маркетплейсе',
@@ -876,16 +879,10 @@ const DJ_PLANS = [
       'До 5 букингов/мес',
       'Базовая аналитика',
     ],
-    limits: { mixes: 5, events: 5, analytics: 'basic' },
     popular: false,
     color: 'slate',
   },
-  {
-    id: 'pro',
-    name: 'Pro',
-    price: 990,
-    priceYear: 9900,
-    currency: '₽',
+  pro: {
     description: 'Профессиональный план для активных DJ',
     features: [
       'Всё из Starter',
@@ -895,16 +892,10 @@ const DJ_PLANS = [
       'Верификация профиля',
       'Продвижение на радио',
     ],
-    limits: { mixes: 20, events: 50, analytics: 'advanced' },
     popular: true,
     color: 'purple',
   },
-  {
-    id: 'agency',
-    name: 'Agency',
-    price: 2990,
-    priceYear: 29900,
-    currency: '₽',
+  agency: {
     description: 'Максимальный план для агентств и топ DJ',
     features: [
       'Всё из Pro',
@@ -915,11 +906,18 @@ const DJ_PLANS = [
       'Мультиаккаунт (до 5 DJ)',
       'Брендированная страница',
     ],
-    limits: { mixes: -1, events: -1, analytics: 'full' },
     popular: false,
     color: 'amber',
   },
-];
+};
+
+const DJ_PLANS = (Object.keys(DJ_PLANS_CORE) as Array<keyof typeof DJ_PLANS_CORE>).map(
+  (id) => ({
+    ...DJ_PLANS_CORE[id],
+    currency: '₽',
+    ...DJ_PLANS_MARKETING[id],
+  }),
+);
 
 // GET /plans - тарифные планы
 app.get('/plans', requireAuth, requireDjRole, async (c) => {

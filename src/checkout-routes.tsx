@@ -296,16 +296,14 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     session.metadata?.planId
   ) {
     try {
-      const DJ_PLANS_LOCAL: Record<string, {
-        name: string; price: number; priceYear: number;
-        limits: { mixes: number; events: number; analytics: string };
-      }> = {
-        starter: { name: 'Starter', price: 0,    priceYear: 0,     limits: { mixes: 5,  events: 5,  analytics: 'basic' } },
-        pro:     { name: 'Pro',     price: 990,  priceYear: 9900,  limits: { mixes: 20, events: 50, analytics: 'advanced' } },
-        agency:  { name: 'Agency',  price: 2990, priceYear: 29900, limits: { mixes: -1, events: -1, analytics: 'full' } },
-      };
+      // shared source of truth — см. dj-plans-constants.tsx. Раньше тут
+      // жил локальный DJ_PLANS_LOCAL дубликат: цены/квоты совпадали с
+      // dj-studio, но drift-риск был реален (поменяешь price в одном —
+      // забудешь во втором → DJ заплатит за Pro и получит Starter
+      // квоты). 2026-05-25 уже был incident по DJ-webhook'у.
+      const { DJ_PLANS_CORE } = await import('./dj-plans-constants.tsx');
       const planId = String(session.metadata.planId);
-      const plan = DJ_PLANS_LOCAL[planId];
+      const plan = DJ_PLANS_CORE[planId as keyof typeof DJ_PLANS_CORE];
       if (plan) {
         const interval = session.metadata.interval === 'year' ? 'year' : 'month';
         // Webhook second line of defence: даже если кто-то обошёл
