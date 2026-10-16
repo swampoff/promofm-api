@@ -986,7 +986,7 @@ promotion.post('/production360/admin/:id/status', requireAuth, requireAdmin, asy
         title: status === 'approved' ? 'Заявка «360°» одобрена'
              : status === 'rejected' ? 'Заявка «360°» отклонена'
              : `Заявка «360°»: статус ${status}`,
-        message: `«${row.project_title}»${reason ? ` — ${reason}` : ''}`,
+        message: `«${row.project_title}»${reason ? ` – ${reason}` : ''}`,
         read: false, createdAt: new Date().toISOString(),
       });
     } catch { /* best-effort */ }
@@ -1037,7 +1037,7 @@ promotion.post('/promolab/admin/:id/status', requireAuth, requireAdmin, async (c
         title: status === 'approved' ? 'Заявка PromoLab одобрена'
              : status === 'rejected' ? 'Заявка PromoLab отклонена'
              : `Заявка PromoLab: статус ${status}`,
-        message: `«${row.experiment_name}»${reason ? ` — ${reason}` : ''}`,
+        message: `«${row.experiment_name}»${reason ? ` – ${reason}` : ''}`,
         read: false, createdAt: new Date().toISOString(),
       });
     } catch { /* best-effort */ }

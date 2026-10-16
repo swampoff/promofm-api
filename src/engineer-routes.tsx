@@ -988,7 +988,7 @@ app.post('/admin/orders/:id/refund', requireAuth, requireAdmin, async (c) => {
     if (!o.payment_order_id) {
       return c.json({
         success: false,
-        error: 'payment_order_id NULL — refund через YooKassa-дашборд вручную',
+        error: 'payment_order_id NULL – refund через YooKassa-дашборд вручную',
       }, 422);
     }
 

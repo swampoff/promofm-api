@@ -982,7 +982,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             type: 'notification',
             data: {
               title: 'Трек продвигается',
-              comment: `«${ttpResult.rows[0]?.title || session.metadata.trackTitle}» — теперь в секции «Протестировано экспертами» на 14 дней`,
+              comment: `«${ttpResult.rows[0]?.title || session.metadata.trackTitle}» – теперь в секции «Протестировано экспертами» на 14 дней`,
             },
           });
         } catch {}
@@ -1015,7 +1015,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         const emails: string[] = recipientsRes.rows.map((r: any) => String(r.email)).filter(Boolean);
 
         const trackUrl = `https://promo-music.ru/tracks/${req.track_id || ''}`;
-        const subject = `[ЭКСКЛЮЗИВ A&R] ${req.track_title} — экспертный анализ`;
+        const subject = `[ЭКСКЛЮЗИВ A&R] ${req.track_title} – экспертный анализ`;
         const html = `
           <div style="font-family:system-ui,sans-serif;max-width:600px;">
             <div style="background:#FF577F;color:#fff;padding:12px 16px;border-radius:8px 8px 0 0;font-weight:700;">
@@ -1023,8 +1023,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             </div>
             <div style="border:1px solid #eee;border-top:none;padding:16px;border-radius:0 0 8px 8px;">
               <h2 style="margin-top:0;">${req.track_title}</h2>
-              <p><strong>${req.artist_name}</strong> · ${req.genre || '—'}</p>
-              <p>Средняя оценка экспертов: <strong>${req.average_rating ?? '—'}/10</strong></p>
+              <p><strong>${req.artist_name}</strong> · ${req.genre || '–'}</p>
+              <p>Средняя оценка экспертов: <strong>${req.average_rating ?? '–'}/10</strong></p>
               ${req.consolidated_feedback ? `<div style="background:#f8f8f8;padding:12px;border-radius:6px;"><strong>Анализ экспертов:</strong><br>${req.consolidated_feedback}</div>` : ''}
               <p style="margin-top:16px;"><a href="${trackUrl}" style="display:inline-block;padding:10px 20px;background:#FF577F;color:#fff;text-decoration:none;border-radius:6px;">Послушать и связаться</a></p>
             </div>
@@ -1064,7 +1064,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             type: 'notification',
             data: {
               title: 'Эксклюзив-pitch отправлен',
-              comment: `«${req.track_title}» — оценка отправлена ${emails.length} A&R менеджерам`,
+              comment: `«${req.track_title}» – оценка отправлена ${emails.length} A&R менеджерам`,
             },
           });
         } catch {}
@@ -1110,7 +1110,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             type: 'notification',
             data: {
               title: 'Клип продвигается',
-              comment: `«${vpResult.rows[0]?.title || session.metadata.videoTitle}» — теперь в секции «Новые клипы» на главной на 14 дней`,
+              comment: `«${vpResult.rows[0]?.title || session.metadata.videoTitle}» – теперь в секции «Новые клипы» на главной на 14 дней`,
             },
           });
         } catch {}
@@ -1152,7 +1152,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         const watchUrl = video.video_url && String(video.video_url).startsWith('http')
           ? String(video.video_url)
           : `https://promo-music.ru${String(video.video_url || '').startsWith('/') ? '' : '/'}${video.video_url || ''}`;
-        const subject = `[ЭКСКЛЮЗИВ] Клип для эфира: ${video.artist_name} — ${video.title}`;
+        const subject = `[ЭКСКЛЮЗИВ] Клип для эфира: ${video.artist_name} – ${video.title}`;
         const html = `
           <div style="font-family:system-ui,sans-serif;max-width:600px;">
             <div style="background:#7C3AED;color:#fff;padding:12px 16px;border-radius:8px 8px 0 0;font-weight:700;">
@@ -1162,7 +1162,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
               ${video.thumbnail_url ? `<img src="${esc(video.thumbnail_url)}" alt="" style="width:100%;max-width:568px;border-radius:8px;display:block;margin-bottom:12px;" />` : ''}
               <h2 style="margin-top:0;">${esc(video.title)}</h2>
               <p><strong>${esc(video.artist_name)}</strong></p>
-              <p>Здравствуйте, {{name}}! Предлагаем клип артиста ПРОМО.МУЗЫКА к размещению в вашем эфире — эксклюзивно, до широкой ротации.</p>
+              <p>Здравствуйте, {{name}}! Предлагаем клип артиста ПРОМО.МУЗЫКА к размещению в вашем эфире – эксклюзивно, до широкой ротации.</p>
               <p style="margin-top:16px;"><a href="${esc(watchUrl)}" style="display:inline-block;padding:10px 20px;background:#7C3AED;color:#fff;text-decoration:none;border-radius:6px;">Смотреть клип</a></p>
             </div>
             <p style="color:#999;font-size:11px;margin-top:12px;">Эксклюзив-pitch на promo-music.ru для ТВ и радио.</p>
@@ -2207,7 +2207,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
           return c.json({ success: false, error: 'Нельзя принять чужой оффер' }, 403);
         }
         if (offer.status !== 'pending' && offer.status !== 'discussion') {
-          return c.json({ success: false, error: `Оффер в статусе ${offer.status} — принять нельзя` }, 400);
+          return c.json({ success: false, error: `Оффер в статусе ${offer.status} – принять нельзя` }, 400);
         }
         if (offer.payment_status !== 'unpaid') {
           return c.json({ success: false, error: `Платёжная сессия уже создана (payment_status=${offer.payment_status})` }, 409);
@@ -2217,7 +2217,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
           // price=0 offers — не идут через checkout (бесплатная коллаборация
           // принимается напрямую через PUT /collaboration/offers/:id/respond
           // без escrow).
-          return c.json({ success: false, error: 'У оффера нет цены — escrow не требуется' }, 400);
+          return c.json({ success: false, error: 'У оффера нет цены – escrow не требуется' }, 400);
         }
         if (Math.abs(amount - expected) > 0.01) {
           log.warn({ userId, offerId, expected, received: amount }, 'collab_accept_amount_tampering_blocked');
@@ -2387,7 +2387,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
           return c.json({ success: false, error: 'Нельзя оплатить чужой заказ' }, 403);
         }
         if (ord.status !== 'pending_payment' && ord.status !== 'draft') {
-          return c.json({ success: false, error: `Заказ в статусе ${ord.status} — оплата невозможна` }, 400);
+          return c.json({ success: false, error: `Заказ в статусе ${ord.status} – оплата невозможна` }, 400);
         }
         const expected = Number(ord.price) || 0;
         if (!(expected > 0)) {
@@ -2424,7 +2424,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
           return c.json({ success: false, error: 'Нельзя оплатить чужой заказ дистрибуции' }, 403);
         }
         if (ord.status !== 'pending') {
-          return c.json({ success: false, error: `Заказ в статусе ${ord.status} — оплата невозможна` }, 400);
+          return c.json({ success: false, error: `Заказ в статусе ${ord.status} – оплата невозможна` }, 400);
         }
         const expected = Number(ord.price_rub) || 0;
         if (!(expected > 0)) {
@@ -2606,7 +2606,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
           return c.json({ success: false, error: 'Нельзя оплатить чужой заказ' }, 403);
         }
         if (ord.status !== 'pending_payment') {
-          return c.json({ success: false, error: `Заказ в статусе ${ord.status} — оплата невозможна` }, 400);
+          return c.json({ success: false, error: `Заказ в статусе ${ord.status} – оплата невозможна` }, 400);
         }
         const expected = Number(ord.price) || 0;
         if (!(expected > 0)) {
@@ -2654,7 +2654,7 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
           return c.json({ success: false, error: 'Нельзя оплатить чужую кампанию' }, 403);
         }
         if (campaign.status !== 'pending') {
-          return c.json({ success: false, error: `Кампания в статусе ${campaign.status} — оплатить нельзя` }, 409);
+          return c.json({ success: false, error: `Кампания в статусе ${campaign.status} – оплатить нельзя` }, 409);
         }
         const expected = Number(campaign.budget);
         if (!(expected > 0)) {
@@ -3028,7 +3028,7 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
         const djId: string = body?.object?.metadata?.dj_id || '';
         if (!payoutId || !djId) {
           log.warn({ event, payoutId, djId }, 'payout_webhook_missing_metadata');
-          return c.json({ success: true, message: 'No metadata — ignored' });
+          return c.json({ success: true, message: 'No metadata – ignored' });
         }
         // Подтверждаем статус через API (webhook без подписи)
         const verified = await fetchYooKassaPayout(payoutId);
@@ -3044,7 +3044,7 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
           : verified.status === 'canceled' ? 'canceled' : null;
         if (!newStatus) {
           log.info({ payoutId, djId, vstatus: verified.status }, 'payout_status_noop');
-          return c.json({ success: true, message: `Status ${verified.status} — no update` });
+          return c.json({ success: true, message: `Status ${verified.status} – no update` });
         }
         // UPDATE conditionally — обновляем только если status реально
         // меняется. Atomic: два concurrent webhook'а с одинаковым
@@ -3075,7 +3075,7 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
           } else {
             log.info({ payoutId, djId, currentStatus: check.rows[0].status }, 'payout_status_idempotent');
           }
-          return c.json({ success: true, message: 'No update needed — acknowledged' });
+          return c.json({ success: true, message: 'No update needed – acknowledged' });
         }
         const w = upd.rows[0];
         log.info({ payoutId, djId, status: newStatus }, 'payout_status_updated');
@@ -3136,7 +3136,7 @@ checkoutRoutes.post('/webhook/yookassa', async (c) => {
       log.warn({ gateway: 'yookassa', orderId: payload.orderId }, 'webhook_session_not_found');
       // Return 200 OK — webhook is idempotent. Unknown order = either old test row
       // deleted from DB or 3rd-party probe. Avoid YK retry storm by acknowledging.
-      return c.json({ success: true, message: 'Session not in DB — acknowledged' });
+      return c.json({ success: true, message: 'Session not in DB – acknowledged' });
     }
 
     // Migration 100: persist resolvedShopId на session — targeted UPDATE
@@ -3303,7 +3303,7 @@ checkoutRoutes.post('/webhook/stripe', async (c) => {
       log.warn({ gateway: 'stripe', orderId: payload.orderId }, 'webhook_session_not_found');
       // Return 200 OK — webhook is idempotent. Unknown order = either old test row
       // deleted from DB or 3rd-party probe. Avoid retry storm by acknowledging.
-      return c.json({ success: true, message: 'Session not in DB — acknowledged' });
+      return c.json({ success: true, message: 'Session not in DB – acknowledged' });
     }
 
     // Refunds bypass the pending claim — they apply to already-succeeded sessions.

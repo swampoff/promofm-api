@@ -32,7 +32,7 @@ const AI_DETECTOR_TIMEOUT_MS = 90_000;
 
 if (!process.env.AI_DETECTOR_URL) {
   console.warn(
-    `[ai-check] AI_DETECTOR_URL не задан в .env — fallback на ${AI_DETECTOR_URL}. ` +
+    `[ai-check] AI_DETECTOR_URL не задан в .env – fallback на ${AI_DETECTOR_URL}. ` +
     `Если detector не запущен на этом host'е, все треки получат ai_check_status='error'.`,
   );
 }

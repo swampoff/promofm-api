@@ -616,7 +616,7 @@ app.post(
           const pmtData = (typeof pmt.data === 'string' ? JSON.parse(pmt.data) : (pmt.data || {})) as any;
           const orderId = pmtData.orderId;
           if (!orderId) {
-            refundErrors.push(`${pmt.payment_type}: нет orderId — refund невозможен`);
+            refundErrors.push(`${pmt.payment_type}: нет orderId – refund невозможен`);
             continue;
           }
           const session = await getPaymentSession(orderId) as any;

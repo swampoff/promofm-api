@@ -217,12 +217,12 @@ profileRoutes.delete('/account', requireAuth, async (c) => {
     // собирает РЕАЛЬНЫЕ per-table failures (FK violation, RLS) в _errors —
     // раньше они silently swallowed → orphan PII при success:true.
     if (deletedCounts._errors && Object.keys(deletedCounts._errors).length > 0) {
-      console.error('[account-delete] partial failure — PII may remain', { userId, errors: deletedCounts._errors });
-      return c.json({ success: false, error: 'Аккаунт удалён частично — часть данных не удалось стереть. Обратитесь в поддержку, мы завершим удаление вручную.' }, 500);
+      console.error('[account-delete] partial failure – PII may remain', { userId, errors: deletedCounts._errors });
+      return c.json({ success: false, error: 'Аккаунт удалён частично – часть данных не удалось стереть. Обратитесь в поддержку, мы завершим удаление вручную.' }, 500);
     }
 
     if (deletedCounts.users !== 1) {
-      console.error('[account-delete] incomplete — users row not removed', { userId, deletedCounts });
+      console.error('[account-delete] incomplete – users row not removed', { userId, deletedCounts });
       return c.json({ success: false, error: 'Не удалось полностью удалить аккаунт. Обратитесь в поддержку.' }, 500);
     }
 

@@ -745,7 +745,7 @@ subscriptions.post('/:userId/change-plan', requireAuth, async (c) => {
     if (requestedPrice > 0 && !callerIsAdmin) {
       return c.json({
         success: false,
-        error: 'Платный тариф активируется через оплату — используйте оформление подписки',
+        error: 'Платный тариф активируется через оплату – используйте оформление подписки',
         code: 'PAYMENT_REQUIRED',
       }, 402);
     }

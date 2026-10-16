@@ -292,8 +292,8 @@ export async function createArtistNotification(
     // конкретики"). orderTitle gets the headline slot; the verbose
     // sentence stays in `message` for the detail view.
     const titleText = orderTitle
-      ? `«${orderTitle}» — ${statusLabel}`
-      : `Публикация — ${statusLabel}`;
+      ? `«${orderTitle}» – ${statusLabel}`
+      : `Публикация – ${statusLabel}`;
     const notification = {
       id: notifId,
       type: 'publish_status_change',

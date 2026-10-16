@@ -247,7 +247,7 @@ app.post("/mode/:mode/run", requireAdminOrKey, async (c) => {
       const today = new Date().toISOString().slice(0, 10);
       await sendEmail({
         to: "info@promofm.ru",
-        subject: `[ECOSYSTEM] Ежедневный отчёт команды — ${today}`,
+        subject: `[ECOSYSTEM] Ежедневный отчёт команды – ${today}`,
         html: `<h2>Ежедневный отчёт AI-команды ПРОМО.МУЗЫКА</h2>
 <p><b>Дата:</b> ${today} | <b>Агентов:</b> ${report.results.length} | <b>Время:</b> ${report.totalLatencyMs}ms</p>
 <hr/>

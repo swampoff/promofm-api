@@ -539,7 +539,7 @@ export async function runCurator(role: RoleId): Promise<CuratorReport> {
   const testUserId = curatorAuth?.userId || PLACEHOLDER_USER;
 
   if (!userJwt) {
-    console.log(`[curator:${role}] No JWT — aborting`);
+    console.log(`[curator:${role}] No JWT – aborting`);
     return makeReport(role, roleConfig.name, startedAt, false, []);
   }
 

@@ -326,7 +326,7 @@ async function composeHost(venueUserId: string, cfg: HostCfg, streamId: string, 
   const task = item
     ? `Коротко расскажи гостям новость заведения, только факты из неё: «${item.text}».`
     : `Тепло поприветствуй гостей и пожелай им хорошего ${t.period === 'утро' ? 'утра' : t.period === 'день' ? 'дня' : 'вечера'}.`;
-  const prompt = `Ты — ${host}, ${female ? 'ведущая' : 'ведущий'} радио заведения «${spoken}». Эфир звучит в зале для гостей.
+  const prompt = `Ты – ${host}, ${female ? 'ведущая' : 'ведущий'} радио заведения «${spoken}». Эфир звучит в зале для гостей.
 Манера: ${style}, тёплым, спокойным, дружелюбным тоном, без драматизации.
 Сейчас ${t.weekday}, ${t.time} по Москве, ${t.period}.
 ${cfg.notes ? `Пожелания заведения к ведущему: ${String(cfg.notes).slice(0, 300)}\n` : ''}Задача: ${task}
@@ -337,7 +337,7 @@ ${cfg.notes ? `Пожелания заведения к ведущему: ${Stri
 Правила:
 - 3–5 коротких предложений, 15–30 секунд речи. Только русские буквы, никакой латиницы, название заведения пиши так: ${spoken}.
 - Ни одного вопроса. Никаких «срочно», «внимание», «шок».
-- Не выдумывай блюда, цены, даты, время, имена и события, которых нет в новости. Числа и время — словами по-русски.
+- Не выдумывай блюда, цены, даты, время, имена и события, которых нет в новости. Числа и время – словами по-русски.
 - Без рекламных эпитетов (уникальный, потрясающий, невероятный, легендарный, волшебный).
 - О себе говори в ${female ? 'женском' : 'мужском'} роде.
 - Не упоминай нейросети, ИИ, голосовые модели и то, что текст написан программой. Без политики, экономики, медицины.
@@ -410,7 +410,7 @@ async function buildPodcast(venueUserId: string, streams: VenueStream[], items: 
   const g = (h: string) => (isFemale(h) ? 'женщина, о себе в женском роде' : 'мужчина, о себе в мужском роде');
   const facts = items.slice(0, 2).map((it: any) => `- ${it.text}`).join('\n');
   const t = mskContext();
-  const prompt = `Ты — сценарист живой радиопередачи для радио заведения «${spoken}». Передача звучит в зале для гостей.
+  const prompt = `Ты – сценарист живой радиопередачи для радио заведения «${spoken}». Передача звучит в зале для гостей.
 Ведущие: ${a} (${g(a)}) и ${b} (${g(b)}). Манера: ${STYLE_TEXT[cfg.style || ''] || STYLE_TEXT.relaxed}, тёплым дружелюбным тоном.
 Сейчас ${t.weekday}, ${t.period}.
 МАТЕРИАЛ ВЫПУСКА (только это, ничего не добавляй от себя):
@@ -419,10 +419,10 @@ ${topic ? `Тема от заведения: ${topic}\n` : ''}
 ФОРМАТ:
 - 12–16 реплик по 20–45 слов, строго чередуются: ${a}, ${b}, ${a}… Длинные абзацы запрещены.
 - Метки авторов нужны только для озвучки. ИМЕНА ВЕДУЩИХ В РЕЧИ НЕ ПРОИЗНОСЯТСЯ: друг к другу обращаются «друзья», «коллега».
-- Первая реплика: живое приветствие гостей по времени суток — «Вы на волнах радио ${spoken}…», своими словами, без имени, и подводка к теме.
+- Первая реплика: живое приветствие гостей по времени суток – «Вы на волнах радио ${spoken}…», своими словами, без имени, и подводка к теме.
 СВЯЗНОСТЬ:
 - каждая реплика начинается с подхвата конкретного слова или мысли предыдущей; менять тему нельзя;
-- если прозвучал вопрос, следующая реплика — ответ на него («Хм… я думаю, что…»); никто не вступает внезапно.
+- если прозвучал вопрос, следующая реплика – ответ на него («Хм… я думаю, что…»); никто не вступает внезапно.
 ЖИВАЯ ПОДАЧА: паузы многоточием, междометия «хм», «ах»; смех только словами «ха-ха», редко. Никаких ремарок в скобках.
 ФИНАЛ: последняя реплика собирает мысль, тепло прощается своими словами и называет радио ${spoken}.
 ЗАПРЕТЫ:
@@ -561,12 +561,12 @@ const HELP = (venue: string) => `Бот радио «${esc(venue)}» в ПРОМ
 ✍️ Напишите новость текстом: новое меню, событие, акция. Ведущие расскажут о ней гостям в ближайших выходах в эфир.
 🎙 Пришлите голосовое или аудиофайл: запись прозвучит в эфире в ближайший час с 10:00 до 22:00.
 
-/agenda — повестка ведущих
-/del N — убрать пункт N
-/clear — очистить повестку
-/podcast [тема] — собрать подкаст о заведении (до ${PODCASTS_PER_DAY} в день)
-/channel @канал — дублировать новости в ваш Telegram-канал (бот должен быть админом канала); /channel off — выключить
-/stop — отключить этот чат`;
+/agenda – повестка ведущих
+/del N – убрать пункт N
+/clear – очистить повестку
+/podcast [тема] – собрать подкаст о заведении (до ${PODCASTS_PER_DAY} в день)
+/channel @канал – дублировать новости в ваш Telegram-канал (бот должен быть админом канала); /channel off – выключить
+/stop – отключить этот чат`;
 
 async function linkByChat(chatId: string) {
   const { rows } = await pool.query(`SELECT * FROM venue_air_telegram WHERE chat_id = $1`, [chatId]);
@@ -622,20 +622,20 @@ app.post('/tg/update', async (c) => {
       telegramAudioToAir(venueUserId, audio.file_id, chatId).catch(() => {});
       return c.json({ handled: true, reply: 'Принял запись, готовлю к эфиру…' });
     }
-    if (!text) return c.json({ handled: true, reply: 'Пришлите новость текстом или голосовое сообщение. /help — что умеет бот.' });
+    if (!text) return c.json({ handled: true, reply: 'Пришлите новость текстом или голосовое сообщение. /help – что умеет бот.' });
 
     if (/^\/help/i.test(text)) return c.json({ handled: true, reply: HELP(venue) });
     if (/^\/agenda/i.test(text)) {
       const items = await activeAgenda(venueUserId);
       if (!items.length) return c.json({ handled: true, reply: 'Повестка пуста. Напишите новость заведения, и ведущие расскажут о ней в эфире.' });
       const list = items.map((it: any, i: number) => `${i + 1}. ${esc(it.text)}${it.aired_count ? ` <i>(в эфире ${timesRu(it.aired_count)})</i>` : ''}`).join('\n');
-      return c.json({ handled: true, reply: `Повестка ведущих:\n\n${list}\n\n/del N — убрать пункт` });
+      return c.json({ handled: true, reply: `Повестка ведущих:\n\n${list}\n\n/del N – убрать пункт` });
     }
     const del = text.match(/^\/del(?:@\w+)?\s+(\d+)/i);
     if (del) {
       const items = await activeAgenda(venueUserId);
       const it = items[Number(del[1]) - 1];
-      if (!it) return c.json({ handled: true, reply: 'Нет такого пункта. /agenda — список.' });
+      if (!it) return c.json({ handled: true, reply: 'Нет такого пункта. /agenda – список.' });
       await pool.query(`UPDATE venue_air_agenda SET active = false WHERE id = $1`, [it.id]);
       return c.json({ handled: true, reply: `Убрал: «${esc(it.text)}»` });
     }
@@ -762,7 +762,7 @@ app.post('/my/live-air', requireAuth, async (c) => {
       <p style="color:#e0e0e0;">Заведение ${m.escapeHtml(venueName)} (${m.escapeHtml(u[0]?.email || 'нет почты')}) ${what} в кабинете.</p>
       <p style="color:#888;font-size:13px;">${enabled ? 'Ведущие и подкасты уже работают. Переведите заведение на тариф LIVE AIR.' : 'Ведущие и подкасты остановлены. Проверьте тариф.'}</p>`);
     await m.sendEmail({ to: 'info@promofm.ru', subject: `[ПРОМО] LIVE AIR ${enabled ? 'включён' : 'выключен'}: ${venueName}`, html });
-    await m.notifyAdminTelegram(`📻 <b>LIVE AIR ${enabled ? 'включён' : 'выключен'}</b>\n${venueName} (${u[0]?.email || 'нет почты'})${enabled ? `\nТариф ${LIVE_AIR_PRICE} ₽/мес — перевести вручную` : ''}`).catch(() => {});
+    await m.notifyAdminTelegram(`📻 <b>LIVE AIR ${enabled ? 'включён' : 'выключен'}</b>\n${venueName} (${u[0]?.email || 'нет почты'})${enabled ? `\nТариф ${LIVE_AIR_PRICE} ₽/мес – перевести вручную` : ''}`).catch(() => {});
   }).catch(() => {});
   return c.json({ success: true, data: { liveAir: enabled } });
 });

@@ -189,7 +189,7 @@ curatorRoutes.post('/email-report/:roleId', requireAdminOrKey, async (c) => {
 <div style="max-width:600px;margin:0 auto;padding:20px">
 <div style="background:linear-gradient(135deg,#FF577F,#FF884B);padding:20px 24px;border-radius:12px 12px 0 0">
 <h1 style="margin:0;color:#fff;font-size:20px">🛡️ Отчёт куратора: ${report.roleName}</h1>
-<p style="margin:4px 0 0;color:rgba(255,255,255,0.8);font-size:13px">ПРОМО.МУЗЫКА — Автоматический аудит</p>
+<p style="margin:4px 0 0;color:rgba(255,255,255,0.8);font-size:13px">ПРОМО.МУЗЫКА – Автоматический аудит</p>
 </div>
 <div style="background:#1e293b;padding:20px 24px;border-radius:0 0 12px 12px">
 <table style="width:100%;margin-bottom:16px"><tr>

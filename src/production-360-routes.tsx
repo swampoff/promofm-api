@@ -150,7 +150,7 @@ function notifyClient(order: Production360Order, step: string, details?: string)
     type: 'notification',
     data: {
       title: `360° Продакшн: ${step}`,
-      message: details || `Проект «${order.projectTitle}» — ${step}`,
+      message: details || `Проект «${order.projectTitle}» – ${step}`,
       category: 'production_360',
       orderId: order.id,
     },
@@ -162,7 +162,7 @@ function notifyAdmin(order: Production360Order, step: string, details?: string) 
     type: 'notification',
     data: {
       title: `360° Продакшн: ${step}`,
-      message: details || `${order.artistName} — ${order.projectTitle} (${order.finalPrice.toLocaleString('ru-RU')} ₽)`,
+      message: details || `${order.artistName} – ${order.projectTitle} (${order.finalPrice.toLocaleString('ru-RU')} ₽)`,
       category: 'production_360',
       orderId: order.id,
     },
@@ -200,7 +200,7 @@ app.post('/orders', requireAuth, async (c) => {
     }
 
     if (projectDescription.length < 20 || projectDescription.length > 5000) {
-      return c.json({ success: false, error: 'Описание проекта — от 20 до 5000 символов' }, 400);
+      return c.json({ success: false, error: 'Описание проекта – от 20 до 5000 символов' }, 400);
     }
 
     // Calculate price
@@ -274,7 +274,7 @@ app.post('/orders', requireAuth, async (c) => {
       details: `Тип: ${serviceType}, бюджет: ${pricing.finalPrice.toLocaleString('ru-RU')} ₽`,
     });
 
-    notifyAdmin(order, 'Новый проект', `${artistName} — ${projectTitle} (${serviceType}) за ${pricing.finalPrice.toLocaleString('ru-RU')} ₽`);
+    notifyAdmin(order, 'Новый проект', `${artistName} – ${projectTitle} (${serviceType}) за ${pricing.finalPrice.toLocaleString('ru-RU')} ₽`);
 
     return c.json({ success: true, order, pricing }, 201);
   } catch (error) {
@@ -544,7 +544,7 @@ app.post('/orders/:id/progress', requireAuth, async (c) => {
       details: `${stage}: ${pct}%, общий: ${order.progress.completedPercentage}%`,
     });
 
-    notifyClient(order, `Прогресс ${order.progress.completedPercentage}%`, `Этап «${stage}» — ${pct}%`);
+    notifyClient(order, `Прогресс ${order.progress.completedPercentage}%`, `Этап «${stage}» – ${pct}%`);
 
     return c.json({ success: true, order, progress: order.progress });
   } catch (error) {

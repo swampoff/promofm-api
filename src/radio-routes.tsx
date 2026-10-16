@@ -446,7 +446,7 @@ async function refundVenueCampaignOnReject(
     const { getPaymentSession } = await import('./db.tsx');
     const session = await getPaymentSession(campaign.payment_order_id) as any;
     if (!session?.gatewayPaymentId) {
-      refundResult = { needed: true, ok: false, error: 'payment_session не найден — нужен ручной refund в дашборде ЮКассы' };
+      refundResult = { needed: true, ok: false, error: 'payment_session не найден – нужен ручной refund в дашборде ЮКассы' };
       console.error('[venue-reject] payment_session not found', { campaignId });
       return refundResult;
     }
@@ -1067,7 +1067,7 @@ app.post('/finance/withdrawals', requireAuth, async (c) => {
       return c.json({ success: false, error: 'amount must be > 0' }, 400);
     }
     if (amount < 500) {
-      return c.json({ success: false, error: 'Минимальная сумма вывода — 500 ₽' }, 400);
+      return c.json({ success: false, error: 'Минимальная сумма вывода – 500 ₽' }, 400);
     }
 
     const balance = await _getRadioBalance(userId);
@@ -1559,7 +1559,7 @@ app.post('/rotations/report', requireAuth, requireRole('radio_station'), async (
         ON CONFLICT (track_id, station_name, city) DO UPDATE SET
           rotation_count = track_radio_pickups.rotation_count + EXCLUDED.rotation_count,
           aired_at = GREATEST(COALESCE(track_radio_pickups.aired_at, EXCLUDED.aired_at), EXCLUDED.aired_at),
-          -- строка-декор source='auto' «confirmed» по умолчанию — она не должна
+          -- строка-декор source='auto' «confirmed» по умолчанию – она не должна
           -- делать отчёт станции подтверждённым (01.10.2026)
           report_status = CASE
             WHEN (track_radio_pickups.source <> 'auto' AND track_radio_pickups.report_status = 'confirmed')
@@ -1578,7 +1578,7 @@ app.post('/rotations/report', requireAuth, requireRole('radio_station'), async (
     if (finalStatus === 'pending') {
       notifyAdminTelegram(
         `📻 <b>Отчёт об эфире ждёт проверки</b>\n\nСтанция: <b>${escapeHtml(finalStationName)}</b>`
-        + `\nТрек: <b>${escapeHtml(String(trackCheck.rows[0].artist_name || ''))} — ${escapeHtml(String(trackCheck.rows[0].title || ''))}</b>`
+        + `\nТрек: <b>${escapeHtml(String(trackCheck.rows[0].artist_name || ''))} – ${escapeHtml(String(trackCheck.rows[0].title || ''))}</b>`
         + `${city ? `\nГород: ${escapeHtml(String(city))}` : ''}`
         + `\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f/rotation_reports">Отчёты об эфире</a>`,
       ).catch(() => {});
@@ -1652,7 +1652,7 @@ app.get('/admin/rotation-reports', requireAuth, async (c) => {
        LEFT JOIN tracks t ON t.id = trp.track_id
        LEFT JOIN users u ON u.id = trp.submitted_by_user_id
        -- отметки со страницы скачивания по личной ссылке (radio-get-routes.tsx):
-       -- у партнёрского контакта аккаунта нет, почта — из radio_partner_contacts
+       -- у партнёрского контакта аккаунта нет, почта – из radio_partner_contacts
        LEFT JOIN radio_partner_contacts pc ON pc.id = trp.submitted_by_partner_contact_id
        WHERE trp.report_status = $1 ORDER BY trp.picked_up_at DESC LIMIT 200`,
       [status]
@@ -1687,7 +1687,7 @@ app.post('/admin/rotation-reports/:id/approve', requireAuth, async (c) => {
           type: 'rotation_confirmed',
           data: {
             title: 'Ротация подтверждена',
-            message: `«${tr.rows[0].title}» в эфире ${r.station_name} (${r.city || ''}) — ${r.rotation_count} раз`,
+            message: `«${tr.rows[0].title}» в эфире ${r.station_name} (${r.city || ''}) – ${r.rotation_count} раз`,
             trackId: r.track_id, stationName: r.station_name, city: r.city,
           },
         });

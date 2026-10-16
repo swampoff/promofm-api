@@ -774,7 +774,7 @@ app.post('/radio-campaigns', requireAuth, async (c) => {
       ? body.timeSlots.filter((s: any) => typeof s === 'string' && s.trim())
       : [];
     if (requestedSlotIds.length === 0) {
-      return c.json({ success: false, error: 'Выберите рекламные слоты станции — цена рассчитывается по ним' }, 400);
+      return c.json({ success: false, error: 'Выберите рекламные слоты станции – цена рассчитывается по ним' }, 400);
     }
     const { pool: slotPool } = await import('./db-client.tsx');
     const slotRes = await slotPool.query(

@@ -44,7 +44,7 @@ export const BANNER_PLACEMENTS: BannerPlacement[] = [
     description: 'Премиум-размещение над фолдом на главной странице. Самый высокий охват.',
     dimensions: '1920×600 px',
     pricePerWeek: 60000,
-    locations: ['Главная (/) — top of fold'],
+    locations: ['Главная (/) – top of fold'],
   },
   {
     id: 'hero_carousel',
@@ -52,7 +52,7 @@ export const BANNER_PLACEMENTS: BannerPlacement[] = [
     description: 'Ваш баннер крутится в главной карусели на лендинге вместе с promo-слайдами платформы (Сандра, Дэн, Лиана, etc). Автоматическая смена раз в 6 секунд.',
     dimensions: '1920×600 px',
     pricePerWeek: 30000,
-    locations: ['Главная (/) — слайд в hero-карусели'],
+    locations: ['Главная (/) – слайд в hero-карусели'],
   },
   {
     id: 'feed_wide',
@@ -60,7 +60,7 @@ export const BANNER_PLACEMENTS: BannerPlacement[] = [
     description: 'Между секциями главной (между чартами и новостями).',
     dimensions: '1200×300 px',
     pricePerWeek: 35000,
-    locations: ['Главная — между секциями'],
+    locations: ['Главная – между секциями'],
   },
   {
     id: 'sidebar_large',
@@ -68,7 +68,7 @@ export const BANNER_PLACEMENTS: BannerPlacement[] = [
     description: 'Высокий sidebar-баннер на главной и контентных страницах.',
     dimensions: '300×600 px',
     pricePerWeek: 20000,
-    locations: ['Главная, /charts, /news — правая колонка'],
+    locations: ['Главная, /charts, /news – правая колонка'],
   },
   {
     id: 'in_feed_card',
@@ -76,7 +76,7 @@ export const BANNER_PLACEMENTS: BannerPlacement[] = [
     description: 'Нативное размещение между карточками новостей, DJ и концертов.',
     dimensions: '600×400 px',
     pricePerWeek: 15000,
-    locations: ['/news, /djs, /concerts — между карточками'],
+    locations: ['/news, /djs, /concerts – между карточками'],
   },
   {
     id: 'sidebar_small',
@@ -84,7 +84,7 @@ export const BANNER_PLACEMENTS: BannerPlacement[] = [
     description: 'Компактный sidebar-блок. Минимальный пакет для теста.',
     dimensions: '300×250 px',
     pricePerWeek: 10000,
-    locations: ['Главная, /charts, /news — правая колонка (нижняя зона)'],
+    locations: ['Главная, /charts, /news – правая колонка (нижняя зона)'],
   },
 ];
 

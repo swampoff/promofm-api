@@ -40,12 +40,12 @@ function campaignHtml(): string {
   <table align="center" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;margin:0 auto;background:#14142a;border-radius:18px;overflow:hidden;">
     <tr><td style="padding:0;">
       <a href="${SITE_URL}/promo-air" style="text-decoration:none;">
-        <img src="${SITE_URL}/banners/promo-air-restaurants.jpg" alt="promo.air — собственное радио для вашего ресторана" width="600" style="width:100%;max-width:100%;height:auto;display:block;border:0;" />
+        <img src="${SITE_URL}/banners/promo-air-restaurants.jpg" alt="promo.air – собственное радио для вашего ресторана" width="600" style="width:100%;max-width:100%;height:auto;display:block;border:0;" />
       </a>
     </td></tr>
     <tr><td style="padding:24px 22px 8px;">
       <p style="margin:0 0 16px;color:#fff;font-size:17px;">Здравствуйте, <strong>{{name}}</strong>!</p>
-      ${b('<strong style="color:#fff;">Promo.air от ПРОМО.МУЗЫКА</strong> — единая система для ресторанов и кафе, которая объединяет музыку, эфир и коммуникации с гостями.')}
+      ${b('<strong style="color:#fff;">Promo.air от ПРОМО.МУЗЫКА</strong> – единая система для ресторанов и кафе, которая объединяет музыку, эфир и коммуникации с гостями.')}
       ${b('Вместо обычного фонового плейлиста у вас работает собственный эфир заведения:')}
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;margin:14px 0 18px;">
         ${[

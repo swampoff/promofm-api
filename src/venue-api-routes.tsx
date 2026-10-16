@@ -224,7 +224,7 @@ tokensApp.post('/', requireAuth, async (c) => {
     return c.json({
       success: true,
       token: rowToToken(r.rows[0], plaintext),
-      message: 'Сохраните этот токен сейчас — он больше нигде не будет показан.',
+      message: 'Сохраните этот токен сейчас – он больше нигде не будет показан.',
     });
   } catch (error: any) {
     console.error('POST /venue-api/tokens:', error);

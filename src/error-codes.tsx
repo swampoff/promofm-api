@@ -31,7 +31,7 @@ export const ERROR_CODES = {
   CANNOT_CANCEL: { code: "CANNOT_CANCEL", message: "Невозможно отменить", status: 400 },
   CANCEL_REQUIRES_ADMIN: {
     code: "CANCEL_REQUIRES_ADMIN",
-    message: "Депозит уже оплачен — отмена возможна только через поддержку (возврат средств)",
+    message: "Депозит уже оплачен – отмена возможна только через поддержку (возврат средств)",
     status: 409,
   },
 

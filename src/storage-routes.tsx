@@ -301,7 +301,7 @@ storage.post('/upload', requireAuth, async (c) => {
         if ((scanResult.error as any)?.code === 'ETIMEDOUT' || (scanResult as any).signal === 'SIGTERM') {
           // clamscan ran past the timeout — log loudly but DON'T block the
           // upload. Otherwise a slow disk locks artists out of publishing.
-          console.warn('[storage] ClamAV timed out after', scanTimeoutMs, 'ms — accepting upload anyway:', filename);
+          console.warn('[storage] ClamAV timed out after', scanTimeoutMs, 'ms – accepting upload anyway:', filename);
         } else if (scanResult.error) {
           // spawnSync failed to even run clamscan (binary missing → ENOENT,
           // EACCES, etc.). This branch used to be silently skipped: status
@@ -309,7 +309,7 @@ storage.post('/upload', requireAuth, async (c) => {
           // fired and the upload proceeded UNSCANNED without a trace.
           // Scan is best-effort (fail-open), but this MUST be loud so ops
           // notices the scanner is down instead of it failing invisibly.
-          console.error('[storage] ClamAV scan UNAVAILABLE — upload accepted UNSCANNED:', {
+          console.error('[storage] ClamAV scan UNAVAILABLE – upload accepted UNSCANNED:', {
             filename,
             code:    (scanResult.error as any)?.code,
             message: (scanResult.error as Error).message,
@@ -317,7 +317,7 @@ storage.post('/upload', requireAuth, async (c) => {
         } else if (scanResult.status !== 0) {
           // Any other non-zero, non-virus exit (e.g. clamscan internal error
           // code 2). Don't block, but surface it.
-          console.warn('[storage] ClamAV returned status', scanResult.status, '— accepting upload:', filename, scanResult.stderr?.trim());
+          console.warn('[storage] ClamAV returned status', scanResult.status, '– accepting upload:', filename, scanResult.stderr?.trim());
         }
       }
     } catch (e) {

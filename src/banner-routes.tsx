@@ -410,7 +410,7 @@ app.post('/moderation/manage', requireAuth, requireAdmin, async (c) => {
           targetRole: 'artist', // не критично — кабинет тот в котором юзер сидит
           sourceRole: 'admin',
           type: 'admin_action',
-          title: 'Баннер одобрен — оплатите для запуска',
+          title: 'Баннер одобрен – оплатите для запуска',
           message: `Кампания «${banner.title}» одобрена. К оплате ${amount.toLocaleString('ru-RU')} ₽.`,
           link: '/banners',
         }).catch(() => {});
@@ -419,7 +419,7 @@ app.post('/moderation/manage', requireAuth, requireAdmin, async (c) => {
         upsertNotification(String(banner.user_id), notifId, {
           id: notifId,
           type: 'banner_approved',
-          title: 'Баннер одобрен — оплатите для запуска',
+          title: 'Баннер одобрен – оплатите для запуска',
           message: `Кампания «${banner.title}» одобрена администратором. К оплате ${amount.toLocaleString('ru-RU')} ₽ за ${banner.duration_days} дн.`,
           bannerId,
           amount,

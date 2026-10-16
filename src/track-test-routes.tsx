@@ -345,7 +345,7 @@ app.post('/payment', requireAuth, async (c) => {
       orderId,
       amount: request.payment_amount,
       currency: 'RUB',
-      description: `Тест трека: ${request.track_title} — ${request.artist_name}`,
+      description: `Тест трека: ${request.track_title} – ${request.artist_name}`,
       returnUrl,
       gateway: 'yookassa',
       userId: request.user_id || 'guest',
@@ -645,7 +645,7 @@ app.post('/assign-experts', requireAuth, requireAdmin, async (c) => {
               userId: expertUserId,
               type: 'track_test_assigned',
               title: '🎧 Вам назначен тест трека',
-              message: `«${request.track_title}» — ${request.artist_name}. Дедлайн отзыва: 72 часа.`,
+              message: `«${request.track_title}» – ${request.artist_name}. Дедлайн отзыва: 72 часа.`,
               data: { requestId: request_id, reviewId },
               read: false,
               createdAt: now,
@@ -661,7 +661,7 @@ app.post('/assign-experts', requireAuth, requireAdmin, async (c) => {
             subject: `[ПРОМО] Вам назначен тест трека: ${request.track_title}`,
             html: emailWrapper(`
               <h2 style="margin: 0 0 16px; color: #7C3AED;">Вам назначен тест трека</h2>
-              <p style="color:#e0e0e0;">«${escapeHtml(request.track_title)}» — ${escapeHtml(request.artist_name || '')}. Оценка ждёт вас в кабинете эксперта, ориентир — 72 часа.</p>
+              <p style="color:#e0e0e0;">«${escapeHtml(request.track_title)}» – ${escapeHtml(request.artist_name || '')}. Оценка ждёт вас в кабинете эксперта, ориентир – 72 часа.</p>
             `),
           });
         } catch (e: any) {
@@ -1155,9 +1155,9 @@ app.post('/send-feedback', requireAuth, requireAdmin, async (c) => {
           subject: `[ПРОМО] Готов отчёт по тесту трека «${request.track_title}»`,
           html: emailWrapper(`
             <h2 style="margin: 0 0 16px; color: #7C3AED;">Отчёт экспертов готов</h2>
-            <p style="color:#e0e0e0;">«${escapeHtml(request.track_title)}» — ${escapeHtml(request.artist_name || '')}</p>
+            <p style="color:#e0e0e0;">«${escapeHtml(request.track_title)}» – ${escapeHtml(request.artist_name || '')}</p>
             ${rating}
-            <p style="color:#e0e0e0;">Оценки по критериям, комментарии каждого эксперта и рекомендации — в кабинете, раздел «Тест трека».</p>
+            <p style="color:#e0e0e0;">Оценки по критериям, комментарии каждого эксперта и рекомендации – в кабинете, раздел «Тест трека».</p>
             <p><a href="${TT_CABINET_URL}" style="display:inline-block;padding:12px 24px;background:#7C3AED;color:#fff;border-radius:8px;text-decoration:none;">Открыть отчёт</a></p>
           `),
         });
@@ -1212,7 +1212,7 @@ async function createTrackTestPipelinePayment(
   amount: number,
   description: string,
 ): Promise<{ orderId: string; confirmationUrl: string } | { error: string }> {
-  if (!request.user_id) return { error: 'Заявка от гостя — payment-link невозможен' };
+  if (!request.user_id) return { error: 'Заявка от гостя – payment-link невозможен' };
   if (!request.track_id) return { error: 'request.track_id отсутствует' };
 
   const { getGateway } = await import('./payment-gateway.tsx');
@@ -1279,7 +1279,7 @@ app.post('/pipeline/promoteToNovelty', requireAuth, requireAdmin, async (c) => {
       request,
       'track_test_promote',
       TRACK_TEST_PIPELINE_PROMOTE_PRICE,
-      `ПРОМО.ЛАБ: «${request.track_title}» — секция «Протестировано экспертами» на 14 дней`,
+      `ПРОМО.ЛАБ: «${request.track_title}» – секция «Протестировано экспертами» на 14 дней`,
     );
     if ('error' in payment) return c.json({ error: payment.error }, 400);
 
@@ -1358,9 +1358,9 @@ app.post('/pipeline/addToNewsletter', requireAuth, requireAdmin, async (c) => {
     const html = `
       <div style="font-family: system-ui, sans-serif; max-width: 600px;">
         <h2 style="color: #FF577F;">Трек прошёл экспертный тест</h2>
-        <p><strong>${request.track_title}</strong> — ${request.artist_name}</p>
-        <p>Жанр: ${request.genre || '—'}</p>
-        <p>Средняя оценка экспертов: <strong>${request.average_rating ?? '—'}/10</strong></p>
+        <p><strong>${request.track_title}</strong> – ${request.artist_name}</p>
+        <p>Жанр: ${request.genre || '–'}</p>
+        <p>Средняя оценка экспертов: <strong>${request.average_rating ?? '–'}/10</strong></p>
         <p><a href="${trackUrl}" style="display:inline-block;padding:10px 20px;background:#FF577F;color:#fff;text-decoration:none;border-radius:6px;">Послушать трек</a></p>
         <hr><p style="color:#999;font-size:12px;">Вы получаете эту рассылку как зарегистрированный label/producer на promo-music.ru.</p>
       </div>`;
@@ -1422,7 +1422,7 @@ app.post('/pipeline/exclusivePitch', requireAuth, requireAdmin, async (c) => {
       request,
       'track_test_exclusive',
       TRACK_TEST_PIPELINE_EXCLUSIVE_PRICE,
-      `ПРОМО.ЛАБ: эксклюзив-pitch «${request.track_title}» — ${editors_count} A&R`,
+      `ПРОМО.ЛАБ: эксклюзив-pitch «${request.track_title}» – ${editors_count} A&R`,
     );
     if ('error' in payment) return c.json({ error: payment.error }, 400);
 

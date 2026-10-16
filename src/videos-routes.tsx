@@ -560,7 +560,7 @@ async function createVideoPipelinePayment(
   amount: number,
   description: string,
 ): Promise<{ orderId: string; confirmationUrl: string } | { error: string }> {
-  if (!video.user_id) return { error: 'У клипа нет владельца — payment-link невозможен' };
+  if (!video.user_id) return { error: 'У клипа нет владельца – payment-link невозможен' };
 
   const { getGateway } = await import('./payment-gateway.tsx');
   const { upsertPaymentSession } = await import('./db.tsx');
@@ -723,7 +723,7 @@ videosRoutes.post('/exclusivePitch', requireAuth, requireAdmin, async (c) => {
       video,
       'video_exclusive',
       VIDEO_PIPELINE_EXCLUSIVE_PRICE,
-      `Эксклюзив-pitch клипа «${video.title}» — ${editors_count} ТВ/радио-редакторам`,
+      `Эксклюзив-pitch клипа «${video.title}» – ${editors_count} ТВ/радио-редакторам`,
     );
     if ('error' in payment) return c.json({ success: false, error: payment.error }, 400);
 
@@ -863,7 +863,7 @@ videosRoutes.post('/:id/moderate', requireAuth, requireAdmin, async (c) => {
           type: 'notification',
           data: {
             title: status === 'approved' ? 'Видео одобрено' : 'Видео отклонено',
-            comment: `«${video.title}»${status === 'rejected' ? ` — ${note}` : ''}`,
+            comment: `«${video.title}»${status === 'rejected' ? ` – ${note}` : ''}`,
           },
         });
       } catch (notifyErr) {
@@ -888,12 +888,12 @@ videosRoutes.post('/:id/moderate', requireAuth, requireAdmin, async (c) => {
             + '<p style="margin:8px 0 0;color:#888;font-size:13px;">Платформа для музыкантов и лейблов</p></div><div style="padding:32px;">';
           const foot = '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p></div>'
             + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
-            + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
+            + '<p style="margin:0 0 8px;">Промо.Музыка – <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
             + '<p style="margin:0 0 8px;">info@promofm.ru · Москва, Россия</p>'
             + '<p style="margin:0;color:#555;">Вы получили это письмо, так как загрузили клип на модерацию</p></div></div>';
           const cta = '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/artist/video" style="display:inline-block;padding:12px 32px;background:#FF577F;color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Открыть мои клипы</a></p>';
 
-          const subject = status === 'approved' ? `Клип одобрен — ${video.title}` : `Клип отклонён — ${video.title}`;
+          const subject = status === 'approved' ? `Клип одобрен – ${video.title}` : `Клип отклонён – ${video.title}`;
           const html = status === 'approved'
             ? head + '<p>Добрый день!</p><p>Мы посмотрели ваш клип и с радостью сообщаем, что он прошёл модерацию.</p>'
                 + `<p>Клип <strong>«${title}»</strong> одобрен к размещению на Промо.Музыка.</p>`
@@ -911,7 +911,7 @@ videosRoutes.post('/:id/moderate', requireAuth, requireAdmin, async (c) => {
           // в общем ящике, а не только в кабинете (просьба владельца 19.09.2026).
           const adminTo = process.env.ADMIN_EMAIL || 'info@promofm.ru';
           const adminHtml = head
-            + `<p>Клип <strong>«${title}»</strong> — <strong>${status === 'approved' ? 'одобрен' : 'отклонён'}</strong>.</p>`
+            + `<p>Клип <strong>«${title}»</strong> – <strong>${status === 'approved' ? 'одобрен' : 'отклонён'}</strong>.</p>`
             + `<p>Артист: ${escapeHtml(String(u.rows[0]?.name || '-'))} (${escapeHtml(String(to))})</p>`
             + (note ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ${escapeHtml(note)}</p>` : '')
             + foot;

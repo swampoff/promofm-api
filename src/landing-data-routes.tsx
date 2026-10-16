@@ -2457,10 +2457,10 @@ landing.post('/build-albums', async (c) => {
         }
         console.log(`[albums:weekly] Apple RSS: pulled ${entries.length} albums`);
       } else {
-        console.warn(`[albums:weekly] Apple RSS HTTP ${rssRes.status} — skipping Apple branch`);
+        console.warn(`[albums:weekly] Apple RSS HTTP ${rssRes.status} – skipping Apple branch`);
       }
     } catch (rssErr: any) {
-      console.warn(`[albums:weekly] Apple RSS error: ${rssErr?.message} — skipping Apple branch`);
+      console.warn(`[albums:weekly] Apple RSS error: ${rssErr?.message} – skipping Apple branch`);
     }
   }
 
@@ -2535,18 +2535,18 @@ landing.post('/build-albums', async (c) => {
               // подход: нет meta → skip (лучше пустая страница чем синглы как
               // «альбомы недели»).
               if (!meta) {
-                console.log(`[albums:weekly] Apple skipping "${cand.title}" — no iTunes meta`);
+                console.log(`[albums:weekly] Apple skipping "${cand.title}" – no iTunes meta`);
                 continue;
               }
               if (Number(meta.trackCount) < MIN_TRACKS_FOR_ALBUM) {
-                console.log(`[albums:weekly] Apple skipping "${cand.title}" by ${cand.artist} — trackCount=${meta.trackCount} (single/EP)`);
+                console.log(`[albums:weekly] Apple skipping "${cand.title}" by ${cand.artist} – trackCount=${meta.trackCount} (single/EP)`);
                 continue;
               }
               // Доп guard по collectionName/title: «Track Title - Single» / «... - EP»
               // — это явное Apple-маркеры single-релиза даже если trackCount странно.
               const collName = String(meta.collectionName || cand.title || '');
               if (/\s-\s(Single|EP)\s*$/i.test(collName)) {
-                console.log(`[albums:weekly] Apple skipping "${cand.title}" — title marked Single/EP`);
+                console.log(`[albums:weekly] Apple skipping "${cand.title}" – title marked Single/EP`);
                 continue;
               }
               if (worldAlbums.some(function(a: any) { return a.position === cand.position; })) continue;

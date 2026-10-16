@@ -80,7 +80,7 @@ function loadSpaIndex(): SpaIndex | null {
     }
     const routesSrc = readFileSync(PUBLIC_ROUTES_FILE, 'utf-8');
     const routes = [...routesSrc.matchAll(/path:\s*'([^']*)'/g)].map((m) => m[1]);
-    if (routes.length < 20) throw new Error(`слишком мало маршрутов (${routes.length}) — формат файла поменялся?`);
+    if (routes.length < 20) throw new Error(`слишком мало маршрутов (${routes.length}) – формат файла поменялся?`);
     const rootSrc = existsSync(ROOT_ROUTES_FILE) ? readFileSync(ROOT_ROUTES_FILE, 'utf-8') : '';
     let registry = new Map<string, SeoRegistryEntry>();
     try {

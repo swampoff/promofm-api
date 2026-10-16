@@ -311,7 +311,7 @@ async function sendTelegramAlert(event: ThreatEvent): Promise<void> {
   if (Date.now() - lastTgAlert < TG_COOLDOWN) return;
   lastTgAlert = Date.now();
 
-  const msg = `🚨 WAF Alert — ${event.severity}
+  const msg = `🚨 WAF Alert – ${event.severity}
 
 🏷 Тип: ${event.category}
 🌐 IP: ${event.ip}

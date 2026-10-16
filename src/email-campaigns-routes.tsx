@@ -322,7 +322,7 @@ app.get('/unsubscribe', async (c) => {
     const title = valid ? 'Отписаться от рассылки?' : 'Не удалось отписаться';
     const detail = valid
       ? `Адрес: ${email}. Нажмите кнопку, чтобы больше не получать письма.`
-      : 'Ссылка недействительна. Напишите на info@promo-music.ru — отпишем вручную.';
+      : 'Ссылка недействительна. Напишите на info@promo-music.ru – отпишем вручную.';
     const qs = new URLSearchParams();
     if (valid) {
       qs.set('email', email);
@@ -336,7 +336,7 @@ app.get('/unsubscribe', async (c) => {
 <div style="max-width:420px;padding:40px;text-align:center;background:#1a1a2e;border-radius:16px;">
 <h1 style="color:#fff;font-size:22px;">${title}</h1><p id="d" style="color:#aaa;">${detail}</p>
 ${valid ? `<button id="u" style="margin-top:16px;padding:12px 28px;border:none;border-radius:10px;background:#FF577F;color:#fff;font-size:15px;cursor:pointer;">Отписаться</button>
-<script>document.getElementById('u').onclick=async function(){this.disabled=true;this.textContent='…';try{var r=await fetch('/server/api/email-campaigns/unsubscribe?${qs.toString()}',{method:'POST'});var j=await r.json();document.getElementById('d').textContent=j.success?'Готово — больше писем не придёт.':(j.error||'Не получилось — напишите на info@promo-music.ru');this.style.display='none'}catch(e){document.getElementById('d').textContent='Ошибка сети, попробуйте ещё раз';this.disabled=false;this.textContent='Отписаться'}};</script>` : ''}
+<script>document.getElementById('u').onclick=async function(){this.disabled=true;this.textContent='…';try{var r=await fetch('/server/api/email-campaigns/unsubscribe?${qs.toString()}',{method:'POST'});var j=await r.json();document.getElementById('d').textContent=j.success?'Готово – больше писем не придёт.':(j.error||'Не получилось – напишите на info@promo-music.ru');this.style.display='none'}catch(e){document.getElementById('d').textContent='Ошибка сети, попробуйте ещё раз';this.disabled=false;this.textContent='Отписаться'}};</script>` : ''}
 <p style="margin-top:24px;"><a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>
 </div></body></html>`,
       valid ? 200 : 400

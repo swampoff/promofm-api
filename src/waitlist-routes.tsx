@@ -50,7 +50,7 @@ app.post('/distribution', async (c) => {
 
       sendEmail({
         to: email,
-        subject: 'Вы в списке ранних — дистрибуция ПРОМО.МУЗЫКА',
+        subject: 'Вы в списке ранних – дистрибуция ПРОМО.МУЗЫКА',
         html: `<div style="font-family:Arial,sans-serif;max-width:600px;padding:24px;background:#0a0a14;color:#e0e0e0;border-radius:12px">
           <h2 style="color:#FF577F;margin:0 0 16px">Спасибо! Вы в списке ранних 🎉</h2>
           <p>Скоро мы запустим дистрибуцию ваших треков в Яндекс.Музыку, VK Music, Spotify, Apple Music, СберЗвук, YouTube Music и ещё 30+ сервисов.</p>
@@ -60,7 +60,7 @@ app.post('/distribution', async (c) => {
             <li>Приоритет в очереди подключения</li>
             <li>Личный куратор на первый релиз</li>
           </ul>
-          <p style="margin-top:24px">Просто оставайтесь на платформе — пришлём приглашение когда сервис будет готов.</p>
+          <p style="margin-top:24px">Просто оставайтесь на платформе – пришлём приглашение когда сервис будет готов.</p>
           <p style="color:#888;font-size:12px;margin-top:32px">ПРОМО.МУЗЫКА · <a href="https://promo-music.ru" style="color:#FF577F">promo-music.ru</a></p>
         </div>`,
       }).catch(() => {});

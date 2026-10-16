@@ -209,7 +209,7 @@ export const emailWrapper = (content: string) => `
         <tr><td style="padding: 24px 40px 32px; color: #666; font-size: 12px; border-top: 1px solid #2a2a3e; text-align: center;">
           <img src="${SITE_URL}/logo.png" alt="ПРОМО.МУЗЫКА" style="height: 34px; margin-bottom: 10px;" />
           <p style="margin: 0 0 10px; color: #e0e0e0; font-size: 14px; font-weight: 600;">Команда ПРОМО.Музыка</p>
-          <p style="margin: 0;">&copy; ${new Date().getFullYear()} ПРОМО.МУЗЫКА — платформа продвижения музыки</p>
+          <p style="margin: 0;">&copy; ${new Date().getFullYear()} ПРОМО.МУЗЫКА – платформа продвижения музыки</p>
           <p style="margin: 4px 0 0;"><a href="${SITE_URL}" style="color: #FF577F; text-decoration: none;">promo-music.ru</a></p>
         </td></tr>
       </table>
@@ -232,7 +232,7 @@ export async function sendPasswordResetEmail(email: string, name: string, token:
     <p style="color: #999; font-size: 14px;">Ссылка действительна в течение 1 часа.</p>
     <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">Если кнопка не работает: ${resetUrl}</p>
   `);
-  return sendEmail({ to: email, subject: 'Сброс пароля — ПРОМО.МУЗЫКА', html });
+  return sendEmail({ to: email, subject: 'Сброс пароля – ПРОМО.МУЗЫКА', html });
 }
 
 export async function sendActivationEmail(email: string, name: string, token: string): Promise<boolean> {
@@ -241,15 +241,15 @@ export async function sendActivationEmail(email: string, name: string, token: st
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Ваш кабинет на ПРОМО.МУЗЫКА готов</h2>
     <p>Здравствуйте, <strong>${escapeHtml(name)}</strong>!</p>
     <p>Мы перенесли вашу страницу артиста со старой платформы <strong>promo.fm</strong> на новый сервис <strong>promo-music.ru</strong>.</p>
-    <p>Чтобы получить доступ — придумайте пароль по ссылке ниже. Email уже привязан, никакая дополнительная верификация не нужна:</p>
+    <p>Чтобы получить доступ – придумайте пароль по ссылке ниже. Email уже привязан, никакая дополнительная верификация не нужна:</p>
     <p style="text-align: center; margin: 28px 0;">
       <a href="${resetUrl}" style="${buttonStyle}">Активировать кабинет</a>
     </p>
-    <p style="color: #999; font-size: 14px;">Ссылка действительна в течение 7 дней. Если не активируете — кабинет останется, можно зайти позже через «Забыли пароль?».</p>
+    <p style="color: #999; font-size: 14px;">Ссылка действительна в течение 7 дней. Если не активируете – кабинет останется, можно зайти позже через «Забыли пароль?».</p>
     <p style="color: #999; font-size: 14px; margin-top: 16px;">В кабинете: загрузка треков, публикация на радио ПРОМО.ФМ, статистика, заказы продвижения, продажа концертов и многое другое.</p>
     <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">Если кнопка не работает: ${resetUrl}</p>
   `);
-  return sendEmail({ to: email, subject: 'Ваш кабинет на ПРОМО.МУЗЫКА — активируйте', html });
+  return sendEmail({ to: email, subject: 'Ваш кабинет на ПРОМО.МУЗЫКА – активируйте', html });
 }
 
 export async function sendVerificationEmail(email: string, name: string, token: string): Promise<boolean> {
@@ -264,7 +264,7 @@ export async function sendVerificationEmail(email: string, name: string, token: 
     <p style="color: #999; font-size: 14px;">Ссылка действительна в течение 24 часов.</p>
     <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">Если кнопка не работает: ${verifyUrl}</p>
   `);
-  return sendEmail({ to: email, subject: 'Подтвердите email — ПРОМО.МУЗЫКА', html });
+  return sendEmail({ to: email, subject: 'Подтвердите email – ПРОМО.МУЗЫКА', html });
 }
 
 export async function sendLabelInvitationEmail(
@@ -283,15 +283,15 @@ export async function sendLabelInvitationEmail(
     <p style="text-align: center; margin: 28px 0;">
       <a href="${acceptUrl}" style="${buttonStyle}">Открыть приглашение</a>
     </p>
-    <p style="color: #999; font-size: 14px;">Если вы не ожидаете это приглашение — просто проигнорируйте письмо.</p>
+    <p style="color: #999; font-size: 14px;">Если вы не ожидаете это приглашение – просто проигнорируйте письмо.</p>
     <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">Прямая ссылка: ${acceptUrl}</p>
   `);
-  return sendEmail({ to: toEmail, subject: `Приглашение от лейбла «${safeName}» — ПРОМО.МУЗЫКА`, html });
+  return sendEmail({ to: toEmail, subject: `Приглашение от лейбла «${safeName}» – ПРОМО.МУЗЫКА`, html });
 }
 
 export async function notifyArtistRequest(data: { artistName: string; trackTitle: string; genre?: string; stationName?: string; stationId: string; }) {
   const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: #FF577F;">Новая заявка артиста на радио</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px; font-weight: bold;">Артист:</td><td>${escapeHtml(data.artistName)}</td></tr><tr><td style="padding: 8px; font-weight: bold;">Трек:</td><td>${escapeHtml(data.trackTitle)}</td></tr>${data.genre ? `<tr><td style="padding: 8px; font-weight: bold;">Жанр:</td><td>${escapeHtml(data.genre)}</td></tr>` : ''}<tr><td style="padding: 8px; font-weight: bold;">Радиостанция:</td><td>${escapeHtml(data.stationName || data.stationId)}</td></tr></table></div>`;
-  await sendAdminEmail({subject: `[ПРОМО] Заявка: ${escapeHtml(data.artistName)} — ${escapeHtml(data.trackTitle)}`, html });
+  await sendAdminEmail({subject: `[ПРОМО] Заявка: ${escapeHtml(data.artistName)} – ${escapeHtml(data.trackTitle)}`, html });
 }
 
 /**
@@ -304,7 +304,7 @@ export async function notifyAdminNewVenue(data: {
   userId: string; stage: 'registered' | 'card_attached';
 }) {
   const isCard = data.stage === 'card_attached';
-  const title = isCard ? 'Заведение привязало карту — ждёт утверждения' : 'Новое заведение зарегистрировалось';
+  const title = isCard ? 'Заведение привязало карту – ждёт утверждения' : 'Новое заведение зарегистрировалось';
   const color = isCard ? '#10B981' : '#7C3AED';
   const html = emailWrapper(`
     <h2 style="margin:0 0 16px;color:#fff;font-size:20px;">${title}</h2>
@@ -369,7 +369,7 @@ export async function notifyBookingRequest(data: {
     + row('Сообщение:', data.message)
     + `</table></div>`;
 
-  await sendAdminEmail({subject: `[ПРОМО] Букинг: ${escapeHtml(data.eventTitle)} — ${escapeHtml(data.eventDate)}`,
+  await sendAdminEmail({subject: `[ПРОМО] Букинг: ${escapeHtml(data.eventTitle)} – ${escapeHtml(data.eventDate)}`,
     html,
   });
 
@@ -377,14 +377,14 @@ export async function notifyBookingRequest(data: {
     [
       'Заявка на букинг',
       'Заказчик: ' + data.venueName + (data.clientEmail ? ' / ' + data.clientEmail : '') + (data.clientPhone ? ' / ' + data.clientPhone : ''),
-      'Исполнитель: ' + (data.performerName || '—'),
-      'Событие: ' + data.eventTitle + ' — ' + data.eventDate + (data.city ? ', ' + data.city : ''),
+      'Исполнитель: ' + (data.performerName || '–'),
+      'Событие: ' + data.eventTitle + ' – ' + data.eventDate + (data.city ? ', ' + data.city : ''),
     ].join('\n'),
   ).catch(() => {});
 }
 
 export async function notifyNewUser(data: { email: string; name: string; role: string; via?: string; needsApproval?: boolean; application?: any }) {
-  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: ${data.needsApproval ? '#F59E0B' : '#3B82F6'};">${data.needsApproval ? 'Заявка — требует одобрения' : 'Новый пользователь'}</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Имя:</td><td>${escapeHtml(data.name)}</td></tr><tr><td style="padding: 8px;">Email:</td><td>${escapeHtml(data.email)}</td></tr><tr><td style="padding: 8px;">Роль:</td><td>${escapeHtml(data.role)}</td></tr>${data.via ? `<tr><td style="padding: 8px;">Через:</td><td>${escapeHtml(data.via)}</td></tr>` : ''}${data.application ? `<tr><td style="padding: 8px;">Заявка:</td><td>${escapeHtml(JSON.stringify(data.application))}</td></tr>` : ''}</table></div>`;
+  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: ${data.needsApproval ? '#F59E0B' : '#3B82F6'};">${data.needsApproval ? 'Заявка – требует одобрения' : 'Новый пользователь'}</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Имя:</td><td>${escapeHtml(data.name)}</td></tr><tr><td style="padding: 8px;">Email:</td><td>${escapeHtml(data.email)}</td></tr><tr><td style="padding: 8px;">Роль:</td><td>${escapeHtml(data.role)}</td></tr>${data.via ? `<tr><td style="padding: 8px;">Через:</td><td>${escapeHtml(data.via)}</td></tr>` : ''}${data.application ? `<tr><td style="padding: 8px;">Заявка:</td><td>${escapeHtml(JSON.stringify(data.application))}</td></tr>` : ''}</table></div>`;
   // 09.10.2026: дубль в Telegram — после переезда письма на info@promofm.ru до владельца не доходят
   // (Яндекс принимает, но в ящик не кладёт); Telegram не зависит от почты.
   notifyAdminTelegram(`${data.needsApproval ? '📝 Заявка на модерацию' : '👤 Новая регистрация'}: <b>${escapeHtml(data.name)}</b>\nРоль: ${escapeHtml(data.role)}\nEmail: ${escapeHtml(data.email)}${data.via ? `\nЧерез: ${escapeHtml(data.via)}` : ''}`).catch(() => {});
@@ -398,7 +398,7 @@ export async function sendAccountApprovedEmail(email: string, name: string): Pro
     <p>Ваша заявка одобрена. Войдите и пользуйтесь всеми функциями платформы.</p>
     <p style="text-align: center; margin: 28px 0;"><a href="${SITE_URL}/login" style="${buttonStyle}">Войти</a></p>
   `);
-  return sendEmail({ to: email, subject: 'Аккаунт одобрен — ПРОМО.МУЗЫКА', html });
+  return sendEmail({ to: email, subject: 'Аккаунт одобрен – ПРОМО.МУЗЫКА', html });
 }
 
 export async function sendAccountRejectedEmail(email: string, name: string, reason: string): Promise<boolean> {
@@ -409,7 +409,7 @@ export async function sendAccountRejectedEmail(email: string, name: string, reas
     ${reason ? `<p style="padding: 12px; background: #1a1a2e; border-left: 3px solid #EF4444; border-radius: 4px;"><strong>Причина:</strong> ${escapeHtml(reason)}</p>` : ''}
     <p>Свяжитесь с нами: <a href="mailto:info@promofm.ru" style="color: #FF577F;">info@promofm.ru</a></p>
   `);
-  return sendEmail({ to: email, subject: 'Заявка отклонена — ПРОМО.МУЗЫКА', html });
+  return sendEmail({ to: email, subject: 'Заявка отклонена – ПРОМО.МУЗЫКА', html });
 }
 
 // ── Profile verification (migration 058 artist + 062 cross-role) ──
@@ -446,7 +446,7 @@ export async function sendProfileVerifiedEmail(
   `);
   return sendEmail({
     to: email,
-    subject: 'Профиль верифицирован — ПРОМО.МУЗЫКА',
+    subject: 'Профиль верифицирован – ПРОМО.МУЗЫКА',
     html,
   });
 }
@@ -468,7 +468,7 @@ export async function sendProfileVerificationRejectedEmail(
   `);
   return sendEmail({
     to: email,
-    subject: 'Заявка на верификацию отклонена — ПРОМО.МУЗЫКА',
+    subject: 'Заявка на верификацию отклонена – ПРОМО.МУЗЫКА',
     html,
   });
 }
@@ -490,7 +490,7 @@ export async function notifyTrackUpload(data: { title: string; artist: string; g
     </p>
   `);
   notifyAdminTelegram(`🎵 <b>Новый трек на модерации</b>\n\nАртист: <b>${stripHtml(data.artist)}</b>\nТрек: <b>${stripHtml(data.title)}</b>${data.genre ? `\nЖанр: ${stripHtml(data.genre)}` : ''}${data.email ? `\nEmail: ${stripHtml(data.email)}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Модерация</a>`).catch(() => {});
-  await sendAdminEmail({subject: `[ПРОМО] Трек: ${escapeHtml(data.artist)} — ${escapeHtml(data.title)}`, html });
+  await sendAdminEmail({subject: `[ПРОМО] Трек: ${escapeHtml(data.artist)} – ${escapeHtml(data.title)}`, html });
 }
 
 export async function notifyVideoUpload(data: { title: string; artist: string; category?: string; videoUrl?: string; email?: string; userId?: string; }) {
@@ -508,7 +508,7 @@ export async function notifyVideoUpload(data: { title: string; artist: string; c
     </p>
   `);
   notifyAdminTelegram(`🎬 <b>Новое видео на модерации</b>\n\nАвтор: <b>${stripHtml(data.artist)}</b>\nВидео: <b>${stripHtml(data.title)}</b>${data.category ? `\nКатегория: ${stripHtml(data.category)}` : ''}${data.email ? `\nEmail: ${stripHtml(data.email)}` : ''}${data.videoUrl ? `\nСсылка: ${stripHtml(data.videoUrl)}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Модерация</a>`).catch(() => {});
-  await sendAdminEmail({subject: `[ПРОМО] Видео: ${escapeHtml(data.artist)} — ${escapeHtml(data.title)}`, html });
+  await sendAdminEmail({subject: `[ПРОМО] Видео: ${escapeHtml(data.artist)} – ${escapeHtml(data.title)}`, html });
 }
 
 export async function notifyConcertCreated(data: { title: string; artist?: string; city?: string; date?: string; venue?: string; }) {
@@ -573,7 +573,7 @@ export async function notifyBugReport(data: { reportId: string; ticketId?: strin
     <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
       <tr><td style="padding: 8px; color: #999;">От:</td><td style="padding: 8px;">${escapeHtml(from)}</td></tr>
       ${data.page ? `<tr><td style="padding: 8px; color: #999;">Страница:</td><td style="padding: 8px;">${escapeHtml(data.page)}</td></tr>` : ''}
-      <tr><td style="padding: 8px; color: #999;">Тикет:</td><td style="padding: 8px;">${data.ticketId ? escapeHtml(data.ticketId) : 'не создан — автор не вошёл на сайт'}</td></tr>
+      <tr><td style="padding: 8px; color: #999;">Тикет:</td><td style="padding: 8px;">${data.ticketId ? escapeHtml(data.ticketId) : 'не создан – автор не вошёл на сайт'}</td></tr>
       <tr><td style="padding: 8px; color: #999; vertical-align: top;">Сообщение:</td><td style="padding: 8px; white-space: pre-wrap;">${escapeHtml(data.message)}</td></tr>
     </table>
     <p style="margin: 20px 0 0; color: #999; font-size: 13px;">${data.email ? 'Кнопка «Ответить» в почте отправит ответ автору.' : 'Автор не оставил почту.'}${data.ticketId ? ' Ответ в тикете автор увидит в кабинете.' : ''}</p>
@@ -599,7 +599,7 @@ export async function notifyPaymentReceived(data: { amount: number; currency?: s
     </table>
   `);
   notifyAdminTelegram(`💰 <b>Оплата получена</b>\n\nСумма: <b>${data.amount} ${stripHtml(data.currency || 'RUB')}</b>\nТип: ${stripHtml(typeLabel)}${data.description ? `\nОписание: ${stripHtml(data.description)}` : ''}${data.userName ? `\nПлательщик: ${stripHtml(data.userName)}` : ''}${data.userEmail ? `\nEmail: ${stripHtml(data.userEmail)}` : ''}${data.gateway ? `\nШлюз: ${stripHtml(data.gateway)}` : ''}${data.orderId ? `\nЗаказ: <code>${stripHtml(data.orderId)}</code>` : ''}`).catch(() => {});
-  await sendAdminEmail({subject: `[ПРОМО] Оплата ${data.amount} ${data.currency || 'RUB'} — ${escapeHtml(typeLabel)}`, html });
+  await sendAdminEmail({subject: `[ПРОМО] Оплата ${data.amount} ${data.currency || 'RUB'} – ${escapeHtml(typeLabel)}`, html });
 }
 
 // ── Universal Moderation Submission Notification ──
@@ -657,11 +657,11 @@ export async function notifyPaymentExpired(data: {
   retryUrl: string;        // deep link обратно в кабинет для повторной оплаты
   orderId?: string;
 }): Promise<boolean> {
-  const subject = `Не получилось оплатить ${data.amount} ${escapeHtml(data.currency || 'RUB')} — повторить?`;
+  const subject = `Не получилось оплатить ${data.amount} ${escapeHtml(data.currency || 'RUB')} – повторить?`;
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #F59E0B;">Не получилось оплатить?</h2>
     <p>Здравствуйте${data.name ? ', <b>' + escapeHtml(data.name) + '</b>' : ''}!</p>
-    <p>Вы начали оплату на платформе ПРОМО.МУЗЫКА, но не завершили её — платёж был автоматически отменён через несколько минут.</p>
+    <p>Вы начали оплату на платформе ПРОМО.МУЗЫКА, но не завершили её – платёж был автоматически отменён через несколько минут.</p>
     <table style="width: 100%; border-collapse: collapse; color: #e0e0e0; margin: 16px 0; background: rgba(255,255,255,0.03); border-radius: 8px;">
       <tr><td style="padding: 10px; color: #999;">Сумма:</td><td style="padding: 10px; font-size: 18px; font-weight: 700; color: #FF577F;">${data.amount} ${escapeHtml(data.currency || 'RUB')}</td></tr>
       ${data.description ? `<tr><td style="padding: 10px; color: #999;">Описание:</td><td style="padding: 10px;">${escapeHtml(data.description)}</td></tr>` : ''}
@@ -669,7 +669,7 @@ export async function notifyPaymentExpired(data: {
     <p style="text-align: center; margin: 28px 0;">
       <a href="${data.retryUrl}" style="${buttonStyle}">Повторить оплату</a>
     </p>
-    <p style="color: #888; font-size: 13px;">Если у вас возникли проблемы с оплатой, ответьте на это письмо — мы поможем разобраться.</p>
+    <p style="color: #888; font-size: 13px;">Если у вас возникли проблемы с оплатой, ответьте на это письмо – мы поможем разобраться.</p>
     ${data.orderId ? `<p style="color: #555; font-size: 11px; margin-top: 20px;">Номер заказа: <code>${escapeHtml(data.orderId)}</code></p>` : ''}
   `);
   // Best-effort Telegram alert
@@ -709,11 +709,11 @@ export async function notifyChatNewSession(data: { sessionId: string; guestName?
     `💬 <b>Новый live-чат на сайте</b>\n\n`
     + `От: ${stripHtml(who)}${data.guestEmail ? `\nEmail: ${stripHtml(data.guestEmail)}` : ''}`
     + `${data.firstMessage ? `\n\n${stripHtml(data.firstMessage).slice(0, 500)}` : ''}\n\n`
-    + `<i>Чтобы ответить — нажмите Reply на это сообщение и отправьте текст.</i>\n`
+    + `<i>Чтобы ответить – нажмите Reply на это сообщение и отправьте текст.</i>\n`
     + `<code>[session:${data.sessionId}]</code>\n\n`
     + `→ <a href="${link}">Открыть в админке</a>`
   ).catch(() => {});
-  await sendAdminEmail({subject: `[ПРОМО] Новый чат — ${who}`, html });
+  await sendAdminEmail({subject: `[ПРОМО] Новый чат – ${who}`, html });
 }
 
 /**
@@ -731,11 +731,11 @@ export async function sendChatGuestReplyEmail(data: { toEmail: string; toName?: 
     <p style="text-align: center; margin: 28px 0;">
       <a href="${returnLink}" style="${buttonStyle}">Открыть чат</a>
     </p>
-    <p style="color: #888; font-size: 13px;">Просто перейдите по кнопке — ваша история переписки восстановится. Также можно ответить на это письмо: ответ дойдёт до того же оператора.</p>
+    <p style="color: #888; font-size: 13px;">Просто перейдите по кнопке – ваша история переписки восстановится. Также можно ответить на это письмо: ответ дойдёт до того же оператора.</p>
   `);
   return sendEmail({
     to: data.toEmail,
-    subject: `Ответ в чате на ПРОМО.МУЗЫКА — ${escapeHtml(data.adminName)}`,
+    subject: `Ответ в чате на ПРОМО.МУЗЫКА – ${escapeHtml(data.adminName)}`,
     html,
   });
 }
@@ -754,11 +754,11 @@ export async function sendVenueTrialEndingEmail(data: { toEmail: string; venueNa
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Триал ПРОМО.ЭИР заканчивается</h2>
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
     <p>Ваш пробный период на ПРОМО.ЭИР заканчивается <strong>${escapeHtml(expiresHuman)}</strong> (через ${data.daysRemaining} ${data.daysRemaining === 1 ? 'день' : 'дн.'}).</p>
-    <p style="padding:12px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:6px;color:#e0e0e0;">После окончания триала доступ к расширенным функциям («Бизнес» — мультизоны, расширенная аналитика, расписание, приоритетная поддержка) приостановится. Чтобы продолжить пользоваться этими возможностями — выберите тариф в кабинете.</p>
+    <p style="padding:12px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:6px;color:#e0e0e0;">После окончания триала доступ к расширенным функциям («Бизнес» – мультизоны, расширенная аналитика, расписание, приоритетная поддержка) приостановится. Чтобы продолжить пользоваться этими возможностями – выберите тариф в кабинете.</p>
     <p style="text-align:center;margin:28px 0;">
       <a href="${SITE_URL}/venue/subscription" style="${buttonStyle}">Выбрать тариф</a>
     </p>
-    <p style="color:#888;font-size:13px;">Если ничего не сделать — заведение перейдёт на бесплатный режим: 1 зона, до 5 плейлистов, базовый каталог. Все ваши данные сохранятся, можно будет вернуться к платному тарифу в любое время.</p>
+    <p style="color:#888;font-size:13px;">Если ничего не сделать – заведение перейдёт на бесплатный режим: 1 зона, до 5 плейлистов, базовый каталог. Все ваши данные сохранятся, можно будет вернуться к платному тарифу в любое время.</p>
   `);
   return sendEmail({
     to: data.toEmail,
@@ -777,11 +777,11 @@ export async function sendVenueTrialExpiredEmail(data: { toEmail: string; venueN
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Триал ПРОМО.ЭИР завершён</h2>
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
     <p>Пробный период подошёл к концу. Доступ к расширенным функциям сейчас ограничен: заведение работает в бесплатном режиме (1 зона, до 5 плейлистов, базовый каталог треков).</p>
-    <p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:6px;color:#e0e0e0;">Все ваши плейлисты, расписания и настройки сохранены. Чтобы вернуть полный функционал — выберите тариф «Бизнес» (₽9 990/мес) или «Сеть» (₽14 990/мес) в кабинете.</p>
+    <p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:6px;color:#e0e0e0;">Все ваши плейлисты, расписания и настройки сохранены. Чтобы вернуть полный функционал – выберите тариф «Бизнес» (₽9 990/мес) или «Сеть» (₽14 990/мес) в кабинете.</p>
     <p style="text-align:center;margin:28px 0;">
       <a href="${SITE_URL}/venue/subscription" style="${buttonStyle}">Выбрать тариф</a>
     </p>
-    <p style="color:#888;font-size:13px;">Спасибо за то, что попробовали ПРОМО.ЭИР! Если есть вопросы — напишите на info@promofm.ru или в чат поддержки.</p>
+    <p style="color:#888;font-size:13px;">Спасибо за то, что попробовали ПРОМО.ЭИР! Если есть вопросы – напишите на info@promofm.ru или в чат поддержки.</p>
   `);
   return sendEmail({
     to: data.toEmail,
@@ -808,15 +808,15 @@ export async function sendVenueRadioWelcomeEmail(data: { toEmail: string; venueN
     <p>Вам доступны <strong>${days} дней бесплатного доступа</strong> к собственному радио для вашего заведения. Пробный период начинается после привязки карты в кабинете: мы списываем 1 ₽ для проверки и сразу его возвращаем, а оплата подписки спишется только по окончании пробного периода.</p>
     <p style="padding:14px;background:#1a1a2e;border-left:3px solid #6366f1;border-radius:6px;color:#e0e0e0;">
       <strong>Что дальше:</strong><br>
-      1. Зайдите в кабинет и заполните анкету — какая музыка нужна, какие джинглы, какой стиль ведущих.<br>
+      1. Зайдите в кабинет и заполните анкету – какая музыка нужна, какие джинглы, какой стиль ведущих.<br>
       2. Наш редактор соберёт ваш эфир под запрос (обычно за 1-2 рабочих дня).<br>
       3. Вы получите 6-значный код и приложение для Android-устройства в заведении.<br>
-      4. Подключаете устройство к колонкам — и эфир играет.
+      4. Подключаете устройство к колонкам – и эфир играет.
     </p>
     <p style="text-align:center;margin:28px 0;">
       <a href="${SITE_URL}/venue/onboarding" style="${buttonStyle}">Заполнить анкету</a>
     </p>
-    <p style="color:#888;font-size:13px;">Вопросы? Напишите в чат поддержки прямо из кабинета или на info@promofm.ru — отвечаем в рабочие часы.</p>
+    <p style="color:#888;font-size:13px;">Вопросы? Напишите в чат поддержки прямо из кабинета или на info@promofm.ru – отвечаем в рабочие часы.</p>
   `);
   return sendEmail({
     to: data.toEmail,
@@ -839,12 +839,12 @@ export async function sendVenueTrialLastDayEmail(data: { toEmail: string; venueN
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
     <p>Ваш пробный период на ПРОМО.ЭИР заканчивается <strong>${escapeHtml(expiresHuman)}</strong>. Это последний день, когда эфир работает без оплаты.</p>
     <p style="padding:12px;background:#2a1818;border-left:3px solid #EF4444;border-radius:6px;color:#fde0e0;">
-      Если карта не привязана к концу дня — эфир в заведении приостановится. Все настройки сохранятся, реактивация занимает минуту после оплаты.
+      Если карта не привязана к концу дня – эфир в заведении приостановится. Все настройки сохранятся, реактивация занимает минуту после оплаты.
     </p>
     <p style="text-align:center;margin:28px 0;">
       <a href="${SITE_URL}/venue/subscription" style="${buttonStyle}">Выбрать тариф и продолжить</a>
     </p>
-    <p style="color:#888;font-size:13px;">Тарифы: «Бизнес» ₽9 990/мес — до 4 зон, расширенная аналитика, расписание. «Сеть» ₽14 990/мес — несколько точек, API.</p>
+    <p style="color:#888;font-size:13px;">Тарифы: «Бизнес» ₽9 990/мес – до 4 зон, расширенная аналитика, расписание. «Сеть» ₽14 990/мес – несколько точек, API.</p>
   `);
   return sendEmail({
     to: data.toEmail,
@@ -861,7 +861,7 @@ export async function sendVenueRadioReadyEmail(data: { toEmail: string; venueNam
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 22px;">Ваше радио готово к запуску</h2>
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
-    <p>Эфир собран и готов транслироваться в заведении. Чтобы подключить — зайдите в кабинет и используйте код ниже.</p>
+    <p>Эфир собран и готов транслироваться в заведении. Чтобы подключить – зайдите в кабинет и используйте код ниже.</p>
     <p style="text-align:center;margin:24px 0;">
       <span style="display:inline-block;padding:14px 28px;background:#0f0f1e;border:1px solid #6366f1;border-radius:12px;color:#a5b4fc;font-family:monospace;font-size:28px;letter-spacing:3px;font-weight:bold;">${escapeHtml(data.pairingCode)}</span>
     </p>
@@ -869,12 +869,12 @@ export async function sendVenueRadioReadyEmail(data: { toEmail: string; venueNam
       <strong>Как подключить:</strong><br>
       1. Установите наше приложение на Android-устройство в заведении (ссылка в кабинете).<br>
       2. Откройте приложение, введите код выше.<br>
-      3. Подключите устройство к колонкам — эфир начнёт играть.
+      3. Подключите устройство к колонкам – эфир начнёт играть.
     </p>
     <p style="text-align:center;margin:24px 0;">
       <a href="${SITE_URL}/venue/apk" style="${buttonStyle}">Открыть кабинет</a>
     </p>
-    <p style="color:#888;font-size:13px;">Код действует 24 часа. Если не успеете подключить — сгенерируйте новый в кабинете.</p>
+    <p style="color:#888;font-size:13px;">Код действует 24 часа. Если не успеете подключить – сгенерируйте новый в кабинете.</p>
   `);
   return sendEmail({
     to: data.toEmail,
@@ -897,7 +897,7 @@ export async function sendVenueRadioChangesRequestedEmail(data: { toEmail: strin
     <p style="text-align:center;margin:24px 0;">
       <a href="${SITE_URL}/venue/onboarding" style="${buttonStyle}">Открыть анкету</a>
     </p>
-    <p style="color:#888;font-size:13px;">После сохранения изменений анкета снова уйдёт редактору — обычно эфир запускается за 1 рабочий день.</p>
+    <p style="color:#888;font-size:13px;">После сохранения изменений анкета снова уйдёт редактору – обычно эфир запускается за 1 рабочий день.</p>
   `);
   return sendEmail({
     to: data.toEmail,
@@ -915,11 +915,11 @@ export async function sendVenueRadioRejectedEmail(data: { toEmail: string; venue
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
     <p>Мы посмотрели вашу анкету для эфира ПРОМО.ЭИР и пока не можем её принять. Причина:</p>
     <p style="padding:14px;background:#1a1a2e;border-left:3px solid #EF4444;border-radius:6px;color:#e0e0e0;">${escapeHtml(data.reason)}</p>
-    <p>Если это можно исправить — заполните анкету заново, и мы рассмотрим её ещё раз.</p>
+    <p>Если это можно исправить – заполните анкету заново, и мы рассмотрим её ещё раз.</p>
     <p style="text-align:center;margin:24px 0;">
       <a href="${SITE_URL}/venue/onboarding" style="${buttonStyle}">Заполнить анкету заново</a>
     </p>
-    <p style="color:#888;font-size:13px;">Остались вопросы — напишите нам на info@promofm.ru.</p>
+    <p style="color:#888;font-size:13px;">Остались вопросы – напишите нам на info@promofm.ru.</p>
   `);
   return sendEmail({
     to: data.toEmail,
@@ -966,7 +966,7 @@ export async function notifyEngineerNewOrder(
   const html = emailWrapper(`
     <h2 style="margin:0 0 16px;color:#FF577F;">Новая заявка на услугу</h2>
     <p>Здравствуйте, <strong>${escapeHtml(name || 'инженер')}</strong>!</p>
-    <p>Клиент оставил заявку. Подтвердите готовность взять заказ — он перейдёт к оплате.</p>
+    <p>Клиент оставил заявку. Подтвердите готовность взять заказ – он перейдёт к оплате.</p>
     ${engineerOrderCard(orderTitle)}
     <p style="text-align:center;margin:28px 0;"><a href="${SITE_URL}/engineer/orders" style="${buttonStyle}">Открыть заявки</a></p>
   `);
@@ -982,7 +982,7 @@ export async function notifyEngineerOrderPaid(
   const html = emailWrapper(`
     <h2 style="margin:0 0 16px;color:#10B981;">Заказ оплачен</h2>
     <p>Здравствуйте, <strong>${escapeHtml(name || 'инженер')}</strong>!</p>
-    <p>Клиент оплатил заказ. Можно приступать к работе — после сдачи отправьте файл через кабинет.</p>
+    <p>Клиент оплатил заказ. Можно приступать к работе – после сдачи отправьте файл через кабинет.</p>
     ${engineerOrderCard(orderTitle, { amount })}
     <p style="text-align:center;margin:28px 0;"><a href="${SITE_URL}/engineer/orders" style="${buttonStyle}">К заказам</a></p>
   `);
@@ -998,7 +998,7 @@ export async function notifyClientOrderDelivered(
   const html = emailWrapper(`
     <h2 style="margin:0 0 16px;color:#FF577F;">Заказ готов</h2>
     <p>Здравствуйте, <strong>${escapeHtml(name || '')}</strong>!</p>
-    <p>Звукоинженер сдал работу. Проверьте файл и подтвердите приём — после этого заказ закроется.</p>
+    <p>Звукоинженер сдал работу. Проверьте файл и подтвердите приём – после этого заказ закроется.</p>
     ${engineerOrderCard(orderTitle, { deliveryUrl })}
     <p style="text-align:center;margin:28px 0;"><a href="${SITE_URL}/cabinet/orders" style="${buttonStyle}">Открыть заказ</a></p>
   `);
@@ -1017,7 +1017,7 @@ export async function notifyClientOrderRefunded(
     <p>Здравствуйте, <strong>${escapeHtml(name || '')}</strong>!</p>
     <p>Деньги по заказу возвращены на ваш способ оплаты. Зачисление обычно занимает 3–7 рабочих дней (правила банка-эмитента).</p>
     ${engineerOrderCard(orderTitle, { amount, reason: reason || undefined })}
-    <p style="color:#888;font-size:13px;">Если у вас есть вопросы — ответьте на это письмо или напишите в поддержку: <a href="mailto:info@promofm.ru" style="color:#FF577F;">info@promofm.ru</a></p>
+    <p style="color:#888;font-size:13px;">Если у вас есть вопросы – ответьте на это письмо или напишите в поддержку: <a href="mailto:info@promofm.ru" style="color:#FF577F;">info@promofm.ru</a></p>
   `);
   return sendEmail({ to: email, subject: `Возврат: ${orderTitle}`, html });
 }
@@ -1077,7 +1077,7 @@ export async function notifyRadioDownload(data: {
 }): Promise<void> {
   const kindLabel = data.kind === 'mix' ? 'DJ-микс' : 'Трек';
   const station = data.stationName || 'Радиостанция (без имени профиля)';
-  const owner = data.ownerName || '—';
+  const owner = data.ownerName || '–';
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #10B981;">Радио скачало ${kindLabel === 'DJ-микс' ? 'микс' : 'трек'}</h2>
     <table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">
@@ -1085,10 +1085,10 @@ export async function notifyRadioDownload(data: {
       <tr><td style="padding: 8px; color: #999;">Автор:</td><td style="padding: 8px;">${escapeHtml(owner)}</td></tr>
       <tr><td style="padding: 8px; color: #999;">Радиостанция:</td><td style="padding: 8px;">${escapeHtml(station)}</td></tr>
     </table>
-    <p style="color:#888;font-size:13px;margin-top:16px;">Скачивание для эфира. Когда станция подтвердит ротацию — артист получит уведомление о ротации отдельно.</p>
+    <p style="color:#888;font-size:13px;margin-top:16px;">Скачивание для эфира. Когда станция подтвердит ротацию – артист получит уведомление о ротации отдельно.</p>
   `);
   notifyAdminTelegram(`📻 <b>Радио скачало ${stripHtml(kindLabel === 'DJ-микс' ? 'микс' : 'трек')}</b>\n\n${stripHtml(kindLabel)}: <b>${stripHtml(data.title)}</b>\nАвтор: <b>${stripHtml(owner)}</b>\nРадиостанция: <b>${stripHtml(station)}</b>`).catch(() => {});
-  await sendAdminEmail({subject: `[ПРОМО] Радио скачало: ${escapeHtml(station)} — ${escapeHtml(data.title)}`, html });
+  await sendAdminEmail({subject: `[ПРОМО] Радио скачало: ${escapeHtml(station)} – ${escapeHtml(data.title)}`, html });
 }
 
 // ─── Track-test (тест трека): чтобы платный тракт не зависал молча ───
@@ -1107,10 +1107,10 @@ export async function notifyTrackTestPending(data: { trackTitle: string; artistN
       <tr><td style="padding: 8px; color: #999;">Артист:</td><td style="padding: 8px;">${escapeHtml(data.artistName)}</td></tr>
       <tr><td style="padding: 8px; color: #999;">Оплата:</td><td style="padding: 8px;">${escapeHtml(data.source)}${data.amount ? ` (${data.amount} ₽)` : ''}</td></tr>
     </table>
-    <p style="color:#888;font-size:13px;margin-top:12px;">Деньги взяты — следующий шаг за админом: модерация → назначение экспертов.</p>
+    <p style="color:#888;font-size:13px;margin-top:12px;">Деньги взяты – следующий шаг за админом: модерация → назначение экспертов.</p>
   `);
   notifyAdminTelegram(`🎧 <b>Тест трека ждёт модерации</b>\n\nТрек: <b>${stripHtml(data.trackTitle)}</b>\nАртист: <b>${stripHtml(data.artistName)}</b>\nОплата: ${stripHtml(data.source)}${data.amount ? ` (${data.amount} ₽)` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Админка</a>`).catch(() => {});
-  await sendAdminEmail({subject: `[ПРОМО] Тест трека ждёт модерации: ${escapeHtml(data.artistName)} — ${escapeHtml(data.trackTitle)}`, html });
+  await sendAdminEmail({subject: `[ПРОМО] Тест трека ждёт модерации: ${escapeHtml(data.artistName)} – ${escapeHtml(data.trackTitle)}`, html });
 }
 
 /**
@@ -1128,9 +1128,9 @@ export async function notifyTrackTestStalled(items: Array<{ id: string; trackTit
       <tr style="color:#999;"><td style="padding:6px;">Трек</td><td style="padding:6px;">Артист</td><td style="padding:6px;">Статус</td><td style="padding:6px;">Висит</td></tr>
       ${rows}
     </table>
-    <p style="color:#888;font-size:13px;margin-top:12px;">Каждая строка — оплаченная заявка, по которой следующий шаг просрочен (модерация, эксперты, финализация или отправка отчёта артисту).</p>
+    <p style="color:#888;font-size:13px;margin-top:12px;">Каждая строка – оплаченная заявка, по которой следующий шаг просрочен (модерация, эксперты, финализация или отправка отчёта артисту).</p>
   `);
-  notifyAdminTelegram(`⚠️ <b>Track-test: ${items.length} застрявших заявок</b>\n\n${items.slice(0, 5).map(i => `• ${stripHtml(i.trackTitle)} — ${stripHtml(i.status)} (${Math.round(i.hoursStuck)} ч)`).join('\n')}${items.length > 5 ? `\n…и ещё ${items.length - 5}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Админка</a>`).catch(() => {});
+  notifyAdminTelegram(`⚠️ <b>Track-test: ${items.length} застрявших заявок</b>\n\n${items.slice(0, 5).map(i => `• ${stripHtml(i.trackTitle)} – ${stripHtml(i.status)} (${Math.round(i.hoursStuck)} ч)`).join('\n')}${items.length > 5 ? `\n…и ещё ${items.length - 5}` : ''}\n\n→ <a href="https://promo-music.ru/ctrl-pm7k2f">Админка</a>`).catch(() => {});
   await sendAdminEmail({subject: `[ПРОМО] Track-test: ${items.length} застрявших заявок`, html });
 }
 

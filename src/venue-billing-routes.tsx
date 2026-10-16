@@ -115,19 +115,19 @@ app.post('/subscribe', requireAuth, async (c) => {
     }
     const price = interval === 'year' ? plan.price_year : plan.price_month;
     if (!price || price <= 0) {
-      return c.json({ success: false, error: 'Tier requires custom pricing — contact sales' }, 400);
+      return c.json({ success: false, error: 'Tier requires custom pricing – contact sales' }, 400);
     }
 
     const profile = await loadVenueProfile(userId);
     if (!profile) {
-      return c.json({ success: false, error: 'Venue profile not found — register the venue first' }, 404);
+      return c.json({ success: false, error: 'Venue profile not found – register the venue first' }, 404);
     }
 
     const { getGateway } = await import('./payment-gateway.tsx');
     const gateway = getGateway('yookassa');
     const orderId = crypto.randomUUID();
     const returnUrl = `https://promo-music.ru/venue/subscription?payment=success&tier=${tier}`;
-    const desc = `Подписка «${plan.name}» (${interval === 'year' ? 'год' : 'мес'}) — ${profile.venueName || 'заведение'}`;
+    const desc = `Подписка «${plan.name}» (${interval === 'year' ? 'год' : 'мес'}) – ${profile.venueName || 'заведение'}`;
 
     const result = await gateway.createPayment({
       orderId,
@@ -217,7 +217,7 @@ app.post('/attach-card', requireAuth, async (c) => {
       orderId,
       amount: 1,
       currency: 'RUB',
-      description: `Привязка карты для пробного периода — ${profile.venueName || 'заведение'} (1 ₽ вернётся автоматически)`,
+      description: `Привязка карты для пробного периода – ${profile.venueName || 'заведение'} (1 ₽ вернётся автоматически)`,
       returnUrl: 'https://promo-music.ru/venue/subscription?card=attached',
       userId,
       gateway: 'yookassa',

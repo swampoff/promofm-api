@@ -24,18 +24,18 @@ interface ClassifiedError {
 // ─── Deterministic Patterns ───────────────────────────────────────────────────
 
 const PATTERNS: Array<{ regex: RegExp; type: ErrorType; severity: Severity; hint: string }> = [
-  { regex: /cannot read prop|undefined is not|null is not/i, type: 'bug', severity: 'high', hint: 'Null reference — add null check or optional chaining' },
-  { regex: /network error|fetch failed|ECONNREFUSED|ETIMEDOUT/i, type: 'bug', severity: 'medium', hint: 'Network/connectivity issue — check endpoint availability' },
-  { regex: /CORS|cross-origin|blocked by/i, type: 'bug', severity: 'medium', hint: 'CORS policy — verify allowed origins in backend' },
-  { regex: /rate limit|429|too many requests/i, type: 'bug', severity: 'medium', hint: 'Rate limiting — implement backoff or increase limits' },
-  { regex: /syntax error|unexpected token|parse error/i, type: 'bug', severity: 'high', hint: 'Syntax/parse error — check JSON or code syntax' },
-  { regex: /out of memory|heap|stack overflow/i, type: 'bug', severity: 'critical', hint: 'Memory issue — check for leaks, reduce payload size' },
-  { regex: /permission denied|unauthorized|403|401/i, type: 'bug', severity: 'medium', hint: 'Auth/permission issue — verify token and roles' },
-  { regex: /hallucin|made up|invented|fabricat/i, type: 'ai_error', severity: 'high', hint: 'AI hallucination detected — add grounding constraints' },
-  { regex: /LLM.*error|model.*unavailable|openrouter.*fail/i, type: 'ai_error', severity: 'medium', hint: 'LLM provider issue — check fallback chain' },
-  { regex: /button.*not work|nothing happens|click.*no response/i, type: 'inactive_ui', severity: 'medium', hint: 'Dead UI element — check event handler binding' },
-  { regex: /confus|unclear|dont understand/i, type: 'ux_issue', severity: 'low', hint: 'UX clarity issue — simplify text or add tooltip' },
-  { regex: /feature request/i, type: 'idea', severity: 'low', hint: 'Feature request — evaluate and prioritize' },
+  { regex: /cannot read prop|undefined is not|null is not/i, type: 'bug', severity: 'high', hint: 'Null reference – add null check or optional chaining' },
+  { regex: /network error|fetch failed|ECONNREFUSED|ETIMEDOUT/i, type: 'bug', severity: 'medium', hint: 'Network/connectivity issue – check endpoint availability' },
+  { regex: /CORS|cross-origin|blocked by/i, type: 'bug', severity: 'medium', hint: 'CORS policy – verify allowed origins in backend' },
+  { regex: /rate limit|429|too many requests/i, type: 'bug', severity: 'medium', hint: 'Rate limiting – implement backoff or increase limits' },
+  { regex: /syntax error|unexpected token|parse error/i, type: 'bug', severity: 'high', hint: 'Syntax/parse error – check JSON or code syntax' },
+  { regex: /out of memory|heap|stack overflow/i, type: 'bug', severity: 'critical', hint: 'Memory issue – check for leaks, reduce payload size' },
+  { regex: /permission denied|unauthorized|403|401/i, type: 'bug', severity: 'medium', hint: 'Auth/permission issue – verify token and roles' },
+  { regex: /hallucin|made up|invented|fabricat/i, type: 'ai_error', severity: 'high', hint: 'AI hallucination detected – add grounding constraints' },
+  { regex: /LLM.*error|model.*unavailable|openrouter.*fail/i, type: 'ai_error', severity: 'medium', hint: 'LLM provider issue – check fallback chain' },
+  { regex: /button.*not work|nothing happens|click.*no response/i, type: 'inactive_ui', severity: 'medium', hint: 'Dead UI element – check event handler binding' },
+  { regex: /confus|unclear|dont understand/i, type: 'ux_issue', severity: 'low', hint: 'UX clarity issue – simplify text or add tooltip' },
+  { regex: /feature request/i, type: 'idea', severity: 'low', hint: 'Feature request – evaluate and prioritize' },
 ];
 
 // ─── Classify ─────────────────────────────────────────────────────────────────

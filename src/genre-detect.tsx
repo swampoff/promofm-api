@@ -184,11 +184,11 @@ export async function detectGenreLLM(artist: string, title: string): Promise<str
   const t = (title || '').trim();
   if (!a && !t) return null;
   try {
-    const sys = `Ты — музыкальный классификатор. Определи жанр трека и ответь РОВНО ОДНИМ словом из списка (без пояснений): ${CANON_GENRES.join(', ')}. Если уверенности нет — ответь Unknown.`;
+    const sys = `Ты – музыкальный классификатор. Определи жанр трека и ответь РОВНО ОДНИМ словом из списка (без пояснений): ${CANON_GENRES.join(', ')}. Если уверенности нет – ответь Unknown.`;
     // quickLLM первым (openrouter→anthropic, оба через прокси, оплачено);
     // gemini free-tier (20 req/min) — только резерв.
-    const raw = (await quickLLM(sys, `${a} — ${t}`, { maxTokens: 8, tag: 'genre-detect' }).catch(() => null))
-      ?? await geminiQuick(sys, `${a} — ${t}`);
+    const raw = (await quickLLM(sys, `${a} – ${t}`, { maxTokens: 8, tag: 'genre-detect' }).catch(() => null))
+      ?? await geminiQuick(sys, `${a} – ${t}`);
     const cleaned = String(raw || '').trim().replace(/[."'\n].*$/s, '');
     if (/^unknown$/i.test(cleaned)) return null;
     return normalizeGenre(cleaned);

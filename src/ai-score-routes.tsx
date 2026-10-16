@@ -51,7 +51,7 @@ async function scoreForTracks(rows: any[], radioCount: number, venueCount: numbe
     {
       key: 'audio', label: 'Аудио-характеристики', weight: 12,
       score: pct(share((t) => t.bpm !== null || t.music_key !== null)),
-      hint: 'Темп, тональность, энергия — считаются автоматически',
+      hint: 'Темп, тональность, энергия – считаются автоматически',
     },
     {
       key: 'description', label: 'Описание', weight: 12,
@@ -74,7 +74,7 @@ async function scoreForTracks(rows: any[], radioCount: number, venueCount: numbe
     {
       key: 'radio', label: 'Данные об эфирах', weight: 10,
       score: pct(Math.min(radioCount, 10), 10),
-      hint: 'Подтверждённые фингерпринтом эфиры — то, чего нет у стримингов',
+      hint: 'Подтверждённые фингерпринтом эфиры – то, чего нет у стримингов',
     },
     {
       key: 'venue', label: 'Данные по заведениям', weight: 5,

@@ -201,7 +201,7 @@ app.get('/djs/:id/mixes', async (c) => {
          WHERE (m.dj_id = $1 OR m.dj_id = (
                 SELECT user_id FROM dj_profiles
                  WHERE id::text = $1 OR user_id = $1 LIMIT 1))
-           -- 'approved' = одобрен, ждёт оплаты эфира — в профиле виден (10-06)
+           -- 'approved' = одобрен, ждёт оплаты эфира – в профиле виден (10-06)
            AND m.moderation_status IN ('upcoming', 'published', 'approved')
            AND m.is_hidden = FALSE
          ORDER BY m.created_at DESC`,

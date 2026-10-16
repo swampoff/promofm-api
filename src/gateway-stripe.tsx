@@ -179,7 +179,7 @@ export class StripeGateway implements PaymentGateway {
 
     // Verify signature — MANDATORY (reject if secret not configured)
     if (!webhookSecret) {
-      console.error('Stripe webhook: STRIPE_WEBHOOK_SECRET not configured — rejecting webhook');
+      console.error('Stripe webhook: STRIPE_WEBHOOK_SECRET not configured – rejecting webhook');
       return null;
     }
     const valid = await verifyStripeSignature(rawBody, sigHeader, webhookSecret);

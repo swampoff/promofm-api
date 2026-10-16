@@ -1403,7 +1403,7 @@ app.post('/finances/withdrawals', requireAuth, requireDjRole, profileLimiter, as
     const method = String(body.method || 'sbp');
 
     if (!(amount >= 500)) {
-      return c.json({ success: false, error: 'Минимальная сумма вывода — 500 ₽' }, 400);
+      return c.json({ success: false, error: 'Минимальная сумма вывода – 500 ₽' }, 400);
     }
     if (!['sbp', 'yoomoney', 'card'].includes(method)) {
       return c.json({ success: false, error: 'Недопустимый способ вывода' }, 400);
@@ -2249,7 +2249,7 @@ app.post('/mixes/:id/submit-moderation', requireAuth, requireDjRole, async (c) =
       return c.json({ success: false, error: 'Микс уже на модерации' }, 409);
     }
     if (current === 'approved' || current === 'upcoming') {
-      return c.json({ success: false, error: 'Микс уже одобрен — повторная модерация не нужна' }, 409);
+      return c.json({ success: false, error: 'Микс уже одобрен – повторная модерация не нужна' }, 409);
     }
     await pool.query(
       `UPDATE dj_mixes

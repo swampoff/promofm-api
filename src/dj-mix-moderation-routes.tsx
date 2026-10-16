@@ -195,7 +195,7 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
       } catch {}
 
       if (djEmail) {
-        const emailSubject = `Микс одобрен — ${mix.title}`;
+        const emailSubject = `Микс одобрен – ${mix.title}`;
         const statusBlock = `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>${getPublicationPrice().toLocaleString('ru-RU')} ₽</strong></p>`;
         const ctaButton = '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru/dj/mixes" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#8B5CF6,#7C3AED);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>';
 
@@ -239,7 +239,7 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
           notifyAdminTelegram(
             [
               '\u26a0\ufe0f Микс «' + mix.title + '» одобрен, но письмо об оплате ' + price + ' \u20bd НЕ доставлено.',
-              'Адрес DJ: ' + djEmail + ' — похоже на VK-плейсхолдер без ящика.',
+              'Адрес DJ: ' + djEmail + ' – похоже на VK-плейсхолдер без ящика.',
               'Он увидит счёт только в кабинете. Свяжитесь с ним вручную.',
             ].join('\n'),
           ).catch(() => {});
@@ -313,7 +313,7 @@ app.post('/manage-dj-mix-moderation', requireAuth, requireAdmin, async (c) => {
     } catch {}
 
     if (djEmail) {
-      const rejectSubject = `Результат модерации — ${mix.title}`;
+      const rejectSubject = `Результат модерации – ${mix.title}`;
       const bodyText = rejection_type === 'profanity'
         ? 'Микс отклонён в связи с ненормативной лексикой / контентом, не соответствующим редакционной политике платформы. Будем рады принять clean version.'
         : 'На данный момент мы не готовы включить микс в публикацию. Это связано с внутренними критериями отбора и редакционной концепцией платформы. Будем рады следующим работам.';

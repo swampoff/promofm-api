@@ -1012,7 +1012,7 @@ app.put('/profile/update/:producerId', requireAuth, async (c) => {
       // Раньше ошибка глоталась, PUT отвечал 200, и кабинет писал «Профиль
       // сохранён», хотя публичная страница не обновилась.
       console.error(`[producer-profile] mirror to producer_profiles failed:`, mirrorErr);
-      return c.json({ success: false, error: 'Профиль не сохранился — попробуйте ещё раз' }, 500);
+      return c.json({ success: false, error: 'Профиль не сохранился – попробуйте ещё раз' }, 500);
     }
 
     // Audit A-P1 (2026-05-31): forensic trail на изменения профиля —
@@ -1264,7 +1264,7 @@ app.get('/ai/history/:producerId', requireAuth, async (c) => {
  */
 function fallbackRecs(d: any): string {
   const t: string[] = [
-    '> ⚙️ **Демо-рекомендации** — AI временно недоступен, показаны базовые подсказки на основе данных вашего кабинета.\n',
+    '> ⚙️ **Демо-рекомендации** – AI временно недоступен, показаны базовые подсказки на основе данных вашего кабинета.\n',
     '📊 **Обзор кабинета**\n',
     `- Диалогов: ${d.conversations}`,
     `- Непрочитанных: ${d.totalUnread}`,
@@ -1275,16 +1275,16 @@ function fallbackRecs(d: any): string {
   ];
   const recs: string[] = [];
   if (d.totalUnread > 0) {
-    recs.push(`- Ответьте на ${d.totalUnread} непрочитанн${d.totalUnread === 1 ? 'ое' : 'ых'} сообщени${d.totalUnread === 1 ? 'е' : 'й'} — быстрый отклик повышает рейтинг`);
+    recs.push(`- Ответьте на ${d.totalUnread} непрочитанн${d.totalUnread === 1 ? 'ое' : 'ых'} сообщени${d.totalUnread === 1 ? 'е' : 'й'} – быстрый отклик повышает рейтинг`);
   }
   if (d.customServices < 3) {
-    recs.push(`- У вас ${d.customServices} услуг${d.customServices === 1 ? 'а' : ''} — добавьте ещё чтобы расширить выдачу в каталоге`);
+    recs.push(`- У вас ${d.customServices} услуг${d.customServices === 1 ? 'а' : ''} – добавьте ещё чтобы расширить выдачу в каталоге`);
   }
   if (d.upcomingSessions < 2 && d.customServices > 0) {
-    recs.push('- Мало запланированных сессий — поделитесь профилем в соцсетях, обновите описание услуг');
+    recs.push('- Мало запланированных сессий – поделитесь профилем в соцсетях, обновите описание услуг');
   }
   if (d.vacationMode) {
-    recs.push('- ⚠️ Режим отпуска включён — новые заказы не поступают. Выключите когда вернётесь.');
+    recs.push('- ⚠️ Режим отпуска включён – новые заказы не поступают. Выключите когда вернётесь.');
   }
   if (recs.length === 0) {
     t.push('- Все базовые метрики в норме. Подключите MISTRAL_API_KEY чтобы получать персональные рекомендации.');

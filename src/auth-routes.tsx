@@ -241,7 +241,7 @@ auth.post("/signup", async (c) => {
 
     const profileOk = await createVpsProfileOrRollback(userId, email, userName, userRole);
     if (!profileOk) {
-      return c.json({ success: false, error: 'Ошибка регистрации — не удалось создать профиль. Попробуйте ещё раз.' }, 500);
+      return c.json({ success: false, error: 'Ошибка регистрации – не удалось создать профиль. Попробуйте ещё раз.' }, 500);
     }
 
     // Радиозаявка: пишем данные в radio_profiles (колонки уже есть) +
@@ -374,7 +374,7 @@ auth.post("/signin", async (c) => {
       }
       return c.json({
         success: false,
-        error: "У этого аккаунта ещё нет пароля — он создан при переносе базы. Мы отправили на вашу почту ссылку, чтобы задать пароль.",
+        error: "У этого аккаунта ещё нет пароля – он создан при переносе базы. Мы отправили на вашу почту ссылку, чтобы задать пароль.",
         requiresPasswordSetup: true,
       }, 401);
     }
@@ -602,7 +602,7 @@ auth.post("/vk-callback", async (c) => {
 
     const profileOk = await createVpsProfileOrRollback(userId, userEmail, vkName, vkRole, vkAvatar);
     if (!profileOk) {
-      return c.json({ success: false, error: 'Ошибка создания аккаунта — не удалось создать профиль' }, 500);
+      return c.json({ success: false, error: 'Ошибка создания аккаунта – не удалось создать профиль' }, 500);
     }
     notifyNewUser({ email: userEmail, name: vkName, role: vkRole, via: "vk_oauth" }).catch(() => {});
 
@@ -904,7 +904,7 @@ auth.post("/set-email", requireAuth, async (c) => {
     if (!isPlaceholder) {
       return c.json({
         success: false,
-        error: "У аккаунта уже указана почта. Смена адреса — через поддержку.",
+        error: "У аккаунта уже указана почта. Смена адреса – через поддержку.",
       }, 409);
     }
 

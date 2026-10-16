@@ -187,8 +187,8 @@ function readItemFields(body: any, kind: string) {
 
 function fieldsError(f: ReturnType<typeof readItemFields>): string | null {
   if (!f.title) return 'Укажите название';
-  if (f.bpm !== null && (!Number.isFinite(f.bpm) || f.bpm < 30 || f.bpm > 300)) return 'BPM — от 30 до 300';
-  if (Number.isNaN(f.priceLease as any) || Number.isNaN(f.priceExclusive as any)) return `Цена — от ${MIN_PRICE} до ${MAX_PRICE.toLocaleString('ru-RU')} ₽`;
+  if (f.bpm !== null && (!Number.isFinite(f.bpm) || f.bpm < 30 || f.bpm > 300)) return 'BPM – от 30 до 300';
+  if (Number.isNaN(f.priceLease as any) || Number.isNaN(f.priceExclusive as any)) return `Цена – от ${MIN_PRICE} до ${MAX_PRICE.toLocaleString('ru-RU')} ₽`;
   return null;
 }
 
@@ -212,7 +212,7 @@ market.put('/my/items/:id', requireAuth, async (c) => {
   const s = await requireSeller(c); if (typeof s !== 'string') return s;
   const item = await ownItem(c.req.param('id'), s);
   if (!item) return c.json({ success: false, error: 'Товар не найден' }, 404);
-  if (item.status === 'sold') return c.json({ success: false, error: 'Товар продан эксклюзивно — менять нельзя' }, 409);
+  if (item.status === 'sold') return c.json({ success: false, error: 'Товар продан эксклюзивно – менять нельзя' }, 409);
   const body = await c.req.json().catch(() => ({}));
   const f = readItemFields(body, item.kind);
   const err = fieldsError(f); if (err) return c.json({ success: false, error: err }, 400);
@@ -387,7 +387,7 @@ market.post('/my/withdrawals', requireAuth, async (c) => {
   const amount = Math.round(Number(body?.amount) * 100) / 100;
   const details = String(body?.details || '').trim().slice(0, 500);
   const method = ['card', 'sbp', 'bank'].includes(body?.method) ? body.method : 'card';
-  if (!Number.isFinite(amount) || amount < MIN_WITHDRAWAL) return c.json({ success: false, error: `Минимальная сумма вывода — ${MIN_WITHDRAWAL.toLocaleString('ru-RU')} ₽` }, 400);
+  if (!Number.isFinite(amount) || amount < MIN_WITHDRAWAL) return c.json({ success: false, error: `Минимальная сумма вывода – ${MIN_WITHDRAWAL.toLocaleString('ru-RU')} ₽` }, 400);
   if (!details) return c.json({ success: false, error: 'Укажите реквизиты для выплаты' }, 400);
   const client = await pool.connect();
   try {
@@ -416,11 +416,11 @@ market.post('/my/withdrawals', requireAuth, async (c) => {
     const u = await userInfo(s);
     import('./email-helper.tsx').then(async (m) => {
       const html = m.emailWrapper(`
-        <h2 style="margin:0 0 16px;color:#10B981;">Заявка на вывод — маркетплейс</h2>
-        <p style="color:#e0e0e0;">${m.escapeHtml(u.name || u.email || s)} (${m.escapeHtml(u.email || '—')}) просит вывести <b>${amount.toLocaleString('ru-RU')} ₽</b>.</p>
+        <h2 style="margin:0 0 16px;color:#10B981;">Заявка на вывод – маркетплейс</h2>
+        <p style="color:#e0e0e0;">${m.escapeHtml(u.name || u.email || s)} (${m.escapeHtml(u.email || '–')}) просит вывести <b>${amount.toLocaleString('ru-RU')} ₽</b>.</p>
         <p style="color:#e0e0e0;">Способ: ${m.escapeHtml(method)}. Реквизиты: ${m.escapeHtml(details)}</p>
         <p style="color:#888;font-size:13px;">Комиссия 10 % уже удержана при продаже. Заявка ${m.escapeHtml(String(rows[0].id))}.</p>`);
-      await m.sendEmail({ to: 'info@promofm.ru', subject: `[ПРОМО] Вывод с маркетплейса: ${amount.toLocaleString('ru-RU')} ₽ — ${u.name || u.email || s}`, html });
+      await m.sendEmail({ to: 'info@promofm.ru', subject: `[ПРОМО] Вывод с маркетплейса: ${amount.toLocaleString('ru-RU')} ₽ – ${u.name || u.email || s}`, html });
       await m.notifyAdminTelegram(`💸 <b>Вывод с маркетплейса</b>\n${u.name || u.email || s}: <b>${amount} ₽</b>\nРеквизиты: ${details}`).catch(() => {});
     }).catch(() => {});
     return c.json({ success: true, data: { id: String(rows[0].id), amount, status: 'pending' } }, 201);
@@ -578,7 +578,7 @@ export async function fulfillMarketPurchase(purchaseId: string, orderId: string,
       `SELECT count(*)::int AS n FROM market_purchases WHERE item_id = $1 AND license = 'exclusive' AND status = 'paid'`, [p.item_id]);
     if (Number(dup.rows[0]?.n) > 1) {
       import('./email-helper.tsx').then((m) => m.notifyAdminTelegram(
-        `⚠️ <b>Маркетплейс: второй оплаченный эксклюзив</b>\nТовар ${p.item_id}, покупка ${p.id} — нужен возврат ${p.amount} ₽`)).catch(() => {});
+        `⚠️ <b>Маркетплейс: второй оплаченный эксклюзив</b>\nТовар ${p.item_id}, покупка ${p.id} – нужен возврат ${p.amount} ₽`)).catch(() => {});
     }
   }
   const [{ rows: items }, buyer, seller] = await Promise.all([
@@ -607,7 +607,7 @@ export async function fulfillMarketPurchase(purchaseId: string, orderId: string,
         subject: `[ПРОМО] Покупка: ${kindLabel} «${it.title}»`,
         html: m.emailWrapper(`
           <h2 style="margin:0 0 16px;color:#7C3AED;">Спасибо за покупку!</h2>
-          <p style="color:#e0e0e0;">${m.escapeHtml(kindLabel)} «${m.escapeHtml(it.title)}» — ${m.escapeHtml(it.seller_name || '')}. ${m.escapeHtml(LICENSE_LABEL[p.license])}, ${Number(p.amount).toLocaleString('ru-RU')} ₽.</p>
+          <p style="color:#e0e0e0;">${m.escapeHtml(kindLabel)} «${m.escapeHtml(it.title)}» – ${m.escapeHtml(it.seller_name || '')}. ${m.escapeHtml(LICENSE_LABEL[p.license])}, ${Number(p.amount).toLocaleString('ru-RU')} ₽.</p>
           <p style="color:#e0e0e0;">${m.escapeHtml(licenseText(it.kind, p.license, it.title, it.seller_name || ''))}</p>
           <p><a href="${DOMAIN}/marketplace?tab=purchases" style="display:inline-block;padding:12px 24px;background:#7C3AED;color:#fff;border-radius:8px;text-decoration:none;">Скачать файл</a></p>`),
       });
@@ -615,15 +615,15 @@ export async function fulfillMarketPurchase(purchaseId: string, orderId: string,
     if (seller.email) {
       await m.sendEmail({
         to: seller.email,
-        subject: `[ПРОМО] Продажа: ${kindLabel} «${it.title}» — ${Number(p.amount).toLocaleString('ru-RU')} ₽`,
+        subject: `[ПРОМО] Продажа: ${kindLabel} «${it.title}» – ${Number(p.amount).toLocaleString('ru-RU')} ₽`,
         html: m.emailWrapper(`
           <h2 style="margin:0 0 16px;color:#10B981;">Ваш ${m.escapeHtml(kindLabel)} купили</h2>
-          <p style="color:#e0e0e0;">«${m.escapeHtml(it.title)}», ${m.escapeHtml(LICENSE_LABEL[p.license])} — ${Number(p.amount).toLocaleString('ru-RU')} ₽.</p>
-          <p style="color:#e0e0e0;">Вам начислено <b>${Number(p.payout).toLocaleString('ru-RU')} ₽</b> (за вычетом 10 % комиссии платформы). Вывести — в кабинете, раздел «Мои продажи», от ${MIN_WITHDRAWAL.toLocaleString('ru-RU')} ₽.</p>
-          ${p.license === 'exclusive' ? '<p style="color:#e0e0e0;">Эксклюзив продаётся один раз — товар снят с продажи.</p>' : ''}`),
+          <p style="color:#e0e0e0;">«${m.escapeHtml(it.title)}», ${m.escapeHtml(LICENSE_LABEL[p.license])} – ${Number(p.amount).toLocaleString('ru-RU')} ₽.</p>
+          <p style="color:#e0e0e0;">Вам начислено <b>${Number(p.payout).toLocaleString('ru-RU')} ₽</b> (за вычетом 10 % комиссии платформы). Вывести – в кабинете, раздел «Мои продажи», от ${MIN_WITHDRAWAL.toLocaleString('ru-RU')} ₽.</p>
+          ${p.license === 'exclusive' ? '<p style="color:#e0e0e0;">Эксклюзив продаётся один раз – товар снят с продажи.</p>' : ''}`),
       });
     }
-    m.notifyAdminTelegram(`🛒 <b>Продажа на маркетплейсе</b>\n${kindLabel} «${it.title}» (${LICENSE_LABEL[p.license]}) — ${p.amount} ₽\nПродавцу: ${p.payout} ₽, комиссия: ${p.commission} ₽`).catch(() => {});
+    m.notifyAdminTelegram(`🛒 <b>Продажа на маркетплейсе</b>\n${kindLabel} «${it.title}» (${LICENSE_LABEL[p.license]}) – ${p.amount} ₽\nПродавцу: ${p.payout} ₽, комиссия: ${p.commission} ₽`).catch(() => {});
   } catch (e: any) {
     console.warn('[market] emails', e?.message);
   }

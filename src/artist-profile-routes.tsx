@@ -592,13 +592,13 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileSave
       delete updates.username;
       if (handle && handle !== (currentProfile.username || '')) {
         if (!/^[A-Za-z0-9А-Яа-яЁё_.-]{2,50}$/.test(handle)) {
-          fieldErrors.username = 'Сценическое имя: от 2 до 50 символов — буквы, цифры, «_», «.», «-», без пробелов';
+          fieldErrors.username = 'Сценическое имя: от 2 до 50 символов – буквы, цифры, «_», «.», «-», без пробелов';
         } else {
           const { rows } = await pool.query(
             `SELECT 1 FROM users WHERE lower(username) = lower($1) AND id::text <> $2 LIMIT 1`,
             [handle, artistId],
           );
-          if (rows.length > 0) fieldErrors.username = `Сценическое имя @${handle} уже занято — выберите другое`;
+          if (rows.length > 0) fieldErrors.username = `Сценическое имя @${handle} уже занято – выберите другое`;
           else newUsername = handle;
         }
       }
@@ -623,7 +623,7 @@ app.put('/profile/:artistId', requireAuth, requireOwner('artistId'), profileSave
       try {
         await pool.query(`UPDATE users SET username = $1 WHERE id::text = $2`, [newUsername, artistId]);
       } catch (e: any) {
-        if (e?.code === '23505') fieldErrors.username = `Сценическое имя @${newUsername} уже занято — выберите другое`;
+        if (e?.code === '23505') fieldErrors.username = `Сценическое имя @${newUsername} уже занято – выберите другое`;
         else throw e;
       }
     }

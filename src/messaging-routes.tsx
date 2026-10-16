@@ -1239,7 +1239,7 @@ app.post('/conversations/:id/participants', requireAuth, async (c) => {
         const labelB = ROLE_LABELS[participant.role] || participant.role;
         return c.json({
           success: false,
-          error: `${labelA} не может переписываться с ролью ${labelB} — добавление отклонено`,
+          error: `${labelA} не может переписываться с ролью ${labelB} – добавление отклонено`,
           code: 'COMMUNICATION_RESTRICTED',
         }, 403);
       }

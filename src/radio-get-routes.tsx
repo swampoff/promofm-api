@@ -226,7 +226,7 @@ function stationForm(rcp: Recipient): string {
   <label for="sc">Город вещания</label>
   <input id="sc" name="city" maxlength="80" value="${escapeHtml(rcp.city)}" placeholder="Например, Геленджик">
   <label for="sf">Формат</label>
-  <select id="sf" name="format"><option value="">— выберите —</option>${opts}</select>
+  <select id="sf" name="format"><option value="">– выберите –</option>${opts}</select>
   <label for="ss">Ссылка на онлайн-эфир, если есть</label>
   <input id="ss" name="stream_url" maxlength="500" value="${escapeHtml(rcp.streamUrl)}" placeholder="https://…">
   <p class="note">По ссылке на эфир мы сможем подтверждать, что трек прозвучал у вас, и показывать вашу станцию на странице трека и на карте эфиров ПРОМО.МУЗЫКИ.</p>
@@ -310,7 +310,7 @@ ${otherRows ? `<div class="card"><h2>Ещё в подборке этой нед�
  });}
 })();
 </script>`;
-    return page(`${t.artist_name || ''} — ${t.title || ''}`, body, 200, c);
+    return page(`${t.artist_name || ''} – ${t.title || ''}`, body, 200, c);
   } catch (err: any) {
     console.error('[radio-get] page failed:', err?.message || err);
     return messagePage(c, 500, 'Что-то пошло не так', 'Попробуйте открыть ссылку ещё раз через минуту.');

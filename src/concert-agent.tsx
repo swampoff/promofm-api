@@ -238,7 +238,7 @@ async function extractConcertsWithMistral(
     return [];
   }
 
-  const systemPrompt = `Ты — парсер концертных афиш. Из текста HTML-страницы извлеки предстоящие концерты.
+  const systemPrompt = `Ты – парсер концертных афиш. Из текста HTML-страницы извлеки предстоящие концерты.
 
 ВАЖНО:
 - Верни ТОЛЬКО валидный JSON: {"concerts": [...]}
@@ -247,7 +247,7 @@ async function extractConcertsWithMistral(
 - Максимум 15 концертов
 - Если дата неизвестна, используй пустую строку
 - НЕ добавляй markdown-обёртку
-- Если не удалось — верни {"concerts": []}`;
+- Если не удалось – верни {"concerts": []}`;
 
   try {
     const resp = await fetch('https://api.mistral.ai/v1/chat/completions', {

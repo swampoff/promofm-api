@@ -323,7 +323,7 @@ app.post('/request', async (c) => {
     const performer = perf.rows[0];
 
     const bookingId = `bk-${crypto.randomUUID()}`;
-    const baseTitle = eventTitle || `${eventType} — ${city || 'город не указан'}`;
+    const baseTitle = eventTitle || `${eventType} – ${city || 'город не указан'}`;
     // С артистом из импорта связи нет — это запрос на подбор, а не бронь.
     // Пишем это прямо в заголовке, чтобы в очереди было видно без
     // дополнительных проверок.
@@ -388,8 +388,8 @@ app.post('/request', async (c) => {
         type: 'booking_request',
         title: 'Новая заявка на выступление',
         message: offeredFee
-          ? `${title} — ${eventDate} · предложено ${offeredFee.toLocaleString('ru-RU')} \u20bd`
-          : `${title} — ${eventDate}`,
+          ? `${title} – ${eventDate} · предложено ${offeredFee.toLocaleString('ru-RU')} \u20bd`
+          : `${title} – ${eventDate}`,
         link: performer.performer_category === 'dj' ? '/dj/bookings' : '/artist/booking',
       });
     } catch (err: any) {

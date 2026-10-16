@@ -124,7 +124,7 @@ export class TBankGateway implements PaymentGateway {
 
     // Verify signature — MANDATORY (reject if secret not configured)
     if (!secretKey) {
-      console.error('TBank webhook: TBANK_SECRET_KEY not configured — rejecting webhook');
+      console.error('TBank webhook: TBANK_SECRET_KEY not configured – rejecting webhook');
       return null;
     }
     const valid = await verifyTBankSignature(body, secretKey);

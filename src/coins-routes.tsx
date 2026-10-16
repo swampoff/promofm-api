@@ -94,7 +94,7 @@ coinsRoutes.post('/topup', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Укажите gateway: "yookassa" или "tbank"' }, 400);
     }
     if (!amount || amount < 10) {
-      return c.json({ success: false, error: 'Минимальная сумма пополнения — 10 ₽' }, 400);
+      return c.json({ success: false, error: 'Минимальная сумма пополнения – 10 ₽' }, 400);
     }
 
     const coinAmount = Math.floor(amount * COINS_PER_RUBLE);

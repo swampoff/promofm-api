@@ -196,7 +196,7 @@ donationsRoutes.post('/withdrawals', requireAuth, async (c) => {
       return c.json({ success: false, error: 'amount must be > 0' }, 400);
     }
     if (amount < 1000) {
-      return c.json({ success: false, error: 'Минимальная сумма вывода — 1000 ₽' }, 400);
+      return c.json({ success: false, error: 'Минимальная сумма вывода – 1000 ₽' }, 400);
     }
 
     const balance = await getDonationBalance(userId);

@@ -757,7 +757,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
       if (fromChatId) {
         await telegramReply(fromChatId,
           '👋 Бот моста live-чат ↔ Telegram активен.\n\n'
-          + 'Когда придёт уведомление «Новый live-чат на сайте» — нажмите '
+          + 'Когда придёт уведомление «Новый live-чат на сайте» – нажмите '
           + '<b>Reply</b> на него и пришлите текст. Ответ доставится посетителю.'
         );
       }
@@ -768,7 +768,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
     if (!replyTo || typeof replyTo.text !== 'string') {
       if (fromChatId) {
         await telegramReply(fromChatId,
-          '⚠️ Чтобы доставить ответ — сделайте <b>Reply</b> на уведомление '
+          '⚠️ Чтобы доставить ответ – сделайте <b>Reply</b> на уведомление '
           + '«Новый live-чат на сайте». Без Reply бот не знает в какую сессию слать.'
         );
       }
@@ -780,7 +780,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
       if (fromChatId) {
         await telegramReply(fromChatId,
           '⚠️ В исходном сообщении нет метки сессии. Ответьте на свежее '
-          + 'уведомление «Новый live-чат на сайте» — там должна быть строка '
+          + 'уведомление «Новый live-чат на сайте» – там должна быть строка '
           + '<code>[session:UUID]</code>.'
         );
       }

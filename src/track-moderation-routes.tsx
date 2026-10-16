@@ -276,7 +276,7 @@ app.post('/submitTrack', requireAuth, async (c) => {
     const descriptionRaw = String(body.description || '').trim();
     if (descriptionRaw.length < 20) {
       return c.json({
-        error: 'Опишите трек минимум в 20 символах — это видно на публичном профиле',
+        error: 'Опишите трек минимум в 20 символах – это видно на публичном профиле',
         code: 'DESCRIPTION_REQUIRED'
       }, 400);
     }
@@ -565,7 +565,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
         if (is_ai_track) {
           // AI track — special email with AI section offer
           const aiPercent = track.ai_score || 95;
-          emailSubject = 'Результат модерации — ' + track.title;
+          emailSubject = 'Результат модерации – ' + track.title;
           emailHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
             + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
             + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
@@ -584,14 +584,14 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
             + '</div>'
             + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
-            + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
+            + '<p style="margin:0 0 8px;">Промо.Музыка – <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
             + '<p style="margin:0 0 8px;">info@promofm.ru · Москва, Россия</p>'
             + '<p style="margin:0;color:#555;">Вы получили это письмо, так как отправили трек на модерацию</p>'
             + '</div>'
             + '</div>';
         } else {
           // Normal track — paid approval email.
-          emailSubject = 'Трек одобрен — ' + track.title;
+          emailSubject = 'Трек одобрен – ' + track.title;
           const statusBlock = '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Для публикации необходимо произвести оплату: <strong>' + getPublicationPrice().toLocaleString('ru-RU') + ' ₽</strong></p>';
           const ctaButton = '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru' + payLink(cabinetPath, String(pendingTrackId)) + '" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>';
 
@@ -605,13 +605,13 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<p>Благодарим вас за отправку трека на платформу Промо.Музыка. Мы внимательно прослушали вашу работу и с радостью сообщаем, что она прошла модерацию.</p>'
             + '<p>Ваш трек <strong>«' + escapeHtml(track.title) + '»</strong> одобрен к размещению, и мы будем рады представить его нашей аудитории.</p>'
             + statusBlock
-            + '<p>Спасибо за ваше творчество и доверие к нашей платформе — это действительно ценно для нас.</p>'
+            + '<p>Спасибо за ваше творчество и доверие к нашей платформе – это действительно ценно для нас.</p>'
             + (moderator_notes ? '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #3B82F6;border-radius:4px;">Комментарий: ' + escapeHtml(moderator_notes) + '</p>' : '')
             + ctaButton
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
             + '</div>'
             + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
-            + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
+            + '<p style="margin:0 0 8px;">Промо.Музыка – <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
             + '<p style="margin:0 0 8px;">info@promofm.ru · Москва, Россия</p>'
             + '<p style="margin:0;color:#555;">Вы получили это письмо, так как отправили трек на модерацию</p>'
             + '</div>'
@@ -715,7 +715,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
 
         if (rejection_type === 'profanity') {
           // Rejection: profanity / explicit content
-          rejectSubject = 'Результат модерации — ' + track.title;
+          rejectSubject = 'Результат модерации – ' + track.title;
           rejectHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
             + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
             + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
@@ -731,14 +731,14 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
             + '</div>'
             + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
-            + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
+            + '<p style="margin:0 0 8px;">Промо.Музыка – <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
             + '<p style="margin:0 0 8px;">info@promofm.ru · Москва, Россия</p>'
             + '<p style="margin:0;color:#555;">Вы получили это письмо, так как отправили трек на модерацию</p>'
             + '</div>'
             + '</div>';
         } else {
           // General rejection
-          rejectSubject = 'Результат модерации — ' + track.title;
+          rejectSubject = 'Результат модерации – ' + track.title;
           rejectHtml = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
             + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;border-bottom:1px solid #2a2a4a;">'
             + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
@@ -755,7 +755,7 @@ app.post('/manageTrackModeration', requireAuth, requireAdmin, async (c) => {
             + '<p style="color:#888;">С уважением,<br/>Команда Промо.Музыка</p>'
             + '</div>'
             + '<div style="background:#0d0d1a;padding:20px 32px;border-top:1px solid #2a2a4a;text-align:center;font-size:12px;color:#666;">'
-            + '<p style="margin:0 0 8px;">Промо.Музыка — <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
+            + '<p style="margin:0 0 8px;">Промо.Музыка – <a href="https://promo-music.ru" style="color:#FF577F;text-decoration:none;">promo-music.ru</a></p>'
             + '<p style="margin:0 0 8px;">info@promofm.ru · Москва, Россия</p>'
             + '<p style="margin:0;color:#555;">Вы получили это письмо, так как отправили трек на модерацию</p>'
             + '</div>'
@@ -1063,7 +1063,7 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
           currentStatus: snapshot.moderation_status,
         });
         console.warn(
-          `[approve-paid] skipped trackId=${trackId} — snapshot status=${snapshot.moderation_status}, ` +
+          `[approve-paid] skipped trackId=${trackId} – snapshot status=${snapshot.moderation_status}, ` +
           `expected 'paid'. Possible causes: already advanced, /manageTrackModeration ` +
           `re-approval race, or webhook never fired.`
         );
@@ -1114,7 +1114,7 @@ app.post('/approve-paid', requireAuth, requireAdmin, async (c) => {
         }
         if (notifyEmail) {
           const aName = (snapshot as any).artist_name || (snapshot as any).artist || 'артист';
-          const subj = `Ваш трек «${snapshot.title}» прошёл модерацию — размещён в разделе «Скоро»`;
+          const subj = `Ваш трек «${snapshot.title}» прошёл модерацию – размещён в разделе «Скоро»`;
           const eHtml = emailWrapper(
             '<h2 style="margin:0 0 16px; color:#fff; font-size:20px;">Трек прошёл модерацию ✓</h2>'
             + '<p>Здравствуйте, <b>' + escapeHtml(aName) + '</b>!</p>'
@@ -1160,8 +1160,8 @@ app.post('/promote-upcoming', async (c) => {
           AND (
             (upcoming_until IS NOT NULL AND upcoming_until <= $1::timestamptz)
             -- Страховка: upcoming без даты (аплоад не проставил upcoming_until)
-            -- раньше зависал НАВСЕГДА — крон его не видел (кейс Rina Shakti
-            -- 2026-07-27, + трек с 29 мая). 48ч в «скоро» — и публикуем.
+            -- раньше зависал НАВСЕГДА – крон его не видел (кейс Rina Shakti
+            -- 2026-07-27, + трек с 29 мая). 48ч в «скоро» – и публикуем.
             OR (upcoming_until IS NULL AND created_at < $1::timestamptz - interval '48 hours')
           )`,
       [now.toISOString()]
@@ -1412,7 +1412,7 @@ app.post('/send-payment-reminders', async (c) => {
       const priceText = priceValue.toLocaleString('ru-RU') + ' ₽';
       const cabinetPath = t.user_role === 'label' ? `/label/releases?pay=${encodeURIComponent(String(t.id))}` : '/artist/tracks';
 
-      const subject = 'Напоминание об оплате — ' + t.title;
+      const subject = 'Напоминание об оплате – ' + t.title;
       const html = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a14;color:#e5e5e5;border-radius:12px;overflow:hidden;">'
         + '<div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:24px 32px;text-align:center;">'
         + '<img src="https://promo-music.ru/logo.png" alt="Промо.Музыка" style="height:36px;" />'
@@ -1421,7 +1421,7 @@ app.post('/send-payment-reminders', async (c) => {
         + '<p>Ваш трек <strong>«' + escapeHtml(t.title) + '»</strong> одобрен модерацией и ждёт оплаты для публикации.</p>'
         + '<p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:4px;">Стоимость публикации: <strong>' + priceText + '</strong></p>'
         + '<p style="text-align:center;margin:28px 0;"><a href="https://promo-music.ru' + cabinetPath + '" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#FF577F,#FF577F);color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">Оплатить и опубликовать</a></p>'
-        + '<p style="color:#888;">Если у вас вопросы — ответьте на это письмо.</p>'
+        + '<p style="color:#888;">Если у вас вопросы – ответьте на это письмо.</p>'
         + '</div></div>';
 
       try {

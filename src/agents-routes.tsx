@@ -66,7 +66,7 @@ const AGENTS = [
   { id: 'QA',   role: 'QA Lead',           specialty: 'testing strategies, UX edge cases, accessibility, error states, user flows', personality: 'skeptical, methodical, breaks things professionally, asks "what if"' },
 ];
 
-const SYSTEM_PROMPT = `You simulate an expert IT department team for ПРОМО.МУЗЫКА — a music marketing ecosystem.
+const SYSTEM_PROMPT = `You simulate an expert IT department team for ПРОМО.МУЗЫКА – a music marketing ecosystem.
 
 Tech stack: React + TypeScript, Tailwind CSS v4, React Router v7 (package: react-router), Motion (motion/react), PostgreSQL (the sole data store), JWT Auth, Node.js API, Hono web server.
 

@@ -4,7 +4,7 @@ const SENTRY_DSN = process.env.SENTRY_DSN || "";
 
 export function initSentry() {
   if (!SENTRY_DSN) {
-    console.log("[Sentry] No SENTRY_DSN configured — error tracking disabled");
+    console.log("[Sentry] No SENTRY_DSN configured – error tracking disabled");
     return;
   }
 

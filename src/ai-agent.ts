@@ -117,7 +117,7 @@ async function collectNews(sourceId?: string) {
 
   return {
     collected: 0,
-    message: 'Сбор новостей идёт через news-cron.sh — этот эндпоинт только обновляет lastFetchAt у источников',
+    message: 'Сбор новостей идёт через news-cron.sh – этот эндпоинт только обновляет lastFetchAt у источников',
   };
 }
 

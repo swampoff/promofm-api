@@ -184,7 +184,7 @@ function scanFileIntegrity(): void {
         addAlert({
           severity: 'CRITICAL', category: 'FIM',
           message: `Critical file DELETED: ${filepath}`,
-          mitre: 'T1070.004 — Indicator Removal: File Deletion',
+          mitre: 'T1070.004 – Indicator Removal: File Deletion',
         });
       }
       continue;
@@ -197,7 +197,7 @@ function scanFileIntegrity(): void {
         severity: 'HIGH', category: 'FIM',
         message: `File modified: ${filepath}`,
         details: `Old hash: ${state.fileHashes[filepath].slice(0, 16)}... New hash: ${hash.slice(0, 16)}...`,
-        mitre: 'T1565.001 — Data Manipulation: Stored Data',
+        mitre: 'T1565.001 – Data Manipulation: Stored Data',
       });
       state.fileHashes[filepath] = hash; // Update to new hash
     }
@@ -223,7 +223,7 @@ function scanProcesses(): void {
             severity: 'CRITICAL', category: 'MALWARE',
             message: `Suspicious process detected: ${proc}`,
             details: line.trim().slice(0, 200),
-            mitre: 'T1496 — Resource Hijacking',
+            mitre: 'T1496 – Resource Hijacking',
           });
         }
       }
@@ -236,7 +236,7 @@ function scanProcesses(): void {
           severity: 'CRITICAL', category: 'REVERSE_SHELL',
           message: 'Possible reverse shell detected',
           details: line.trim().slice(0, 200),
-          mitre: 'T1059.004 — Command & Scripting: Unix Shell',
+          mitre: 'T1059.004 – Command & Scripting: Unix Shell',
         });
       }
     }
@@ -262,7 +262,7 @@ function scanCronJobs(): void {
         severity: 'HIGH', category: 'CRON_CHANGE',
         message: 'Cron job configuration changed',
         details: `Previous length: ${state.cronSnapshot.length}, New length: ${cronContent.length}`,
-        mitre: 'T1053.003 — Scheduled Task: Cron',
+        mitre: 'T1053.003 – Scheduled Task: Cron',
       });
     }
     state.cronSnapshot = cronContent;
@@ -282,7 +282,7 @@ function scanCronJobs(): void {
         addAlert({
           severity: 'CRITICAL', category: 'CRON_MALICIOUS',
           message: `Suspicious cron entry detected: ${pattern.source}`,
-          mitre: 'T1053.003 — Scheduled Task: Cron',
+          mitre: 'T1053.003 – Scheduled Task: Cron',
         });
       }
     }
@@ -306,7 +306,7 @@ function scanOutboundConnections(): void {
             severity: 'HIGH', category: 'BEACON',
             message: `Suspicious outbound connection on port ${port}`,
             details: line.trim().slice(0, 200),
-            mitre: 'T1571 — Non-Standard Port',
+            mitre: 'T1571 – Non-Standard Port',
           });
         }
       }
@@ -353,7 +353,7 @@ function scanDependencies(): void {
           severity: 'HIGH', category: 'SUPPLY_CHAIN',
           message: `${modifiedFiles.length} node_modules files modified after package-lock.json`,
           details: modifiedFiles.slice(0, 5).join(', '),
-          mitre: 'T1195.002 — Supply Chain: Compromise Software Supply Chain',
+          mitre: 'T1195.002 – Supply Chain: Compromise Software Supply Chain',
         });
       }
     }
@@ -376,7 +376,7 @@ function scanDependencies(): void {
               severity: 'CRITICAL', category: 'SUPPLY_CHAIN',
               message: `Suspicious postinstall script in ${f}`,
               details: script.slice(0, 200),
-              mitre: 'T1195.002 — Supply Chain Compromise',
+              mitre: 'T1195.002 – Supply Chain Compromise',
             });
           }
         } catch {}
@@ -431,7 +431,7 @@ function correlateKillChains(): void {
         severity: 'CRITICAL', category: 'KILL_CHAIN',
         message: `Multi-phase attack detected from ${ip}`,
         details: `Phases: ${Array.from(phases).join(', ')} (${events.length} events)`,
-        mitre: 'TA0001-TA0010 — Full Kill Chain',
+        mitre: 'TA0001-TA0010 – Full Kill Chain',
       });
     }
   }
@@ -455,7 +455,7 @@ async function scanAuthLogs(): Promise<void> {
       addAlert({
         severity: 'HIGH', category: 'BRUTE_FORCE',
         message: `Mass login failures from ${row.ip_address}: ${row.cnt} attempts in 1h`,
-        mitre: 'T1110 — Brute Force',
+        mitre: 'T1110 – Brute Force',
       });
 
       // Add to kill chain
@@ -481,7 +481,7 @@ async function scanAuthLogs(): Promise<void> {
       addAlert({
         severity: 'CRITICAL', category: 'CREDENTIAL_STUFFING',
         message: `Credential stuffing from ${row.ip_address}: ${row.email_count} unique emails`,
-        mitre: 'T1110.004 — Credential Stuffing',
+        mitre: 'T1110.004 – Credential Stuffing',
       });
     }
   } catch (err) {
@@ -504,7 +504,7 @@ function scanPermissionChanges(): void {
         addAlert({
           severity: 'HIGH', category: 'PRIV_ESC',
           message: `SUID/SGID file found: ${f}`,
-          mitre: 'T1548.001 — SUID/SGID Abuse',
+          mitre: 'T1548.001 – SUID/SGID Abuse',
         });
       }
     }
@@ -520,7 +520,7 @@ function scanPermissionChanges(): void {
         severity: 'MEDIUM', category: 'PERMISSIONS',
         message: `World-writable source files found`,
         details: worldWritable.split('\n').slice(0, 5).join(', '),
-        mitre: 'T1222.002 — File & Directory Permissions Modification',
+        mitre: 'T1222.002 – File & Directory Permissions Modification',
       });
     }
   } catch {}

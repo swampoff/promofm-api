@@ -809,7 +809,7 @@ const BOOKING_NATIVE_COLS = `id, user_id, performer_id, venue_id,
   accepted_at, rejected_at, cancelled_at, deposit_paid_at, final_paid_at,
   cancelled_by, cancelled_by_role, cancellation_reason,
   -- Контакты заказчика. Без них гостевая заявка приходит исполнителю
-  -- «от кого-то» — ответить некому. В лидовой модели это основной
+  -- «от кого-то» – ответить некому. В лидовой модели это основной
   -- сценарий, а не исключение.
   client_name, client_email, client_phone, source,
   created_at, updated_at`;

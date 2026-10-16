@@ -24,7 +24,7 @@ export const RELEASE_SOURCES: ReleaseSource[] = [
     id: 'wikipedia-albums',
     name: 'Wikipedia Albums 2026',
     url: 'https://en.wikipedia.org/wiki/List_of_2026_albums',
-    parsingHint: 'Wikipedia list of albums released or announced for 2026. Each entry has a release date, artist name, album title, and sometimes genre/label. Extract future releases only. There are NO cover images on Wikipedia — leave cover_image_url empty.',
+    parsingHint: 'Wikipedia list of albums released or announced for 2026. Each entry has a release date, artist name, album title, and sometimes genre/label. Extract future releases only. There are NO cover images on Wikipedia – leave cover_image_url empty.',
   },
 ];
 
@@ -105,7 +105,7 @@ async function extractReleasesWithLLM(
 ${source.parsingHint}
 
 RULES:
-- Return ONLY valid JSON with field "releases" — array of objects
+- Return ONLY valid JSON with field "releases" – array of objects
 - Each object: {"artist": "Artist Name", "title": "Album/Single Title", "release_date": "YYYY-MM-DD", "genre": "genre or empty string", "cover_image_url": "full URL to cover image or empty string", "release_type": "album or single or ep"}
 - ONLY include releases with release_date >= "${today}" (future or today)
 - If the date is approximate or you only know the month, use the 1st of that month

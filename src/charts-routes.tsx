@@ -328,7 +328,7 @@ ${sourceConfig.parsingHint}
 - НЕ добавляй markdown-обёртку, только чистый JSON
 - Если трек содержит feat., оставь feat. в title
 - НЕ ПРИДУМЫВАЙ треки. Возвращай ТОЛЬКО то, что реально есть на странице.
-- Если нашёл меньше треков чем запрошено — верни только найденные, НЕ заполняй остальное плейсхолдерами`;
+- Если нашёл меньше треков чем запрошено – верни только найденные, НЕ заполняй остальное плейсхолдерами`;
 
   const userText = 'Вот текст страницы чарта "' + sourceConfig.name + '" (' + sourceConfig.url + '):\n\n' + pageText;
 
@@ -1422,7 +1422,7 @@ async function buildPromoFMChart(): Promise<PromoFMChartEntry[]> {
     }
     const blocked = isAiBlocked(trackScores[key].artist, trackScores[key].title);
     if (blocked) {
-      console.log(`[charts] исключён: ${trackScores[key].artist} — ${trackScores[key].title} (${blocked})`);
+      console.log(`[charts] исключён: ${trackScores[key].artist} – ${trackScores[key].title} (${blocked})`);
       trackScores[key].score = 0;
     }
   }
@@ -1877,7 +1877,7 @@ charts.post('/full-update', requireAdminOrKey, async (c) => {
           totalTracks: entries.length,
           sourceStats,
           onPlatformCount: chartData.onPlatformCount,
-          top5: entries.slice(0, 5).map(e => `${e.position}. ${e.artist} — ${e.title} (${e.score})`),
+          top5: entries.slice(0, 5).map(e => `${e.position}. ${e.artist} – ${e.title} (${e.score})`),
         },
       },
     });

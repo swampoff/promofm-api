@@ -325,7 +325,7 @@ function downloadDeniedPage(c: any, opts: { title: string; message: string; show
 function downloadDeniedHtml(c: any, opts: { status: number; title: string; message: string; showLogin?: boolean }) {
   const html = `<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${opts.title} — ПРОМО.МУЗЫКА</title>
+<title>${opts.title} – ПРОМО.МУЗЫКА</title>
 <style>
  body{margin:0;background:#0a0a1a;color:#e6e6f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
       display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
@@ -359,7 +359,7 @@ async function htmlDenialFallback(c: any, next: any) {
   c.res = downloadDeniedHtml(c, {
     status: 401,
     title: 'Нужно войти в кабинет',
-    message: 'Скачивание доступно радиостанциям и заведениям — файлы выдаём под учётной записью, чтобы вести учёт выдач. Войдите и нажмите ссылку из письма снова. Слушать подборку можно без входа.',
+    message: 'Скачивание доступно радиостанциям и заведениям – файлы выдаём под учётной записью, чтобы вести учёт выдач. Войдите и нажмите ссылку из письма снова. Слушать подборку можно без входа.',
     showLogin: true,
   });
 }
@@ -513,7 +513,7 @@ tracksRoutes.get('/:id/download', htmlDenialFallback, requireAuth, async (c) => 
     const userAgent = c.req.header('user-agent') || '';
 
     if (isAdmin) {
-      console.log(`[tracks/download] ADMIN userId=${userId} trackId=${trackId} — в статистику выдач не пишем`);
+      console.log(`[tracks/download] ADMIN userId=${userId} trackId=${trackId} – в статистику выдач не пишем`);
     } else if (role === 'radio_station') {
       await pool.query(
         `INSERT INTO track_downloads_by_radio

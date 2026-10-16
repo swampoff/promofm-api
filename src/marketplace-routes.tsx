@@ -1452,7 +1452,7 @@ app.post('/digital-goods', requireAuth, async (c) => {
     const producerId = c.get('userId');
 
     if (!producerId || !title || !category || !price) {
-      return c.json({ success: false, error: 'title, category, price required (producerId — из JWT)' }, 400);
+      return c.json({ success: false, error: 'title, category, price required (producerId – из JWT)' }, 400);
     }
 
     const good: DigitalGood = {
@@ -1888,7 +1888,7 @@ app.post('/admin/purchases/refund', requireAuth, requireAdmin, async (c) => {
     }
     const paymentOrderId = purchaseData.paymentOrderId;
     if (!paymentOrderId) {
-      return c.json({ success: false, error: 'orderId не сохранён в покупке — рефанд через YooKassa-дашборд' }, 422);
+      return c.json({ success: false, error: 'orderId не сохранён в покупке – рефанд через YooKassa-дашборд' }, 422);
     }
 
     // 3. Lookup payment session

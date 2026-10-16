@@ -100,7 +100,7 @@ export async function syncVenueArtistTracks(): Promise<{ venues: number; eligibl
     const warnings: string[] = [];
     for (const v of venues) {
       if (path.resolve(v.musicDir) === path.resolve(AIR_TRACKS_DIR)) {
-        warnings.push(`${v.slug}: папка музыки — общий эфир, в заведении звучат и треки без согласия артиста`);
+        warnings.push(`${v.slug}: папка музыки – общий эфир, в заведении звучат и треки без согласия артиста`);
         continue;
       }
       let entries: import('fs').Dirent[] = [];
@@ -120,7 +120,7 @@ export async function syncVenueArtistTracks(): Promise<{ venues: number; eligibl
           .then(() => { linked++; changed = true; })
           .catch((e: any) => warnings.push(`${v.slug}: ${fn}: ${e?.code || e?.message}`));
       }
-      if (changed) await rebuildVenue(v).catch((e: any) => warnings.push(`${v.slug}: пересборка — ${e?.message}`));
+      if (changed) await rebuildVenue(v).catch((e: any) => warnings.push(`${v.slug}: пересборка – ${e?.message}`));
     }
     return { venues: venues.length, eligible: eligible.size, linked, removed, warnings };
   } finally {

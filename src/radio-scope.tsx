@@ -23,7 +23,7 @@ export function scopeTracksSql(scope: RadioScope): string {
     return `SELECT t.id, t.title, t.created_at FROM tracks t WHERE t.user_id = $1`;
   }
   return `SELECT t.id,
-                 COALESCE(NULLIF(TRIM(COALESCE(ap.artist_name, t.artist_name)), '') || ' — ', '') || t.title AS title,
+                 COALESCE(NULLIF(TRIM(COALESCE(ap.artist_name, t.artist_name)), '') || ' – ', '') || t.title AS title,
                  t.created_at
             FROM tracks t
             LEFT JOIN artist_profiles ap ON ap.id = t.artist_id

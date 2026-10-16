@@ -500,7 +500,7 @@ app.put('/roster/managed/:id', requireAuth, async (c) => {
       } else {
         body.slug = slugify(raw);
         const taken = await pool.query(`SELECT 1 FROM artist_profiles WHERE slug = $1 AND id::text <> $2 LIMIT 1`, [body.slug, id]);
-        if (taken.rows.length) return c.json({ success: false, error: 'Этот адрес (slug) уже занят — выберите другой' }, 409);
+        if (taken.rows.length) return c.json({ success: false, error: 'Этот адрес (slug) уже занят – выберите другой' }, 409);
       }
     }
     const sets: string[] = [];
@@ -603,7 +603,7 @@ app.delete('/roster/managed/:id', requireAuth, async (c) => {
     if (Number(t.rows[0]?.n || 0) > 0) {
       return c.json({
         success: false,
-        error: 'У артиста есть треки — сначала удалите или передайте их.',
+        error: 'У артиста есть треки – сначала удалите или передайте их.',
         code: 'has_tracks',
       }, 409);
     }
@@ -1396,7 +1396,7 @@ app.get('/analytics/artist/:artistProfileId', requireAuth, async (c) => {
               MAX(rp.picked_up_at)::date                    AS last_pickup,
               COUNT(DISTINCT rp.track_id)::int              AS tracks_count,
               -- Подтверждение эфиром: есть ли детекция фингерпринта по этому
-              -- треку на этой станции. Считаем на лету — как только ПРОМО.CHECK
+              -- треку на этой станции. Считаем на лету – как только ПРОМО.CHECK
               -- поймает трек, статус сам станет «подтверждён» (инцидент
               -- 2026-08-03: партнёрские заявки показывались как факт эфира).
               BOOL_OR(EXISTS (

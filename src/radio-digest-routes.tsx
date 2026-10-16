@@ -66,15 +66,15 @@ function digestHtml(tracks: DigestTrack[]): string {
     const listen = t.audio_url ? `${SITE_URL}${t.audio_url}` : '';
     return `
       <p style="margin:0 0 16px;">
-        <b>${i + 1}) ${escapeHtml(t.artist_name || 'Unknown Artist')} — ${escapeHtml(t.title || 'Без названия')}</b><br>
+        <b>${i + 1}) ${escapeHtml(t.artist_name || 'Unknown Artist')} – ${escapeHtml(t.title || 'Без названия')}</b><br>
         ${t.genre ? `Жанр: ${escapeHtml(String(t.genre))}<br>` : ''}
         Слушать: <a href="${SITE_URL}/novinki-nedeli">${SITE_URL}/novinki-nedeli</a>
       </p>`;
   }).join('');
   return `
     <div style="font-family: Arial, sans-serif; max-width: 600px; color:#111;">
-      <h2 style="color:#7C3AED;">Новинки недели — на ротацию партнёрам</h2>
-      <p>Готово к пересылке радио-партнёрам (по договорённости — порционно, не всё сразу):</p>
+      <h2 style="color:#7C3AED;">Новинки недели – на ротацию партнёрам</h2>
+      <p>Готово к пересылке радио-партнёрам (по договорённости – порционно, не всё сразу):</p>
       ${blocks}
       <p style="color:#666; font-size:13px; margin-top:18px;">
         Внутреннее письмо ПРОМО.FM для ручной пересылки партнёрам.
@@ -276,7 +276,7 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
       <td style="padding:0;"><a href="${releasesUrl}" style="text-decoration:none;"><img src="${SITE_URL}/banners/${DIGEST_BANNER_FILE}" alt="Новинки недели promo.music" style="width:100%;height:auto;display:block;border:0;" /></a></td>
     </tr>`;
     } else {
-      console.warn(`[radio-digest] баннер отсутствует: ${DIGEST_BANNER_PATH} — письмо уйдёт без шапки`);
+      console.warn(`[radio-digest] баннер отсутствует: ${DIGEST_BANNER_PATH} – письмо уйдёт без шапки`);
     }
   } catch { /* без баннера письмо остаётся корректным */ }
   // {{name}} подставляет smtpSendBatch на каждого получателя (имя станции).
@@ -297,7 +297,7 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
     <tr>
       <td style="padding:28px 40px 6px;color:#e6e6f0;font-size:16px;line-height:1.6;">
         <p style="margin:0 0 14px;">Здравствуйте, <strong style="color:#fff;">{{name}}</strong>!</p>
-        <p style="margin:0 0 8px;">Подобрали новые релизы артистов ПРОМО.МУЗЫКА за прошедшую неделю — послушайте и забирайте подходящие в эфир. Все треки готовы к ротации: лицензии, метаданные и джинглы — в порядке.</p>
+        <p style="margin:0 0 8px;">Подобрали новые релизы артистов ПРОМО.МУЗЫКА за прошедшую неделю – послушайте и забирайте подходящие в эфир. Все треки готовы к ротации: лицензии, метаданные и джинглы – в порядке.</p>
       </td>
     </tr>
     <tr><td style="padding:12px 28px 4px;">${cards}</td></tr>${videoSection}
@@ -308,7 +308,7 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
     <tr><td style="padding:24px 40px 30px;border-top:1px solid #2a2a45;text-align:center;">
       <img src="${SITE_URL}/logo.png" alt="ПРОМО.МУЗЫКА" height="30" style="height:30px;margin-bottom:12px;border:0;" />
       <p style="margin:0 0 6px;color:#c8c8d8;font-size:13px;font-weight:600;">Команда ПРОМО.МУЗЫКА</p>
-      <p style="margin:0;color:#666;font-size:12px;">&copy; ${new Date().getFullYear()} ПРОМО.МУЗЫКА — платформа продвижения музыки</p>
+      <p style="margin:0;color:#666;font-size:12px;">&copy; ${new Date().getFullYear()} ПРОМО.МУЗЫКА – платформа продвижения музыки</p>
       <p style="margin:6px 0 0;"><a href="${SITE_URL}" style="color:#FF577F;text-decoration:none;font-size:12px;">promo-music.ru</a></p>
     </td></tr>
   </table>
@@ -443,7 +443,7 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
       tracks.length ? `${tracks.length} трек(ов)` : '',
       promoVideos.length ? `${promoVideos.length} клип(ов)` : '',
     ].filter(Boolean).join(' + ');
-    const subject = `🎵 Новинки недели для эфира — ${subjectParts} · ${dateLabel}`;
+    const subject = `🎵 Новинки недели для эфира – ${subjectParts} · ${dateLabel}`;
 
     // Фоновая отправка: lock + client переходят во владение фоновой задачи.
     backgrounded = true;
@@ -514,7 +514,7 @@ radioDigest.post('/run-weekly', requireAdminOrKey, async (c) => {
       started: true,
       tracks: tracks.length,
       recipients: recipients.length,
-      message: `Отправка начата в фоне: ${recipients.length} получателей, ${tracks.length} трек(ов). Итог — в логе [radio-weekly].`,
+      message: `Отправка начата в фоне: ${recipients.length} получателей, ${tracks.length} трек(ов). Итог – в логе [radio-weekly].`,
     }, 202);
   } catch (err: any) {
     console.error('[radio-weekly] run failed:', err?.message || err);
