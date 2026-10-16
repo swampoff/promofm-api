@@ -1046,6 +1046,73 @@ app.post('/subscription/:djId/change', requireAuth, requireDjRole, async (c) => 
   }
 });
 
+/**
+ * POST /subscription/:djId/cancel - отменить активную подписку DJ.
+ *
+ * Audit 2026-06-04: до этого PR'а DJ не имели cancel endpoint'а
+ * (artist уже имеет — subscriptions.post('/:userId/cancel'), venue
+ * имеет — venue-billing /cancel). DJ был единственной ролью без выхода
+ * из подписки — могли только «доиграть» до endDate.
+ *
+ * Поведение (как у venue/artist):
+ *   - Сохраняет endDate существующей подписки — юзер пользуется до
+ *     конца оплаченного периода. После endDate автоматически в
+ *     'expired' через cron.
+ *   - status = 'cancelled' (отдельно от 'active' и 'expired')
+ *   - autoRenew = false — не списываем на следующий период даже если
+ *     карта сохранена
+ *   - Никаких pro-rata рефандов — это admin делает руками через
+ *     /admin/payments/:orderId/refund если нужно вернуть остаток.
+ *
+ * Body: { reason? } — опциональная причина для аналитики.
+ */
+app.post('/subscription/:djId/cancel', requireAuth, requireDjRole, async (c) => {
+  try {
+    const djId = c.req.param('djId');
+    const userId = c.get('userId') as string;
+    // IDOR guard: own subscription only (requireDjRole + djId === userId).
+    // admin может cancel через separate endpoint в admin-ops если когда-
+    // нибудь добавится; пока ограничиваем self.
+    if (djId !== userId && c.get('userRole') !== 'admin') {
+      return c.json({ success: false, error: 'Можно отменить только свою подписку' }, 403);
+    }
+
+    const body = await c.req.json().catch(() => ({}));
+    const reason = String(body.reason || '').slice(0, 250);
+
+    const existing = await djSubscriptionsStore.get(djId);
+    if (!existing) {
+      return c.json({ success: false, error: 'Подписка не найдена' }, 404);
+    }
+    const sub = typeof existing === 'string' ? JSON.parse(existing) : existing;
+    if (sub.status === 'cancelled' || sub.status === 'expired') {
+      return c.json({ success: false, error: `Подписка уже в статусе ${sub.status}` }, 409);
+    }
+
+    sub.status = 'cancelled';
+    sub.cancelledAt = new Date().toISOString();
+    sub.cancellationReason = reason;
+    sub.autoRenew = false;
+    // endDate оставляем как есть — юзер докатывает оплаченный период.
+    await djSubscriptionsStore.set(djId, sub);
+
+    console.log(`DJ ${djId} cancelled subscription (was ${sub.planName})`);
+    return c.json({
+      success: true,
+      data: {
+        djId,
+        planId: sub.planId,
+        status: 'cancelled',
+        validUntil: sub.endDate,
+        cancellationReason: reason,
+      },
+    });
+  } catch (error) {
+    console.error('Error cancelling DJ subscription:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
 // ════════════════════════════════════════
 // COINS
 // ════════════════════════════════════════
