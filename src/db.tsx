@@ -5061,6 +5061,9 @@ export async function listAllNewsPublic(): Promise<NewsPublicRow[]> {
 
 export async function upsertNewsPublic(news: Partial<NewsPublicRow> & { id: string; title: string }): Promise<void> {
   const { pool } = await import('./db-client.tsx');
+  // Запрет владельца на длинное тире в текстах сайта (16.10.2026): генератор новостей
+  // его любит, поэтому чистим на записи, а не после.
+  const noDash = (v?: string | null) => (v || '').replace(/\u2014/g, '\u2013');
   await pool.query(
     `INSERT INTO news_public
        (id, title, excerpt, content, category, tags, source, source_id,
@@ -5085,7 +5088,7 @@ export async function upsertNewsPublic(news: Partial<NewsPublicRow> & { id: stri
        status        = EXCLUDED.status,
        updated_at    = NOW()`,
     [
-      news.id, news.title, news.excerpt || '', news.content || '',
+      news.id, noDash(news.title), noDash(news.excerpt), noDash(news.content),
       news.category || 'industry', news.tags || [], news.source || '',
       news.sourceId || null, news.sourceUrl || null, news.imageUrl || null,
       news.authorName || null, news.authorAvatar || null,
