@@ -26,6 +26,7 @@ import { SUBSCRIPTION_PLANS } from './subscriptions-routes.tsx';
 
 import { createLogger } from "./logger.tsx";
 import { notifyPaymentReceived, notifyPaymentExpired } from './email-helper.tsx';
+import { isAllowedUrl, siteForUserId, SITE_ORIGIN, PATH, type SiteKey } from './site-origin.tsx';
 
 // Bounds for free-form payment amounts (donation/topup/purchase). RUB.
 // Subscription amounts are validated against SUBSCRIPTION_PLANS below.
@@ -41,6 +42,43 @@ const log = createLogger("checkout");
 
 const checkoutRoutes = new Hono();
 
+
+// ── Helper: save the card for recurring charges ──
+//
+// Вызывается в начале processPaymentSuccess, до веток по типу платежа: ветке
+// привязки карты заведения (venue_card_attach) нужно знать, сохранилась ли
+// карта. Ошибку не пробрасываем: claim к этому моменту уже не откатывается
+// (сессия записана succeeded), а остальные шаги нужны. Зато пишем громко:
+// без карты не будет ни автосписания после триала, ни продлений.
+async function saveCardFromWebhook(session: PaymentSession, webhook: WebhookPayload, now: string): Promise<string | null> {
+  if (!session.savePaymentMethod || !webhook.paymentMethodId) return null;
+  if (webhook.paymentMethodSaved === false) {
+    // Шлюз провёл платёж, но токен не сохранил (у магазина не включены автоплатежи).
+    log.error({ orderId: session.orderId, userId: session.userId, gateway: session.gateway }, 'payment_method_not_saved_by_gateway');
+    return null;
+  }
+  const card = webhook.paymentMethodCard || {};
+  const gatewayLabel = session.gateway === 'yookassa' ? 'ЮКасса' : session.gateway === 'stripe' ? 'Stripe' : 'Т-Банк';
+  const method: SavedPaymentMethod = {
+    id: `pm-${Date.now()}`,
+    userId: session.userId,
+    gateway: session.gateway,
+    gatewayMethodId: webhook.paymentMethodId,
+    type: 'bank_card',
+    title: `${gatewayLabel} карта${card.last4 ? ` •• ${card.last4}` : ''}`,
+    ...(card.last4 ? { last4: card.last4 } : {}),
+    ...(card.brand ? { brand: card.brand } : {}),
+    createdAt: now,
+  };
+  try {
+    const rowId = await upsertPaymentMethod(method.id, session.userId, method);
+    log.info({ orderId: session.orderId, userId: session.userId, rowId }, 'payment_method_saved');
+    return rowId || method.id;
+  } catch (err: any) {
+    log.error({ err: err?.message, orderId: session.orderId, userId: session.userId }, 'payment_method_save_failed');
+    return null;
+  }
+}
 
 // ── Helper: process successful payment ──
 
@@ -80,6 +118,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     status: 'completed',
     createdAt: now,
   });
+
+  // Save payment method if requested (раньше в конце функции, см. saveCardFromWebhook)
+  const savedCardId = await saveCardFromWebhook(session, webhook, now);
 
   // Update user balance for donations/topups. Uses atomic SQL increment to
   // survive concurrent webhook deliveries — the previous read-modify-write
@@ -247,6 +288,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           subscriptionUpdatedAt:   now,
           subscriptionGateway:     session.gateway,
           subscriptionGatewayPaymentId: session.gatewayPaymentId,
+          // Оплата после отмены = возобновление: снимаем пометки отмены.
+          cancelledFromStatus:     null,
+          subscriptionCancelledAt: null,
           updatedAt:               now,
         };
 
@@ -351,43 +395,59 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   }
 
 
-  // ─── Fulfill venue_radio_subscription (type='subscription') ───
-  //
-  // /subscribe (venue-radio-routes) создаёт сессию с type='subscription' и
-  // metadata.type='venue_radio_subscription' (БЕЗ itemType). Раньше активация
-  // жила под guard'ом purchase+itemType (см. ниже) и была НЕДОСТИЖИМА →
-  // заведение платило, подписка навсегда pending_payment, stream-token 403:
-  // деньги взяты, доступ не выдан. Теперь активируем на subscription-пути.
-  // Идемпотентность — orderId-keyed (COALESCE(payment_order_id,'') <> $1):
-  // retry с тем же orderId апдейтит 0 строк, реальное продление (новый
-  // orderId) продлевает от max(текущий конец, сейчас).
   // Привязка карты заведением (1 ₽): включаем пробный период и возвращаем рубль.
-  // Срок: TRIAL_PERIOD_DAYS (7 дней с 16.10.2026, раньше было 14).
-  // Карта уже сохранена общим блоком savePaymentMethod выше.
+  // Срок: trialPeriodDaysFor (7 дней с 16.10.2026, раньше было 14). Карту уже
+  // сохранил saveCardFromWebhook в начале функции. Сессию создаёт
+  // POST /venue-billing/attach-card (до 16.10 сессии не было, и вебхук
+  // отвечал «Session not in DB», critic A2 a). Выбранный тариф приходит как
+  // metadata.trialPlan / trialInterval: НЕ planKey, иначе ветка
+  // venue_subscription выше включила бы платный тариф за 1 ₽.
+  //   pending_card (или нет статуса) → trial, trial_expires_at = сейчас + 7 дней;
+  //   trial / отменённый пробный с остатком срока → смена карты (и тарифа),
+  //     срок пробного не меняется, отмена снимается;
+  //   active / expired / отменённая платная → только карта, статус не трогаем.
   if (session.metadata?.type === 'venue_card_attach') {
-    const venueUserId = String(session.metadata.userId || session.userId || '');
-    try {
+    const venueUserId = String(session.userId || '');
+    // Цель = плательщик (session.userId из JWT), metadata.userId только сверяем.
+    const userMismatch = !!session.metadata.userId && String(session.metadata.userId) !== venueUserId;
+    if (userMismatch) {
+      log.warn({ sessionUserId: venueUserId, claimedUserId: session.metadata.userId, orderId: session.orderId }, 'venue_card_attach_impersonation_blocked_webhook');
+    }
+    if (!userMismatch) try {
       const { getVenueProfile, upsertVenueProfile } = await import('./db.tsx');
-      const { TRIAL_PERIOD_DAYS } = await import('./venue-trial.tsx');
+      const { trialPeriodDaysFor } = await import('./venue-trial.tsx');
+      const { isVenuePaidTier } = await import('./venue-plans-constants.tsx');
       const prof: any = await getVenueProfile(venueUserId);
-      if (prof && prof.subscriptionStatus !== 'active') {
-        let untilMs = Date.now() + TRIAL_PERIOD_DAYS * 24 * 60 * 60 * 1000;
-        // Повторная привязка (смена карты) во время идущего пробного не
-        // должна сокращать уже выданный срок (например, 14 дней до 16.10).
-        if (prof.subscriptionStatus === 'trial' && prof.trial_expires_at) {
-          const prevMs = new Date(prof.trial_expires_at).getTime();
-          if (!Number.isNaN(prevMs) && prevMs > untilMs) untilMs = prevMs;
-        }
-        const until = new Date(untilMs).toISOString();
+      const st = String(prof?.subscriptionStatus || 'pending_card');
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const choice: Record<string, string> = {};
+      if (isVenuePaidTier(session.metadata.trialPlan)) choice.subscriptionPlan = session.metadata.trialPlan;
+      if (session.metadata.trialInterval === 'month' || session.metadata.trialInterval === 'year') choice.subscriptionInterval = session.metadata.trialInterval;
+      const prevTrialEndMs = Date.parse(prof?.trial_expires_at || '');
+      const trialLeft = Number.isFinite(prevTrialEndMs) && prevTrialEndMs > nowMs;
+      if (!savedCardId) {
+        log.error({ venueUserId, orderId: session.orderId }, 'venue_card_attach_card_not_saved');
+      }
+
+      if (!prof) {
+        log.warn({ venueUserId, orderId: session.orderId }, 'venue_card_attach_no_profile');
+      } else if (st === 'pending_card') {
+        const until = new Date(nowMs + trialPeriodDaysFor(nowMs) * 24 * 60 * 60 * 1000).toISOString();
         await upsertVenueProfile(venueUserId, {
           ...prof,
+          ...choice,
           subscriptionStatus: 'trial',
           trial_expires_at: until,
           subscriptionExpiresAt: until,
-          cardAttachedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
+          trialStartedAt: nowIso,
+          trial_warning_sent_at: null,
+          trial_last_day_sent_at: null,
+          cardAttachedAt: nowIso,
+          cardSaveFailed: !savedCardId,
+          updatedAt: nowIso,
         });
-        log.info({ venueUserId, until }, 'venue_trial_started_after_card');
+        log.info({ venueUserId, until, plan: choice.subscriptionPlan || prof.subscriptionPlan || 'start' }, 'venue_trial_started_after_card');
         import('./email-helper.tsx')
           .then((m: any) => m.notifyAdminNewVenue?.({
             venueName: prof.venueName || prof.name || '',
@@ -398,26 +458,64 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
             stage: 'card_attached',
           }))
           .catch((e: any) => log.warn({ err: e?.message }, 'venue_card_admin_notify_failed'));
+      } else if (st === 'trial' || (st === 'cancelled' && prof.cancelledFromStatus === 'trial' && trialLeft)) {
+        // Пробный без срока (старые строки до карточной схемы) получает 7 дней от сейчас.
+        const until = trialLeft
+          ? new Date(prevTrialEndMs).toISOString()
+          : new Date(nowMs + trialPeriodDaysFor(nowMs) * 24 * 60 * 60 * 1000).toISOString();
+        await upsertVenueProfile(venueUserId, {
+          ...prof,
+          ...choice,
+          subscriptionStatus: 'trial',
+          trial_expires_at: until,
+          subscriptionExpiresAt: until,
+          cancelledFromStatus: null,
+          subscriptionCancelledAt: null,
+          cardAttachedAt: nowIso,
+          cardSaveFailed: !savedCardId,
+          updatedAt: nowIso,
+        });
+        log.info({ venueUserId, until, resumed: st === 'cancelled' }, 'venue_trial_card_changed');
+      } else {
+        await upsertVenueProfile(venueUserId, { ...prof, cardAttachedAt: nowIso, cardSaveFailed: !savedCardId, updatedAt: nowIso });
+        log.info({ venueUserId, status: st }, 'venue_card_changed');
       }
     } catch (e: any) {
       log.error({ err: e?.message, venueUserId }, 'venue_card_attach_trial_failed');
     }
-    // Возврат проверочного рубля — не блокируем ответ вебхука.
-    try {
-      const { getGateway } = await import('./payment-gateway.tsx');
-      const gw: any = getGateway('yookassa');
-      if (typeof gw.refund === 'function' && webhook.sessionId) {
-        gw.refund(webhook.sessionId, 1, {
+    // Возврат проверочного рубля. Ждём ответ шлюза, чтобы сбой был в логе;
+    // idempotenceKey по orderId: повтор вебхука не вернёт рубль дважды.
+    // (До 16.10 здесь читался несуществующий webhook.sessionId, и рубль
+    // не возвращался никогда.)
+    const attachPaymentId = webhook.paymentId || session.gatewayPaymentId;
+    if (attachPaymentId) {
+      try {
+        const { getGateway } = await import('./payment-gateway.tsx');
+        const gw: any = getGateway('yookassa');
+        const refund = await gw.refund(attachPaymentId, Number(session.amount) || 1, {
           description: 'Возврат проверочного платежа за привязку карты',
           idempotenceKey: `refund-attach-${session.orderId}`,
-        }).then(() => log.info({ orderId: session.orderId }, 'venue_card_attach_refunded'))
-          .catch((e: any) => log.warn({ err: e?.message }, 'venue_card_attach_refund_failed'));
+          shopId: (session as any).shop_id || undefined,
+        });
+        log.info({ orderId: session.orderId, refundId: refund?.id, status: refund?.status }, 'venue_card_attach_refunded');
+      } catch (e: any) {
+        log.error({ err: e?.message, orderId: session.orderId, paymentId: attachPaymentId }, 'venue_card_attach_refund_failed');
       }
-    } catch (e: any) {
-      log.warn({ err: e?.message }, 'venue_card_attach_refund_skipped');
+    } else {
+      log.error({ orderId: session.orderId }, 'venue_card_attach_refund_no_payment_id');
     }
   }
 
+  // ─── Fulfill venue_radio_subscription (type='subscription') ───
+  //
+  // /subscribe (venue-radio-routes) создаёт сессию с type='subscription' и
+  // metadata.type='venue_radio_subscription' (БЕЗ itemType). Раньше активация
+  // жила под guard'ом purchase+itemType (см. ниже) и была НЕДОСТИЖИМА →
+  // заведение платило, подписка навсегда pending_payment, stream-token 403:
+  // деньги взяты, доступ не выдан. Теперь активируем на subscription-пути.
+  // Идемпотентность — orderId-keyed (COALESCE(payment_order_id,'') <> $1):
+  // retry с тем же orderId апдейтит 0 строк, реальное продление (новый
+  // orderId) продлевает от max(текущий конец, сейчас).
   if (
     session.type === 'subscription' &&
     session.metadata?.type === 'venue_radio_subscription' &&
@@ -426,18 +524,47 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     try {
       const { pool: vrPool } = await import('./db-client.tsx');
       const subId = String(session.metadata.subscriptionId);
-      const r = await vrPool.query(
-        `UPDATE venue_radio_subscriptions
-            SET status = 'active',
-                current_period_start = COALESCE(current_period_start, NOW()),
-                current_period_end = GREATEST(COALESCE(current_period_end, NOW()), NOW()) + INTERVAL '30 days',
-                payment_order_id = $1, payment_gateway = $2,
-                auto_renew = true, updated_at = NOW()
-          WHERE id = $3
-            AND COALESCE(payment_order_id, '') <> $1
-          RETURNING venue_id, plan_id, current_period_end`,
-        [session.orderId, session.gateway, subId]
-      );
+      // uq_vr_active_sub_per_venue: у заведения одна active-строка. С 16.10
+      // провижининг реально создаёт active-строку пробного эфира (plan 'trial',
+      // раньше INSERT падал), поэтому прежнюю active-строку этого заведения
+      // закрываем ('superseded') в той же транзакции, а новый период считаем
+      // от её конца: оплата во время пробного не съедает оставшиеся дни.
+      const client = await vrPool.connect();
+      let r: any;
+      try {
+        await client.query('BEGIN');
+        const prev = await client.query(
+          `UPDATE venue_radio_subscriptions o
+              SET status = 'superseded', updated_at = NOW()
+             FROM venue_radio_subscriptions n
+            WHERE n.id = $1 AND COALESCE(n.payment_order_id, '') <> $2
+              AND o.venue_id = n.venue_id AND o.id <> n.id AND o.status = 'active'
+            RETURNING o.current_period_end`,
+          [subId, session.orderId]
+        );
+        const carryEnd = prev.rows.reduce((m: Date | null, x: any) => {
+          const d = x.current_period_end ? new Date(x.current_period_end) : null;
+          return d && (!m || d > m) ? d : m;
+        }, null as Date | null);
+        r = await client.query(
+          `UPDATE venue_radio_subscriptions
+              SET status = 'active',
+                  current_period_start = COALESCE(current_period_start, NOW()),
+                  current_period_end = GREATEST(COALESCE(current_period_end, NOW()), NOW(), COALESCE($4::timestamptz, NOW())) + INTERVAL '30 days',
+                  payment_order_id = $1, payment_gateway = $2,
+                  auto_renew = true, updated_at = NOW()
+            WHERE id = $3
+              AND COALESCE(payment_order_id, '') <> $1
+            RETURNING venue_id, plan_id, current_period_end`,
+          [session.orderId, session.gateway, subId, carryEnd ? carryEnd.toISOString() : null]
+        );
+        await client.query('COMMIT');
+      } catch (txErr) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw txErr;
+      } finally {
+        client.release();
+      }
       if (r.rows.length > 0) {
         log.info({ subscriptionId: subId, venueId: r.rows[0].venue_id, planId: r.rows[0].plan_id, until: r.rows[0].current_period_end, amount: session.amount }, 'venue_radio_subscription_activated');
         try {
@@ -1805,22 +1932,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     }
   }
 
-  // Save payment method if requested
-  if (session.savePaymentMethod && webhook.paymentMethodId) {
-    const method: SavedPaymentMethod = {
-      id: `pm-${Date.now()}`,
-      userId: session.userId,
-      gateway: session.gateway,
-      gatewayMethodId: webhook.paymentMethodId,
-      type: 'bank_card',
-      title: `${session.gateway === 'yookassa' ? 'ЮКасса' : session.gateway === 'stripe' ? 'Stripe' : 'Т-Банк'} карта`,
-      createdAt: now,
-    };
-    await upsertPaymentMethod(method.id, session.userId, method);
-  }
-
   // Record platform revenue (using existing platform-revenue if available)
-  try {
+  // Проверочный 1 ₽ привязки карты заведения сразу возвращается: это не выручка.
+  if (session.metadata?.type !== 'venue_card_attach') try {
     const { recordRevenue } = await import('./platform-revenue.tsx');
     const commissionRate = session.type === 'donation' ? 0 : 0.1; // 10% commission except donations
 
@@ -1934,8 +2048,14 @@ async function processPaymentCanceled(session: PaymentSession, rawBody?: any) {
       if (email) {
         // Build retry deep-link based on payment type
         const meta = session.metadata || {};
+        // Оплаты заведения (тариф, привязка карты, эфир) ведут в кабинет заведения на
+        // его сайте; раньше падали в /artist/finances.
+        const isVenuePayment = String(session.type || '').startsWith('venue_') || String(meta.type || '').startsWith('venue_');
+        const site: SiteKey = isVenuePayment ? await siteForUserId(session.userId) : 'music';
         let retryUrl = 'https://promo-music.ru/artist/finances';
-        if (meta.type === 'track_publish' || session.type === 'purchase') {
+        if (isVenuePayment) {
+          retryUrl = `${SITE_ORIGIN[site]}${PATH.venueSubscription}`;
+        } else if (meta.type === 'track_publish' || session.type === 'purchase') {
           retryUrl = `https://promo-music.ru/artist/tracks?retry=${encodeURIComponent(session.orderId)}`;
         } else if (session.type === 'subscription') {
           retryUrl = 'https://promo-music.ru/artist/subscription?retry=1';
@@ -1951,6 +2071,7 @@ async function processPaymentCanceled(session: PaymentSession, rawBody?: any) {
           description: session.description || meta.trackTitle || '',
           retryUrl,
           orderId: session.orderId,
+          site,
         });
         log.info({ orderId: session.orderId, email }, 'payment_expired_email_sent');
       } else {
@@ -2858,15 +2979,14 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
     if (!returnUrl) {
       return c.json({ success: false, error: 'returnUrl обязателен' }, 400);
     }
-    // Validate returnUrl — prevent open redirect
-    const ALLOWED_ORIGINS = ['https://promo-music.ru', 'https://www.promo-music.ru', 'https://promofm.org'];
+    // Validate returnUrl: prevent open redirect (только https на наши сайты, site-origin.tsx)
     try {
-      const returnOrigin = new URL(returnUrl).origin;
-      if (!ALLOWED_ORIGINS.includes(returnOrigin)) {
-        return c.json({ success: false, error: 'returnUrl must be on promo-music.ru' }, 400);
-      }
+      new URL(returnUrl);
     } catch {
       return c.json({ success: false, error: 'Invalid returnUrl format' }, 400);
+    }
+    if (!isAllowedUrl(returnUrl)) {
+      return c.json({ success: false, error: 'returnUrl must be on promo-music.ru' }, 400);
     }
 
     const orderId = crypto.randomUUID();
@@ -3000,7 +3120,7 @@ checkoutRoutes.delete('/methods/:id', requireAuth, async (c) => {
     if (!ownsMethod) {
       return c.json({ success: false, error: 'Payment method not found' }, 404);
     }
-    await deletePaymentMethod(methodId);
+    await deletePaymentMethod(methodId, userId);
     return c.json({ success: true, message: 'Способ оплаты удалён' });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);

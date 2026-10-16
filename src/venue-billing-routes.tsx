@@ -14,49 +14,66 @@
  * tiers) are NOT touched.
  *
  * State stored in venue_profiles.data:
- *   subscriptionStatus       'trial' | 'active' | 'expired' | 'cancelled'
+ *   subscriptionStatus       'pending_card' | 'trial' | 'active' | 'expired' | 'cancelled'
+ *                            (no status = 'pending_card')
  *   subscriptionPlan         'start' | 'business' | 'network' | 'enterprise'
- *   subscriptionExpiresAt    ISO date (when the current paid period ends)
+ *                            (during the trial: the tier chosen at card binding)
+ *   subscriptionExpiresAt    ISO date (end of the paid period; for a trial = trial_expires_at)
  *   subscriptionInterval     'month' | 'year'
  *   subscriptionPriceRub     last paid price (audit)
  *   subscriptionUpdatedAt    ISO date
+ *   trial_expires_at         ISO date, set when the card is bound (webhook)
+ *   cancelledFromStatus      'trial' | 'active' while status='cancelled'
+ *   subscriptionCancelledAt  ISO date of the cancel
  *
  * Saved payment method: stored in the existing `payment_methods` SQL
- * table (the same one artist subscriptions use). One method per
- * user is the working model; multiple methods is a future feature.
+ * table (the same one artist subscriptions use). The newest card with a
+ * gateway token is the one charged (db.tsx getChargeablePaymentMethod).
  *
  * Endpoints:
+ *   GET    /plans                    — public tariff list (prices, trial
+ *                                       days, limits) for the cabinets
+ *                                       and promoair.ru.
  *   POST   /subscribe                — create YooKassa session for
  *                                       chosen tier+interval. Sets
  *                                       savePaymentMethod=true so
  *                                       the gateway returns a
  *                                       reusable token for the
  *                                       recurring cron.
- *   POST   /cancel                   — flip status='cancelled' but
- *                                       leave subscriptionExpiresAt
- *                                       intact — stream keeps
- *                                       playing until end of period.
+ *   POST   /attach-card              — 1 ₽ card check that starts the
+ *                                       trial for the chosen tier.
+ *   POST   /cancel                   — status='cancelled', access stays
+ *                                       until the paid/trial period
+ *                                       ends, no further charges.
+ *   POST   /resume                   — undo a cancel while the period
+ *                                       is still running.
  *   GET    /me                       — current venue subscription
  *                                       state + saved payment
  *                                       method info (last4, brand)
- *                                       for cabinet display.
+ *                                       + next charge (date, amount).
  *   POST   /cron/charge-recurring    — CRON_SECRET-protected.
  *                                       Sister of /server/subscriptions/
  *                                       charge-recurring but for
  *                                       venue_profiles only.
  *
  * Webhook activation: handled in checkout-routes.tsx by the
- * `metadata.type === 'venue_subscription'` branch (added in this PR).
+ * `metadata.type === 'venue_subscription'` branch (paid tier) and the
+ * `metadata.type === 'venue_card_attach'` branch (trial start).
  */
 
 import { Hono } from 'hono';
 import crypto from 'crypto';
 import { pool } from './db-client.tsx';
 import { requireAuth } from './auth-middleware.tsx';
-import { ensureVenueProfile, getVenueProfile as dbGetVenueProfile, upsertVenueProfile, getPaymentMethods, upsertPaymentSession, getPaymentSession, insertPaymentTx } from './db.tsx';
+import { ensureVenueProfile, getVenueProfile as dbGetVenueProfile, upsertVenueProfile, getChargeablePaymentMethod, upsertPaymentSession, getPaymentSession, insertPaymentTx } from './db.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { emitSSE } from './sse-routes.tsx';
+import { originFromRequest, siteForUserId, PATH } from './site-origin.tsx';
+import { loadVenueReceiptEmail } from './venue-billing-helpers.tsx';
+import { VENUE_PLAN_LIMITS, getEffectiveVenuePlan } from './venue-plan-limits.tsx';
+import { TRIAL_PERIOD_DAYS } from './venue-trial.tsx';
+import type { VenueExpiredReason } from './email-helper.tsx';
 
 const app = new Hono();
 
@@ -77,7 +94,10 @@ const app = new Hono();
 // enterprise has no fixed price — manual contracts, not subscribable.
 // ──────────────────────────────────────────────────────────────────
 
-import { VENUE_PLANS_CORE } from './venue-plans-constants.tsx';
+import {
+  VENUE_PLANS_CORE, VENUE_YEAR_MONTHS, FULL_RADIO_PLAN, RENEWAL_LEAD_DAYS,
+  isVenuePaidTier, venuePlanPrice, parseVenuePlanChoice, getVenueNextCharge,
+} from './venue-plans-constants.tsx';
 
 export const VENUE_PLANS = VENUE_PLANS_CORE;
 
@@ -99,6 +119,37 @@ async function getUserId(c: any): Promise<string> {
   return (c as any).get('userId') || 'anonymous';
 }
 
+const fmtDate = (iso: string) => new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: 'Europe/Moscow' });
+
+// ──────────────────────────────────────────────────────────────────
+// GET /plans — public tariff list (no auth, no secrets)
+// ──────────────────────────────────────────────────────────────────
+// Один источник цен для кабинетов и promoair.ru: VENUE_PLANS_CORE (деньги),
+// VENUE_PLAN_LIMITS (что входит), TRIAL_PERIOD_DAYS. «Радио полного цикла»
+// показывается с ценой, но не покупается онлайн (заявка через анкету эфира).
+app.get('/plans', (c) => {
+  const plans = [
+    ...(Object.keys(VENUE_PLANS_CORE) as Array<keyof typeof VENUE_PLANS_CORE>).map((id) => ({
+      id,
+      name: VENUE_PLANS_CORE[id].name,
+      monthly: VENUE_PLANS_CORE[id].price_month,
+      yearly: VENUE_PLANS_CORE[id].price_year,
+      purchasable: true,
+      limits: VENUE_PLAN_LIMITS[id],
+    })),
+    {
+      id: FULL_RADIO_PLAN.id,
+      name: FULL_RADIO_PLAN.name,
+      monthly: FULL_RADIO_PLAN.price_month,
+      yearly: FULL_RADIO_PLAN.price_year,
+      purchasable: false,
+      limits: null,
+    },
+  ];
+  c.header('Cache-Control', 'public, max-age=300');
+  return c.json({ success: true, currency: 'RUB', trialDays: TRIAL_PERIOD_DAYS, yearMonths: VENUE_YEAR_MONTHS, plans });
+});
+
 // ──────────────────────────────────────────────────────────────────
 // POST /subscribe — create YooKassa session, save payment method
 // ──────────────────────────────────────────────────────────────────
@@ -106,17 +157,14 @@ app.post('/subscribe', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
     const body = await c.req.json().catch(() => ({}));
-    const tier = String(body.tier || '').toLowerCase();
-    const interval = body.interval === 'year' ? 'year' : 'month';
-
+    const choice = parseVenuePlanChoice(body);
+    if (choice.error || !choice.tier) {
+      return c.json({ success: false, error: choice.error || `Unknown tier "". Allowed: ${Object.keys(VENUE_PLANS).join(', ')}` }, 400);
+    }
+    const tier = choice.tier;
+    const interval = choice.interval || 'month';
     const plan = VENUE_PLANS[tier];
-    if (!plan) {
-      return c.json({ success: false, error: `Unknown tier "${tier}". Allowed: ${Object.keys(VENUE_PLANS).join(', ')}` }, 400);
-    }
-    const price = interval === 'year' ? plan.price_year : plan.price_month;
-    if (!price || price <= 0) {
-      return c.json({ success: false, error: 'Tier requires custom pricing – contact sales' }, 400);
-    }
+    const price = venuePlanPrice(tier, interval);
 
     const profile = await loadVenueProfile(userId);
     if (!profile) {
@@ -126,8 +174,11 @@ app.post('/subscribe', requireAuth, async (c) => {
     const { getGateway } = await import('./payment-gateway.tsx');
     const gateway = getGateway('yookassa');
     const orderId = crypto.randomUUID();
-    const returnUrl = `https://promo-music.ru/venue/subscription?payment=success&tier=${tier}`;
+    // Возврат на тот сайт, откуда начали оплату (сессия у promoair.ru своя).
+    const returnUrl = `${originFromRequest(c)}${PATH.venueSubscription}?payment=success&tier=${tier}`;
     const desc = `Подписка «${plan.name}» (${interval === 'year' ? 'год' : 'мес'}) – ${profile.venueName || 'заведение'}`;
+    // 54-ФЗ: чек на e-mail заведения (без него шлюз подставлял noreply@).
+    const receiptEmail = await loadVenueReceiptEmail(userId);
 
     const result = await gateway.createPayment({
       orderId,
@@ -148,6 +199,7 @@ app.post('/subscribe', requireAuth, async (c) => {
         interval,
         userId,
         venueId: profile.id,
+        ...(receiptEmail ? { email: receiptEmail } : {}),
       },
     });
 
@@ -185,9 +237,6 @@ app.post('/subscribe', requireAuth, async (c) => {
   }
 });
 
-// ──────────────────────────────────────────────────────────────────
-// POST /cancel — flip status to 'cancelled' (stream runs to period end)
-// ──────────────────────────────────────────────────────────────────
 /**
  * POST /attach-card: привязка карты для старта бесплатного пробного периода
  * (TRIAL_PERIOD_DAYS из venue-trial.tsx: 7 дней с 16.10.2026, раньше 14).
@@ -197,43 +246,102 @@ app.post('/subscribe', requireAuth, async (c) => {
  * ничего списать по окончании.
  *
  * Механика: проверочный платёж 1 ₽ с savePaymentMethod. После успеха вебхук
- * сохраняет payment_method_id, включает триал на 7 дней и ВОЗВРАЩАЕТ рубль.
- * По окончании триала крон venue-trial списывает первый месяц с этой карты
+ * (checkout-routes.tsx, ветка venue_card_attach) сохраняет карту, включает
+ * пробный на 7 дней и ВОЗВРАЩАЕТ рубль. По окончании пробного крон
+ * venue-trial списывает выбранный тариф с этой карты
  * (venue-billing-helpers.tsx: tryAutoChargeAtTrialEnd).
+ *
+ * Тело (необязательно): {tier: 'start'|'business'|'network', interval:
+ * 'month'|'year'}. Выбор пишется в профиль вебхуком: пробный идёт на этом
+ * тарифе, и списывается ровно он. Без выбора: текущий тариф профиля
+ * (по умолчанию «Старт», помесячно).
+ *
+ * Сессия платежа сохраняется так же, как в /subscribe: без неё вебхук
+ * отвечал «Session not in DB» и пробный не включался (critic A2 a).
+ *
+ * Пробный один раз: после окончания (expired) карта привязывается через
+ * /subscribe с оплатой. Во время пробного или платной подписки это смена
+ * карты (срок не меняется).
  */
 app.post('/attach-card', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
+    const body = await c.req.json().catch(() => ({}));
+    const choice = parseVenuePlanChoice(body);
+    if (choice.error) {
+      return c.json({ success: false, error: choice.error }, 400);
+    }
     const profile = await loadVenueProfile(userId);
     if (!profile) {
       return c.json({ success: false, error: 'Профиль заведения не найден' }, 404);
+    }
+    const status = String(profile.subscriptionStatus || 'pending_card');
+    if (status === 'expired' || status === 'inactive') {
+      return c.json({
+        success: false,
+        code: 'trial_used',
+        error: 'Пробный период уже был. Чтобы продолжить, оформите подписку.',
+      }, 409);
     }
 
     const { getGateway } = await import('./payment-gateway.tsx');
     const gateway = getGateway('yookassa');
     const orderId = crypto.randomUUID();
+    const returnUrl = `${originFromRequest(c)}${PATH.venueSubscription}?card=attached`;
+    const desc = `Привязка карты для пробного периода – ${profile.venueName || 'заведение'} (1 ₽ вернётся автоматически)`;
+    const receiptEmail = await loadVenueReceiptEmail(userId);
+    // Выбор тарифа: trialPlan / trialInterval, НЕ planKey (см. вебхук).
+    const meta: Record<string, string> = {
+      type: 'venue_card_attach',
+      userId,
+      venueId: String(profile.id || ''),
+      ...(choice.tier ? { trialPlan: choice.tier } : {}),
+      ...(choice.interval ? { trialInterval: choice.interval } : {}),
+    };
 
     const result = await gateway.createPayment({
       orderId,
       amount: 1,
       currency: 'RUB',
-      description: `Привязка карты для пробного периода – ${profile.venueName || 'заведение'} (1 ₽ вернётся автоматически)`,
-      returnUrl: 'https://promo-music.ru/venue/subscription?card=attached',
+      description: desc,
+      returnUrl,
       userId,
       gateway: 'yookassa',
       type: 'venue_subscription',
       savePaymentMethod: true,
-      metadata: {
-        type: 'venue_card_attach',
-        userId,
-        venueId: String(profile.id || ''),
-      },
+      metadata: { ...meta, ...(receiptEmail ? { email: receiptEmail } : {}) },
     });
 
+    await upsertPaymentSession(orderId, {
+      orderId,
+      userId,
+      gateway: 'yookassa',
+      gatewayPaymentId: result.sessionId,
+      amount: 1,
+      currency: 'RUB',
+      status: 'pending',
+      type: 'venue_subscription',
+      description: desc,
+      metadata: meta,
+      savePaymentMethod: true,
+      confirmationUrl: result.confirmationUrl,
+      returnUrl,
+      createdAt: new Date().toISOString(),
+    });
+
+    // Что сделает вебхук (checkout-routes.tsx, venue_card_attach): старт пробного,
+    // смена карты в пробном (тариф можно сменить) или только смена карты.
+    const mode = status === 'pending_card' ? 'trial_start'
+      : (status === 'trial' || (status === 'cancelled' && profile.cancelledFromStatus === 'trial')) ? 'trial_card_change'
+      : 'card_change';
+    const appliesChoice = mode !== 'card_change';
     return c.json({
       success: true,
       confirmationUrl: result.confirmationUrl,
       orderId,
+      mode,
+      tier: (appliesChoice && choice.tier) || (isVenuePaidTier(profile.subscriptionPlan) ? profile.subscriptionPlan : 'start'),
+      interval: (appliesChoice && choice.interval) || (profile.subscriptionInterval === 'year' ? 'year' : 'month'),
       note: 'Списываем 1 ₽ для проверки карты и сразу возвращаем. Пробный период включится после подтверждения.',
     });
   } catch (error: any) {
@@ -242,6 +350,13 @@ app.post('/attach-card', requireAuth, async (c) => {
   }
 });
 
+// ──────────────────────────────────────────────────────────────────
+// POST /cancel — status 'cancelled', access until the period ends
+// ──────────────────────────────────────────────────────────────────
+// Доступ сохраняется до конца оплаченного или пробного периода
+// (getEffectiveVenuePlan), списаний больше нет: крон пробного сканирует
+// только status='trial', крон продлений не списывает с 'cancelled' и
+// по окончании срока переводит в 'expired' (markVenueExpired).
 app.post('/cancel', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
@@ -250,14 +365,35 @@ app.post('/cancel', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Venue profile not found' }, 404);
     }
 
+    const data = profile.data || profile;
+    const status = String(data.subscriptionStatus || 'pending_card');
+    if (status === 'cancelled') {
+      return c.json({
+        success: true,
+        message: 'Подписка уже отменена.',
+        subscriptionStatus: 'cancelled',
+        subscriptionExpiresAt: data.subscriptionExpiresAt || null,
+      });
+    }
+    if (status !== 'trial' && status !== 'active') {
+      return c.json({ success: false, code: 'nothing_to_cancel', error: 'Активной подписки нет' }, 409);
+    }
+
+    const nowIso = new Date().toISOString();
+    // Для пробного срок доступа = конец пробного (вебхук привязки карты ставит
+    // оба поля одинаково, но старые строки могли иметь только trial_expires_at).
+    const accessUntil = (status === 'trial' ? data.trial_expires_at : null) || data.subscriptionExpiresAt || null;
     const nextData = {
-      ...(profile.data || profile),
+      ...data,
       subscriptionStatus: 'cancelled',
-      subscriptionUpdatedAt: new Date().toISOString(),
-      // Intentionally keep subscriptionExpiresAt — the stream
-      // continues until the paid period ends, then the next cron
-      // run flips status='expired' + revokes the bearer token.
-      updatedAt: new Date().toISOString(),
+      cancelledFromStatus: status,
+      subscriptionCancelledAt: nowIso,
+      subscriptionExpiresAt: accessUntil,
+      subscriptionUpdatedAt: nowIso,
+      // Intentionally keep the period end — the stream continues until
+      // it, then the charge-recurring cron flips status='expired' +
+      // revokes the bearer token.
+      updatedAt: nowIso,
     };
 
     await pool.query(
@@ -267,14 +403,17 @@ app.post('/cancel', requireAuth, async (c) => {
 
     emitSSE(userId, {
       type: 'venue_subscription_cancelled',
-      data: { expiresAt: nextData.subscriptionExpiresAt || null },
+      data: { expiresAt: accessUntil },
     });
 
+    const until = accessUntil ? fmtDate(accessUntil) : null;
     return c.json({
       success: true,
-      message: 'Подписка отменена. Эфир будет работать до конца оплаченного периода.',
+      message: status === 'trial'
+        ? `Подписка отменена. Пробный период работает${until ? ` до ${until}` : ''}, списаний не будет.`
+        : `Подписка отменена. Эфир будет работать до конца оплаченного периода${until ? ` (${until})` : ''}, продления не будет.`,
       subscriptionStatus: 'cancelled',
-      subscriptionExpiresAt: nextData.subscriptionExpiresAt || null,
+      subscriptionExpiresAt: accessUntil,
     });
   } catch (error: any) {
     console.error('POST /venue-billing/cancel:', error);
@@ -283,8 +422,56 @@ app.post('/cancel', requireAuth, async (c) => {
 });
 
 // ──────────────────────────────────────────────────────────────────
+// POST /resume — undo a cancel while the period is still running
+// ──────────────────────────────────────────────────────────────────
+// Возвращает статус, из которого отменили (trial / active). Нужна
+// сохранённая карта: без неё в конце срока нечего списывать (для
+// пробного тогда /attach-card, он тоже снимает отмену).
+// Оплата тарифа через /subscribe тоже снимает отмену (вебхук).
+app.post('/resume', requireAuth, async (c) => {
+  try {
+    const userId = await getUserId(c);
+    const profile = await loadVenueProfile(userId);
+    if (!profile) {
+      return c.json({ success: false, error: 'Venue profile not found' }, 404);
+    }
+    const data = profile.data || profile;
+    const until = Date.parse(data.subscriptionExpiresAt || '');
+    if (data.subscriptionStatus !== 'cancelled' || !(until > Date.now())) {
+      return c.json({ success: false, code: 'nothing_to_resume', error: 'Возобновить нечего: подписка не отменена или её срок уже закончился' }, 409);
+    }
+    const card = await getChargeablePaymentMethod(userId);
+    if (!card) {
+      return c.json({ success: false, code: 'card_required', error: 'Привяжите карту, чтобы возобновить подписку' }, 409);
+    }
+    const back = data.cancelledFromStatus === 'trial' ? 'trial' : 'active';
+    const nowIso = new Date().toISOString();
+    const nextData = {
+      ...data,
+      subscriptionStatus: back,
+      cancelledFromStatus: null,
+      subscriptionCancelledAt: null,
+      subscriptionUpdatedAt: nowIso,
+      updatedAt: nowIso,
+    };
+    await pool.query(
+      `UPDATE venue_profiles SET data = $1::jsonb, updated_at = NOW() WHERE user_id = $2`,
+      [JSON.stringify(nextData), userId]
+    );
+    emitSSE(userId, { type: 'venue_subscription_resumed', data: { status: back, expiresAt: data.subscriptionExpiresAt } });
+    return c.json({ success: true, subscriptionStatus: back, subscriptionExpiresAt: data.subscriptionExpiresAt });
+  } catch (error: any) {
+    console.error('POST /venue-billing/resume:', error);
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────
 // GET /me — current state + saved payment method for cabinet display
 // ──────────────────────────────────────────────────────────────────
+// Без статуса = pending_card (карта не привязана), как в
+// getEffectiveVenuePlan. Раньше здесь был 'trial'/'business', а гейтинг
+// читал тот же профиль как активный «Старт» (critic A2 f).
 app.get('/me', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
@@ -294,29 +481,45 @@ app.get('/me', requireAuth, async (c) => {
     }
 
     const data = profile.data || profile;
-    const subscription = {
-      status:      data.subscriptionStatus      || 'trial',
-      plan:        data.subscriptionPlan        || 'business',  // trial default
-      expiresAt:   data.subscriptionExpiresAt   || data.trial_expires_at || null,
-      interval:    data.subscriptionInterval    || null,
-      priceRub:    data.subscriptionPriceRub    || null,
-      updatedAt:   data.subscriptionUpdatedAt   || null,
-      planLabel:   VENUE_PLANS[data.subscriptionPlan]?.name || null,
-    };
 
     // Surface a tiny saved-card summary (last4, brand) without
     // exposing the full PCI surface. payment_methods rows from the
-    // same store the artist cron uses.
-    const methods = await getPaymentMethods(userId).catch(() => null) as any;
-    const card = Array.isArray(methods?.data) ? methods.data[0]
-                : Array.isArray(methods)        ? methods[0]
-                : methods?.savedMethods?.[0]    || null;
+    // same store the artist cron uses. Только карта шлюза: её и спишут.
+    const card = await getChargeablePaymentMethod(userId).catch((e: any) => {
+      console.error('[venue-billing] /me card lookup failed:', e?.message);
+      return null;
+    });
     const savedCard = card ? {
       last4:    card.last4 || card.card?.last4 || null,
       brand:    card.brand || card.card?.brand || null,
       gateway:  card.gateway || 'yookassa',
-      gatewayMethodId: card.gatewayMethodId || card.id || null,
+      gatewayMethodId: card.gatewayMethodId || null,
     } : null;
+
+    const next = getVenueNextCharge(data, !!card);
+    const status = data.subscriptionStatus || 'pending_card';
+    const subscription = {
+      status,
+      plan:        data.subscriptionPlan        || 'start',
+      effectivePlan: getEffectiveVenuePlan(data),
+      expiresAt:   data.subscriptionExpiresAt   || data.trial_expires_at || null,
+      interval:    data.subscriptionInterval    || null,
+      priceRub:    data.subscriptionPriceRub    || null,
+      updatedAt:   data.subscriptionUpdatedAt   || null,
+      planLabel:   (isVenuePaidTier(data.subscriptionPlan) ? VENUE_PLANS[data.subscriptionPlan].name : null),
+      trialDays:   TRIAL_PERIOD_DAYS,
+      trialExpiresAt: data.trial_expires_at || null,
+      cancelledFromStatus: status === 'cancelled' ? (data.cancelledFromStatus || null) : null,
+      cancelledAt: status === 'cancelled' ? (data.subscriptionCancelledAt || null) : null,
+      // Ближайшее автосписание: null, если списания не будет (нет карты,
+      // отменено, истекло, карта ещё не привязана).
+      nextChargeAt:  next?.at || null,
+      nextChargeRub: next?.amountRub ?? null,
+      nextChargePlan: next?.tier || null,
+      nextChargeInterval: next?.interval || null,
+      // Пробный идёт, а карта не сохранилась: автосписания не будет.
+      cardRequired: status === 'trial' && !card,
+    };
 
     return c.json({ success: true, subscription, savedCard });
   } catch (error: any) {
@@ -329,7 +532,8 @@ app.get('/me', requireAuth, async (c) => {
 // POST /cron/charge-recurring — CRON_SECRET, mirrors artist cron
 // ──────────────────────────────────────────────────────────────────
 //
-// Runs daily. Finds venues with subscriptionExpiresAt within 3 days
+// Runs every 6 hours (systemd/promofm-venue-charge-recurring.timer).
+// Finds venues with subscriptionExpiresAt within RENEWAL_LEAD_DAYS (3)
 // or already past + status='active'/'cancelled' and either:
 //  - Charges the saved card → extends period by 30/365 days.
 //  - No card and past expiry → flips to 'expired' + revokes bearer
@@ -351,7 +555,7 @@ app.post('/cron/charge-recurring', async (c) => {
   }
 
   const now = new Date();
-  const soonMs = now.getTime() + 3 * 24 * 60 * 60 * 1000;
+  const soonMs = now.getTime() + RENEWAL_LEAD_DAYS * 24 * 60 * 60 * 1000;
   const results: any[] = [];
   let charged = 0, expired = 0, skipped = 0;
 
@@ -387,10 +591,16 @@ app.post('/cron/charge-recurring', async (c) => {
         }
 
         const isCancelled = data.subscriptionStatus === 'cancelled';
-        const methods = await getPaymentMethods(row.user_id).catch(() => null) as any;
-        const card = Array.isArray(methods?.data) ? methods.data[0]
-                    : Array.isArray(methods)        ? methods[0]
-                    : methods?.savedMethods?.[0]    || null;
+        // Карта шлюза (с токеном). Сбой чтения БД ≠ «карты нет»: не отключаем,
+        // повторим на следующем прогоне.
+        let card: any = null;
+        try {
+          card = isCancelled ? null : await getChargeablePaymentMethod(row.user_id);
+        } catch (e: any) {
+          skipped++;
+          results.push({ userId: row.user_id, action: 'skipped', reason: 'card_lookup_failed', error: e?.message });
+          continue;
+        }
 
         // No saved card OR cancelled → if past expiry, mark expired
         // and revoke bearer tokens so the APK stops streaming.
@@ -427,10 +637,12 @@ app.post('/cron/charge-recurring', async (c) => {
         const chargeResult = await gateway.chargeRecurring({
           amount,
           currency: 'RUB',
-          paymentMethodId: card.gatewayMethodId || card.id,
+          paymentMethodId: card.gatewayMethodId,
           orderId,
           description: `Продление «${plan.name}» (${interval === 'year' ? 'год' : 'мес'})`,
           userId: row.user_id,
+          // 54-ФЗ: чек на e-mail заведения
+          receiptEmail: row.email || undefined,
         });
 
         // Реальный исход списания (YooKassa off-session capture:true — синхронно).
@@ -605,15 +817,19 @@ export async function markVenueExpired(userId: string, email: string | null, rea
     data: { reason },
   });
 
-  // Use the existing trial-expired email (same message — «эфир
-  // приостановлен, оплатите чтобы вернуть»). When we add a dedicated
-  // post-trial expiry email, swap it here.
+  // The expiry email names the reason (cancelled / card declined /
+  // period over without a card), see sendVenueTrialExpiredEmail.
   if (email) {
     try {
       const { sendVenueTrialExpiredEmail } = await import('./email-helper.tsx');
+      // markVenueExpired зовёт только крон продлений: оплаченный период
+      // закончился (без карты или отказ карты) либо подписку отменили.
+      const emailReason: VenueExpiredReason = reason === 'cancelled_period_ended' ? 'cancelled' : 'period_ended';
       await sendVenueTrialExpiredEmail({
         toEmail: email,
         venueName: (profile as any)?.venueName || 'ваше заведение',
+        site: await siteForUserId(userId),
+        reason: emailReason,
       });
     } catch (e) {
       console.warn('[venue-billing] expired email failed:', (e as any)?.message);

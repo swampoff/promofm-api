@@ -240,7 +240,7 @@ app.delete("/user/:userId/payment-methods/:methodId", requireAuth, requireOwner(
       return apiError(c, 'VALIDATION_REQUIRED_FIELDS', 'User ID and Method ID are required');
     }
 
-    await db.deletePaymentMethod(methodId);
+    await db.deletePaymentMethod(methodId, userId);
 
     return c.json({
       success: true,

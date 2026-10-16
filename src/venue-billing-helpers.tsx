@@ -9,7 +9,7 @@
 
 import crypto from 'crypto';
 import { pool } from './db-client.tsx';
-import { getPaymentMethods, upsertPaymentSession, getPaymentSession, insertPaymentTx } from './db.tsx';
+import { getChargeablePaymentMethod, upsertPaymentSession, getPaymentSession, insertPaymentTx } from './db.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
 import { emitSSE } from './sse-routes.tsx';
 
@@ -17,77 +17,113 @@ import { emitSSE } from './sse-routes.tsx';
 // Раньше тут была копия (комментарий «duplicated to avoid circular
 // import»). venue-plans-constants — листовой модуль без импортов
 // routes/helpers, так что circular-import больше не возникает.
-import { VENUE_PLANS_CORE as VENUE_PLANS } from './venue-plans-constants.tsx';
+import { resolveVenueChargePlan } from './venue-plans-constants.tsx';
+
+/** E-mail заведения для чека 54-ФЗ (users.email). null, если адреса нет. */
+export async function loadVenueReceiptEmail(userId: string): Promise<string | null> {
+  try {
+    const r = await pool.query(`SELECT email FROM users WHERE id::text = $1 LIMIT 1`, [userId]);
+    const email = String(r.rows[0]?.email || '').trim();
+    return email.includes('@') ? email : null;
+  } catch (e: any) {
+    console.warn('[venue-billing-helpers] receipt email lookup failed for', userId, ':', e?.message);
+    return null;
+  }
+}
 
 /**
- * Attempt to charge the venue's saved card for the first paid month
- * at the moment their trial expires.
- *
- * Behaviour:
- *   - No saved card → return false. Caller falls back to «mark expired».
- *   - Card present → attempt charge. On success:
- *       - Updates venue_profiles.data (status='active', plan,
- *         expiresAt, interval, priceRub).
- *       - Inserts payment_txns + revenue records (same shape the
- *         artist cron uses).
- *       - Emits SSE so the cabinet updates immediately.
- *       - Returns true. Caller skips the «mark expired» path.
- *   - Card present, charge throws → return false. Caller falls
- *     back to «mark expired». A re-attempt happens once the trial
- *     row is past expiry on the next cron tick anyway (venue-billing
- *     cron picks up active/cancelled rows past expiry too).
- *
- * Plan choice for the first charge: takes
- * `data.subscriptionPlan` if the venue already picked a tier during
- * onboarding (default 'business' — set in /venue/profile during the
- * trial). Falls back to 'business' otherwise. Interval: monthly.
+ * Исход попытки первого списания по окончании пробного периода:
+ *   charged   — списано (или найдено уже успешное списание), тариф активен;
+ *   no_card   — сохранённой карты нет → caller отключает заведение;
+ *   declined  — шлюз отклонил карту → caller отключает заведение;
+ *   pending   — платёж ещё в обработке у шлюза → ждём вебхук, повтор на
+ *               следующем прогоне (с тем же orderId, повторно не спишет);
+ *   error     — сбой сети / БД / шлюза → caller повторит на следующем прогоне;
+ *   not_trial — статус уже не trial (отменили в кабинете или оплатили).
  */
-export async function tryAutoChargeAtTrialEnd(userId: string, profileData: any): Promise<boolean> {
-  if (!profileData) return false;
+export type TrialChargeOutcome = 'charged' | 'no_card' | 'declined' | 'pending' | 'error' | 'not_trial';
 
-  // Look up saved payment method. The artist cron uses the same
-  // `payment_methods` SQL table — we read the first available method.
-  const methods = await getPaymentMethods(userId).catch(() => null) as any;
-  const card = Array.isArray(methods?.data) ? methods.data[0]
-              : Array.isArray(methods)        ? methods[0]
-              : methods?.savedMethods?.[0]    || null;
-  if (!card) return false;
-  if (!(card.gatewayMethodId || card.id)) return false;
+/**
+ * Charge the venue's saved card for the first paid period at the moment
+ * its trial expires (called by the expire-trials cron, venue-trial.tsx).
+ *
+ * Plan: the tier/interval chosen before the card was attached
+ * (subscriptionPlan / subscriptionInterval), fallback «Старт» monthly
+ * (resolveVenueChargePlan). Year = price_year (10 months).
+ *
+ * orderId is deterministic per trial (`venue-first-<user>-<trialEndMs>`):
+ * it is the YooKassa Idempotence-Key, so a crash or overlap between the
+ * charge and the session write cannot charge twice, and a payment that
+ * the gateway left pending is picked up on the next run once its webhook
+ * marks the session succeeded.
+ *
+ * On success: venue_profiles.data → status 'active', chosen plan, period
+ * from now (+30 / +365 days); payment_txns + revenue; SSE.
+ */
+export async function tryAutoChargeAtTrialEnd(
+  userId: string,
+  profileData: any,
+  opts: { email?: string | null; trialEndIso?: string | null } = {},
+): Promise<TrialChargeOutcome> {
+  if (!profileData) return 'not_trial';
 
-  const tier = String(profileData.subscriptionPlan || 'business').toLowerCase();
-  const plan = VENUE_PLANS[tier];
-  if (!plan) return false;          // unknown plan → fail closed
+  // Свежее состояние прямо перед списанием: крон прочитал строку раньше, а
+  // заведение могло за это время отменить подписку или оплатить тариф.
+  let data: any;
+  try {
+    const fresh = await pool.query(`SELECT data FROM venue_profiles WHERE user_id = $1`, [userId]);
+    data = fresh.rows[0]?.data;
+  } catch (e: any) {
+    console.error('[venue-billing-helpers] profile re-read failed for', userId, ':', e?.message);
+    return 'error';
+  }
+  if (!data || data.subscriptionStatus !== 'trial') return 'not_trial';
 
-  const interval = profileData.subscriptionInterval === 'year' ? 'year' : 'month';
-  const amount = interval === 'year' ? plan.price_year : plan.price_month;
+  let card: any;
+  try {
+    card = await getChargeablePaymentMethod(userId);
+  } catch (e: any) {
+    console.error('[venue-billing-helpers] saved card lookup failed for', userId, ':', e?.message);
+    return 'error';
+  }
+  if (!card) return 'no_card';
+
+  const { tier, interval, amount, name } = resolveVenueChargePlan(data);
+  const trialEndMs = Date.parse(opts.trialEndIso || data.trial_expires_at || '') || 0;
+  const orderId = `venue-first-${userId}-${trialEndMs}`;
   const now = new Date();
-  const orderId = `venue-first-${userId}-${now.getTime()}`;
 
-  // Idempotency: if a prior charge for the same trial-expiry tick is
-  // already in flight (extremely rare — cron is 1/day), skip.
   const prior = await getPaymentSession(orderId).catch(() => null) as any;
-  if (prior && (prior.status === 'succeeded' || prior.status === 'processing')) {
-    return false;
+  if (prior && (prior.status === 'pending' || prior.status === 'processing')) {
+    console.warn('[venue-billing-helpers] first charge still pending at gateway for', userId, orderId);
+    return 'pending';
+  }
+  if (prior && prior.status === 'succeeded') {
+    // Деньги уже списаны (вебхук подтвердил ранее pending-платёж или прошлый
+    // прогон упал после списания): только включаем тариф, выручку не дублируем.
+    await activateAfterTrial(userId, data, { tier, interval, amount: Number(prior.amount) || amount, name, orderId, now, gateway: card.gateway || 'yookassa', recordMoney: false });
+    return 'charged';
   }
 
+  let chargeStatus: 'succeeded' | 'canceled' | 'pending';
   try {
     const { getGateway } = await import('./payment-gateway.tsx');
     const gateway = getGateway(card.gateway || 'yookassa');
     const chargeResult = await gateway.chargeRecurring({
       amount,
       currency: 'RUB',
-      paymentMethodId: card.gatewayMethodId || card.id,
+      paymentMethodId: card.gatewayMethodId,
       orderId,
-      description: `Первый месяц подписки «${plan.name}» (после триала)`,
+      description: `Подписка «${name}» (${interval === 'year' ? 'год' : 'месяц'}) после пробного периода`,
       userId,
+      receiptEmail: opts.email || undefined,
     });
 
     // Реальный исход списания (2026-07-02): раньше статус не проверялся —
     // отклонённая карта на границе триала всё равно активировала платный месяц
-    // и писала фантомную выручку, а caller получал true и НЕ делал mark-expired.
-    // planKey из metadata убран — иначе webhook-ветка venue_subscription
-    // активировала бы подписку ВТОРОЙ раз (см. venue-billing-routes).
-    const chargeStatus = chargeResult.status; // 'succeeded' | 'canceled' | 'pending'
+    // и писала фантомную выручку. planKey в metadata НЕ кладём — иначе
+    // webhook-ветка venue_subscription активировала бы подписку ВТОРОЙ раз.
+    chargeStatus = chargeResult.status; // 'succeeded' | 'canceled' | 'pending'
 
     await upsertPaymentSession(orderId, {
       orderId,
@@ -97,42 +133,58 @@ export async function tryAutoChargeAtTrialEnd(userId: string, profileData: any):
       amount, currency: 'RUB',
       status: chargeStatus === 'succeeded' ? 'succeeded' : chargeStatus === 'canceled' ? 'canceled' : 'pending',
       type: 'venue_subscription',
-      description: `Первый месяц «${plan.name}» после триала`,
+      description: `Первый период «${name}» после пробного`,
       metadata: { tier, interval, autoTrialEnd: true, userId },
       savePaymentMethod: false,
       confirmationUrl: '',
       returnUrl: 'https://promo-music.ru/venue',
       createdAt: now.toISOString(),
     });
+  } catch (err: any) {
+    console.warn('[venue-billing-helpers] auto-charge failed for', userId, ':', err?.message);
+    return 'error';
+  }
 
-    if (chargeStatus !== 'succeeded') {
-      // Списание не подтверждено → false: caller (trial-cron) делает свой
-      // штатный mark-expired фолбэк.
-      console.warn(`[venue-billing-helpers] auto-charge not succeeded (${chargeStatus}) for`, userId);
-      return false;
-    }
+  if (chargeStatus === 'canceled') {
+    console.warn('[venue-billing-helpers] first charge declined for', userId, orderId);
+    return 'declined';
+  }
+  if (chargeStatus !== 'succeeded') {
+    console.warn('[venue-billing-helpers] first charge pending for', userId, orderId);
+    return 'pending';
+  }
 
-    // Extend period. Starts from NOW (the trial expiry moment) —
-    // venue has been getting free service during the trial, so the
-    // 30 paid days run from this moment forward.
-    const daysToAdd = interval === 'year' ? 365 : 30;
-    const newExpiry = new Date(now.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
-    const nextData = {
-      ...profileData,
-      subscriptionStatus:    'active',
-      subscriptionPlan:       tier,
-      subscriptionExpiresAt:  newExpiry.toISOString(),
-      subscriptionInterval:   interval,
-      subscriptionPriceRub:   amount,
-      subscriptionUpdatedAt:  now.toISOString(),
-      trial_ended_at:         now.toISOString(),
-      updatedAt:              now.toISOString(),
-    };
-    await pool.query(
-      `UPDATE venue_profiles SET data = $1::jsonb, updated_at = NOW() WHERE user_id = $2`,
-      [JSON.stringify(nextData), userId]
-    );
+  await activateAfterTrial(userId, data, { tier, interval, amount, name, orderId, now, gateway: card.gateway || 'yookassa', recordMoney: true });
+  return 'charged';
+}
 
+// Пробный → платный тариф после подтверждённого списания. Период от «сейчас»
+// (момента окончания пробного): 30 дней месяц, 365 дней год.
+async function activateAfterTrial(
+  userId: string,
+  data: any,
+  p: { tier: string; interval: 'month' | 'year'; amount: number; name: string; orderId: string; now: Date; gateway: string; recordMoney: boolean },
+): Promise<void> {
+  const { tier, interval, amount, name, orderId, now } = p;
+  const daysToAdd = interval === 'year' ? 365 : 30;
+  const newExpiry = new Date(now.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
+  const nextData = {
+    ...data,
+    subscriptionStatus:    'active',
+    subscriptionPlan:       tier,
+    subscriptionExpiresAt:  newExpiry.toISOString(),
+    subscriptionInterval:   interval,
+    subscriptionPriceRub:   amount,
+    subscriptionUpdatedAt:  now.toISOString(),
+    trial_ended_at:         now.toISOString(),
+    updatedAt:              now.toISOString(),
+  };
+  await pool.query(
+    `UPDATE venue_profiles SET data = $1::jsonb, updated_at = NOW() WHERE user_id = $2`,
+    [JSON.stringify(nextData), userId]
+  );
+
+  if (p.recordMoney) {
     await insertPaymentTx({
       id: `tx-venue-first-${crypto.randomUUID()}`,
       userId,
@@ -140,8 +192,8 @@ export async function tryAutoChargeAtTrialEnd(userId: string, profileData: any):
       type: 'expense',
       category: 'venue_subscription',
       amount, currency: 'RUB',
-      gateway: card.gateway || 'yookassa',
-      description: `Первый месяц «${plan.name}» после триала`,
+      gateway: p.gateway,
+      description: `Первый период «${name}» после пробного`,
       metadata: { tier, interval, autoTrialEnd: true, orderId },
       status: 'pending',
       createdAt: now.toISOString(),
@@ -150,7 +202,7 @@ export async function tryAutoChargeAtTrialEnd(userId: string, profileData: any):
     try {
       await recordRevenue({
         channel: 'venue_subscription',
-        description: `Первый месяц «${plan.name}» (auto-charge after trial): venue ${userId}`,
+        description: `Первый период «${name}» (auto-charge after trial): venue ${userId}`,
         grossAmount: amount, platformRevenue: amount, payoutAmount: 0,
         commissionRate: 1.0, payerId: userId, payerName: userId,
         metadata: { tier, interval, autoTrialEnd: true, orderId },
@@ -158,15 +210,10 @@ export async function tryAutoChargeAtTrialEnd(userId: string, profileData: any):
     } catch (e) {
       console.warn('[venue-billing-helpers] recordRevenue warning:', e);
     }
-
-    emitSSE(userId, {
-      type: 'venue_subscription_activated',
-      data: { tier, expiresAt: newExpiry.toISOString(), via: 'trial_auto_charge' },
-    });
-
-    return true;
-  } catch (err: any) {
-    console.warn('[venue-billing-helpers] auto-charge failed for', userId, ':', err?.message);
-    return false;
   }
+
+  emitSSE(userId, {
+    type: 'venue_subscription_activated',
+    data: { tier, expiresAt: newExpiry.toISOString(), via: 'trial_auto_charge' },
+  });
 }

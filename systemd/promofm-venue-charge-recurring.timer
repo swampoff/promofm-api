@@ -1,0 +1,15 @@
+[Unit]
+Description=PromoFM venue cron: subscription renewals and expiry, every 6 hours
+
+[Timer]
+# 00:35, 06:35, 12:35, 18:35. Renewals are charged 3 days before the period
+# ends (RENEWAL_LEAD_DAYS). The orderId (= YooKassa Idempotence-Key) carries
+# the day: at most one charge attempt per subscription per day, so a declined
+# card is retried daily until the period is over, then the venue expires.
+OnCalendar=*-*-* 00/6:35:00
+RandomizedDelaySec=120
+Persistent=true
+Unit=promofm-venue-cron@charge-recurring.service
+
+[Install]
+WantedBy=timers.target

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import * as db from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { requireAuth } from './auth-middleware.tsx';
+import { isAllowedUrl, originFromRequest } from './site-origin.tsx';
 
 const coinsRoutes = new Hono();
 
@@ -77,18 +78,18 @@ coinsRoutes.post('/topup', requireAuth, async (c) => {
 
     const { gateway, amount, returnUrl } = body;
 
-    // Validate returnUrl — prevent open redirect
+    // Validate returnUrl: prevent open redirect (только https на наши сайты, site-origin.tsx)
     if (returnUrl) {
-      const ALLOWED_ORIGINS = ['https://promo-music.ru', 'https://www.promo-music.ru', 'https://promofm.org'];
       try {
-        const returnOrigin = new URL(returnUrl).origin;
-        if (!ALLOWED_ORIGINS.includes(returnOrigin)) {
-          return c.json({ success: false, error: 'returnUrl must be on promo-music.ru' }, 400);
-        }
+        new URL(returnUrl);
       } catch {
         return c.json({ success: false, error: 'Invalid returnUrl format' }, 400);
       }
+      if (!isAllowedUrl(returnUrl)) {
+        return c.json({ success: false, error: 'returnUrl must be on promo-music.ru' }, 400);
+      }
     }
+    const defaultReturnUrl = `${originFromRequest(c)}/cabinet/coins?payment=result`;
 
     if (!gateway || !['yookassa', 'tbank'].includes(gateway)) {
       return c.json({ success: false, error: 'Укажите gateway: "yookassa" или "tbank"' }, 400);
@@ -110,7 +111,7 @@ coinsRoutes.post('/topup', requireAuth, async (c) => {
       gateway,
       userId,
       orderId,
-      returnUrl: returnUrl || 'https://promo-music.ru/cabinet/coins?payment=result',
+      returnUrl: returnUrl || defaultReturnUrl,
       metadata: { coinAmount: String(coinAmount), type: 'topup' },
       savePaymentMethod: false,
       type: 'topup',
@@ -130,7 +131,7 @@ coinsRoutes.post('/topup', requireAuth, async (c) => {
       metadata: { coinAmount: String(coinAmount) },
       savePaymentMethod: false,
       confirmationUrl: result.confirmationUrl,
-      returnUrl: returnUrl || 'https://promo-music.ru/cabinet/coins?payment=result',
+      returnUrl: returnUrl || defaultReturnUrl,
       createdAt: new Date().toISOString(),
     });
 

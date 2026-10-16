@@ -43,6 +43,10 @@ export interface WebhookPayload {
   currency: string;
   metadata: Record<string, string>;
   paymentMethodId?: string;
+  // YooKassa: payment_method.saved (false = токен нельзя использовать для
+  // автосписаний) и данные карты для показа в кабинете («•• 4242»).
+  paymentMethodSaved?: boolean;
+  paymentMethodCard?: { last4?: string; brand?: string; title?: string };
   raw: any;
   /**
    * Migration 100 (YooKassa shop rotation safety): сообщает caller'у
@@ -61,6 +65,9 @@ export interface RecurringChargeRequest {
   orderId: string;
   description: string;
   userId: string;
+  // 54-ФЗ: e-mail покупателя для чека. YooKassa кладёт чек в платёж, только
+  // если адрес передан (createPayment всегда шлёт чек с запасным адресом).
+  receiptEmail?: string;
 }
 
 export interface PaymentGateway {
@@ -100,6 +107,8 @@ export interface SavedPaymentMethod {
   gatewayMethodId: string;
   type: string;        // 'bank_card', 'yoo_money', etc.
   title: string;       // 'Visa *4242'
+  last4?: string;
+  brand?: string;
   createdAt: string;
 }
 

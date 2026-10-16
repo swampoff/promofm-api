@@ -1,0 +1,25 @@
+[Unit]
+# Venue billing crons (PROMO.AIR / ПРОМО.ЭИР). Instance = job name:
+#   promofm-venue-cron@expire-trials.service     (timer: hourly)
+#   promofm-venue-cron@charge-recurring.service  (timer: every 6 hours)
+# The job itself lives in the API (CRON_SECRET-protected endpoints); this unit
+# only runs scripts/venue-cron.sh, which reads CRON_SECRET from .env, takes a
+# flock and curls 127.0.0.1:3000. See docs/PROMOAIR.md, section BILLING.
+Description=PromoFM venue cron: %i
+After=network.target promofm-api.service
+Wants=promofm-api.service
+
+[Service]
+Type=oneshot
+# Same user as the API (drop-in 10-user.conf): .env is 0600 promofm:promofm.
+User=promofm
+Group=promofm
+Slice=sites-promofm.slice
+NoNewPrivileges=true
+# bash explicitly: works even if the exec bit was lost on deploy.
+ExecStart=/bin/bash /opt/promofm-api/scripts/venue-cron.sh %i
+# A trial/renewal pass with YooKassa calls can take minutes; never stack runs.
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=promofm-venue-cron-%i

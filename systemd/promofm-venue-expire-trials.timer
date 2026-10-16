@@ -1,0 +1,14 @@
+[Unit]
+Description=PromoFM venue cron: trial end (autocharge or expiry) and trial reminders, hourly
+
+[Timer]
+# Every hour at :05. The job compares timestamps; the reminder flags and the
+# per-trial orderId make reruns no-ops.
+OnCalendar=*-*-* *:05:00
+RandomizedDelaySec=60
+# Server was down at :05 → run once at boot, the job is idempotent.
+Persistent=true
+Unit=promofm-venue-cron@expire-trials.service
+
+[Install]
+WantedBy=timers.target

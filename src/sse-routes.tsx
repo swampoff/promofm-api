@@ -16,15 +16,12 @@ const app = new Hono();
 // authenticated event streams, so a malicious page could subscribe a victim's
 // SSE channel and intercept their notifications.
 import { requireAuth, requireOwner, requireAdmin } from './auth-middleware.tsx';
+import { ALLOWED_ORIGINS, SITE_ORIGIN } from './site-origin.tsx';
 
-const SSE_ALLOWED_ORIGINS = new Set([
-  'https://promo-music.ru',
-  'https://www.promo-music.ru',
-  'https://promofm.org',
-]);
+const SSE_ALLOWED_ORIGINS = new Set(ALLOWED_ORIGINS);
 
 function sseCorsHeaders(origin: string | undefined): Record<string, string> {
-  const allowed = origin && SSE_ALLOWED_ORIGINS.has(origin) ? origin : 'https://promo-music.ru';
+  const allowed = origin && SSE_ALLOWED_ORIGINS.has(origin) ? origin : SITE_ORIGIN.music;
   return {
     'Access-Control-Allow-Origin': allowed,
     'Vary': 'Origin',

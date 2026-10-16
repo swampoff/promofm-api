@@ -35,6 +35,7 @@ import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { ensureVenueProfile, getVenueProfile as dbGetVenueProfile } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { sendVenueRadioReadyEmail, sendVenueRadioChangesRequestedEmail, sendVenueRadioRejectedEmail } from './email-helper.tsx';
+import { siteForUserId } from './site-origin.tsx';
 import { TRIAL_PERIOD_DAYS } from './venue-trial.tsx';
 
 const app = new Hono();
@@ -539,9 +540,10 @@ app.post('/admin/:requestId/reject', requireAuth, requireAdmin, async (c) => {
     }
     // Сообщаем заведению причину — раньше отказ был молчаливым.
     const rejectedRow = r.rows[0];
-    loadVenueContact(rejectedRow.user_id).then((contact) => {
+    // Письма ведут на сайт заведения (siteForUserId), хотя действие делает админ на promo-music.ru.
+    loadVenueContact(rejectedRow.user_id).then(async (contact) => {
       if (contact) {
-        return sendVenueRadioRejectedEmail({ toEmail: contact.email, venueName: contact.name, reason });
+        return sendVenueRadioRejectedEmail({ toEmail: contact.email, venueName: contact.name, reason, site: await siteForUserId(rejectedRow.user_id) });
       }
     }).catch((err) => console.error('[venue-station] rejected email failed:', err?.message));
     return c.json({ success: true, request: rowToRequest(r.rows[0]) });
@@ -575,12 +577,13 @@ app.post('/admin/:requestId/request-changes', requireAuth, requireAdmin, async (
     // Notify venue — fire-and-forget so email outage doesn't block
     // the admin action.
     const venueRow = r.rows[0];
-    loadVenueContact(venueRow.user_id).then((contact) => {
+    loadVenueContact(venueRow.user_id).then(async (contact) => {
       if (contact) {
         return sendVenueRadioChangesRequestedEmail({
           toEmail: contact.email,
           venueName: contact.name,
           message,
+          site: await siteForUserId(venueRow.user_id),
         });
       }
     }).catch((err) => console.error('[venue-station] changes_requested email failed:', err?.message));
@@ -662,8 +665,16 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
     // enum-значения → без риска CHECK), plan_id='trial', +TRIAL_PERIOD_DAYS
     // (7 дней с 16.10.2026, раньше 14; уже созданные строки не трогаем). stream-token
     // пускает active+период → эфир играет сразу; по истечении доступ гаснет
-    // по дате, дальше нужен платный абонемент. Идемпотентно: только если у
-    // заведения ещё нет живой подписки (active с непросроченным периодом).
+    // по дате, дальше нужен платный абонемент.
+    //
+    // Ключ venue_id = user_id заведения: так строку читают /venue-radio/
+    // subscription, /subscribe и /stream-token (JWT userId). До 16.10 здесь
+    // писался req.venue_id (= venue_profiles.id), и пробный был невидим
+    // (critic A4). Плюс plan_id 'trial' не было в venue_radio_plans, и INSERT
+    // падал на FK (миграция 161 добавляет строку плана).
+    // Идемпотентно: только если у заведения нет active-строки (одна на
+    // заведение, uq_vr_active_sub_per_venue) и пробного эфира ещё не было
+    // (второй поток для новой точки пробный не продлевает).
     try {
       await pool.query(
         `INSERT INTO venue_radio_subscriptions
@@ -671,11 +682,10 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
          SELECT $1, 'trial', 'active', NOW(), NOW() + make_interval(days => $2::int), NOW(), NOW()
           WHERE NOT EXISTS (
             SELECT 1 FROM venue_radio_subscriptions
-             WHERE venue_id = $1
-               AND status = 'active'
-               AND (current_period_end IS NULL OR current_period_end > NOW())
+             WHERE venue_id IN ($1, $3)
+               AND (status = 'active' OR plan_id = 'trial')
           )`,
-        [req.venue_id, TRIAL_PERIOD_DAYS]
+        [String(req.user_id), TRIAL_PERIOD_DAYS, String(req.venue_id || '')]
       );
     } catch (trialErr: any) {
       // Триал best-effort: не валим провижининг, если подписочная таблица
@@ -686,12 +696,13 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
     // Notify venue with the pairing code — this is the critical
     // moment in the funnel: admin's done, venue sees the code in
     // their inbox and in the cabinet at the same time.
-    loadVenueContact(req.user_id).then((contact) => {
+    loadVenueContact(req.user_id).then(async (contact) => {
       if (contact) {
         return sendVenueRadioReadyEmail({
           toEmail: contact.email,
           venueName: contact.name,
           pairingCode: code,
+          site: await siteForUserId(req.user_id),
         });
       }
     }).catch((err) => console.error('[venue-station] ready email failed:', err?.message));

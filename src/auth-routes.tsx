@@ -22,6 +22,7 @@ import {
   sendSecurityAlert,
 } from './auth-security.tsx';
 import { setSessionCookie, clearSessionCookie, getSessionCookie, setRefreshCookie, getRefreshCookie, clearRefreshCookie } from './cookie-helper.tsx';
+import { ALLOWED_ORIGINS, PATH, originFromRequest, siteFromRequest, siteForUserId, signupSiteFromRequest } from './site-origin.tsx';
 
 import { createLogger } from "./logger.tsx";
 
@@ -54,6 +55,17 @@ async function sql(text: string, params?: any[]) {
   const client = await getPool().connect();
   try { return await client.query(text, params); }
   finally { client.release(); }
+}
+
+// Сайт регистрации (users.signup_site, миграция 160): по нему письма без контекста
+// запроса ведут на promoair.ru или promo-music.ru. Отдельный best-effort UPDATE:
+// без колонки (миграция не применена) регистрация не должна падать.
+async function storeSignupSite(userId: string, site: string): Promise<void> {
+  try {
+    await sql(`UPDATE users SET signup_site = $1 WHERE id = $2`, [site, userId]);
+  } catch (err) {
+    log.warn({ err, userId }, 'signup_site_store_failed');
+  }
 }
 
 // ── JWT helpers ──
@@ -265,25 +277,29 @@ auth.post("/signup", async (c) => {
       } catch (e) { log.warn({ err: e, userId }, 'radio_application_store_failed'); }
     }
 
-    log.info({ email, userId, role: userRole, status: accountStatus }, 'user_registered');
+    const signupSite = signupSiteFromRequest(c);
+    await storeSignupSite(userId, signupSite);
+    const site = siteFromRequest(c);
+
+    log.info({ email, userId, role: userRole, status: accountStatus, signupSite }, 'user_registered');
     logAuthEvent('signup_success', {
       userId, description: `Регистрация: ${email}, роль: ${userRole}`,
       ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
       userAgent: c.req.header('user-agent') || '',
     });
 
-    notifyNewUser({ email, name: userName, role: userRole, via: "email", needsApproval: isPartner, application: radioApp || undefined }).catch(() => {});
+    notifyNewUser({ email, name: userName, role: userRole, via: "email", needsApproval: isPartner, application: radioApp || undefined, site: signupSite }).catch(() => {});
 
     const verificationToken = crypto.randomUUID();
     await vpsStoreToken(userId, verificationToken, "email_verify", 24);
-    sendVerificationEmail(email, userName, verificationToken).catch((e) => log.warn({ err: e, email }, "verification_email_failed"));
+    sendVerificationEmail(email, userName, verificationToken, site).catch((e) => log.warn({ err: e, email }, "verification_email_failed"));
 
     // Venue-specific welcome — fires alongside the standard
     // verification email so the new venue understands the 7-day trial
     // + next steps (onboarding wizard → admin queue → pairing code).
     // Other roles get only the verification email.
     if (userRole === 'venue') {
-      sendVenueRadioWelcomeEmail({ toEmail: email, venueName: userName })
+      sendVenueRadioWelcomeEmail({ toEmail: email, venueName: userName, pendingApproval: isPartner, site })
         .catch((e) => log.warn({ err: e, email }, 'venue_welcome_email_failed'));
     }
 
@@ -472,16 +488,11 @@ auth.post("/vk-callback", async (c) => {
     if (!vkParsed.ok) return vkParsed.response;
     const { code, redirect_uri, code_verifier, device_id, role: vkRequestedRole } = vkParsed.body;
 
-    // Validate redirect_uri — prevent OAuth redirect manipulation
-    const ALLOWED_REDIRECT_URIS = [
-      'https://promo-music.ru/login',
-      'https://www.promo-music.ru/login',
-      'https://promo-music.ru/register',
-      'https://www.promo-music.ru/register',
-      'https://promo-music.ru/auth/vk/callback',
-      'https://www.promo-music.ru/auth/vk/callback',
-    ];
-    const effectiveRedirectUri = redirect_uri || 'https://promo-music.ru/login';
+    // Validate redirect_uri: prevent OAuth redirect manipulation.
+    // Только наши origin'ы (site-origin.tsx); сам VK дополнительно сверяет
+    // redirect_uri с доверенными адресами приложения.
+    const ALLOWED_REDIRECT_URIS = ALLOWED_ORIGINS.flatMap((o) => ['/login', '/register', '/auth/vk/callback'].map((p) => o + p));
+    const effectiveRedirectUri = redirect_uri || `${originFromRequest(c)}${PATH.login}`;
     if (!ALLOWED_REDIRECT_URIS.includes(effectiveRedirectUri)) {
       return c.json({ success: false, error: 'Invalid redirect_uri' }, 400);
     }
@@ -604,7 +615,9 @@ auth.post("/vk-callback", async (c) => {
     if (!profileOk) {
       return c.json({ success: false, error: 'Ошибка создания аккаунта – не удалось создать профиль' }, 500);
     }
-    notifyNewUser({ email: userEmail, name: vkName, role: vkRole, via: "vk_oauth" }).catch(() => {});
+    const vkSignupSite = signupSiteFromRequest(c);
+    await storeSignupSite(userId, vkSignupSite);
+    notifyNewUser({ email: userEmail, name: vkName, role: vkRole, via: "vk_oauth", site: vkSignupSite }).catch(() => {});
 
     const accessToken = signToken({ id: userId, email: userEmail, role: vkRole });
     setSessionCookie(c, accessToken);
@@ -804,7 +817,7 @@ auth.post("/request-reset", async (c) => {
     await vpsStoreToken(user.id, resetToken, "password_reset", 1);
 
     const profile = await vpsGetProfile(user.id);
-    await sendPasswordResetEmail(email, profile?.name || user.full_name || email.split("@")[0], resetToken);
+    await sendPasswordResetEmail(email, profile?.name || user.full_name || email.split("@")[0], resetToken, siteFromRequest(c));
     recentResetSends.set(emailKey, Date.now());
     log.info({ email }, 'password_reset_sent');
     return c.json({ success: true, message: "Если аккаунт с таким email существует, мы отправили письмо." });
@@ -929,7 +942,7 @@ auth.post("/set-email", requireAuth, async (c) => {
     await vpsStoreToken(userId, verificationToken, "email_verify", 24);
     const profile = await vpsGetProfile(userId);
     const name = profile?.name || cur.rows[0].full_name || cur.rows[0].username || email.split('@')[0];
-    sendVerificationEmail(email, name, verificationToken)
+    sendVerificationEmail(email, name, verificationToken, siteFromRequest(c))
       .catch((e) => log.warn({ err: e, email }, "set_email_verification_failed"));
 
     log.info({ userId, from: currentEmail, to: email }, 'user_email_filled_in');
@@ -983,7 +996,7 @@ auth.post("/resend-verification", async (c) => {
     const verificationToken = crypto.randomUUID();
     await vpsStoreToken(user.id, verificationToken, "email_verify", 24);
     const profile = await vpsGetProfile(user.id);
-    await sendVerificationEmail(user.email, profile?.name || user.full_name || "User", verificationToken);
+    await sendVerificationEmail(user.email, profile?.name || user.full_name || "User", verificationToken, siteFromRequest(c));
     return c.json({ success: true, message: "Письмо отправлено" });
   } catch (error) {
     return c.json({ success: false, error: "Internal server error" }, 500);
@@ -997,7 +1010,7 @@ auth.get("/verify-email-page", async (c) => {
   // Render an intermediate page that auto-submits via POST
   // This avoids state mutation on GET (CSRF-safe)
   const token = c.req.query("token");
-  if (!token) return c.redirect("https://promo-music.ru/login?error=missing_token");
+  if (!token) return c.redirect(`${originFromRequest(c)}${PATH.login}?error=missing_token`);
 
   return c.html(`<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Email Verification</title>
@@ -1021,16 +1034,18 @@ auth.post("/verify-email-confirm", async (c) => {
     const body = await c.req.json();
     token = body.token;
   }
-  if (!token) return c.redirect("https://promo-music.ru/login?error=missing_token");
+  // Ссылка из письма открыта на сайте регистрации: туда же и редирект.
+  const loginUrl = `${originFromRequest(c)}${PATH.login}`;
+  if (!token) return c.redirect(`${loginUrl}?error=missing_token`);
 
   const verifyData = await vpsGetToken(token);
-  if (!verifyData || new Date() > new Date(verifyData.expiresAt)) return c.redirect("https://promo-music.ru/login?error=invalid_token");
+  if (!verifyData || new Date() > new Date(verifyData.expiresAt)) return c.redirect(`${loginUrl}?error=invalid_token`);
 
   // Check if already verified (idempotent — safe for GET)
   const alreadyVerified = await sql(`SELECT is_email_verified FROM users WHERE id = $1`, [verifyData.userId]);
   if (alreadyVerified.rows[0]?.is_email_verified) {
     await vpsUseToken(token);
-    return c.redirect("https://promo-music.ru/login?verified=true");
+    return c.redirect(`${loginUrl}?verified=true`);
   }
 
   await sql(`UPDATE users SET is_email_verified = true, email_verified_at = NOW() WHERE id = $1`, [verifyData.userId]);
@@ -1043,10 +1058,10 @@ auth.post("/verify-email-confirm", async (c) => {
     const user = userResult.rows[0];
     const autoLoginToken = crypto.randomUUID();
     await vpsStoreToken(user.id, autoLoginToken, "auto_login", 0.083);
-    return c.redirect(`https://promo-music.ru/login?verified=true&auto_login_token=${autoLoginToken}`);
+    return c.redirect(`${loginUrl}?verified=true&auto_login_token=${autoLoginToken}`);
   }
 
-  return c.redirect("https://promo-music.ru/login?verified=true");
+  return c.redirect(`${loginUrl}?verified=true`);
 });
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1097,7 +1112,7 @@ auth.post("/resend-verification-by-email", async (c) => {
     const verificationToken = crypto.randomUUID();
     await vpsStoreToken(user.id, verificationToken, "email_verify", 24);
     const profile = await vpsGetProfile(user.id);
-    await sendVerificationEmail(email, profile?.name || user.full_name || email.split("@")[0], verificationToken);
+    await sendVerificationEmail(email, profile?.name || user.full_name || email.split("@")[0], verificationToken, siteFromRequest(c));
     recentVerifySends.set(emailKey, Date.now());
     return c.json({ success: true, message: VERIFY_EMAIL_GENERIC_MSG });
   } catch (error) {
@@ -1288,11 +1303,12 @@ auth.post("/admin/verify-profile", requireAuth, requireAdmin, async (c) => {
       const userEmail = userRow.rows[0]?.email;
       const userName = userRow.rows[0]?.full_name || '';
       if (userEmail) {
+        // Админ работает на promo-music.ru, а письмо ведёт на сайт пользователя.
         if (isVerified) {
-          sendProfileVerifiedEmail(userEmail, userName, role)
+          siteForUserId(String(userId)).then((site) => sendProfileVerifiedEmail(userEmail, userName, role, site))
             .catch((e) => log.warn({ err: e, userId, role }, 'profile_verified_email_failed'));
         } else if (rejectionReason) {
-          sendProfileVerificationRejectedEmail(userEmail, userName, role, rejectionReason)
+          siteForUserId(String(userId)).then((site) => sendProfileVerificationRejectedEmail(userEmail, userName, role, rejectionReason, site))
             .catch((e) => log.warn({ err: e, userId, role }, 'profile_rejection_email_failed'));
         }
       }
@@ -1320,7 +1336,7 @@ auth.post("/admin/approve-user", requireAuth, requireAdmin, async (c) => {
     const result = await sql(`UPDATE users SET status = 'active'::user_status, is_email_verified = true, email_verified_at = COALESCE(email_verified_at, NOW()) WHERE id = $1 RETURNING email, full_name`, [userId]);
     if (result.rows.length === 0) return c.json({ success: false, error: "Не найден" }, 404);
     const user = result.rows[0];
-    sendAccountApprovedEmail(user.email, user.full_name || '').catch(() => {});
+    siteForUserId(String(userId)).then((site) => sendAccountApprovedEmail(user.email, user.full_name || '', site)).catch(() => {});
     logAdminAction(c, { action: 'user_approve', resourceType: 'user', targetId: String(userId), details: { email: user.email } });
     const notifId = `notif_approved_${Date.now()}`;
     await upsertNotification(userId, notifId, { id: notifId, userId, type: "info", title: "Аккаунт одобрен!", message: "Ваша заявка одобрена.", read: false, createdAt: new Date().toISOString() });
@@ -1340,7 +1356,7 @@ auth.post("/admin/reject-user", requireAuth, requireAdmin, async (c) => {
     const result = await sql(`UPDATE users SET status = 'rejected'::user_status WHERE id = $1 RETURNING email, full_name`, [userId]);
     if (result.rows.length === 0) return c.json({ success: false, error: "Не найден" }, 404);
     const user = result.rows[0];
-    sendAccountRejectedEmail(user.email, user.full_name || '', reason || '').catch(() => {});
+    siteForUserId(String(userId)).then((site) => sendAccountRejectedEmail(user.email, user.full_name || '', reason || '', site)).catch(() => {});
     logAdminAction(c, { action: 'user_reject', resourceType: 'user', targetId: String(userId), details: { email: user.email, reason: reason || null } });
     const notifId = `notif_rejected_${Date.now()}`;
     await upsertNotification(userId, notifId, { id: notifId, userId, type: "info", title: "Заявка отклонена", message: reason ? `Причина: ${reason}` : "Заявка отклонена.", read: false, createdAt: new Date().toISOString() });

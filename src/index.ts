@@ -20,6 +20,7 @@ if (!process.env.DATABASE_URL) {
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { ALLOWED_ORIGINS } from './site-origin.tsx';
 import { logger as honoLogger } from 'hono/logger';
 import * as db from './db.tsx';
 
@@ -213,7 +214,8 @@ app.use('/*', async (c, next) => {
 });
 
 app.use('/*', cors({
-  origin: ['https://promo-music.ru', 'https://www.promo-music.ru', 'https://admin.promo-music.ru', 'https://promofm.org', 'https://www.promofm.org'],
+  // Наши сайты (site-origin.tsx); promoair.ru только при PROMOAIR_ORIGIN.
+  origin: ALLOWED_ORIGINS,
   // Audit B-6 (2026-05-31): X-Internal-Key убран из allowHeaders. Cron
   // вызывает endpoints server-side (localhost), browser CORS preflight
   // никогда не должен пропускать этот header — иначе XSS на allowed origin

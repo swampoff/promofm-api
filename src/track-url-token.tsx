@@ -21,6 +21,7 @@
  */
 
 import crypto from 'crypto';
+import { ALLOWED_HOSTS } from './site-origin.tsx';
 
 function getSecret(): string {
   const s = process.env.EMAIL_TRACK_SECRET || process.env.UNSUBSCRIBE_SECRET || process.env.JWT_SECRET;
@@ -56,12 +57,9 @@ export function verifyRedirectUrl(url: string, sig: unknown): boolean {
 
 // Собственные домены — на них redirect без подписи безопасен (нельзя
 // использовать для фишинг-амплификации, т.к. цель на доверенном сайте).
-const OWN_REDIRECT_HOSTS = new Set([
-  'promo-music.ru',
-  'www.promo-music.ru',
-  'promofm.org',
-  'www.promofm.org',
-]);
+// Список общий с CORS и return URL (site-origin.tsx); promoair.ru в нём только
+// при включённом PROMOAIR_ORIGIN.
+const OWN_REDIRECT_HOSTS = new Set(ALLOWED_HOSTS);
 
 /**
  * Решение о редиректе.

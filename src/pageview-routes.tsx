@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import geoip from 'geoip-lite';
+import { knownHostFromRequest } from './site-origin.tsx';
 
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 
@@ -16,6 +17,11 @@ async function requireAdminOrKey(c: any, next: any) {
 
 
 const app = new Hono();
+
+// page_views.host (миграция 160): с какого из наших сайтов просмотр, чтобы
+// promoair.ru не смешивался со статистикой promo-music.ru. Пока колонки нет
+// (42703 undefined_column), пишем как раньше и больше не пробуем.
+let pageViewsHostColumn = true;
 
 // is_bot detection at insert time. Extended 2026-07: +prerender (крон prerender.py
 // UA "PromoFM-Prerender" раньше считался человеком) + headless/monitor/curl и т.п.
@@ -59,27 +65,44 @@ app.post('/pv', async (c) => {
     const geo = ip && ip !== '0.0.0.0' ? geoip.lookup(ip) : null;
     const country = geo?.country || null;
 
-    await pool.query(
+    const values = [
+      (body.p || '/').substring(0, 500),
+      (body.r || '').substring(0, 1000) || null,
+      ua.substring(0, 500),
+      ip,
+      device,
+      browser,
+      os,
+      body.sw || null,
+      body.sh || null,
+      (body.l || '').substring(0, 10) || null,
+      (body.sid || '').substring(0, 64) || null,
+      body.uid || null,
+      isBot,
+      body.lt || null,
+      country,
+    ];
+    const insertWithoutHost = () => pool.query(
       `INSERT INTO page_views (path, referrer, user_agent, ip, device, browser, os, screen_w, screen_h, language, session_id, user_id, is_bot, load_time, country)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-      [
-        (body.p || '/').substring(0, 500),
-        (body.r || '').substring(0, 1000) || null,
-        ua.substring(0, 500),
-        ip,
-        device,
-        browser,
-        os,
-        body.sw || null,
-        body.sh || null,
-        (body.l || '').substring(0, 10) || null,
-        (body.sid || '').substring(0, 64) || null,
-        body.uid || null,
-        isBot,
-        body.lt || null,
-        country,
-      ]
+      values
     );
+    if (pageViewsHostColumn) {
+      try {
+        await pool.query(
+          `INSERT INTO page_views (path, referrer, user_agent, ip, device, browser, os, screen_w, screen_h, language, session_id, user_id, is_bot, load_time, country, host)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+          [...values, knownHostFromRequest(c)]
+        );
+      } catch (err: any) {
+        if (err?.code !== '42703') throw err;
+        pageViewsHostColumn = false;
+        console.warn('[pageview] page_views.host missing (migration 160 not applied), writing without host');
+        await insertWithoutHost();
+      }
+    } else {
+      await insertWithoutHost();
+    }
 
     return c.json({ ok: true });
   } catch (e: any) {
@@ -146,7 +169,7 @@ app.get('/stats', requireAdminOrKey, async (c) => {
         FROM page_views WHERE ${HUMAN} AND ${SINCE} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`, pr),
       pool.query(`SELECT CASE
           WHEN referrer IS NULL OR referrer = '' THEN 'Прямые/закладки'
-          WHEN referrer ~* 'promo-music\\.ru' THEN 'Внутренние'
+          WHEN referrer ~* '(promo-music|promoair)\\.ru' THEN 'Внутренние'
           WHEN referrer ~* '(google|yandex|bing|duckduck|search)' THEN 'Поиск'
           WHEN referrer ~* '(vk\\.com|t\\.me|telegram|instagram|facebook|youtube|tiktok|ok\\.ru|dzen)' THEN 'Соцсети'
           ELSE 'Другие сайты' END AS source, count(DISTINCT session_id)::int AS visitors

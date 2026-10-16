@@ -35,6 +35,7 @@ import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { emitSSE, connections } from './sse-routes.tsx';
 import { notifyChatNewSession, sendChatGuestReplyEmail } from './email-helper.tsx';
+import { ALLOWED_ORIGINS as SITE_ORIGINS, SITE_ORIGIN, isAirEnabled, siteFromRequest, type SiteKey } from './site-origin.tsx';
 
 const app = new Hono();
 
@@ -52,17 +53,18 @@ function safeErr(err: any): string {
 }
 
 // CORS for the public SSE stream (raw Response bypasses Hono CORS).
-const ALLOWED_ORIGINS = new Set([
-  'https://promo-music.ru',
-  'https://www.promo-music.ru',
-  'https://promofm.org',
-  'https://www.promofm.org',
-  'https://promofm.ru',
-  'https://www.promofm.ru',
-]);
+const ALLOWED_ORIGINS = new Set(SITE_ORIGINS);
+
+// Сайт гостевого чата хранится в chat_sessions.source: 'widget' (promo-music.ru)
+// или 'widget:air' (promoair.ru, допускается CHECK-ограничением из миграции 160).
+// По нему письмо «Вам ответили» ведёт обратно на тот же сайт.
+const AIR_SOURCE_SUFFIX = ':air';
+function siteFromChatSource(source: string | null | undefined): SiteKey {
+  return isAirEnabled() && String(source || '').endsWith(AIR_SOURCE_SUFFIX) ? 'air' : 'music';
+}
 
 function sseCorsHeaders(origin: string | undefined): Record<string, string> {
-  const allowed = origin && ALLOWED_ORIGINS.has(origin) ? origin : 'https://promo-music.ru';
+  const allowed = origin && ALLOWED_ORIGINS.has(origin) ? origin : SITE_ORIGIN.music;
   return {
     'Access-Control-Allow-Origin': allowed,
     'Vary': 'Origin',
@@ -133,12 +135,18 @@ app.post('/init', async (c) => {
     }
 
     const token = newGuestToken();
-    const r = await pool.query(
+    const insertSession = (source: string) => pool.query(
       `INSERT INTO chat_sessions (guest_token, guest_name, guest_email, source, ip_addr, user_agent)
-       VALUES ($1, $2, $3, 'widget', $4, $5)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id`,
-      [token, guestName, guestEmail, ip, ua]
+      [token, guestName, guestEmail, source, ip, ua]
     );
+    const source = siteFromRequest(c) === 'air' ? `widget${AIR_SOURCE_SUFFIX}` : 'widget';
+    // 23514 = check_violation: миграция 160 ещё не применена, чат важнее метки сайта.
+    const r = await insertSession(source).catch((err: any) => {
+      if (source !== 'widget' && err?.code === '23514') return insertSession('widget');
+      throw err;
+    });
     const sessionId = r.rows[0].id;
 
     // NB: email/Telegram-пинг админу шлём НЕ здесь, а только когда гость
@@ -504,7 +512,7 @@ app.post('/admin/sessions/:sessionId/reply', requireAuth, requireAdmin, async (c
     } catch { /* keep default */ }
 
     const sr = await pool.query(
-      `SELECT id::text AS id, guest_token, guest_email, guest_name, status
+      `SELECT id::text AS id, guest_token, guest_email, guest_name, status, source
          FROM chat_sessions WHERE id::text = $1`,
       [sessionId]
     );
@@ -555,6 +563,7 @@ app.post('/admin/sessions/:sessionId/reply', requireAuth, requireAdmin, async (c
         body: text,
         sessionId,
         guestToken: session.guest_token,
+        site: siteFromChatSource(session.source),
       }).catch((e) => console.warn('[chat-support] guest reply email failed:', safeErr(e)));
     }
 
@@ -802,7 +811,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
 
     // Verify session is still active.
     const sr = await pool.query(
-      `SELECT id::text AS id, guest_token, guest_email, guest_name, status
+      `SELECT id::text AS id, guest_token, guest_email, guest_name, status, source
          FROM chat_sessions WHERE id::text = $1`,
       [sessionId],
     );
@@ -871,6 +880,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
         body: replyText,
         sessionId,
         guestToken: session.guest_token,
+        site: siteFromChatSource(session.source),
       }).catch((e) => console.warn('[chat-support/tg-bridge] guest email fallback failed:', safeErr(e)));
     }
 

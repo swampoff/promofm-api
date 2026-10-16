@@ -32,11 +32,17 @@
  *      `POST /venue/cron/expire-trials` (auth via CRON_SECRET, same
  *      pattern as src/subscriptions-routes.tsx:819 /charge-recurring
  *      which is the canonical billing cron). For each venue profile:
- *        - status='trial' AND expires_at < now() → mark 'expired',
- *          send expiry email, fire SSE.
+ *        - status='trial' AND expires_at < now() → charge the chosen
+ *          tier from the saved card (tryAutoChargeAtTrialEnd). Charged →
+ *          'active'. No card / declined → mark 'expired', send expiry
+ *          email, fire SSE. Gateway pending or a transient error → retry
+ *          next run (errors for up to TRIAL_CHARGE_RETRY_MS).
  *        - status='trial' AND daysRemaining ∈ (0, 3] AND no prior
- *          warning sent → send warning email, mark
- *          `data.trial_warning_sent_at`.
+ *          warning sent → send warning email (with the amount and date
+ *          of the first charge), mark `data.trial_warning_sent_at`.
+ *      A trial cancelled in the cabinet has status 'cancelled': it is
+ *      not scanned here, never charged, and expires via the
+ *      charge-recurring cron once trial_expires_at passes.
  *
  *   3. New profile init. `applyInitialTrial(profile)` is called from
  *      venue-routes.tsx when a fresh profile is being upserted. Sets
@@ -51,7 +57,11 @@
 
 import { pool } from './db-client.tsx';
 import { emitSSE } from './sse-routes.tsx';
-import { sendVenueTrialEndingEmail, sendVenueTrialExpiredEmail, sendVenueTrialLastDayEmail } from './email-helper.tsx';
+import { sendVenueTrialEndingEmail, sendVenueTrialExpiredEmail, sendVenueTrialLastDayEmail, type TrialChargeNotice } from './email-helper.tsx';
+import { siteForUserId } from './site-origin.tsx';
+import { getChargeablePaymentMethod } from './db.tsx';
+import { resolveVenueChargePlan } from './venue-plans-constants.tsx';
+import type { TrialChargeOutcome } from './venue-billing-helpers.tsx';
 
 // Пробный период для заведений. Владелец 2026-10-16: сокращён с 14 до 7 дней.
 // 7 дней действуют только для пробных, начатых с TRIAL_7D_START_ISO; тем, кто
@@ -82,6 +92,11 @@ export const TRIAL_WARNING_DAYS = 3;
 export const TRIAL_LAST_DAY_DAYS = 1;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+// Сбой при первом списании (сеть, шлюз, БД) не отключает заведение сразу:
+// крон (раз в час) повторяет попытку до суток после конца пробного периода.
+// Отказ карты или отсутствие карты отключают сразу.
+export const TRIAL_CHARGE_RETRY_MS = MS_PER_DAY;
 
 export interface TrialState {
   isTrialing: boolean;
@@ -163,6 +178,7 @@ export function applyInitialTrial<P extends Record<string, any>>(profile: P): P 
 
 export interface CronResult {
   scanned: number;
+  charged: number;
   expired: number;
   warned: number;
   skipped: number;
@@ -184,7 +200,7 @@ export interface CronResult {
  *     to text on the equality predicate, must be explicit.
  */
 export async function expireTrialsOnce(): Promise<CronResult> {
-  const result: CronResult = { scanned: 0, expired: 0, warned: 0, skipped: 0, errors: [] };
+  const result: CronResult = { scanned: 0, charged: 0, expired: 0, warned: 0, skipped: 0, errors: [] };
 
   // Audit 2026-06-03: cron-secret endpoint /venue/cron/expire-trials может
   // быть позван дважды конкурентно (manual + systemd-timer overlap, или
@@ -242,34 +258,44 @@ export async function expireTrialsOnce(): Promise<CronResult> {
       });
 
       if (state.isExpired) {
-        // First-month auto-charge attempt: if the venue saved a card
-        // during onboarding (POST /venue-billing/subscribe with
-        // savePaymentMethod=true), we charge it now instead of
-        // downgrading. The full charge → activation → period extension
-        // pipeline lives in venue-billing-routes.tsx; we just delegate.
-        let chargedFirstMonth = false;
+        // Первое списание выбранного тарифа с карты, привязанной при старте
+        // пробного (POST /venue-billing/attach-card). Вся цепочка списание →
+        // активация → выручка в venue-billing-helpers.tsx.
+        let outcome: TrialChargeOutcome = 'error';
         try {
           const { tryAutoChargeAtTrialEnd } = await import('./venue-billing-helpers.tsx');
-          chargedFirstMonth = await tryAutoChargeAtTrialEnd(row.user_id, row.data);
+          outcome = await tryAutoChargeAtTrialEnd(row.user_id, row.data, { email: row.email, trialEndIso: state.expiresAtIso });
         } catch (e: any) {
           console.warn('[venue-trial] auto-charge attempt failed for', row.user_id, ':', e?.message);
         }
 
-        if (chargedFirstMonth) {
-          // Charge succeeded — venue-billing-helpers already wrote
-          // the new state (subscriptionStatus='active', extended
-          // expiry, emitted SSE, etc.). Count this as a "warned"
-          // outcome (positive transition) and move on.
-          result.warned++;
+        if (outcome === 'charged') {
+          // venue-billing-helpers already wrote the new state
+          // (subscriptionStatus='active', new period, SSE).
+          result.charged++;
           continue;
         }
+        if (outcome === 'not_trial' || outcome === 'pending') {
+          // Отменили / оплатили за это время, или платёж ждёт вебхук шлюза.
+          result.skipped++;
+          continue;
+        }
+        if (outcome === 'error') {
+          const endedMs = state.expiresAtIso ? Date.parse(state.expiresAtIso) : now;
+          if (now - endedMs < TRIAL_CHARGE_RETRY_MS) {
+            result.skipped++;
+            continue;
+          }
+        }
 
-        // No card OR charge failed → fall back to original expiry path:
-        // mark expired, revoke bearer tokens, pause streams, email.
+        // No card, card declined, or still failing a day after the trial
+        // ended → mark expired, revoke bearer tokens, pause streams, email.
+        const reason = outcome === 'no_card' ? 'no_card' : 'charge_failed';
         const nextData = {
           ...row.data,
           subscriptionStatus: 'expired',
           subscriptionPlan: 'free',
+          subscriptionExpiredReason: reason,
           trial_ended_at: new Date(now).toISOString(),
           updatedAt: new Date(now).toISOString(),
         };
@@ -297,16 +323,33 @@ export async function expireTrialsOnce(): Promise<CronResult> {
 
         emitSSE(row.user_id, {
           type: 'venue_trial_expired',
-          data: { status: 'expired', plan: 'free' },
+          data: { status: 'expired', plan: 'free', reason },
         });
         if (row.email) {
           await sendVenueTrialExpiredEmail({
             toEmail: row.email,
             venueName: row.venue_name || 'ваше заведение',
+            site: await siteForUserId(row.user_id),
+            reason,
           }).catch((e) => console.warn('[venue-trial] expiry email failed:', e?.message));
         }
         result.expired++;
         continue;
+      }
+
+      // Сумма и дата первого списания для напоминаний T-3 / T-1. Карта может
+      // не сохраниться (cardSaveFailed): тогда письмо просит оформить подписку.
+      // (Тот же отбор, что у веток ниже: T-1 в последний день, T-3 если ещё не уходило.)
+      const remindersDone = state.daysRemaining === TRIAL_LAST_DAY_DAYS
+        ? !!(row.data?.trial_last_day_sent_at && row.data?.trial_warning_sent_at)
+        : !!row.data?.trial_warning_sent_at;
+      const remindNow = state.isTrialing && !!state.expiresAtIso && !remindersDone
+        && state.daysRemaining > 0 && state.daysRemaining <= TRIAL_WARNING_DAYS;
+      let charge: TrialChargeNotice | undefined;
+      if (remindNow) {
+        const plan = resolveVenueChargePlan(row.data);
+        const hasCard = !!(await getChargeablePaymentMethod(row.user_id));
+        charge = { amountRub: plan.amount, planName: plan.name, interval: plan.interval, atIso: state.expiresAtIso as string, hasCard };
       }
 
       // T-1 last-day reminder. Fires when daysRemaining === 1, with
@@ -332,6 +375,8 @@ export async function expireTrialsOnce(): Promise<CronResult> {
               toEmail: row.email,
               venueName: row.venue_name || 'ваше заведение',
               expiresAtIso: state.expiresAtIso,
+              site: await siteForUserId(row.user_id),
+              charge,
             }).catch((e) => console.warn('[venue-trial] last-day email failed:', e?.message));
           }
           result.warned++;
@@ -363,6 +408,8 @@ export async function expireTrialsOnce(): Promise<CronResult> {
             venueName: row.venue_name || 'ваше заведение',
             daysRemaining: state.daysRemaining,
             expiresAtIso: state.expiresAtIso,
+            site: await siteForUserId(row.user_id),
+            charge,
           }).catch((e) => console.warn('[venue-trial] warning email failed:', e?.message));
         }
         result.warned++;
@@ -376,7 +423,7 @@ export async function expireTrialsOnce(): Promise<CronResult> {
     }
   }
 
-  console.log(`[venue-trial] cron tick: scanned=${result.scanned} expired=${result.expired} warned=${result.warned} skipped=${result.skipped} errors=${result.errors.length}`);
+  console.log(`[venue-trial] cron tick: scanned=${result.scanned} charged=${result.charged} expired=${result.expired} warned=${result.warned} skipped=${result.skipped} errors=${result.errors.length}`);
   await lockClient.query('SELECT pg_advisory_unlock(770451)').catch(() => {});
   lockClient.release();
   return result;

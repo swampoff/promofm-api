@@ -1807,6 +1807,14 @@ export async function getUserSessions(userId: string) {
 
 // ─── Payment Methods ───
 
+// Схема на проде (\d payment_methods, 16.10.2026): id uuid DEFAULT
+// uuid_generate_v4(), user_id text, method_type text DEFAULT 'card',
+// card_last_four, card_brand, is_default, data jsonb, created_at. Колонки
+// updated_at НЕТ, id не текст. Прежний upsert писал id='pm-…' и updated_at:
+// каждая запись падала, QueryBuilder только логировал ошибку, и карты не
+// сохранялись ни у кого (рекуррент артистов, триал и продление заведений).
+// Теперь uuid выдаёт БД, а id приложения ('pm-…') живёт в data.id.
+
 export async function getPaymentMethods(userId: string) {
   const { data, error } = await db()
     .from('payment_methods')
@@ -1814,28 +1822,78 @@ export async function getPaymentMethods(userId: string) {
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
   if (error) console.error('[db] getPaymentMethods:', error);
-  return (data || []).map((r: any) => r.data || r);
+  // id: прикладной из data (как раньше), для старых строк без data.id — uuid строки.
+  return (data || []).map((r: any) => ({ ...(r.data || {}), id: r.data?.id || r.id }));
 }
 
-export async function upsertPaymentMethod(methodId: string, userId: string, method: Record<string, any>) {
-  const row = {
-    id: methodId,
-    user_id: userId,
-    data: method,
-    updated_at: new Date().toISOString(),
-  };
-  const { error } = await db()
-    .from('payment_methods')
-    .upsert(row, { onConflict: 'id' });
-  if (error) console.error('[db] upsertPaymentMethod:', error);
+/**
+ * Самая свежая сохранённая карта шлюза (есть многоразовый gatewayMethodId)
+ * или null. Для списаний: ручные способы из настроек (без токена) не берём.
+ * Ошибка БД пробрасывается: крон не должен принять сбой чтения за «карты нет»
+ * и отключить заведение.
+ */
+export async function getChargeablePaymentMethod(userId: string): Promise<Record<string, any> | null> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `SELECT id::text AS row_id, data, card_last_four, card_brand
+       FROM payment_methods
+      WHERE user_id = $1 AND COALESCE(data->>'gatewayMethodId', '') <> ''
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [userId],
+  );
+  const row = r.rows[0];
+  if (!row) return null;
+  const d = row.data || {};
+  return { ...d, id: d.id || row.row_id, last4: d.last4 || row.card_last_four || null, brand: d.brand || row.card_brand || null };
 }
 
-export async function deletePaymentMethod(methodId: string) {
-  const { error } = await db()
-    .from('payment_methods')
-    .delete()
-    .eq('id', methodId);
-  if (error) console.error('[db] deletePaymentMethod:', error);
+/**
+ * Сохранить способ оплаты. Ключ upsert: (user_id, data.gatewayMethodId) для
+ * карт шлюза (повтор вебхука не плодит строки), иначе (user_id, data.id).
+ * Возвращает uuid строки. Ошибка пробрасывается (раньше глоталась).
+ */
+export async function upsertPaymentMethod(methodId: string, userId: string, method: Record<string, any>): Promise<string> {
+  const { pool } = await import('./db-client.tsx');
+  const data: Record<string, any> = { ...method, id: method.id || methodId };
+  const token = data.gatewayMethodId ? String(data.gatewayMethodId) : '';
+  // Имя поля ключа из фиксированного набора, не из ввода.
+  const keyField = token ? 'gatewayMethodId' : 'id';
+  const keyValue = token || String(data.id);
+  const last4 = data.last4 ?? data.card?.last4 ?? null;
+  const brand = data.brand ?? data.card?.brand ?? null;
+  const res = await pool.query(
+    `WITH upd AS (
+       UPDATE payment_methods
+          SET data = $3::jsonb,
+              card_last_four = COALESCE($4::text, card_last_four),
+              card_brand     = COALESCE($5::text, card_brand)
+        WHERE user_id = $1::text AND data->>'${keyField}' = $2::text
+        RETURNING id
+     ), ins AS (
+       INSERT INTO payment_methods (user_id, card_last_four, card_brand, data)
+       SELECT $1::text, $4::text, $5::text, $3::jsonb
+        WHERE NOT EXISTS (SELECT 1 FROM upd)
+       RETURNING id
+     )
+     SELECT id::text AS id FROM upd UNION ALL SELECT id::text AS id FROM ins`,
+    [userId, keyValue, JSON.stringify(data), last4 == null ? null : String(last4), brand == null ? null : String(brand)],
+  );
+  return res.rows[0]?.id;
+}
+
+/**
+ * Удалить способ оплаты по прикладному id (data.id, 'pm-…') или uuid строки.
+ * С userId удаляет только свой (раньше settings-роут удалял по одному id).
+ * Ошибка пробрасывается: «удалённая» карта, которая осталась, продолжала бы
+ * списываться.
+ */
+export async function deletePaymentMethod(methodId: string, userId?: string) {
+  const { pool } = await import('./db-client.tsx');
+  const params: any[] = [String(methodId)];
+  let sql = `DELETE FROM payment_methods WHERE (id::text = $1 OR data->>'id' = $1)`;
+  if (userId) { params.push(String(userId)); sql += ` AND user_id = $2`; }
+  await pool.query(sql, params);
 }
 
 // ─── Generic Store Helper ───

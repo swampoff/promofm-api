@@ -16,11 +16,12 @@
  *
  *   - getEffectiveVenuePlan(profile) — resolves the venue's current
  *     entitlement-tier from subscriptionStatus + subscriptionPlan.
- *     Trial → 'business' (per the landing promise of "полный
- *     функционал ПРОМО.ЭИР"). Expired/cancelled/inactive → 'free'
- *     (effectively below 'start' — same caps as 'start' until product
- *     decides otherwise, but the UI surfaces a hard «оплатите тариф»
- *     CTA instead of a Старт upsell). Active → declared plan.
+ *     Trial → the tier chosen before the card was attached (fallback
+ *     'start'): the same tier the trial-end autocharge bills (since
+ *     16.10.2026; was a flat 'business'). Cancelled keeps the tier until
+ *     the paid/trial period ends. Expired / pending_card / no status →
+ *     'free' (same caps as 'start', but the UI surfaces a hard «оплатите
+ *     тариф» CTA instead of a Старт upsell). Active → declared plan.
  *
  *   - getEffectiveVenueLimits(profile) — returns the resolved limits.
  *
@@ -34,6 +35,8 @@
  * catalog endpoints (not enforced in this PR; helpers ready for the
  * next iteration).
  */
+
+import { isVenuePaidTier } from './venue-plans-constants.tsx';
 
 export type VenuePlanId = 'free' | 'start' | 'business' | 'network' | 'enterprise';
 
@@ -67,9 +70,8 @@ export const VENUE_PLAN_LIMITS: Record<VenuePlanId, VenuePlanLimits> = {
     analytics: false, scheduling: false, multiLocation: false,
     apiAccess: false, prioritySupport: false, customBranding: false,
   },
-  // 'business' — paid Бизнес tariff (₽9 990/мес) AND the entitlement
-  // a trialing venue gets ("полный функционал ПРОМО.ЭИР" per the
-  // landing promise during the trial window, 7 days since 2026-10-16).
+  // 'business' — paid Бизнес tariff (₽9 990/мес). A trialing venue gets
+  // the tier it chose (see getEffectiveVenuePlan), not always this one.
   business: {
     zones: 4, maxPlaylists: 20, maxTracks: 2000,
     libraryAccess: 'full',
@@ -99,41 +101,57 @@ export const VENUE_PLAN_LIMITS: Record<VenuePlanId, VenuePlanLimits> = {
  * Decision table:
  *   subscriptionStatus       subscriptionPlan         → effective plan
  *   ----------------------   ---------------------    -------------------
- *   'trial' (any plan)                                → 'business'
- *   'expired'/'cancelled'/'inactive'/'pending_card'    → 'free'
+ *   'trial'                  start/business/network   → that plan
+ *   'trial'                  anything else            → 'start'
+ *   'cancelled', period end in the future             → trial: as 'trial',
+ *                                                       paid: declared plan
+ *   'cancelled', period over / no end date            → 'free'
  *   'active'                  business/network/etc.   → that plan
- *   'active'                  start (default)         → 'start'
+ *   'active'                  none                    → 'start'
+ *   'expired'/'inactive'/'pending_card'               → 'free'
  *   undefined / unrecognised                          → 'free' (safe)
  *
- * The 'trial' branch deliberately ignores `subscriptionPlan` — when a
- * venue first registers, backend sets plan='start' as a default, but
- * the landing promise says trial = full features. Honouring the
- * promise means treating trial as 'business' regardless of stored
- * plan. After the cron flips status to 'expired', the next call
- * returns 'free' and gating kicks in.
+ * Trial = the tier the venue picked before attaching the card (stored
+ * in subscriptionPlan by the card-attach webhook, default 'start'), so
+ * what the venue sees during the trial is exactly what it is charged for
+ * when the trial ends (venue-billing-helpers.tsx tryAutoChargeAtTrialEnd).
+ * Until 16.10.2026 trial was a flat 'business' while the autocharge
+ * billed 'start' (critic A2 d).
+ *
+ * Cancel keeps access until the period ends (POST /venue-billing/cancel
+ * keeps subscriptionExpiresAt; for a trial it equals trial_expires_at).
+ * The charge-recurring cron flips it to 'expired' after that date.
+ *
+ * No status at all used to read as 'active' + 'start' (Старт for free,
+ * no card banner) while /venue-billing/me said 'trial'. Both now say
+ * pending_card / 'free' (critic A2 f).
  */
-export function getEffectiveVenuePlan(profile: any): VenuePlanId {
+export function getEffectiveVenuePlan(profile: any, nowMs: number = Date.now()): VenuePlanId {
   if (!profile) return 'free';
 
-  const status = String(profile.subscriptionStatus || 'active').toLowerCase();
-  const plan = String(profile.subscriptionPlan || 'start').toLowerCase();
+  const status = String(profile.subscriptionStatus || 'pending_card').toLowerCase();
+  const plan = String(profile.subscriptionPlan || '').toLowerCase();
+  const trialPlan: VenuePlanId = isVenuePaidTier(plan) ? plan : 'start';
+
+  if (status === 'trial') {
+    return trialPlan;
+  }
+
+  if (status === 'cancelled') {
+    const until = Date.parse(profile.subscriptionExpiresAt || profile.trial_expires_at || '');
+    if (!(until > nowMs)) return 'free';
+    if (profile.cancelledFromStatus === 'trial') return trialPlan;
+    return plan in VENUE_PLAN_LIMITS && plan !== 'free' ? (plan as VenuePlanId) : 'free';
+  }
+
+  if (status === 'active') {
+    const declared = plan || 'start';
+    return declared in VENUE_PLAN_LIMITS ? (declared as VenuePlanId) : 'free';
+  }
 
   // 'pending_card' — заведение зарегистрировалось, но карту ещё не привязало.
   // Доступа нет вовсе: пробный период (7 дней) начинается с момента привязки
-  // (владелец 2026-08-07). Без явной ветки статус проваливался в
-  // «использовать заявленный план» и выдавал 'start' авансом.
-  if (status === 'expired' || status === 'cancelled' || status === 'inactive' || status === 'pending_card') {
-    return 'free';
-  }
-
-  if (status === 'trial') {
-    return 'business';
-  }
-
-  // status === 'active' or undefined → use declared plan
-  if (plan in VENUE_PLAN_LIMITS) {
-    return plan as VenuePlanId;
-  }
+  // (владелец 2026-08-07). То же для expired / inactive / неизвестных статусов.
   return 'free';
 }
 

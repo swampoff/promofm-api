@@ -13,10 +13,14 @@
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
+import { isAllowedUrl, originFromRequest, PATH } from './site-origin.tsx';
 
 const app = new Hono();
 
-const ALLOWED_ORIGINS = ['https://promo-music.ru', 'https://www.promo-music.ru'];
+// Строки venue_radio_subscriptions ключуются user_id заведения (JWT userId).
+// До 16.10 провижининг писал пробный под venue_profiles.id (critic A4), поэтому
+// читатели принимают и такие старые строки (на проде их 0). $1 = userId.
+const OWN_SUB = `(s.venue_id = $1 OR s.venue_id IN (SELECT vp.id FROM venue_profiles vp WHERE vp.user_id = $1))`;
 
 // ── GET /plans ── (public)
 app.get('/plans', async (c) => {
@@ -48,8 +52,9 @@ app.get('/subscription', requireAuth, async (c) => {
               p.name as plan_name, p.price_month, p.features
        FROM venue_radio_subscriptions s
        LEFT JOIN venue_radio_plans p ON p.id = s.plan_id
-       WHERE s.venue_id = $1
-       ORDER BY s.created_at DESC LIMIT 1`,
+       WHERE ${OWN_SUB}
+       -- действующая строка важнее свежей pending_payment (оплату начали, но не довели)
+       ORDER BY (s.status = 'active') DESC, s.created_at DESC LIMIT 1`,
       [venueId]
     );
     if (r.rows.length === 0) {
@@ -98,9 +103,11 @@ app.post('/subscribe', requireAuth, async (c) => {
     let planName: string;
     let price: number;
     if (planId === 'efir') {
+      // venue_station_requests.venue_id = venue_profiles.id, а не userId:
+      // ищем по user_id (раньше efir всегда отвечал 409, critic A4).
       const st = await pool.query(
         `SELECT monthly_price FROM venue_station_requests
-          WHERE venue_id = $1 AND monthly_price > 0
+          WHERE (user_id = $1 OR venue_id = $1) AND monthly_price > 0
           ORDER BY provisioned_at DESC NULLS LAST, updated_at DESC
           LIMIT 1`,
         [venueId]
@@ -123,13 +130,9 @@ app.post('/subscribe', requireAuth, async (c) => {
       price = parseFloat(planRes.rows[0].price_month);
     }
 
-    const safeReturnUrl = returnUrl || 'https://promo-music.ru/venue/promo-air';
-    try {
-      const origin = new URL(safeReturnUrl).origin;
-      if (!ALLOWED_ORIGINS.includes(origin)) {
-        return c.json({ success: false, error: 'Invalid returnUrl' }, 400);
-      }
-    } catch {
+    // Только https на наши сайты (site-origin.tsx); по умолчанию сайт запроса.
+    const safeReturnUrl = returnUrl || `${originFromRequest(c)}${PATH.venuePromoAir}`;
+    if (!isAllowedUrl(safeReturnUrl)) {
       return c.json({ success: false, error: 'Invalid returnUrl' }, 400);
     }
 
@@ -205,11 +208,11 @@ app.post('/cancel', requireAuth, async (c) => {
   try {
     const venueId = c.get('userId');
     const r = await pool.query(
-      `UPDATE venue_radio_subscriptions
-       SET auto_renew = false, status = CASE WHEN current_period_end < NOW() THEN 'expired' ELSE status END,
+      `UPDATE venue_radio_subscriptions s
+       SET auto_renew = false, status = CASE WHEN s.current_period_end < NOW() THEN 'expired' ELSE s.status END,
            updated_at = NOW()
-       WHERE venue_id = $1 AND status = 'active'
-       RETURNING id, current_period_end`,
+       WHERE ${OWN_SUB} AND s.status = 'active'
+       RETURNING s.id, s.current_period_end`,
       [venueId]
     );
     if (r.rows.length === 0) {
@@ -229,8 +232,8 @@ app.get('/stream-token', requireAuth, async (c) => {
   try {
     const venueId = c.get('userId');
     const r = await pool.query(
-      `SELECT id, current_period_end FROM venue_radio_subscriptions
-       WHERE venue_id = $1 AND status = 'active' AND (current_period_end IS NULL OR current_period_end > NOW())
+      `SELECT s.id, s.current_period_end FROM venue_radio_subscriptions s
+       WHERE ${OWN_SUB} AND s.status = 'active' AND (s.current_period_end IS NULL OR s.current_period_end > NOW())
        LIMIT 1`,
       [venueId]
     );

@@ -30,7 +30,7 @@ interface YooKassaResponse {
   description?: string;
   message?: string;
   recipient?: { account_id?: string; gateway_id?: string };
-  payment_method?: { id?: string; type?: string; saved?: boolean };
+  payment_method?: { id?: string; type?: string; saved?: boolean; title?: string; card?: { last4?: string; card_type?: string } };
   confirmation?: { type?: string; confirmation_url?: string };
   created_at?: string;
   captured_at?: string;
@@ -259,6 +259,10 @@ export class YooKassaGateway implements PaymentGateway {
       currency: verified.amount?.currency || 'RUB',
       metadata,
       paymentMethodId: verified.payment_method?.id,
+      paymentMethodSaved: typeof verified.payment_method?.saved === 'boolean' ? verified.payment_method.saved : undefined,
+      paymentMethodCard: verified.payment_method?.card
+        ? { last4: verified.payment_method.card.last4, brand: verified.payment_method.card.card_type, title: verified.payment_method.title }
+        : undefined,
       raw: body,
       resolvedShopId,
     };
@@ -342,7 +346,7 @@ export class YooKassaGateway implements PaymentGateway {
   }
 
   async chargeRecurring(params: RecurringChargeRequest): Promise<PaymentSessionResult> {
-    const body = {
+    const body: any = {
       amount: {
         value: params.amount.toFixed(2),
         currency: params.currency || 'RUB',
@@ -356,6 +360,22 @@ export class YooKassaGateway implements PaymentGateway {
         type: 'subscription',
       },
     };
+    // 54-ФЗ: чек на автосписание, если вызывающий передал e-mail (заведения,
+    // venue-billing). Состав чека как в createPayment. Без адреса запрос
+    // прежний (артистский рекуррент не меняется).
+    if (params.receiptEmail) {
+      body.receipt = {
+        customer: { email: params.receiptEmail },
+        items: [{
+          description: params.description?.slice(0, 128) || 'Оплата на ПРОМО.МУЗЫКА',
+          quantity: '1.00',
+          amount: { value: params.amount.toFixed(2), currency: params.currency || 'RUB' },
+          vat_code: 1,  // Без НДС
+          payment_subject: 'service',
+          payment_mode: 'full_payment',
+        }],
+      };
+    }
 
     const response = await fetch(`${API_BASE}/payments`, {
       method: 'POST',

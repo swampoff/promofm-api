@@ -10,6 +10,7 @@ import { pool } from './db-client.tsx';
 import { classifyAndLog } from './error-classifier.ts';
 import { requireAuth, requireAdmin, optionalAuth } from './auth-middleware.tsx';
 import { apiError } from './error-codes.tsx';
+import { knownHostFromRequest } from './site-origin.tsx';
 
 const feedbackRoutes = new Hono();
 
@@ -171,6 +172,8 @@ feedbackRoutes.post('/bug-report', optionalAuth, async (c) => {
 
     const message = body.message.trim().slice(0, 2000);
     const page = body.page || 'login';
+    // С какого сайта (promo-music.ru / promoair.ru): в page только путь.
+    const host = knownHostFromRequest(c);
     const rawEmail = typeof body.email === 'string' ? body.email.trim().slice(0, 200) : '';
     const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail) ? rawEmail : null;
 
@@ -231,7 +234,7 @@ feedbackRoutes.post('/bug-report', optionalAuth, async (c) => {
       `INSERT INTO feedback_reports (type, message, page_url, user_id, user_email, context)
        VALUES ('bug', $1, $2, $3, $4, $5) RETURNING id, created_at`,
       [message, page, author?.id || null, replyEmail,
-       JSON.stringify({ ip, email, source: 'test_mode_banner', ticketId })]
+       JSON.stringify({ ip, email, source: 'test_mode_banner', ticketId, host })]
     );
 
     const reportId = res.rows[0].id;
@@ -245,6 +248,7 @@ feedbackRoutes.post('/bug-report', optionalAuth, async (c) => {
       (replyEmail ? `<b>Email:</b> ${replyEmail}\n` : '') +
       (author ? `<b>Аккаунт:</b> ${author.name || author.email || author.id}\n` : '') +
       (ticketId ? `<b>Тикет:</b> ${ticketId} (поддержка в админке)\n` : '') +
+      (host ? `<b>Сайт:</b> ${host}\n` : '') +
       `<b>Страница:</b> ${page}\n` +
       `<b>IP:</b> ${ip}\n` +
       `<b>Время:</b> ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`;
@@ -252,7 +256,7 @@ feedbackRoutes.post('/bug-report', optionalAuth, async (c) => {
 
     // Письмо на info@promofm.ru и колокольчик админам — не задерживают ответ.
     import('./email-helper.tsx')
-      .then((m) => m.notifyBugReport({ reportId, ticketId, message, page, email: replyEmail, userName: author?.name || null }))
+      .then((m) => m.notifyBugReport({ reportId, ticketId, message, page, email: replyEmail, userName: author?.name || null, host }))
       .catch((e) => console.error('[bug-report] admin email failed:', e?.message));
     import('./cross-cabinet-notify.tsx')
       .then((m) => m.notifyAllAdmins({
