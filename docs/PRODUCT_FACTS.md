@@ -410,12 +410,23 @@ keep both in sync when prices change).
 | network    | 14 990    | 149 900    | unlimited zones, premium library, multi-location, API access |
 | enterprise | by sales  | by sales   | unlimited everything, custom contract |
 
-Trial: 7 days at `effectivePlan='business'` (owner 2026-10-16; trials
-started before 2026-10-16 keep 14 days, see `venue-trial.tsx:trialPeriodDaysFor`).
-Starts only after the venue attaches a card: 1 ₽ check payment, refunded at
-once; the `venue_card_attach` webhook (checkout-routes.tsx) stamps
-`trial_expires_at`. At trial end the cron charges the first month to the
-saved card (`venue-billing-helpers.tsx:tryAutoChargeAtTrialEnd`).
+Prices: `src/venue-plans-constants.tsx:VENUE_PLANS_CORE` (single source since
+2026-06-10; year = 10 months, `VENUE_YEAR_MONTHS`). Public list:
+`GET /server/api/venue-billing/plans` (also «Радио полного цикла» 20 000 /
+200 000, `purchasable:false`, no online checkout).
+
+Trial (since 2026-10-16, BILLING): 7 days on the tier the venue chose when
+binding the card (`POST /venue-billing/attach-card {tier, interval}`, default
+«Старт» monthly); trials started before 2026-10-16 keep 14 days
+(`venue-trial.tsx:trialPeriodDaysFor`). Starts only after the card is bound:
+1 ₽ check payment (session stored like /subscribe), refunded at once; the
+`venue_card_attach` webhook (checkout-routes.tsx) saves the card and stamps
+`trial_expires_at`. One trial per venue: `expired` → 409 `trial_used`. At
+trial end the hourly cron charges exactly the chosen tier/interval to the
+saved card (`venue-billing-helpers.tsx:tryAutoChargeAtTrialEnd`). Until
+2026-10-16 the trial showed «Бизнес» and the charge would have been
+'business'/'start', and in practice nothing worked: no session, no card,
+no cron (notes/critic.md A2).
 
 ### Radio ad campaigns — pricing & amount-gate posture
 
@@ -462,17 +473,36 @@ Endpoints under `/server/api/venue-billing`:
 - `POST /subscribe { tier, interval }` — creates YooKassa session
   with `savePaymentMethod: true` so future recurring charges work
   without redirecting the user. Returns `confirmationUrl`.
-- `POST /cancel` — flips `subscriptionStatus='cancelled'` but keeps
-  `subscriptionExpiresAt` intact. Stream plays until period end,
-  then the cron flips to expired + revokes tokens.
-- `GET  /me` — current subscription state + saved card summary
-  (last4, brand, gateway) for cabinet display.
+- `POST /attach-card { tier?, interval? }`: 1 ₽ card check, starts the
+  trial on the chosen tier (or changes the card during a trial / paid
+  period). 400 on unknown tier/interval, 409 `trial_used` after expiry.
+- `POST /cancel`: only from `trial`/`active`: `subscriptionStatus=
+  'cancelled'`, `cancelledFromStatus`, period end kept (trial: =
+  `trial_expires_at`). Access stays until that date
+  (`getEffectiveVenuePlan`), no charge after a cancel (the trial cron
+  scans only `trial`, the renewal cron never charges `cancelled`); then
+  the renewal cron flips to expired + revokes tokens.
+- `POST /resume`: undo a cancel before the period ends (needs a saved
+  card). Paying via `/subscribe` also clears the cancel.
+- `GET  /me`: current subscription state (no status = `pending_card`),
+  `effectivePlan`, saved card summary (last4, brand, gateway), and
+  `nextChargeAt` / `nextChargeRub` (trial end, or 3 days before the
+  paid period ends; null when no charge will happen).
+- `GET  /plans`: public, see «Subscription tiers».
 - `POST /cron/charge-recurring` — CRON_SECRET. Mirror of artist
   `/subscriptions/charge-recurring` but scoped to `venue_profiles`.
   Charges venues whose `subscriptionExpiresAt` is within 3 days OR
-  past. On charge failure / no card past expiry → marks expired
-  (see `markVenueExpired` below). Idempotent via deterministic
-  `venue-renew-{userId}-{expiresMs}` orderId.
+  past (`RENEWAL_LEAD_DAYS`). On charge failure / no card past expiry
+  → marks expired (see `markVenueExpired` below). Idempotent via
+  deterministic `venue-renew-{userId}-{expiresMs}-{day}` orderId.
+  Runs every 6 h (`systemd/promofm-venue-charge-recurring.timer`).
+- Saved cards: `payment_methods` (uuid id from the DB, app id in
+  `data.id`, token in `data.gatewayMethodId`). The newest row with a
+  token is charged (`db.tsx:getChargeablePaymentMethod`). Before
+  2026-10-16 every write failed on prod (id 'pm-…' into uuid, missing
+  `updated_at`), so no card was ever saved (artists included).
+- 54-ФЗ: subscribe, attach-card and both autocharges send the venue's
+  `users.email` as the receipt e-mail (before: `noreply@promo-music.ru`).
 
 Webhook in `checkout-routes.tsx`: `session.type === 'venue_subscription'`
 + `session.metadata.planKey` → activates the tier on
@@ -495,20 +525,23 @@ at trial end, paid period after cancellation ran out):
   poll, shows lock-screen «оплатите чтобы продолжить»
 - All `venue_station_streams.status = 'paused'` — admin UI shows
   the state
-- SSE `venue_subscription_expired` event + email (re-uses
-  `sendVenueTrialExpiredEmail` for now)
+- SSE `venue_subscription_expired` event + email
+  (`sendVenueTrialExpiredEmail` with `reason`: cancelled / period_ended)
 
 ### Trial-end auto-charge
 
 **Source:** `src/venue-billing-helpers.tsx:tryAutoChargeAtTrialEnd` +
 hook in `venue-trial.tsx:expireTrialsOnce`.
 
-If venue saved a card during onboarding (via /venue-billing/subscribe
-with savePaymentMethod=true), the trial-expiry cron attempts to
-charge it for the first paid month BEFORE falling back to «mark
-expired». Charge succeeds → subscription becomes active with 30-day
-period from trial end. Charge fails / no card → original expired
-path kicks in (revoke tokens, pause streams, email).
+The card bound at trial start (attach-card) is charged by the hourly
+expire-trials cron for the chosen tier/interval (`resolveVenueChargePlan`:
+chosen → «Старт» monthly), with a 54-ФЗ receipt to the venue's e-mail.
+orderId `venue-first-{userId}-{trialEndMs}` (deterministic: no double
+charge). Charged → active for 30 / 365 days from now. No card or
+declined → expired (revoke tokens, pause streams, email with the
+reason). Gateway `pending` → wait for the webhook, next run activates.
+Network/gateway error → retried hourly for 24 h, then expired. T-3 and
+T-1 emails name the amount, tier and date of the charge.
 
 This is the difference between «1000 триалов / 0 платящих» and a
 working funnel — without it every trial silently dies on day 14.
@@ -536,10 +569,13 @@ working funnel — without it every trial silently dies on day 14.
 **Source:** `src/venue-plan-limits.tsx`.
 
 Effective plan resolution from profile:
-- `subscriptionStatus='trial'` → effectivePlan=**'business'** (per
-  landing promise "полный функционал ПРОМО.ЭИР")
-- `subscriptionStatus IN ('expired','cancelled','inactive')` →
-  **'free'**
+- `subscriptionStatus='trial'` → the chosen tier (`subscriptionPlan`
+  if start/business/network, else **'start'**): the same tier the
+  trial-end charge bills (since 2026-10-16; was a flat 'business')
+- `subscriptionStatus='cancelled'` → kept until `subscriptionExpiresAt`
+  (trial: the chosen tier; paid: `subscriptionPlan`), then **'free'**
+- `subscriptionStatus IN ('expired','inactive','pending_card')` or no
+  status → **'free'** (no status used to read as active «Старт»)
 - `subscriptionStatus='active'` → use `subscriptionPlan` from row
 - unrecognised → 'free' (safe default)
 

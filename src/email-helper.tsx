@@ -835,14 +835,15 @@ export async function sendVenueTrialEndingEmail(data: { toEmail: string; venueNa
   if (data.charge) {
     // Карточная схема (с 16.10.2026): честно называем сумму и дату автосписания.
     const ch = data.charge;
-    const chargeHuman = new Date(ch.atIso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+    const chargeHuman = new Date(ch.atIso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: 'Europe/Moscow' });
+    const endHuman = new Date(data.expiresAtIso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Moscow' });
     return sendEmail({
       to: data.toEmail,
       subject: `${venueBrand(site)}: пробный период заканчивается через ${data.daysRemaining} ${daysWord}`,
       html: emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Пробный период ${venueBrand(site)} скоро закончится</h2>
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
-    <p>Пробный период заканчивается <strong>${escapeHtml(expiresHuman)}</strong> (через ${data.daysRemaining} ${daysWord}).</p>
+    <p>Пробный период заканчивается <strong>${escapeHtml(endHuman)}</strong> (через ${data.daysRemaining} ${daysWord}).</p>
     ${trialChargeBox(ch, chargeHuman)}
     <p style="text-align:center;margin:28px 0;">
       <a href="${SITE_ORIGIN[site]}${PATH.venueSubscription}" style="${btn(site)}">${ch.hasCard ? 'Управлять подпиской' : 'Оформить подписку'}</a>
@@ -968,14 +969,14 @@ export async function sendVenueTrialLastDayEmail(data: { toEmail: string; venueN
   });
   if (data.charge) {
     const ch = data.charge;
-    const chargeHuman = new Date(ch.atIso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+    const chargeHuman = new Date(ch.atIso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: 'Europe/Moscow' });
     return sendEmail({
       to: data.toEmail,
       subject: `${venueBrand(site)}: пробный период заканчивается ${chargeHuman}`,
       html: emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Пробный период заканчивается ${escapeHtml(chargeHuman)}</h2>
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
-    <p>Пробный период на ${venueBrand(site)} заканчивается <strong>${escapeHtml(expiresHuman)}</strong>.</p>
+    <p>Остались последние сутки пробного периода на ${venueBrand(site)}.</p>
     ${trialChargeBox(ch, chargeHuman)}
     <p style="text-align:center;margin:28px 0;">
       <a href="${SITE_ORIGIN[site]}${PATH.venueSubscription}" style="${btn(site)}">${ch.hasCard ? 'Управлять подпиской' : 'Оформить подписку'}</a>
