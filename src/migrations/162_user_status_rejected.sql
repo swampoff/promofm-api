@@ -1,0 +1,23 @@
+-- Migration 162: значение 'rejected' в enum user_status
+--
+-- Отказ в регистрации партнёра пишет users.status = 'rejected':
+--   * POST /auth/admin/reject-user (auth-routes.tsx, «Заявки партнёров»);
+--   * POST /api/promo-air-admin/venues/:id/reject (админка PROMO.AIR).
+-- На проде enum user_status = {active, inactive, suspended, pending, banned,
+-- blocked} (проверено 17.10.2026): 'rejected' нет, поэтому оба отказа падают
+-- с 22P02 invalid input value for enum, а гейт входа «Ваша заявка отклонена»
+-- (auth-routes.tsx, /signin) не срабатывает никогда.
+--
+-- ALTER TYPE ... ADD VALUE разрешён внутри транзакции с PG12, пока новое
+-- значение не используется в той же транзакции (как в 122). Идемпотентно
+-- (IF NOT EXISTS), без BEGIN/COMMIT (см. CLAUDE.md).
+-- Dry-run:
+--   sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
+--   BEGIN;
+--   \i /opt/promofm-api/src/migrations/162_user_status_rejected.sql
+--   ROLLBACK;
+--   EOF
+-- Apply: то же с COMMIT. Откат значения enum в Postgres невозможен без
+-- пересоздания типа; значение безвредно, пока его никто не пишет.
+
+ALTER TYPE user_status ADD VALUE IF NOT EXISTS 'rejected';

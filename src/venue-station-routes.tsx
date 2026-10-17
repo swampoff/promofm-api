@@ -32,6 +32,7 @@ import { Hono } from 'hono';
 import crypto from 'crypto';
 import { pool } from './db-client.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { logAdminAction } from './audit-helper.tsx';
 import { ensureVenueProfile, getVenueProfile as dbGetVenueProfile } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
 import { sendVenueRadioReadyEmail, sendVenueRadioChangesRequestedEmail, sendVenueRadioRejectedEmail } from './email-helper.tsx';
@@ -80,7 +81,7 @@ async function loadVenueContact(userId: string): Promise<{ email: string; name: 
   }
 }
 
-function rowToRequest(r: any) {
+export function rowToRequest(r: any) {
   return {
     id: r.id,
     userId: r.user_id,
@@ -141,6 +142,31 @@ function newPairingCode(): string {
       .map((b) => PAIRING_ALPHABET[b % PAIRING_ALPHABET.length])
       .join('');
   return `${part(3)}-${part(3)}`;
+}
+
+const PAIRING_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Новый код подключения на 24 часа; старое устройство отвязывается (его
+ * токен перестаёт работать, /device/config отвечает 401). Общий путь для
+ * кабинета (POST /me/regenerate-pairing, после проверки владельца) и
+ * админки PROMO.AIR (promo-air-admin-routes.tsx). Одна UPDATE-операция.
+ * Возвращает обновлённую строку потока или null, если потока нет.
+ */
+export async function reissuePairingCode(streamId: string): Promise<any | null> {
+  const r = await pool.query(
+    `UPDATE venue_station_streams
+        SET pairing_code        = $1,
+            pairing_expires_at  = $2,
+            paired_at           = NULL,
+            paired_device_info  = NULL,
+            device_token_hash   = NULL,   -- старое устройство отвязывается (401)
+            updated_at          = NOW()
+      WHERE id::text = $3
+      RETURNING *`,
+    [newPairingCode(), new Date(Date.now() + PAIRING_TTL_MS).toISOString(), streamId]
+  );
+  return r.rows[0] || null;
 }
 
 // ── Анкета: формат эфира и точки (миграция 150, 26.09.2026) ──────────
@@ -400,21 +426,8 @@ app.post('/me/regenerate-pairing', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Stream not found' }, 404);
     }
 
-    const code = newPairingCode();
-    const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    const r = await pool.query(
-      `UPDATE venue_station_streams
-          SET pairing_code        = $1,
-              pairing_expires_at  = $2,
-              paired_at           = NULL,
-              paired_device_info  = NULL,
-              device_token_hash   = NULL,   -- старое устройство отвязывается (401)
-              updated_at          = NOW()
-        WHERE id::text = $3
-        RETURNING *`,
-      [code, expires, streamId]
-    );
-    return c.json({ success: true, stream: rowToStream(r.rows[0], false) });
+    const updated = await reissuePairingCode(streamId);
+    return c.json({ success: true, stream: rowToStream(updated, false) });
   } catch (error: any) {
     console.error('POST /venue-station/me/regenerate-pairing:', error);
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -424,6 +437,17 @@ app.post('/me/regenerate-pairing', requireAuth, async (c) => {
 // ──────────────────────────────────────────────────────────────────
 // ADMIN ENDPOINTS (requireAdmin)
 // ──────────────────────────────────────────────────────────────────
+
+// Журнал действий админа (audit_logs): цель = пользователь-заведение, чтобы
+// карточка заведения в админке PROMO.AIR показывала всю историю.
+function auditStationAction(c: any, action: string, venueUserId: string | null | undefined, details: Record<string, any>) {
+  logAdminAction(c, {
+    action,
+    resourceType: 'venue',
+    targetId: venueUserId ? String(venueUserId) : null,
+    details: { actorEmail: c.get('userEmail') || null, ...details },
+  });
+}
 
 app.get('/admin/queue', requireAuth, requireAdmin, async (c) => {
   try {
@@ -511,6 +535,7 @@ app.post('/admin/:requestId/take', requireAuth, requireAdmin, async (c) => {
     if (r.rowCount === 0) {
       return c.json({ success: false, error: 'Request not found or already taken' }, 404);
     }
+    auditStationAction(c, 'venue_station_take', r.rows[0].user_id, { requestId: id, after: { requestStatus: 'in_setup' } });
     return c.json({ success: true, request: rowToRequest(r.rows[0]) });
   } catch (error: any) {
     console.error('POST /venue-station/admin/:requestId/take:', error);
@@ -540,6 +565,7 @@ app.post('/admin/:requestId/reject', requireAuth, requireAdmin, async (c) => {
     }
     // Сообщаем заведению причину — раньше отказ был молчаливым.
     const rejectedRow = r.rows[0];
+    auditStationAction(c, 'venue_station_reject', rejectedRow.user_id, { requestId: id, reason, after: { requestStatus: 'rejected' } });
     // Письма ведут на сайт заведения (siteForUserId), хотя действие делает админ на promo-music.ru.
     loadVenueContact(rejectedRow.user_id).then(async (contact) => {
       if (contact) {
@@ -577,6 +603,7 @@ app.post('/admin/:requestId/request-changes', requireAuth, requireAdmin, async (
     // Notify venue — fire-and-forget so email outage doesn't block
     // the admin action.
     const venueRow = r.rows[0];
+    auditStationAction(c, 'venue_station_request_changes', venueRow.user_id, { requestId: id, reason: message, after: { requestStatus: 'changes_requested' } });
     loadVenueContact(venueRow.user_id).then(async (contact) => {
       if (contact) {
         return sendVenueRadioChangesRequestedEmail({
@@ -693,6 +720,16 @@ app.post('/admin/:requestId/provision', requireAuth, requireAdmin, async (c) => 
       console.error('[venue-station] trial start failed:', trialErr?.message);
     }
 
+    // Код подключения в журнал не пишем: это ключ к потоку на 24 часа.
+    auditStationAction(c, 'venue_station_provision', req.user_id, {
+      requestId: String(req.id),
+      streamId: String(ins.rows[0].id),
+      pointName,
+      streamUrl,
+      monthlyPrice,
+      after: { requestStatus: upd.rows[0]?.status, streamStatus: 'provisioned' },
+    });
+
     // Notify venue with the pairing code — this is the critical
     // moment in the funnel: admin's done, venue sees the code in
     // their inbox and in the cabinet at the same time.
@@ -745,6 +782,8 @@ async function setStreamStatus(c: any, status: string, stampLiveOnRequest = fals
     if (r.rowCount === 0) {
       return c.json({ success: false, error: 'Stream not found' }, 404);
     }
+    auditStationAction(c, stampLiveOnRequest ? 'venue_stream_mark_live' : status === 'paused' ? 'venue_stream_pause' : 'venue_stream_resume',
+      r.rows[0].user_id, { streamId: id, after: { streamStatus: status } });
     if (stampLiveOnRequest && r.rows[0].request_id) {
       await pool.query(
         `UPDATE venue_station_requests

@@ -349,6 +349,32 @@ export async function rotateRefreshToken(oldToken: string, userId: string, ip: s
   return createRefreshToken(userId, ip, ua);
 }
 
+/**
+ * Завершить все сессии пользователя при блокировке: token_version + 1
+ * (requireAuth отклоняет выданные раньше access-токены) и отзыв всех
+ * refresh-токенов. Общий путь для бана из админки пользователей
+ * (landing-data-routes.tsx) и блокировки заведения в админке PROMO.AIR
+ * (promo-air-admin-routes.tsx). db: пул или клиент открытой транзакции.
+ */
+export async function revokeUserSessions(
+  userId: string,
+  db: { query: (text: string, params?: any[]) => Promise<any> } = pool,
+): Promise<void> {
+  await db.query(
+    `UPDATE users
+        SET token_version = COALESCE(token_version, 1) + 1
+      WHERE id::text = $1`,
+    [userId]
+  );
+  await db.query(
+    `UPDATE refresh_tokens
+        SET revoked_at = NOW()
+      WHERE user_id::text = $1
+        AND revoked_at IS NULL`,
+    [userId]
+  );
+}
+
 export async function revokeAllRefreshTokens(userId: string): Promise<void> {
   await pool.query(
     `UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,

@@ -14,10 +14,17 @@
  *   GET  /queue/:venueId      — очередь сегментов для плейера
  *   POST /settings            — настройки AI DJ (голос, стиль, частота)
  *   GET  /settings/:venueId   — текущие настройки
+ *
+ * Доступ (17.10.2026): только заведение к своим данным и админ к любым.
+ * venueId = 'current' | свой userId | свой venue_profiles.id; хранится под
+ * userId владельца (access-gates.tsx:decideVenueAccess). Другие роли: 403.
  */
 
 import { Hono } from 'hono';
 import { requireAuth } from './auth-middleware.tsx';
+import { pool } from './db-client.tsx';
+import { isAdminEmail } from './roles.tsx';
+import { decideVenueAccess, venueNeedsOwnerLookup, type VenueAccess, type VenueCaller } from './access-gates.tsx';
 import { callLLM } from './llm-router.tsx';
 import {
   getPromoAirDjSettings,
@@ -73,6 +80,26 @@ const DEFAULT_SETTINGS: Omit<DjSettings, 'venueId'> = {
   timeCheckFrequency: 30,
   weatherFrequency: 60,
 };
+
+// ─── Доступ к данным заведения ──────────────────────────
+
+/** venueId из запроса → ключ данных вызывающего или отказ (400/403). */
+async function resolveVenue(c: any, requested: unknown): Promise<VenueAccess> {
+  const role = String(c.get('userRole') || '');
+  const caller: VenueCaller = {
+    userId: String(c.get('userId') || ''),
+    role,
+    isAdmin: (role === 'admin' || role === 'superadmin') && isAdminEmail(c.get('userEmail')),
+  };
+  let profileOwner: string | null = null;
+  if (venueNeedsOwnerLookup(caller, requested)) {
+    const r = await pool.query(`SELECT user_id FROM venue_profiles WHERE id = $1 LIMIT 1`, [String(requested).trim()]);
+    profileOwner = r.rows[0]?.user_id ? String(r.rows[0].user_id) : null;
+  }
+  return decideVenueAccess(caller, requested, profileOwner);
+}
+
+const denied = (c: any, a: Extract<VenueAccess, { ok: false }>) => c.json({ success: false, error: a.error }, a.status);
 
 // ─── System prompts по типам сегментов ──────────────────
 
@@ -157,15 +184,15 @@ app.post('/generate-script', requireAuth, async (c) => {
     const userId = c.get('userId');
     const body = await c.req.json();
     const {
-      venueId,
+      venueId: requestedVenueId,
       venueName,
       segmentType = 'greeting',
       context = {},
     } = body;
 
-    if (!venueId) {
-      return c.json({ success: false, error: 'venueId is required' }, 400);
-    }
+    const access = await resolveVenue(c, requestedVenueId);
+    if (access.ok === false) return denied(c, access);
+    const venueId = access.venueKey;
 
     // Загружаем настройки (или используем defaults если row отсутствует)
     const savedSettings = await getPromoAirDjSettings(venueId);
@@ -214,6 +241,10 @@ app.post('/generate-script', requireAuth, async (c) => {
 
 app.post('/generate-audio', requireAuth, async (c) => {
   try {
+    // Без venueId, но тот же круг: заведение или админ (платный TTS, запись на диск).
+    const access = await resolveVenue(c, 'current');
+    if (access.ok === false) return denied(c, access);
+
     const { text, voiceType = 'neutral', style = 'professional' } = await c.req.json();
 
     if (!text) {
@@ -296,7 +327,7 @@ app.post('/generate-full', requireAuth, async (c) => {
     const userId = c.get('userId');
     const body = await c.req.json();
     const {
-      venueId,
+      venueId: requestedVenueId,
       venueName,
       segmentType = 'greeting',
       context = {},
@@ -304,9 +335,9 @@ app.post('/generate-full', requireAuth, async (c) => {
       style = 'professional',
     } = body;
 
-    if (!venueId) {
-      return c.json({ success: false, error: 'venueId is required' }, 400);
-    }
+    const access = await resolveVenue(c, requestedVenueId);
+    if (access.ok === false) return denied(c, access);
+    const venueId = access.venueKey;
 
     // 1. Генерируем текст
     const savedSettings = await getPromoAirDjSettings(venueId);
@@ -425,9 +456,10 @@ app.post('/generate-full', requireAuth, async (c) => {
 
 app.get('/scripts/:venueId', requireAuth, async (c) => {
   try {
-    const venueId = c.req.param('venueId');
+    const access = await resolveVenue(c, c.req.param('venueId'));
+    if (access.ok === false) return denied(c, access);
     const limit = parseInt(c.req.query('limit') || '20');
-    const scripts = await listPromoAirDjScripts(venueId, limit);
+    const scripts = await listPromoAirDjScripts(access.venueKey, limit);
     return c.json({ success: true, scripts });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -438,10 +470,11 @@ app.get('/scripts/:venueId', requireAuth, async (c) => {
 
 app.get('/queue/:venueId', requireAuth, async (c) => {
   try {
-    const venueId = c.req.param('venueId');
+    const access = await resolveVenue(c, c.req.param('venueId'));
+    if (access.ok === false) return denied(c, access);
     // Native partial index idx_promo_air_dj_queue_pending делает запрос
     // O(log n) на venue_id вместо O(N) JS .filter по всему массиву.
-    const queue = await listPromoAirDjQueuePending(venueId);
+    const queue = await listPromoAirDjQueuePending(access.venueKey);
     return c.json({ success: true, queue });
   } catch (error: any) {
     return c.json({ success: false, error: safeErrorMessage(error) }, 500);
@@ -453,11 +486,11 @@ app.get('/queue/:venueId', requireAuth, async (c) => {
 app.post('/settings', requireAuth, async (c) => {
   try {
     const body = await c.req.json();
-    const { venueId, ...settingsUpdate } = body;
+    const { venueId: requestedVenueId, ...settingsUpdate } = body;
 
-    if (!venueId) {
-      return c.json({ success: false, error: 'venueId is required' }, 400);
-    }
+    const access = await resolveVenue(c, requestedVenueId);
+    if (access.ok === false) return denied(c, access);
+    const venueId = access.venueKey;
 
     // upsertPromoAirDjSettings принимает partial — отсутствующие
     // поля используют DEFAULT (на INSERT path) или сохраняют существующее
@@ -474,7 +507,9 @@ app.post('/settings', requireAuth, async (c) => {
 
 app.get('/settings/:venueId', requireAuth, async (c) => {
   try {
-    const venueId = c.req.param('venueId');
+    const access = await resolveVenue(c, c.req.param('venueId'));
+    if (access.ok === false) return denied(c, access);
+    const venueId = access.venueKey;
     const saved = await getPromoAirDjSettings(venueId);
     // Если row не существует — возвращаем DEFAULT_SETTINGS (mirror legacy
     // jsonbStore поведения через client-side default fallback).

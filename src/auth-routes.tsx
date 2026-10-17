@@ -23,6 +23,7 @@ import {
 } from './auth-security.tsx';
 import { setSessionCookie, clearSessionCookie, getSessionCookie, setRefreshCookie, getRefreshCookie, clearRefreshCookie } from './cookie-helper.tsx';
 import { ALLOWED_ORIGINS, PATH, originFromRequest, siteFromRequest, siteForUserId, signupSiteFromRequest } from './site-origin.tsx';
+import { accountBlockOf, accountBlockBody, autoLoginBlockBody, moderationConflictText } from './access-gates.tsx';
 
 import { createLogger } from "./logger.tsx";
 
@@ -414,12 +415,16 @@ auth.post("/signin", async (c) => {
       }, 401);
     }
 
-    if (user.status === 'pending') return c.json({ success: false, error: 'Ваш аккаунт на модерации.', accountStatus: 'pending' }, 403);
-    if (user.status === 'rejected') return c.json({ success: false, error: 'Ваша заявка отклонена.', accountStatus: 'rejected' }, 403);
-    // 'blocked' ставит админ (POST /admin/users/:id/status, migration 122).
-    // Живые сессии убиты бампом token_version в момент блокировки; этот гейт
-    // закрывает повторный вход по паролю.
-    if (user.status === 'blocked') return c.json({ success: false, error: 'Аккаунт заблокирован администрацией.', accountStatus: 'blocked' }, 403);
+    // pending / rejected / blocked|banned → 403 (access-gates.tsx; те же
+    // ответы на VK-входе, exchange-auto-login и /refresh).
+    // 'blocked' ставит админ (POST /admin/users/:id/status, migration 122),
+    // 'banned': бан из админки пользователей (landing-data-routes) и
+    // блокировка заведения в админке PROMO.AIR. Живые сессии убиты бампом
+    // token_version в момент блокировки; этот гейт закрывает повторный вход
+    // по паролю (до 17.10.2026 'banned' здесь не проверялся и бан обходился
+    // обычным входом).
+    const block = accountBlockOf(user.status);
+    if (block) return c.json(accountBlockBody(block), 403);
 
     // H7: Check if MFA is enabled
     const mfaEnabled = await isMFAEnabled(user.id);
@@ -545,6 +550,9 @@ auth.post("/vk-callback", async (c) => {
 
     if (existing.rows.length > 0) {
       const eu = existing.rows[0];
+      // Тот же гейт статуса, что у /signin: VK не обходит модерацию и бан.
+      const vkBlock = accountBlockOf(eu.status);
+      if (vkBlock) return c.json(accountBlockBody(vkBlock), 403);
       let profile = await vpsGetProfile(eu.id);
       const role = profile?.role || eu.role || "artist";
 
@@ -592,9 +600,13 @@ auth.post("/vk-callback", async (c) => {
     } catch (err: any) {
       if (err.code === '23505') {
         // Email or username conflict — try to link VK
-        const byEmail = await sql(`SELECT id, email, full_name, role::text FROM users WHERE email = $1`, [userEmail]);
+        const byEmail = await sql(`SELECT id, email, full_name, role::text, status::text FROM users WHERE email = $1`, [userEmail]);
         if (byEmail.rows.length > 0) {
           const eu = byEmail.rows[0];
+          // До привязки VK: заявка на проверке (заведение с той же почтой) или
+          // заблокированный аккаунт не получают ни привязку, ни сессию.
+          const linkBlock = accountBlockOf(eu.status);
+          if (linkBlock) return c.json(accountBlockBody(linkBlock), 403);
           await sql(`UPDATE users SET vk_id = $1, avatar_url = COALESCE($2, avatar_url) WHERE id = $3`, [String(vkUserId), vkAvatar, eu.id]);
           const accessToken = signToken({ id: eu.id, email: userEmail, role: eu.role || "artist" });
           setSessionCookie(c, accessToken);
@@ -856,20 +868,28 @@ auth.post("/reset-password", async (c) => {
     // базы). Поэтому is_email_verified=TRUE + email_verified_at=NOW.
     // Для регулярных reset-password у уже-активированных пользователей
     // это идемпотентно (TRUE остаётся TRUE).
-    await sql(
+    // pending → active (6a5ddda, 28.05.2026) осталось для этой активации, но
+    // НЕ для партнёров (PARTNER_ROLES): их заявку одобряет только админ, а
+    // сброс пароля раньше снимал модерацию (17.10.2026). Импорт заводил
+    // аккаунты сразу 'active', на проде 0 'pending' (проверено 17.10).
+    const upd = await sql(
       `UPDATE users SET
          password_hash    = $1,
          token_version    = COALESCE(token_version, 1) + 1,
          is_email_verified = TRUE,
          email_verified_at = COALESCE(email_verified_at, NOW()),
-         status            = CASE WHEN status::text = 'pending' THEN 'active'::user_status ELSE status END
-       WHERE id = $2`,
-      [passwordHash, resetData.userId]
+         status            = CASE WHEN status::text = 'pending' AND role::text <> ALL($3::text[])
+                                  THEN 'active'::user_status ELSE status END
+       WHERE id = $2
+       RETURNING status::text AS status`,
+      [passwordHash, resetData.userId, PARTNER_ROLES]
     );
     await vpsUseToken(token);
 
-    log.info({ userId: resetData.userId }, 'password_reset_completed');
-    return c.json({ success: true, message: "Пароль обновлён." });
+    const accountStatus = upd.rows[0]?.status;
+    log.info({ userId: resetData.userId, accountStatus }, 'password_reset_completed');
+    // accountStatus: страница сброса может сразу сказать «аккаунт на проверке».
+    return c.json({ success: true, message: "Пароль обновлён.", ...(accountStatus ? { accountStatus } : {}) });
   } catch (error) {
     log.error({ err: error }, "reset_password_error");
     return c.json({ success: false, error: "Internal server error" }, 500);
@@ -1329,12 +1349,28 @@ auth.post("/admin/verify-profile", requireAuth, requireAdmin, async (c) => {
 
 // POST /auth/admin/approve-user
 // ──────────────────────────────────────────────────────────────────────
+// approve/reject не изменили строку: нет пользователя → 404, статус не
+// 'pending' → 409 с текущим статусом (error читаемый: «Заявки партнёров»
+// показывают его в тосте; code/status для кода, как в promo-air-admin).
+async function moderationMiss(c: any, action: 'approve' | 'reject', userId: string) {
+  const cur = await sql(`SELECT status::text AS status FROM users WHERE id::text = $1`, [userId]);
+  if (cur.rows.length === 0) return c.json({ success: false, error: "Не найден" }, 404);
+  const status = cur.rows[0].status;
+  return c.json({ success: false, error: moderationConflictText(action, status), code: 'conflict', status }, 409);
+}
+
 auth.post("/admin/approve-user", requireAuth, requireAdmin, async (c) => {
   try {
     const { userId } = await c.req.json();
     if (!userId) return c.json({ success: false, error: "userId обязателен" }, 400);
-    const result = await sql(`UPDATE users SET status = 'active'::user_status, is_email_verified = true, email_verified_at = COALESCE(email_verified_at, NOW()) WHERE id = $1 RETURNING email, full_name`, [userId]);
-    if (result.rows.length === 0) return c.json({ success: false, error: "Не найден" }, 404);
+    // Только pending → active: отклонённый или заблокированный аккаунт этой
+    // кнопкой не «оживает» (раньше UPDATE шёл без условия на статус).
+    const result = await sql(
+      `UPDATE users SET status = 'active'::user_status, is_email_verified = true, email_verified_at = COALESCE(email_verified_at, NOW())
+        WHERE id::text = $1 AND status::text = 'pending' RETURNING email, full_name`,
+      [String(userId)]
+    );
+    if (result.rows.length === 0) return moderationMiss(c, 'approve', String(userId));
     const user = result.rows[0];
     siteForUserId(String(userId)).then((site) => sendAccountApprovedEmail(user.email, user.full_name || '', site)).catch(() => {});
     logAdminAction(c, { action: 'user_approve', resourceType: 'user', targetId: String(userId), details: { email: user.email } });
@@ -1353,8 +1389,13 @@ auth.post("/admin/reject-user", requireAuth, requireAdmin, async (c) => {
   try {
     const { userId, reason } = await c.req.json();
     if (!userId) return c.json({ success: false, error: "userId обязателен" }, 400);
-    const result = await sql(`UPDATE users SET status = 'rejected'::user_status WHERE id = $1 RETURNING email, full_name`, [userId]);
-    if (result.rows.length === 0) return c.json({ success: false, error: "Не найден" }, 404);
+    // Только pending → rejected (как approve): действующий аккаунт отказом
+    // из «Заявок партнёров» не выключить. 'rejected' в enum: миграция 162.
+    const result = await sql(
+      `UPDATE users SET status = 'rejected'::user_status WHERE id::text = $1 AND status::text = 'pending' RETURNING email, full_name`,
+      [String(userId)]
+    );
+    if (result.rows.length === 0) return moderationMiss(c, 'reject', String(userId));
     const user = result.rows[0];
     siteForUserId(String(userId)).then((site) => sendAccountRejectedEmail(user.email, user.full_name || '', reason || '', site)).catch(() => {});
     logAdminAction(c, { action: 'user_reject', resourceType: 'user', targetId: String(userId), details: { email: user.email, reason: reason || null } });
@@ -1434,12 +1475,22 @@ auth.post("/exchange-auto-login", async (c) => {
     await vpsUseToken(token);
 
     const result = await sql(
-      `SELECT id, email, role::text, full_name, status::text, token_version FROM users WHERE id = $1`,
+      `SELECT id, email, role::text, full_name, status::text, token_version FROM users WHERE id = $1 AND deleted_at IS NULL`,
       [tokenData.userId]
     );
     if (result.rows.length === 0) return c.json({ success: false, error: "User not found" }, 404);
 
     const user = result.rows[0];
+    // Токен выдаётся после подтверждения почты любому аккаунту, но сессию
+    // получает только допущенный: заявка на проверке → 403
+    // {error:'account_pending'} (фронт показывает «почта подтверждена,
+    // аккаунт на проверке»), отказ/блокировка → те же 403, что у /signin.
+    // До 17.10.2026 статус здесь не проверялся: это был обход модерации.
+    const block = accountBlockOf(user.status);
+    if (block) {
+      log.info({ userId: user.id, status: user.status }, 'auto_login_refused');
+      return c.json(autoLoginBlockBody(block), 403);
+    }
     const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
     setSessionCookie(c, accessToken);
     const profile = await vpsGetProfile(user.id);
@@ -1478,12 +1529,21 @@ auth.post("/refresh", async (c) => {
     }
 
     const result = await sql(
-      `SELECT id, email, role::text, full_name, token_version FROM users WHERE id = $1 AND deleted_at IS NULL`,
+      `SELECT id, email, role::text, full_name, status::text, token_version FROM users WHERE id = $1 AND deleted_at IS NULL`,
       [validation.userId]
     );
     if (result.rows.length === 0) return c.json({ success: false, error: "User not found" }, 404);
 
     const user = result.rows[0];
+    // Гейт статуса, как у /signin: блокировка через POST /admin/users/:id/status
+    // бампает token_version, но refresh-токены не отзывает, и без этой проверки
+    // /refresh выдавал заблокированному новую сессию с актуальным tv.
+    const block = accountBlockOf(user.status);
+    if (block) {
+      clearSessionCookie(c);
+      clearRefreshCookie(c);
+      return c.json(accountBlockBody(block), 403);
+    }
     const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || c.req.header('x-real-ip') || '';
     const ua = c.req.header('user-agent') || '';
 

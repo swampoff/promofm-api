@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { getSystemConfig, upsertSystemConfig } from './db.tsx';
 import { safeErrorMessage } from './security.tsx';
+import { logAdminAction } from './audit-helper.tsx';
 
 const app = new Hono();
 
@@ -72,6 +73,17 @@ async function readMeta(): Promise<ApkReleaseMeta> {
 
 async function writeMeta(meta: ApkReleaseMeta): Promise<void> {
   await upsertSystemConfig(APK_CONFIG_KEY, meta);
+}
+
+// Журнал действий админа (audit_logs). targetId = заведение для
+// персональной сборки, null для общего релиза.
+function auditApk(c: any, action: string, targetId: string | null, details: Record<string, any>) {
+  logAdminAction(c, {
+    action,
+    resourceType: 'venue_apk',
+    targetId,
+    details: { actorEmail: c.get('userEmail') || null, ...details },
+  });
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -173,6 +185,7 @@ app.post('/admin/upload', requireAuth, requireAdmin, async (c) => {
       downloadUrl,
     };
     await writeMeta(meta);
+    auditApk(c, 'venue_apk_release_upload', null, { version, versionCode: meta.versionCode, bytes: meta.bytes, sha256 });
 
     return c.json({ success: true, release: meta });
   } catch (error: any) {
@@ -198,6 +211,10 @@ app.put('/admin/info', requireAuth, requireAdmin, async (c) => {
       releaseNotes:   body.releaseNotes   !== undefined ? (String(body.releaseNotes) || null) : cur.releaseNotes,
     };
     await writeMeta(next);
+    auditApk(c, 'venue_apk_release_update', null, {
+      before: { version: cur.version, versionCode: cur.versionCode, minAndroidSdk: cur.minAndroidSdk },
+      after: { version: next.version, versionCode: next.versionCode, minAndroidSdk: next.minAndroidSdk },
+    });
     return c.json({ success: true, release: next });
   } catch (error: any) {
     console.error('PUT /venue-apk/admin/info:', error);
@@ -217,6 +234,7 @@ app.delete('/admin/release', requireAuth, requireAdmin, async (c) => {
       }
     }
     await writeMeta({ ...DEFAULT_META });
+    auditApk(c, 'venue_apk_release_delete', null, { before: { version: cur.version, sha256: cur.sha256 } });
     return c.json({ success: true });
   } catch (error: any) {
     console.error('DELETE /venue-apk/admin/release:', error);
@@ -428,6 +446,7 @@ app.post('/admin/:venueId/upload', requireAuth, requireAdmin, async (c) => {
       );
       build = ins.rows[0];
     }
+    auditApk(c, 'venue_apk_build_upload', venueId, { buildId: build.id, version, bytes: buf.length, sha256 });
     try {
       const { emitSSE } = await import('./sse-routes.tsx');
       emitSSE(venueId, { type: 'venue_apk_ready', data: { title: 'Ваше приложение готово', message: 'Персональный APK радио доступен для скачивания в кабинете.' } });

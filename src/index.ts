@@ -67,6 +67,7 @@ import venueRoyaltyRoutes from './venue-royalty-routes.tsx';
 import venueAirRoutes from './venue-air-routes.tsx';
 import airCatalogRoutes from './air-catalog-routes.tsx';
 import venueApkRoutes from './venue-apk-routes.tsx';
+import promoAirAdminRoutes from './promo-air-admin-routes.tsx';
 import venueScheduleRoutes from './venue-schedule-routes.tsx';
 import { venueApiTokensApp, venueApiPublicApp } from './venue-api-routes.tsx';
 import promoGuideRoutes from './promo-guide-routes.tsx';
@@ -453,6 +454,8 @@ app.route('/server/api/venue-air', venueAirRoutes);
 app.route('/server/api/air-catalog', airCatalogRoutes);
 app.route('/server/api/venue-apk', venueApkRoutes);
 app.route('/server/api/venue-billing', venueBillingRoutes);
+// Раздел PROMO.AIR в админке (requireAuth + requireAdmin на всех маршрутах).
+app.route('/server/api/promo-air-admin', promoAirAdminRoutes);
 // Раньше не были смонтированы → playout-цепочка расписаний и API-токены
 // заведений отдавали 404. Префиксы сверены с фронтом (venue-schedule.ts,
 // venue-api-tokens.ts) и шапками самих модулей.

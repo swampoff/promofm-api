@@ -842,6 +842,46 @@ Cabinet `/venue/apk` page (frontend) reads `/info`, renders the
 download button + pairing code (pulled from `venue-station/me`).
 When `available=false` → «скоро будет» banner instead of dead link.
 
+### PROMO.AIR admin section (since 2026-10-17, ADMIN)
+
+**Source:** `src/promo-air-admin-routes.tsx` (+ pure helpers in
+`src/promo-air-admin-helpers.tsx`), mounted at
+`/server/api/promo-air-admin`, every route `requireAuth + requireAdmin`.
+Contract and JSON examples: `docs/PROMOAIR.md` §3. Frontend: the
+PROMO.AIR section of the admin on promo-music.ru (`/ctrl-pm7k2f/promo-air`).
+
+- The venue list starts from `users.role='venue'` (deleted users
+  excluded), not from `venue_profiles` (junk rows). `effectivePlan` =
+  `getEffectiveVenuePlan(venue_profiles.data)`; the `?plan=` filter uses a
+  SQL copy of it (`EFFECTIVE_PLAN_SQL`, kept in sync by
+  `tools/be-admin-e2e.test.mts`). A stream is «на связи» when a device is
+  paired and `last_seen_at` is within 3 minutes.
+- Account moderation: approve / reject only from `pending`, block from any
+  non-blocked status → `'banned'` + `token_version+1` + refresh tokens
+  revoked (shared `auth-security.tsx:revokeUserSessions`, same as the
+  UsersManagement ban) + streams paused + venue API keys revoked. Restore:
+  banned/blocked/suspended → `active`; streams and API keys stay off.
+  Approve does NOT mark the e-mail verified (the venue still confirms it;
+  `/auth/admin/approve-user` does mark it). A stale state answers 409
+  `{error:'conflict', status}`.
+- Reject writes `users.status='rejected'`, which needs migration 162: the
+  prod enum `user_status` had no `'rejected'` until then, so
+  `/auth/admin/reject-user` always failed (500) and the sign-in gate
+  «Ваша заявка отклонена» never fired.
+- Plan without payment (`POST /venues/:id/plan`): writes the same
+  `venue_profiles.data` fields as a payment (`subscriptionStatus/Plan/
+  Interval/ExpiresAt`, `subscriptionPriceRub=0`,
+  `subscriptionAssignedByAdminAt`), clears cancel/expiry marks, un-pauses
+  paused streams like a payment. No `payment_sessions` row. After the
+  date the normal crons apply: a saved card is charged the assigned plan
+  (renewal or trial-end charge), no card → expired.
+- Trial extension: only while `subscriptionStatus='trial'`, +1..60 days
+  from the current end (or from now if it already passed), T-3/T-1
+  reminders re-armed.
+- Every admin action on venues is in `audit_logs` (`promoair_*`,
+  `venue_station_*`, `venue_stream_*`, `venue_apk_*`; `details.actorEmail`,
+  `reason`, `before`/`after`). Pairing codes are never logged.
+
 ---
 
 ## DJ cabinet
@@ -1416,9 +1456,12 @@ in-line MANUAL DEPLOY STEPS. Auto-runner is stub.
   `/settings/user/unknown/onboarding` и данные молча терялись.
 - **POST `/server/api/landing-data/admin/users/:userId/status`** —
   блокировка/разблокировка юзера из админки. UI-статус 'blocked' ↔
-  enum-значение `'banned'::user_status` (login-гейт `db-client.tsx:641`).
-  До фикса кнопка «заблокировать» в UsersManagement только оптимистично
-  перекрашивала UI — запрос уходил в 404.
+  enum-значение `'banned'::user_status`. До фикса кнопка «заблокировать»
+  в UsersManagement только оптимистично перекрашивала UI — запрос уходил
+  в 404. Вход по паролю (`/auth/signin`) отбивает `'banned'` только с
+  2026-10-17 (раньше проверялся лишь `'blocked'`, а гейт
+  `db-client.tsx:641` стоит на другом, неиспользуемом пути входа);
+  сессии рвёт `auth-security.tsx:revokeUserSessions`.
 
 ## Video promo-pipeline (VideoModeration, добавлен 2026-07-02)
 

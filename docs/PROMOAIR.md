@@ -441,3 +441,381 @@ sudo -u postgres psql -d promofm -c "SELECT order_id, status, updated_at FROM pa
 - **Expiry enforcement.** `markVenueExpired` and trial expiry pause streams and revoke tokens in the DB. Whether playback really stops depends on the APK honouring `/device/config` (be-venue §2).
 - **Night emails.** Reminders come from an hourly cron, so a T-3 email can go out at night.
 - **Not done:** an admin UI for refunds or plan changes (ADMIN agent), renewal reminder emails before a paid period ends (the code has none), and linking venue-billing tiers to stream entitlement.
+
+---
+
+## 3. ADMIN: PROMO.AIR section of the admin API (17.10.2026)
+
+**Goal.** The PROMO.AIR section of the admin on promo-music.ru (`/ctrl-pm7k2f/promo-air`) works from real data: venue list and card, account moderation, plan without payment, trial extension, devices, venue payments and an audit trail. Contract: `notes/PLAN.md` §3.6. Nothing here depends on `PROMOAIR_ORIGIN`; with the gate off, e-mails simply go out with promo-music.ru branding.
+
+### What changed
+
+- **`src/promo-air-admin-routes.tsx` (new).** The routes, mounted at `/server/api/promo-air-admin` (`src/index.ts:458`, import :70).
+  - `app.use('*', requireAuth, requireAdmin)` (:45): one gate for the whole section, so no route can be added without it. It is scoped to the prefix; checked that other routes are not affected.
+  - SQL: `VENUE_ROW_SQL` (:59) starts from `users WHERE role='venue' AND deleted_at IS NULL`, LEFT JOIN `venue_profiles`, the latest `venue_station_requests` row and stream counts (LATERAL). `PAYMENT_SQL` (:109), `AUDIT_SQL` / `AUDIT_SCOPE` (:131, :146).
+  - Keyset pagination `keysetPage` (:189): `(COALESCE(created_at,'epoch'), id) DESC`, `limit+1` rows. The cursor time is formatted by Postgres in UTC with microseconds (`to_char(... 'US')`), so rows inside one millisecond are neither skipped nor repeated, and DateStyle/TimeZone do not matter.
+  - Account transitions `transitionAccount` (:386): one statement, `WITH prev AS (SELECT ... FOR UPDATE) UPDATE users ... WHERE prev.prev_status = ANY(allowed) RETURNING prev.prev_status`. 0 rows → 404 (not a venue) or 409 with the current status.
+  - Block `cutVenueAccess` (:419), in the same transaction: `revokeUserSessions` (token_version + refresh tokens), streams `provisioned|live → paused` (as `markVenueExpired`), `venue_api_tokens` revoked (the Bearer API does not check the account status).
+  - Plan and trial: `lockVenueForBilling` (:510) locks the `users` row and the `venue_profiles` row (`FOR UPDATE`) inside a transaction.
+  - Approve/reject e-mails (`notifyAccountDecision`, :445): existing `sendAccountApprovedEmail` / `sendAccountRejectedEmail` with `siteForUser({role:'venue', signup_site})` (DOMAIN), plus the same in-app notification as `/auth/admin/approve-user`. Fire-and-forget.
+  - Every mutation calls `logAdminAction` (`audit`, :174): `actor_id` = admin, `target_id` = venue user, `resource_type='venue'`, `details = {actorEmail, reason, before, after, ...}`.
+- **`src/promo-air-admin-helpers.tsx` (new, pure, no DB).** Cursor encode/decode, `parseLimit`, `buildVenueFilters` (escaped ILIKE), `ACCOUNT_TRANSITIONS` / `canTransition`, input parsing (`parseReason`, `parsePlanAssignment`, `parseTrialDays`, `untilEndOfDayMsk`), data patches (`planAssignmentData`, `trialExtensionData`), row builders (`toVenueRow`, `toStreamItem`, `toDevice`, `toPaymentItem`, `toAuditItem`). `EFFECTIVE_PLAN_SQL` (:102) is a SQL copy of `getEffectiveVenuePlan` for the `?plan=` filter; the e2e test compares both on 1352 profile shapes.
+- **`src/venue-station-routes.tsx`.**
+  - `rowToRequest` exported (:84), used by the venue card.
+  - `reissuePairingCode(streamId)` (:156) extracted from the owner route `POST /me/regenerate-pairing` (now :429, same SQL, same response). The admin route reuses it.
+  - Admin actions now audited (`auditStationAction`, :443): `venue_station_take` (:538), `venue_station_reject` (:568), `venue_station_request_changes` (:606), `venue_station_provision` (:724, the pairing code is not logged), `venue_stream_pause|resume|mark_live` (:785). Target = the venue user.
+- **`src/venue-apk-routes.tsx`.** Admin actions audited (`auditApk`, :80): `venue_apk_release_upload` (:188), `venue_apk_release_update` (:214), `venue_apk_release_delete` (:237), `venue_apk_build_upload` (:449, target = venue).
+- **`src/auth-security.tsx:359` `revokeUserSessions(userId, db = pool)` (new).** `token_version + 1` and revoke all refresh tokens; takes a transaction client. The UsersManagement ban `landing-data-routes.tsx:2713` now calls it instead of its own two queries (same SQL).
+- **`src/auth-routes.tsx:425` sign-in gate.** `'banned'` is refused like `'blocked'` (403, `accountStatus:'blocked'`). Before, `/signin` checked only `'blocked'`, so a user banned from UsersManagement (`'banned'`) could log in again with the password. Prod has 0 banned users, so nobody is affected today.
+- **`src/migrations/162_user_status_rejected.sql` (new).** See below.
+- **Docs:** `docs/PRODUCT_FACTS.md` «PROMO.AIR admin section» and the corrected ban note.
+
+### New env vars
+
+None.
+
+### Migration 162: `user_status` gets `'rejected'`
+
+Checked on prod 17.10: `enum_range(NULL::user_status) = {active,inactive,suspended,pending,banned,blocked}`. There is no `'rejected'`, so:
+- the existing `POST /auth/admin/reject-user` («Заявки партнёров») has always failed with 500 (22P02);
+- the sign-in gate «Ваша заявка отклонена» never fired;
+- `POST /promo-air-admin/venues/:id/reject` cannot store the status. Until 162 is applied it answers 500 `{error:'migration_required', message:'Отказ пока не сохраняется: ...'}`, the transaction is rolled back and nothing is logged.
+
+`ALTER TYPE user_status ADD VALUE IF NOT EXISTS 'rejected'`: idempotent, no BEGIN/COMMIT in the file, allowed inside the usual transaction because the value is not used there (same as 122). An enum value cannot be removed without recreating the type; it is harmless while nothing writes it.
+
+```bash
+sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF3'
+BEGIN;
+\i /opt/promofm-api/src/migrations/162_user_status_rejected.sql
+ROLLBACK;
+EOF3
+# then the same with COMMIT; check:
+sudo -u postgres psql -d promofm -c "SELECT enum_range(NULL::user_status)"
+```
+
+### API contract
+
+Base `/server/api/promo-air-admin`. All routes: session cookie of an admin (role admin/superadmin **and** e-mail in `ADMIN_EMAILS`); no session → 401 `{success:false, error:'Authorization required'}`, not admin → 403 `{success:false, error:'Admin access required'}`.
+
+Errors (`success:false`):
+
+| HTTP | `error` | Extra fields | When |
+|---|---|---|---|
+| 400 | `reason_required` | `message` | reject / block / plan / trial-extend without a non-empty `reason` |
+| 400 | `invalid_input` | `field`, `message` (Russian) | plan or trial-extend body invalid |
+| 400 | `invalid_filter` | `field`, `message` | unknown `status` / `plan` / `sub`, `q` or `city` longer than 100 |
+| 400 | `invalid_cursor` | | cursor not issued by this endpoint |
+| 404 | `not_found` | | not a uuid, no such user, not `role='venue'`, deleted |
+| 409 | `conflict` | `status`, `kind: 'account' \| 'subscription'` | stale state: `status` is the current account status (or subscription status for trial-extend) |
+| 500 | `migration_required` | `message` | reject before migration 162 |
+
+Pagination (`/venues`, `/payments`, `/audit`): `limit` 1..100 (default 50; out-of-range values are clamped, not rejected), `cursor` = `nextCursor` of the previous page (opaque base64url), `nextCursor: null` on the last page. Order: newest first.
+
+Dates are ISO strings in UTC. Money is rubles (`amountRub`, may carry kopecks). Fields marked «extra» are additions to PLAN §3.6; the frontend may ignore them.
+
+#### `GET /overview`
+
+```json
+{
+  "success": true,
+  "counts": {
+    "venues": 7, "accountsPending": 2, "accountsActive": 5, "accountsBlocked": 0,
+    "requestsPending": 1, "requestsInWork": 0,
+    "streams": 3, "streamsOnline": 1,
+    "subsPendingCard": 3, "subsTrial": 1, "subsActive": 2, "subsCancelled": 0, "subsExpired": 1
+  },
+  "generatedAt": "2026-10-17T07:18:10.821Z"
+}
+```
+
+- `venues`: users with role venue (not deleted). `accountsBlocked` = `banned` + `blocked` + `suspended`.
+- `requestsPending` = station requests in `pending_admin`; `requestsInWork` = `in_setup` + `changes_requested`.
+- `streams` = streams not `dead`; `streamsOnline` = paired device that sent a heartbeat in the last 3 minutes (the app sends one per minute).
+- `subs*`: `venue_profiles.data.subscriptionStatus` of venue users; a venue without a profile counts as `pending_card`. `subsCancelled` is extra.
+
+#### `GET /venues?q=&status=&plan=&city=&sub=&cursor=&limit=`
+
+- `q`: case-insensitive substring of e-mail, name (full_name / display_name / username), venue name or city. `%` `_` `\` are literal.
+- `status`: account status `pending | active | blocked | rejected | inactive` (`blocked` = banned + blocked + suspended).
+- `plan`: effective plan `free | start | business | network | enterprise` (same as `subscription.effectivePlan`).
+- `city`: exact city, case-insensitive. `sub` (extra): `pending_card | trial | active | cancelled | expired`.
+
+```json
+{
+  "success": true,
+  "items": [
+    {
+      "userId": "11111111-1111-4111-8111-111111111111",
+      "email": "leo-bar@example.org",
+      "name": "Лео",
+      "accountStatus": "active",
+      "emailVerified": true,
+      "createdAt": "2026-10-11T07:18:10.646Z",
+      "signupSite": "air",
+      "profile": { "id": "22222222-2222-4222-8222-222222222222", "venueName": "Бар «Лео»", "venueType": "bar", "city": "Казань", "address": null },
+      "subscription": {
+        "status": "active", "plan": "network", "effectivePlan": "network", "interval": "month",
+        "expiresAt": "2026-11-06T07:18:10.646Z", "trialExpiresAt": null, "hasCard": true
+      },
+      "request": { "id": "33333333-3333-4333-8333-333333333333", "status": "pending_admin", "airType": "full_radio", "points": 3, "createdAt": "2026-10-17T07:18:10.713Z" },
+      "streams": { "total": 2, "online": 1, "lastSeenAt": "2026-10-17T07:17:10.715Z" }
+    },
+    {
+      "userId": "44444444-4444-4444-8444-444444444444",
+      "email": "coffee@example.org",
+      "name": "Сандра",
+      "accountStatus": "pending",
+      "emailVerified": false,
+      "createdAt": "2026-10-08T07:18:10.646Z",
+      "signupSite": null,
+      "profile": null,
+      "subscription": { "status": "pending_card", "plan": null, "effectivePlan": "free", "interval": null, "expiresAt": null, "trialExpiresAt": null, "hasCard": false },
+      "request": null,
+      "streams": { "total": 0, "online": 0, "lastSeenAt": null }
+    }
+  ],
+  "nextCursor": "WyIyMDI2LTEwLTEyVDA3OjE4OjEwLjY0NjAwMFoiLCI0OWRmNTIwNy1kOGYwLTRmZGYtOWEyYy00YWY4YmYzMmU1ZDMiXQ"
+}
+```
+
+- `signupSite`: `users.signup_site` (`air` / `music`), `null` for users registered before migration 160 or while it is not applied.
+- `subscription.status` defaults to `pending_card` (no profile or no status); `plan` is the stored tier (`null` if none); `hasCard` = a saved card with a gateway token (the one autocharge would use).
+- `request`: the latest station request (any status, including `rejected`); `points` = number of points in the questionnaire.
+
+Bad filter: `400 {"success":false,"error":"invalid_filter","field":"status","message":"Неизвестный статус аккаунта."}`.
+
+#### `GET /venues/:userId`
+
+```json
+{
+  "success": true,
+  "row": { "...": "VenueRow, same shape as in /venues" },
+  "profile": {
+    "id": "22222222-2222-4222-8222-222222222222", "user_id": "11111111-1111-4111-8111-111111111111",
+    "venueName": "Бар «Лео»", "venueType": "bar", "city": "Казань", "address": null,
+    "subscriptionStatus": "active", "subscriptionPlan": "network", "subscriptionInterval": "month",
+    "subscriptionExpiresAt": "2026-11-06T07:18:10.646Z", "isVerified": false, "email": null, "phone": null
+  },
+  "request": {
+    "id": "33333333-3333-4333-8333-333333333333", "userId": "11111111-1111-4111-8111-111111111111", "venueId": "22222222-2222-4222-8222-222222222222",
+    "musicPreferences": {}, "jingles": {}, "aiHostConfig": {},
+    "format": { "airType": "full_radio", "points": [{ "name": "Зал" }, { "name": "Терраса" }, { "name": "Бар" }] },
+    "status": "pending_admin", "assignedAdminId": null, "adminNotes": null, "rejectedReason": null, "changesRequested": null,
+    "submittedAt": "2026-10-17T07:18:10.713Z", "takenAt": null, "provisionedAt": null, "liveAt": null,
+    "monthlyPrice": 0, "createdAt": "2026-10-17T07:18:10.713Z", "updatedAt": "2026-10-17T07:18:10.713Z"
+  },
+  "streams": [
+    {
+      "id": "55555555-5555-4555-8555-555555555555", "pointName": "Зал", "status": "live",
+      "streamUrl": "https://promo-music.ru/air/live/venue-leo",
+      "pairingCode": null, "pairingExpiresAt": null,
+      "pairedAt": "2026-10-16T07:18:10.715Z", "lastSeenAt": "2026-10-17T07:17:10.715Z",
+      "online": true,
+      "device": { "model": "Xiaomi TV", "android": "11", "appVersion": "1.2.0" }
+    },
+    {
+      "id": "66666666-6666-4666-8666-666666666666", "pointName": "Терраса", "status": "provisioned",
+      "streamUrl": "https://promo-music.ru/air/live/venue-leo2",
+      "pairingCode": "KQ7-M3P", "pairingExpiresAt": "2026-10-18T07:18:10.716Z",
+      "pairedAt": null, "lastSeenAt": null, "online": false, "device": null
+    }
+  ],
+  "payments": [
+    { "id": "77777777-7777-4777-8777-777777777777", "userId": "11111111-1111-4111-8111-111111111111", "email": "leo-bar@example.org",
+      "type": "subscription", "status": "succeeded", "amountRub": 14990, "createdAt": "2026-10-17T06:38:10.737Z",
+      "description": "Сеть", "plan": "network", "interval": "month" }
+  ],
+  "audit": [
+    { "id": "1507", "at": "2026-10-17T07:18:12.034Z", "actorEmail": "info@promofm.ru", "action": "venue_station_take", "reason": null,
+      "details": { "requestId": "33333333-3333-4333-8333-333333333333", "after": { "requestStatus": "in_setup" }, "actorEmail": "info@promofm.ru" },
+      "targetUserId": "11111111-1111-4111-8111-111111111111", "targetEmail": "leo-bar@example.org", "targetName": "Бар «Лео»" }
+  ]
+}
+```
+
+- `profile`: the full merged profile (`getVenueProfile`: `data` jsonb + native columns), `null` if the venue never opened the cabinet.
+- `request`: the latest station request, same shape as `/api/venue-station/admin/:requestId` (`rowToRequest`).
+- `streams` (all, oldest first): `pairingCode` only while no device is paired; `device` is `null` until a device is paired; `online` is extra.
+- `payments`: the last 50 (see `/payments`); `audit`: the last 50 admin actions on this venue (see `/audit`).
+
+#### `POST /venues/:userId/approve` `{reason?}`
+
+`pending → active`. Sends «Аккаунт одобрен» to the venue's site (PROMO.AIR for venues once the gate is on) and an in-app notification. Does **not** mark the e-mail verified: `row.emailVerified` shows whether the venue has confirmed it.
+
+```json
+{ "success": true, "row": { "...": "VenueRow, accountStatus 'active'" } }
+```
+
+Repeat or wrong state: `409 {"success":false,"error":"conflict","status":"active","kind":"account"}`.
+
+#### `POST /venues/:userId/reject` `{reason}`
+
+`pending → rejected` (needs migration 162). Sends «Заявка отклонена» with the reason, plus an in-app notification. `reason` empty → `400 {"success":false,"error":"reason_required","message":"Укажите причину."}`. Not pending → 409 as above.
+
+#### `POST /venues/:userId/block` `{reason}`
+
+Any of `active | pending | rejected | inactive` → `banned`. In one transaction: `token_version + 1` (live sessions get 401), all refresh tokens revoked, streams `provisioned|live → paused`, venue API keys revoked. Sign-in with the password then returns 403. No e-mail to the venue.
+
+```json
+{ "success": true, "row": { "...": "VenueRow, accountStatus 'banned'" }, "pausedStreamIds": ["55555555-5555-4555-8555-555555555555"], "revokedApiTokens": 1 }
+```
+
+Already blocked: `409 {"success":false,"error":"conflict","status":"banned","kind":"account"}`.
+
+#### `POST /venues/:userId/restore` `{reason?}`
+
+`banned | blocked | suspended → active`. Streams stay paused and API keys stay revoked: resume streams with `/api/venue-station/admin/streams/:id/resume` (or a plan assignment, below); the venue issues new keys itself.
+
+```json
+{ "success": true, "row": { "...": "VenueRow, accountStatus 'active'" } }
+```
+
+#### `POST /venues/:userId/plan` `{plan, status, until, reason, interval?}`
+
+```json
+{ "plan": "business", "status": "active", "until": "2026-11-16", "reason": "Оплата по счёту №12" }
+```
+
+- `plan`: `start | business | network`; `status`: `active | trial`; `until`: `YYYY-MM-DD`, read as the end of that day, Moscow time (`2026-11-16T20:59:59.000Z`). Must be in the future; at most 60 days ahead for `trial`, 3 years for `active`. `interval` (extra, optional): `month | year`, default = the current one or `month`.
+- Account must be `active` or `pending`, otherwise 409 `kind:'account'`.
+- Writes `venue_profiles.data`: `subscriptionStatus`, `subscriptionPlan`, `subscriptionInterval`, `subscriptionExpiresAt = until`, `subscriptionPriceRub = 0`, `subscriptionAssignedByAdminAt`; clears `cancelledFromStatus`, `subscriptionCancelledAt`, `subscriptionExpiredReason`. For `trial` also `trial_expires_at = until` and the T-3 / T-1 reminder flags are reset. Creates the profile if the venue has none (`ensureVenueProfile`). No payment row.
+- Paused streams go back to `provisioned` (as after a payment).
+- **After `until` the usual crons apply:** with a saved card the plan is charged (renewal 3 days before the end, or the trial-end charge); without a card the venue expires. The admin UI should say so (`row.subscription.hasCard`).
+
+```json
+{
+  "success": true,
+  "row": { "...": "VenueRow", "subscription": { "status": "active", "plan": "business", "effectivePlan": "business", "interval": "month", "expiresAt": "2026-11-16T20:59:59.000Z", "trialExpiresAt": null, "hasCard": false } },
+  "resumedStreamIds": []
+}
+```
+
+Invalid: `400 {"success":false,"error":"invalid_input","field":"until","message":"Пробный период: не дальше 60 дней вперёд."}` (field is one of `plan`, `status`, `interval`, `until`).
+
+#### `POST /venues/:userId/trial-extend` `{days, reason}`
+
+`days` integer 1..60. Only while `subscriptionStatus = 'trial'` (otherwise `409 {"success":false,"error":"conflict","status":"active","kind":"subscription"}`; account not active/pending → `kind:'account'`). Adds the days to the current trial end (or to now if the end has passed but the cron has not closed the trial yet), sets `subscriptionExpiresAt` to the same date, re-arms the T-3 / T-1 reminders.
+
+```json
+{ "success": true, "row": { "...": "VenueRow, subscription.trialExpiresAt moved" } }
+```
+
+#### `GET /payments?cursor=&limit=`
+
+Venue payments from `payment_sessions` (one row per payment): sessions of venue types (subscription, card check, station subscription) and any payment by a venue user (bookings, content orders). `payment_transactions` / `payment_txns` are ledger copies of the same money and are not listed.
+
+```json
+{
+  "success": true,
+  "items": [
+    { "id": "88888888-8888-4888-8888-888888888888", "userId": "11111111-1111-4111-8111-111111111111", "email": "leo-bar@example.org",
+      "type": "radio_subscription", "status": "succeeded", "amountRub": 15000, "createdAt": "2026-10-17T06:48:10.739Z",
+      "description": "Абонемент эфира", "plan": "efir", "interval": null },
+    { "id": "99999999-9999-4999-8999-999999999999", "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "email": "sea-cafe@example.org",
+      "type": "card_check", "status": "succeeded", "amountRub": 1, "createdAt": "2026-10-17T06:28:10.735Z",
+      "description": "Привязка карты для пробного периода – Кофейня у моря (1 ₽ вернётся автоматически)", "plan": "business", "interval": "year" }
+  ],
+  "nextCursor": null
+}
+```
+
+`type`: `card_check` (1 ₽ check, refunded), `subscription` (paid via /subscribe), `trial_charge` (first charge after the trial), `renewal`, `radio_subscription` (station subscription, `efir` and old plans), otherwise the session purpose (`purchase`, ...). `status` is the raw session status (`pending`, `succeeded`, `canceled`, `refunded`, ...). `plan` / `interval` are extra.
+
+#### `GET /devices`
+
+All venue streams (up to 500), online first.
+
+```json
+{
+  "success": true,
+  "items": [
+    { "streamId": "55555555-5555-4555-8555-555555555555", "userId": "11111111-1111-4111-8111-111111111111", "venueName": "Бар «Лео»", "pointName": "Зал",
+      "status": "live", "pairedAt": "2026-10-16T07:18:10.715Z", "lastSeenAt": "2026-10-17T07:17:10.715Z", "online": true,
+      "device": { "model": "Xiaomi TV", "android": "11", "appVersion": "1.2.0" } },
+    { "streamId": "66666666-6666-4666-8666-666666666666", "userId": "11111111-1111-4111-8111-111111111111", "venueName": "Бар «Лео»", "pointName": "Терраса",
+      "status": "provisioned", "pairedAt": null, "lastSeenAt": null, "online": false, "device": null }
+  ]
+}
+```
+
+`device` comes from the app (`{model, osVersion, appVersion}`, `~/Projects/promo-air-app/src/lib/api.ts`); the old keys `androidVer` / `appVer` are read too.
+
+#### `POST /streams/:streamId/regenerate-pairing`
+
+New 24-hour code; the old device is unpaired (its token gets 401, the app returns to the code screen). Valid in any stream status, so there is no 409. The code is not written to the audit log.
+
+```json
+{ "success": true, "streamId": "55555555-5555-4555-8555-555555555555", "pairingCode": "ZKD-3BX", "pairingExpiresAt": "2026-10-18T07:18:11.956Z" }
+```
+
+#### `GET /audit?cursor=&limit=`
+
+Actions by admins (actor role admin/superadmin) with codes `promoair_*` / `venue_*`, or on venue users (including `user_approve` from «Заявки партнёров»). Newest first.
+
+```json
+{
+  "success": true,
+  "items": [
+    { "id": "1504", "at": "2026-10-17T07:18:11.661Z", "actorEmail": "info@promofm.ru", "action": "promoair_venue_block",
+      "reason": "Жалоба правообладателя",
+      "details": { "reason": "Жалоба правообладателя", "before": { "accountStatus": "active" }, "after": { "accountStatus": "banned" },
+                   "pausedStreamIds": ["55555555-5555-4555-8555-555555555555"], "revokedApiTokens": 1, "actorEmail": "info@promofm.ru" },
+      "targetUserId": "11111111-1111-4111-8111-111111111111", "targetEmail": "leo-bar@example.org", "targetName": "Бар «Лео»" }
+  ],
+  "nextCursor": "WyIyMDI2LTEwLTE3VDA3OjE4OjExLjY2MTAwMFoiLCIxNTA0Il0"
+}
+```
+
+Action codes: `promoair_venue_approve | promoair_venue_reject | promoair_venue_block | promoair_venue_restore | promoair_plan_assign | promoair_trial_extend | promoair_pairing_regenerate`, `venue_station_take | venue_station_reject | venue_station_request_changes | venue_station_provision`, `venue_stream_pause | venue_stream_resume | venue_stream_mark_live`, `venue_apk_release_upload | venue_apk_release_update | venue_apk_release_delete | venue_apk_build_upload`, plus the generic `user_approve`, `user_reject`, `user_block`, `user_unblock`, `profile_verify`, ... when the target is a venue. `reason` = `details.reason` (or `details.message` for request-changes).
+
+### Deploy order
+
+1. Migration 162 (dry-run, then COMMIT, see above). It is independent of 160 and 161, and it also repairs `/auth/admin/reject-user`.
+2. Deploy the code and restart `promofm-api`. No env changes. The admin section works with `PROMOAIR_ORIGIN` empty; it then sends e-mails with promo-music.ru branding.
+3. Frontend: the ADMIN-FE section (`fe/src/admin/promo-air/**`, `fe/src/utils/api/promo-air-admin.ts`) talks to these routes.
+
+### Verification
+
+Local (done):
+
+```bash
+~/Projects/promoair/bin/tsc-api.sh                                   # 8 errors, all baseline (same set as after BILLING)
+cd ~/Projects/promoair/api && npx tsx ../tools/be-admin.test.mts     # 8 groups: cursor, limit, filters, transitions, input, data patches, rows, no em dash
+D=<dir with @electric-sql/pglite-socket@0.2.11>                      # see section 2
+cd ~/Projects/promoair/api && npx tsx ../tools/be-admin-e2e.test.mts $D   # 13 groups on PGlite with the prod schema
+# E2E_DUMP=<file> writes the real response bodies used for the examples above
+```
+
+`be-admin-e2e.test.mts` loads `tools/fixtures/be-billing-prod-schema.sql` + `tools/fixtures/be-admin-extra-schema.sql` (prod `pg_dump --schema-only` of `audit_logs`, `refresh_tokens`, `notifications`, `login_attempts`, `user_mfa`) and checks:
+- access: 401 / 403 for artist, venue, admin role with a non-allowlisted e-mail;
+- overview counts (junk `venue_profiles` row and deleted user ignored, online = paired + < 3 min);
+- list order, cursor pages without gaps or repeats, every filter, `%`/`_` literal, 400 on bad filter / cursor;
+- `EFFECTIVE_PLAN_SQL` = `getEffectiveVenuePlan` on 1352 profile shapes, bad dates included;
+- venue card; approve / reject (409 on repeat, e-mail to the PROMO.AIR or music site by `signup_site`, notification, audit); reject before 162 → 500 `migration_required`, rolled back, then 162 applied twice;
+- block (banned, token_version, refresh tokens, stream paused, API key revoked, live session → 401, `/auth/signin` → 403), restore, plan for a blocked account → 409;
+- plan (400s write nothing, profile created, billing fields, no payment row, streams un-paused, trial variant), trial-extend (409 kinds, +7 days from the current end, reminders reset);
+- regenerate-pairing (device unpaired, code not logged), cabinet regenerate-pairing still works through the shared helper;
+- `venue_station_take` / `mark-live` audited; payments (venue types + venue users, artist excluded, cursor); devices; audit scope (non-admin and non-venue rows excluded, cursor over bigint ids); the UsersManagement ban still revokes sessions.
+
+Earlier suites still pass: `be-site-origin` 14, `be-email-site` 34, `be-billing` 6, `be-billing-e2e` 19.
+
+On prod after deploy (read-only):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://promo-music.ru/server/api/promo-air-admin/overview   # 401 without a session
+# logged in as admin in the browser: /ctrl-pm7k2f/promo-air shows 5 venues, 0 pending
+sudo -u postgres psql -d promofm -c "SELECT action, target_id, details->>'actorEmail', created_at FROM audit_logs WHERE action LIKE 'promoair\_%' OR action LIKE 'venue\_%' ORDER BY id DESC LIMIT 10"
+journalctl -u promofm-api --since '10 min ago' | grep 'promo-air-admin'   # should be empty
+```
+
+### Open risks / not done
+
+- **Approve does not verify the e-mail.** Unlike `/auth/admin/approve-user`, which sets `is_email_verified=true`. A venue approved before it confirmed the address still gets 401 «Email не подтверждён» at sign-in and must use the link from the signup e-mail (or resend). This is deliberate: an admin click should not vouch for an address nobody confirmed. The UI should show `row.emailVerified`.
+- **Plan after `until` may charge the card.** An admin-assigned plan follows the normal billing rules: a venue with a saved card is charged the assigned tier at the end. There is no «don't renew» flag; changing the crons is out of scope. If a comp should not renew, assign it to a venue without a card, or cancel it in the cabinet.
+- **Sign-in gate now refuses `'banned'`** (behaviour change on promo-music.ru, fixes the UsersManagement ban). Other entry points are SECURITY's: VK login (`auth-routes.tsx` VK callback) and `/auth/refresh` do not check `users.status`. VK sessions of a blocked user are still rejected right away by `token_version`, because VK tokens are signed with `tv=1`. `exchange-auto-login` is in SECURITY's list.
+- **`/auth/admin/reject-user` stays broken until 162** (pre-existing). It has no status guard either; SECURITY owns the approve/reject guards in `auth-routes.tsx`.
+- **`mark-live` sets `last_seen_at = NOW()`** without a device (`venue-station-routes.tsx` `setStreamStatus`). That is why «online» here also requires `paired_at`.
+- **`ensureVenueProfile` on plan assignment** e-mails the admin «новое заведение» (stage `registered`) when the venue had no profile (4 of the 5 real venues today).
+- **Restore leaves streams paused and API keys revoked.** Resume streams per point, or assign a plan (which un-pauses them).
+- **Not done:** refunds, venue finance report, an «owner message» action (the existing AdminChat is a stub), station-request moderation (stays on `/api/venue-station/admin/*`), offline alerts.
+- **Station `reject` has no status guard** (`/api/venue-station/admin/:id/reject`, pre-existing). I added audit logging only.

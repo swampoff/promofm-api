@@ -71,12 +71,21 @@ import { emitSSE } from './sse-routes.tsx';
 import { getRevenueStats, recordRevenue, recordPlatformCommission } from './platform-revenue.tsx';
 
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { isAllowedUrl, originFromRequest } from './site-origin.tsx';
 
 const app = new Hono();
 
 // ═══════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════
+
+// Return URL ЮKassa из тела запроса: только https на наши сайты
+// (site-origin.tsx). Иначе (чужой домен, http, localhost): страница
+// маркетплейса на сайте запроса. До 17.10.2026 returnUrl не проверялся:
+// открытый редирект после оплаты на любой адрес.
+function marketplaceReturnUrl(c: any, requested: unknown, path: string): string {
+  return isAllowedUrl(requested) ? String(requested) : `${originFromRequest(c)}${path}`;
+}
 
 function genId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -487,7 +496,7 @@ app.post('/beats/:id/purchase', requireAuth, async (c) => {
     const { getGateway } = await import('./payment-gateway.tsx');
     const { upsertPaymentSession } = await import('./db.tsx');
     const orderId = crypto.randomUUID();
-    const safeReturnUrl = returnUrl || 'https://promo-music.ru/marketplace/beats';
+    const safeReturnUrl = marketplaceReturnUrl(c, returnUrl, '/marketplace/beats');
 
     const gw = getGateway('yookassa');
     const result = await gw.createPayment({
@@ -1515,7 +1524,7 @@ app.post('/digital-goods/:id/purchase', requireAuth, async (c) => {
     const { getGateway } = await import('./payment-gateway.tsx');
     const { upsertPaymentSession } = await import('./db.tsx');
     const orderId = crypto.randomUUID();
-    const safeReturnUrl = returnUrl || 'https://promo-music.ru/marketplace/digital';
+    const safeReturnUrl = marketplaceReturnUrl(c, returnUrl, '/marketplace/digital');
 
     const gw = getGateway('yookassa');
     const result = await gw.createPayment({
