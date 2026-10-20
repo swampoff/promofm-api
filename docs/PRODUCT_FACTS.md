@@ -882,6 +882,50 @@ PROMO.AIR section of the admin on promo-music.ru (`/ctrl-pm7k2f/promo-air`).
   `venue_station_*`, `venue_stream_*`, `venue_apk_*`; `details.actorEmail`,
   `reason`, `before`/`after`). Pairing codes are never logged.
 
+### Partner account moderation gate (since 2026-10-17, SECURITY)
+
+Owner decision 2026-10-16: venue (and other `PARTNER_ROLES`: radio_station,
+radio) accounts keep MANUAL approval. Signup → `users.status='pending'` →
+admin approves → the account can get a session.
+
+- Every path that issues a session checks `users.status` with the same
+  helper (`src/access-gates.tsx:accountBlockOf/accountBlockBody`) and the
+  same 403 bodies: `/auth/signin` (unchanged texts and order: no password →
+  unverified 401 → wrong password 401 → status 403 → MFA), `/auth/vk-callback`
+  (existing VK user and the link-by-e-mail path; a pending account is not
+  linked), `/auth/exchange-auto-login`, `/auth/refresh` (also clears the
+  cookies). Refused: `pending`, `rejected`, `blocked`, `banned`; allowed:
+  `active`, `inactive`, `suspended`.
+- `/auth/exchange-auto-login` for a pending account: 403
+  `{error:'account_pending', accountStatus:'pending', message}`. The
+  e-mail confirmation redirect still carries `verified=true&auto_login_token`;
+  the promoair.ru login page turns the 403 into «почта подтверждена, аккаунт
+  на проверке». Before 2026-10-17 this endpoint ignored the status: a pending
+  venue got a session straight from the confirmation link.
+- `/auth/reset-password` sets the password and marks the e-mail verified,
+  but `pending → active` only for non-partner roles (the legacy-import
+  activation from 6a5ddda, 2026-05-28; imports were created `active`, prod
+  has 0 `pending` users on 2026-10-17). Partners stay `pending`. The
+  response now has `accountStatus`.
+- `/auth/admin/approve-user` only `pending → active` and
+  `/auth/admin/reject-user` only `pending → rejected`; otherwise 409
+  `{error:'<readable text>', code:'conflict', status}` (PendingPartners shows
+  `error` in a toast). Before, approve reactivated rejected/banned users.
+
+**AI host for venues (`/server/api/promo-air-dj`, `src/promo-air-dj-routes.tsx`).**
+Since 2026-10-17 only the venue itself (role `venue`) or an admin: `venueId`
+= `'current'` | own userId | own `venue_profiles.id`, stored under the
+owner's userId (`access-gates.tsx:decideVenueAccess`); other venues and
+other roles get 403, `generate-audio` too. Before, any logged-in user could
+read and overwrite any venue's settings and spend LLM/TTS credits. The
+three `promo_air_dj_*` tables had 0 rows on prod.
+
+**Marketplace return URL** (`/marketplace/beats/:id/purchase`,
+`/marketplace/digital-goods/:id/purchase`): the client `returnUrl` is used
+only if it is https on one of our hosts (`site-origin.tsx:isAllowedUrl`),
+else `<request site>/marketplace/beats|digital`. Before, any URL was passed
+to YooKassa (open redirect after payment).
+
 ---
 
 ## DJ cabinet
@@ -1461,7 +1505,9 @@ in-line MANUAL DEPLOY STEPS. Auto-runner is stub.
   в 404. Вход по паролю (`/auth/signin`) отбивает `'banned'` только с
   2026-10-17 (раньше проверялся лишь `'blocked'`, а гейт
   `db-client.tsx:641` стоит на другом, неиспользуемом пути входа);
-  сессии рвёт `auth-security.tsx:revokeUserSessions`.
+  сессии рвёт `auth-security.tsx:revokeUserSessions`. С того же дня
+  VK-вход, `/auth/exchange-auto-login` и `/auth/refresh` проверяют статус
+  так же (см. «Partner account moderation gate»).
 
 ## Video promo-pipeline (VideoModeration, добавлен 2026-07-02)
 

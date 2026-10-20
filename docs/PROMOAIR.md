@@ -819,3 +819,142 @@ journalctl -u promofm-api --since '10 min ago' | grep 'promo-air-admin'   # shou
 - **Restore leaves streams paused and API keys revoked.** Resume streams per point, or assign a plan (which un-pauses them).
 - **Not done:** refunds, venue finance report, an «owner message» action (the existing AdminChat is a stub), station-request moderation (stays on `/api/venue-station/admin/*`), offline alerts.
 - **Station `reject` has no status guard** (`/api/venue-station/admin/:id/reject`, pre-existing). I added audit logging only.
+
+---
+
+## 4. SECURITY: approval cannot be bypassed, AI-host IDOR, marketplace redirect (17.10.2026)
+
+**Goal.** Owner decision (PLAN §1): venue (and other partner) accounts keep MANUAL approval. After this section no path gives a `pending` account a session, an admin click cannot silently reactivate a rejected or banned account, one venue cannot touch another venue's AI-host data, and the marketplace no longer redirects to arbitrary sites after payment. Nothing here depends on `PROMOAIR_ORIGIN`.
+
+### Why `/reset-password` flipped `pending → active` (evidence)
+
+- The line came with commit `6a5ddda` (28.05.2026, «fix(chat-visibility): legacy artists невидимы до активации пароля»; `git log -S` on `/opt/promofm-api`, read-only). Its message: legacy imports (2250 rows) were created with status **active** and no password; setting the password through the activation e-mail should verify the e-mail and make them visible in chat. `status pending → active` was added «идемпотентно» on top. It was never needed for the imports, and it opened a bypass for partners.
+- Prod, 17.10.2026 (`SELECT status, role, password_hash IS NULL, is_email_verified, count(*) FROM users WHERE deleted_at IS NULL GROUP BY 1,2,3,4`): **0 `pending` users of any role**. All legacy accounts without a password are `active` (2244 artists, 859 radio_station). Venues: 5, all `active` and verified. `enum_range(NULL::user_status) = {active,inactive,suspended,pending,banned,blocked}` (no `rejected` until migration 162).
+- Kept: password + `is_email_verified=TRUE` + the `pending → active` flip **only for non-partner roles** (the legacy-activation case, should a non-partner ever be `pending`). Partners (`PARTNER_ROLES` = radio_station, radio, venue) stay `pending`.
+
+### What changed
+
+- **`src/access-gates.tsx` (new, pure, no DB).**
+  - `accountBlockOf(status)` (:34): `pending` → pending, `rejected` → rejected, `blocked|banned` → blocked, everything else (`active`, `inactive`, `suspended`) → null. Same set as the old `/signin` checks plus ADMIN's `banned`.
+  - `accountBlockBody(block)` (:45): the exact `/signin` 403 bodies (`{success:false, error:'Ваш аккаунт на модерации.'|'Ваша заявка отклонена.'|'Аккаунт заблокирован администрацией.', accountStatus}`), byte-identical to before (tested).
+  - `autoLoginBlockBody(block)` (:54): for pending `{success:false, error:'account_pending', accountStatus:'pending', message:'Почта подтверждена. Аккаунт на проверке: напишем, когда откроем доступ.'}`, otherwise as `/signin`.
+  - `moderationConflictText(action, status)` (:73): readable 409 text for «Заявки партнёров».
+  - `decideVenueAccess(caller, venueId, profileOwner)` (:109) + `venueNeedsOwnerLookup` (:90): who may use which venue's AI-host data (below).
+- **`src/auth-routes.tsx`.**
+  - `/signin` (:331, gate :426): the three status `if`s replaced by `accountBlockOf/accountBlockBody` at the same place. Order unchanged: no password → unverified 401 → wrong password 401 → status 403 → MFA. Same bodies.
+  - `/vk-callback` (:490): existing VK user (:554) and the «link VK to an existing account by e-mail» path (:608) refuse blocked statuses with the `/signin` 403 **before** any write, so a pending venue is neither logged in nor linked. New VK users are unchanged (always `active`, partner roles cannot sign up via VK).
+  - `/reset-password` (:845, SQL :881): `CASE WHEN status='pending' AND role <> ALL(PARTNER_ROLES) THEN 'active'`. The response adds `accountStatus` (`{success:true, message:'Пароль обновлён.', accountStatus:'pending'}` for a partner on moderation).
+  - `/admin/approve-user` (:1362): `UPDATE ... WHERE id::text=$1 AND status='pending'`; `/admin/reject-user` (:1388): same guard (pending → rejected). Miss → `moderationMiss` (:1355): 404 `{error:'Не найден'}` or 409 `{success:false, error:'Одобрить можно только аккаунт на проверке. Сейчас: заблокирован.', code:'conflict', status:'banned'}`. The audit (`user_approve` / `user_reject`), e-mail and notification run only on success. `id::text` also turns a non-uuid id into 404 instead of 500.
+  - `/exchange-auto-login` (:1465, gate :1489): also `deleted_at IS NULL`; non-active → 403 `autoLoginBlockBody` and no cookie. The token is still consumed before the check (single use).
+  - `/refresh` (:1517, gate :1541): selects `status`; blocked statuses → 403 `/signin` body and both cookies cleared. Closes a pre-existing hole: `POST /auth/admin/users/:id/status` (block) bumps `token_version` but does not revoke refresh tokens, so `/refresh` used to mint a fresh session for a blocked user.
+  - `/verify-email-confirm` unchanged: still redirects to `<site>/login?verified=true&auto_login_token=…` for every account, so the promoair.ru login page can show «почта подтверждена, аккаунт на проверке» (`fe/src/promoair/api/auth.ts:accountBlockFrom` maps the 403).
+- **`src/promo-air-dj-routes.tsx`** (AI host, `/server/api/promo-air-dj`). `resolveVenue` (:87) builds the caller (`role`, `isAdmin` = admin/superadmin role **and** `ADMIN_EMAILS`, same as `requireAdmin`), looks up `venue_profiles.id → user_id` only when it matters, and calls `decideVenueAccess`. Every route uses it: `generate-script` (:193), `generate-audio` (:245, role check only), `generate-full` (:338), `GET /scripts/:venueId` (:459), `GET /queue/:venueId` (:473), `POST /settings` (:491), `GET /settings/:venueId` (:510).
+  - venue: `'current'` (what the cabinet sends, `fe/src/venue/components/radio-brand.tsx:757`), own userId or own `venue_profiles.id` → data stored under **own userId**; anything else 403 `{error:'Нет доступа к данным этого заведения'}`.
+  - admin: any venue; a profile id is mapped to its owner's userId.
+  - other roles (artist, dj, label, admin role without allowlisted e-mail): 403 on every route, including `generate-audio` (paid TTS + file write). No LLM/TTS call happens on a refused request.
+  - Storage key change is safe: the three `promo_air_dj_*` tables have 0 rows on prod (checked 17.10). Before, every venue that used the cabinet tab shared the literal key `'current'`.
+- **`src/marketplace-routes.tsx`.** `marketplaceReturnUrl` (:86) used at :499 (beats) and :1527 (digital goods): the client `returnUrl` is kept only if `isAllowedUrl` (https, our host, no port/userinfo); otherwise `${originFromRequest(c)}/marketplace/beats|digital`. Silent fallback, not 400, so dev frontends (`http://localhost`) still get a working checkout. promo-music.ru clients send `https://promo-music.ru/...` and are unaffected.
+- **Docs:** `docs/PRODUCT_FACTS.md` «Partner account moderation gate» (after the PROMO.AIR admin section) and the ban note.
+
+### New env vars / migrations
+
+None. `/auth/admin/reject-user` still needs migration 162 to store `rejected` (pre-existing, see section 3); with the new guard a non-pending target gets 409 before the enum is touched.
+
+### API contract changes (for AUTH-FE / admin)
+
+| Endpoint | Case | Before | Now |
+|---|---|---|---|
+| `POST /auth/exchange-auto-login` | pending | 200 + session | 403 `{error:'account_pending', accountStatus:'pending', message}` |
+| | rejected / blocked / banned | 200 + session | 403 `/signin` body (`accountStatus` `rejected` / `blocked`) |
+| `POST /auth/reset-password` | partner pending | 200, status → active | 200 `{..., accountStatus:'pending'}`, stays pending |
+| | non-partner pending | 200, → active | 200 `{..., accountStatus:'active'}` (unchanged) |
+| `POST /auth/admin/approve-user` | target not pending | 200, → active | 409 `{error:<text>, code:'conflict', status}` |
+| `POST /auth/admin/reject-user` | target not pending | 200 (or 500 before 162) | 409 same shape |
+| `POST /auth/refresh` | pending / rejected / blocked / banned | 200 + new session | 403 `/signin` body, cookies cleared |
+| `POST /auth/vk-callback` | existing account pending / rejected / blocked / banned | 200 + session (+ VK linked by e-mail) | 403 `/signin` body, nothing written |
+| `/api/promo-air-dj/*` | another venue / non-venue role | 200 | 403 `{error:'Нет доступа к данным этого заведения'}` |
+| marketplace purchase | foreign / http `returnUrl` | passed to YooKassa | replaced by our default |
+
+### Deploy order
+
+1. No migration and no env change for this section. Deploy the code with the rest of the chain and restart `promofm-api`.
+2. nginx for AutoDJ (below): independent of the code, can go first.
+
+### nginx: `/air/dj-api/` (for the lead; I did not touch nginx or AutoDJ)
+
+Today `promo-music.ru.includes:326-332` proxies every method of `/air/dj-api/` to AutoDJ `127.0.0.1:8087/api/`, whose write endpoints (`upload`, `queue`, `clear_queue`, `skip`, `metadata/scan`) have no auth (notes/critic.md A11). Public readers only need GET status (`fe/src/app/components/landing/RadioMiniPlayer.tsx:13`, `fe/src/venue/components/VenueAirPlayer.tsx:17`, `api/src/venue-station-routes.tsx:188` via the public URL) and, at most, now-playing. Internal callers go to `127.0.0.1:8087` directly, not through nginx (`api/src/air-routes.tsx:17`, `news-broadcast.tsx:23`, `track-moderation-routes.tsx:113`, `services/podcast/engine.mjs:39`, `services/autodj/watchdog.sh:10`); the Android app (`~/Projects/promo-air-app`) does not use it. Replace the block with:
+
+```nginx
+# AutoDJ API: наружу только чтение статуса; управление только с 127.0.0.1:8087 напрямую
+location = /air/dj-api/status {
+    limit_except GET { deny all; }          # GET (и HEAD); POST/PUT/DELETE → 403
+    proxy_pass http://127.0.0.1:8087/api/status;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+location = /air/dj-api/now-playing {
+    limit_except GET { deny all; }
+    proxy_pass http://127.0.0.1:8087/api/now-playing;
+    proxy_http_version 1.1;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+location ^~ /air/dj-api/ { return 404; }    # ^~: не отдавать регуляркам панели (FastPanel)
+```
+
+The promoair.ru vhost must not get `/air/dj-api/` at all except these two exact locations (infra template already). Then `nginx -t && systemctl reload nginx` and check:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://promo-music.ru/air/dj-api/status                  # 200 (today 200)
+curl -s -o /dev/null -w '%{http_code}\n' https://promo-music.ru/air/dj-api/now-playing             # 200 (today 200)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://promo-music.ru/air/dj-api/status          # 403
+curl -s -o /dev/null -w '%{http_code}\n' https://promo-music.ru/air/dj-api/queue                   # 404
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://promo-music.ru/air/dj-api/skip            # 404 (do NOT run before the change: today it would skip the live track)
+```
+
+Also from critic.md C9, outside the code: rotate `X-Internal-Key` (a scout printed it).
+
+### Review of the ADMIN and BILLING changes (task item 6)
+
+No authz defects found.
+- `promo-air-admin-routes.tsx`: one `app.use('*', requireAuth, requireAdmin)` (:45) covers all 13 routes (the e2e checks 401/403 on every route). All SQL is parameterized: filters (`buildVenueFilters`, escaped ILIKE, whitelisted status/plan/sub values), cursors (`decodeCursor` validates timestamp and uuid/bigint shapes), ids (`isUuid`). Mass assignment: plan/trial write only whitelisted fields (`parsePlanAssignment`, `planAssignmentData`, `trialExtensionData`).
+- `venue-billing-routes.tsx`: `subscribe`, `attach-card`, `cancel`, `resume`, `me` take the user from the JWT; `tier`/`interval` validated (`parseVenuePlanChoice`); `GET /plans` returns only public data; `/cron/charge-recurring` and `/venue/cron/expire-trials` refuse without `CRON_SECRET` (500 when unset, 401 on mismatch). Card delete is owner-scoped (`deletePaymentMethod(methodId, userId)` in `checkout-routes.tsx` DELETE `/methods/:id` and `settings-routes.tsx`, both from the JWT/`requireOwner`).
+- `venue-station-routes.tsx` / `venue-apk-routes.tsx`: admin routes keep `requireAuth, requireAdmin`; the owner `POST /me/regenerate-pairing` still checks `user_id` + `venue_id` before the shared `reissuePairingCode`.
+- Minor, not changed: the cron secret is compared with `!==` (not constant-time; same pattern as the artist cron). The secret is long and the endpoints are not rate-sensitive, so I left it.
+
+### Verification (done locally)
+
+```bash
+~/Projects/promoair/bin/tsc-api.sh            # 8 errors, all baseline (same set as after BILLING/ADMIN), 0 new
+cd ~/Projects/promoair/api && npx tsx ../tools/be-security.test.mts      # 13 checks passed
+D=<dir with @electric-sql/pglite-socket@0.2.11>                             # see section 2
+cd ~/Projects/promoair/api && npx tsx ../tools/be-security-e2e.test.mts $D   # 17 groups passed (3 runs)
+```
+
+- `be-security.test.mts` (pure): every prod `user_status` value through `accountBlockOf`; `/signin` bodies byte-identical to the original literals; the promoair login page mapping (`accountBlockFrom`, copied) recognises every 403 body; 409 texts; the `decideVenueAccess` matrix (own / other venue by userId and profile id, artist, dj, role-only admin, real admin, 400 on empty/oversized id); `isAllowedUrl` against foreign, http, userinfo, port, `//host`, `javascript:`, `data:`, localhost and promoair while the gate is off; no em dash.
+- `be-security-e2e.test.mts`: real `auth-routes`, `promo-air-dj-routes`, `marketplace-routes` on PGlite with the prod schema (`tools/fixtures/be-billing-prod-schema.sql`, `be-admin-extra-schema.sql`, new `be-security-extra-schema.sql`: `pg_dump --schema-only` of `verification_tokens`, `profiles`, `promo_air_dj_*`, `beats`, `digital_goods`, `artist_profiles`, no data); migration 162 applied, `PROMOAIR_ORIGIN` empty like prod. SMTP, YooKassa, VK ID and OpenRouter mocked. Covers: real `/signup` of a venue on promoair.ru → `/verify-email-confirm` redirect still has `verified=true&auto_login_token` → exchange 403 `account_pending`, no cookie, token single-use; `/signin` 403 and the unchanged check order; `/request-reset` + `/reset-password` keep a venue pending, legacy non-partner activation still works, radio pending stays, active/banned untouched; approve/reject guards, audit only on success, 404 for unknown/non-uuid ids; exchange after approval (200 + cookie) and for rejected/banned/blocked; `/refresh` after the old-style block; VK by vk_id and by e-mail (pending not linked), active VK user still 200; AI host matrix incl. «no LLM call on 403»; marketplace `return_url` sent to YooKassa and stored in the session for 7 cases (beats) + digital goods.
+- Mutation check: on a scratch copy of `src/` I reverted each fix in turn (exchange gate, reset CASE, approve/reject guard, refresh gate, VK gates, DJ ownership, marketplace check); the e2e failed at the matching group every time.
+- Earlier suites still pass: `be-site-origin` 14, `be-email-site` 34, `be-billing` 6, `be-billing-e2e` 19, `be-admin` 8, `be-admin-e2e` 13 (one of four runs failed once right after the intentional 22P02 rollback in its «reject before 162» step and passed 3/3 on rerun: a PGlite socket flake, not related to these changes).
+
+### Checks on prod after deploy
+
+```bash
+# all read-only; expected values with today's data (0 pending users)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{"token":"x"}' https://promo-music.ru/server/auth/exchange-auto-login   # 400 (invalid token, unchanged)
+curl -s -o /dev/null -w '%{http_code}\n' https://promo-music.ru/server/api/promo-air-dj/settings/current   # 401 without a session
+# logged in as an artist in the browser: GET /server/api/promo-air-dj/settings/current → 403
+# venue cabinet «AI-ведущий» tab (radio-brand.tsx) still generates a text
+journalctl -u promofm-api --since '10 min ago' | grep -E 'auto_login_refused|reset_password_error|exchange_auto_login_error'   # empty or expected refusals only
+sudo -u postgres psql -d promofm -c "SELECT status::text, count(*) FROM users GROUP BY 1"   # unchanged by the deploy
+```
+
+### Open risks / not done
+
+- **Behaviour changes on promo-music.ru** (all on paths that only matter for non-active accounts; prod has 0 pending/banned/rejected users today): reset no longer activates partners; approve/reject refuse non-pending targets (409 toast in «Заявки партнёров» instead of a silent change); VK, exchange and refresh refuse blocked statuses; `promo-air-dj` is venue/admin only (the only caller is the venue «AI-ведущий» tab); marketplace return URL falls back for foreign URLs. The old promo-music login page ignores `auto_login_token`, so the exchange change is invisible there.
+- **`requireAuth` / `/auth/me` still do not check `users.status`** (per-request cost and blast radius). Sessions can only be minted by the gated paths now, and blocks bump `token_version`; a session minted before a status change lives until it expires (max 24 h, `JWT_EXPIRES_IN`) only if `token_version` was not bumped. The PROMO.AIR block and the UsersManagement ban bump it; `reject-user` does not (a pending account has no session to kill).
+- **VK link-by-e-mail** (`/vk-callback` 23505 path) still links a VK id to an existing account whose e-mail matches the VK e-mail (pre-existing policy). Now only for allowed statuses; whether the linking itself is wanted is a product decision.
+- **Pre-existing, found by the e2e, not fixed:** migration `097_digital_goods_file_url.sql` is **not applied on prod** (`digital_goods` has `file_url` but no `file_bytes`/`file_mime`, checked 17.10). `getDigitalGood` selects `file_bytes`, so `POST /marketplace/digital-goods/:id/purchase` answers 500 on prod for the 13 digital goods. The migration is idempotent (`ADD COLUMN IF NOT EXISTS`); applying it is the lead's call (dry-run first).
+- **Pre-existing, not fixed:** `GET /promo-air-dj/scripts/:id?limit=abc` → `LIMIT NaN` → 500; `/api/venue-station/admin/:id/reject` has no status guard (ADMIN's note); `/auth/resend-verification` reads only Bearer (dead, be-domain §6).
+- **Not done here (out of code):** nginx `/air/dj-api/` restriction (snippet above), `X-Internal-Key` rotation.
+- **Prod access during this work:** read-only `\d`/SELECT, `pg_dump --schema-only` of 8 tables, `git log -S`/`git show` in `/opt/promofm-api`, two public GETs on `/air/dj-api/status|now-playing`. One `journalctl` grep I started for the 097 question was too slow; I stopped it and killed my own two `journalctl` PIDs on the server. Nothing else was touched.
