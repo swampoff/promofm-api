@@ -34,6 +34,18 @@ record of what got executed.
 
 ---
 
+## 2026-10-20 – PROMO.AIR: бэкапы, чистка venue_profiles, миграции 160/161/162 (laptop, перед выкаткой feat/promoair-domain)
+
+- **What:** подготовка базы к выкатке PROMO.AIR (promoair.ru) по `notes/deploy/RUNBOOK.md` §0, шаги 1-3.
+- **Affected:** `venue_profiles` (удалено 11 строк, осталась 1: `10c0e848-…`, user `d6b6ffa8-…`, role venue); схема `users`, `page_views`, `chat_sessions`, `venue_radio_plans`, enum `user_status`; 6 строк `users` (role venue).
+- **Why:** мусорные профили (демо venue-1..3, anonymous, test-venue-001, 5 профилей удалённых пользователей, фейковый пробный админа) попали бы в кроны пробного/автосписаний; миграции нужны новому коду (сайт регистрации, хост просмотров, чат promoair, служебные тарифы эфира, статус `rejected`, без которого отклонение партнёра давало 500).
+- **How:**
+  1. Бэкапы в `/root/backups/`: `promofm_2026-10-20_1830.dump` (полный, `-Fc`), `venue_profiles_2026-10-20_1830.{sql,dump}`, `payment_methods_2026-10-20_1830.dump`.
+  2. `scripts/sql/promoair-cleanup-venue-profiles.sql`: dry-run (guard 11 id совпал), затем `-v apply=1` → `DELETE 11`, `COMMIT`. Связанные демо-строки в `radio_venue_requests`/`venue_ad_campaigns`/`venue_playlists`/`venue_orders_index` не трогали.
+  3. Миграции 160, 161, 162: каждая `BEGIN; SET LOCAL lock_timeout='5s'; \i …; ROLLBACK;`, затем то же с `COMMIT`. После 160: `UPDATE users SET signup_site='music' WHERE role='venue' AND signup_site IS NULL;` → `UPDATE 6`.
+- **Verified:** `enum_range(user_status)` содержит `rejected`; `venue_radio_plans` = basic, business, efir, pro, trial; `chat_sessions_source_chk` с `widget:air`/`cabinet:air`; `page_views.host` есть; `count(*) venue_profiles` = 1; `content_orders.data jsonb` есть (флаг «срочно» сохраняется).
+- **Follow-ups:** `CRON_SECRET` и таймеры venue-кронов (RUNBOOK §0 шаги 5-6, таймеры только после боевой привязки карты 1 ₽); миграция 097 маркетплейса всё ещё не применена.
+
 ## 2026-07-02 — Артист-рассылка: финал прогона + hard-bounce чистка (laptop; запись — cloud по отчёту)
 
 - **What:** финальный прогон рассылки по артист-базе. 873 отправлено,
