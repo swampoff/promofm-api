@@ -10,11 +10,47 @@
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
-import { getTicketsByUser, upsertTicket } from './db.tsx';
+import { getTicketsByUser, upsertTicket, getVenueProfile, upsertNotification } from './db.tsx';
 import { pool } from './db-client.tsx';
 import { notifySupportTicket } from './email-helper.tsx';
+import { getEffectiveVenueLimits } from './venue-plan-limits.tsx';
 
 const app = new Hono();
+
+// ── Видимость внутренних заметок (20.10.2026) ──
+// Заметка команды (internal_note: true) видна только админам. Раньше API
+// отдавал её автору тикета, а скрывал только фронт PROMO.AIR.
+const isStaff = (role: unknown) => role === 'admin' || role === 'superadmin';
+function visibleMessages(raw: unknown, staff: boolean): any[] {
+  const list = Array.isArray(raw) ? raw : [];
+  return staff ? list : list.filter((m: any) => !(m && m.internal_note === true));
+}
+function ticketForViewer<T extends Record<string, any>>(ticket: T, staff: boolean): T {
+  if (!ticket || staff) return ticket;
+  return { ...ticket, messages: visibleMessages(ticket.messages, false) };
+}
+
+const PRIORITY_RANK: Record<string, number> = { low: 0, medium: 1, high: 2, urgent: 3 };
+
+/**
+ * Приоритет нового тикета. Заведение на тарифе с приоритетной поддержкой
+ * (Бизнес, Сеть, корпоративный; в т. ч. пробный на них) получает не ниже
+ * 'high' (SLA 24 ч) независимо от того, что прислал клиент. Остальные роли
+ * и тарифы как раньше: значение клиента или 'medium'.
+ */
+async function ticketPriority(userId: string, role: unknown, asked: unknown): Promise<string> {
+  if (role !== 'venue') return (asked || 'medium') as string; // как до 20.10.2026
+  const client = typeof asked === 'string' && Object.prototype.hasOwnProperty.call(PRIORITY_RANK, asked) ? asked : 'medium';
+  try {
+    const profile = await getVenueProfile(userId);
+    if (profile && getEffectiveVenueLimits(profile).prioritySupport) {
+      return PRIORITY_RANK[client] >= PRIORITY_RANK.high ? client : 'high';
+    }
+  } catch (err: any) {
+    console.warn('[tickets] venue priority lookup failed:', err?.message);
+  }
+  return client;
+}
 
 // ============================================
 // TICKETS
@@ -35,8 +71,10 @@ app.get('/user/:userId', requireAuth, async (c) => {
   try {
     const tickets = await getTicketsByUser(userId);
 
+    const staff = isStaff(authRole);
     const sorted = (tickets || [])
       .filter(Boolean)
+      .map((t: any) => ticketForViewer(t, staff))
       .sort((a: any, b: any) =>
         new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
       );
@@ -90,7 +128,7 @@ app.get('/:ticketId', requireAuth, async (c) => {
 
     return c.json({
       success: true,
-      data: ticket
+      data: ticketForViewer(ticket, isStaff(authRole))
     });
   } catch (error) {
     console.error('Error loading ticket:', error);
@@ -113,7 +151,6 @@ app.post('/create', requireAuth, async (c) => {
       subject,
       description,
       category,
-      priority,
       attachments,
     } = body;
 
@@ -125,6 +162,8 @@ app.post('/create', requireAuth, async (c) => {
     }
 
     const ticketId = `TKT-${crypto.randomUUID()}`;
+    // Приоритет решает сервер для заведений (приоритетная поддержка тарифа).
+    const priority = await ticketPriority(user_id, c.get('userRole'), body.priority);
 
     // Создаём первое сообщение (описание проблемы)
     const firstMessageId = `msg-${crypto.randomUUID()}`;
@@ -271,14 +310,24 @@ app.put('/:ticketId', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Нельзя редактировать чужой тикет' }, 403);
     }
 
+    // Не админ не переписывает ленту сообщений (иначе мог бы стереть заметки
+    // команды или вписать ответ «от поддержки») и не меняет владельца. У
+    // заведения приоритет назначает сервер (ticketPriority).
+    const patch: Record<string, any> = body && typeof body === 'object' ? { ...body } : {};
+    if (!isStaff(role)) {
+      delete patch.messages;
+      delete patch.user_id;
+      delete patch.id;
+      if (role === 'venue') delete patch.priority;
+    }
     const updatedTicket = {
       ...ticket,
-      ...body,
+      ...patch,
       updated_at: new Date().toISOString(),
     };
 
     // Preserve messages array if body doesn't include it
-    if (!body.messages && ticket.messages) {
+    if (!patch.messages && ticket.messages) {
       updatedTicket.messages = ticket.messages;
     }
 
@@ -294,7 +343,7 @@ app.put('/:ticketId', requireAuth, async (c) => {
 
     return c.json({
       success: true,
-      data: updatedTicket
+      data: ticketForViewer(updatedTicket, isStaff(role))
     });
   } catch (error) {
     console.error('Error updating ticket:', error);
@@ -372,7 +421,7 @@ app.get('/:ticketId/messages', requireAuth, async (c) => {
       return c.json({ success: false, error: 'Access denied' }, 403);
     }
     const raw = _q.rows[0].messages || [];
-    const messages = (Array.isArray(raw) ? raw : [])
+    const messages = visibleMessages(raw, isStaff(authRole))
       .sort((a: any, b: any) =>
         new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
       );
@@ -442,7 +491,8 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
       sender_type,
       message,
       attachments: attachments || [],
-      internal_note: internal_note || false,
+      // Заметку «только для команды» может оставить только админ.
+      internal_note: isStaff(authRole) ? internal_note === true : false,
       created_at: new Date().toISOString(),
     };
 
@@ -473,7 +523,7 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
 
     // Bell-уведомление автору тикета, когда отвечает поддержка/админ.
     // internal_note пропускаем — это заметка для команды, юзер её не видит.
-    if (bumpStatus && !internal_note) {
+    if (bumpStatus && !messageData.internal_note) {
       const ticket = upd.rows[0] as { user_id: string; subject: string };
       if (ticket?.user_id && ticket.user_id !== sender_id) {
         try {
@@ -483,15 +533,34 @@ app.post('/:ticketId/messages', requireAuth, async (c) => {
           );
           const userRole = (ur.rows[0]?.role || 'artist') as
             'artist' | 'dj' | 'admin' | 'radio' | 'venue' | 'producer' | 'label';
-          const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
           const preview = String(message).trim();
+          const short = preview.length > 200 ? preview.slice(0, 197) + '...' : preview;
+          // Кабинет заведения читает колокольчик из notifications
+          // (/api/venue/notifications), а не из cross_cabinet_notifications:
+          // без этой строки заведение не узнавало об ответе поддержки
+          // (20.10.2026). Отдельно от ccn: сбой одного не отменяет другое.
+          if (userRole === 'venue') {
+            const notifId = `notif_ticket_reply_${crypto.randomUUID()}`;
+            await upsertNotification(ticket.user_id, notifId, {
+              id: notifId,
+              userId: ticket.user_id,
+              type: 'support',
+              title: `Ответ поддержки: ${ticket.subject || 'обращение'}`.slice(0, 200),
+              message: short,
+              actionUrl: `/venue/support?ticket=${encodeURIComponent(ticketId)}`,
+              link: `/venue/support?ticket=${encodeURIComponent(ticketId)}`,
+              read: false,
+              createdAt: new Date().toISOString(),
+            }).catch((e: any) => console.error('[tickets] venue reply notification failed:', e?.message));
+          }
+          const { notifyCrossCabinet } = await import('./cross-cabinet-notify.tsx');
           await notifyCrossCabinet({
             targetUserId: ticket.user_id,
             targetRole: userRole,
             sourceRole: 'admin',
             type: 'support_ticket_new',
             title: `Ответ на тикет: ${ticket.subject || 'обращение'}`.slice(0, 200),
-            message: (preview.length > 200 ? preview.slice(0, 197) + '...' : preview),
+            message: short,
             link: `/profile?tab=support&ticket=${ticketId}`,
             metadata: { ticketId, replyFromAdmin: true },
           });
@@ -563,7 +632,7 @@ app.post('/:ticketId/rate', requireAuth, async (c) => {
 
     return c.json({
       success: true,
-      data: upd.rows[0]
+      data: ticketForViewer(upd.rows[0], isStaff(authRole))
     });
   } catch (error) {
     console.error('Error rating ticket:', error);

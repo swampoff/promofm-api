@@ -16,6 +16,22 @@ import { emitSSE } from './sse-routes.tsx';
 
 const app = new Hono();
 
+/**
+ * Чьё уведомление правим: пользователь сессии. Переданный user_id (тело или
+ * query, как в старом клиенте) допустим только свой; админ может указать
+ * любой. До 20.10.2026 user_id брался из запроса без проверки, но getNotification
+ * искал не тот id и ничего не находил; после починки поиска без этой проверки
+ * любой вошедший менял бы чужие уведомления. null = 403.
+ */
+function ownUserId(c: any, asked: unknown): string | null {
+  const me = String(c.get('userId') || '');
+  const role = c.get('userRole');
+  const want = typeof asked === 'string' && asked.trim() ? asked.trim() : '';
+  if (!want) return me || null;
+  if (want === me || role === 'admin' || role === 'superadmin') return want;
+  return null;
+}
+
 // ============================================
 // NOTIFICATIONS
 // ============================================
@@ -126,17 +142,9 @@ app.put('/:notificationId/read', requireAuth, async (c) => {
     // We need the userId to look up the notification.
     // Try to get it from query param or body.
     const body = await c.req.json().catch(() => ({}));
-    const userId = body.user_id || c.req.query('user_id') || '';
-
-    // If userId provided, do a direct lookup; otherwise search all notifications is not feasible.
-    // The notification object itself contains user_id, so we need at least one lookup strategy.
-    // Since the old code used notificationId as the full key, and getNotification needs userId,
-    // we require user_id to be passed.
+    const userId = ownUserId(c, body.user_id || c.req.query('user_id'));
     if (!userId) {
-      return c.json({
-        success: false,
-        error: 'user_id is required'
-      }, 400);
+      return c.json({ success: false, error: 'Access denied' }, 403);
     }
 
     const notification = await getNotification(userId, notificationId);
@@ -173,13 +181,10 @@ app.put('/:notificationId/star', requireAuth, async (c) => {
 
   try {
     const body = await c.req.json();
-    const { starred, user_id } = body;
-
+    const { starred } = body;
+    const user_id = ownUserId(c, body.user_id);
     if (!user_id) {
-      return c.json({
-        success: false,
-        error: 'user_id is required'
-      }, 400);
+      return c.json({ success: false, error: 'Access denied' }, 403);
     }
 
     const notification = await getNotification(user_id, notificationId);
@@ -215,13 +220,9 @@ app.delete('/:notificationId', requireAuth, async (c) => {
   const notificationId = c.req.param('notificationId');
 
   try {
-    const userId = c.req.query('user_id') || '';
-
+    const userId = ownUserId(c, c.req.query('user_id'));
     if (!userId) {
-      return c.json({
-        success: false,
-        error: 'user_id query param is required'
-      }, 400);
+      return c.json({ success: false, error: 'Access denied' }, 403);
     }
 
     const notification = await getNotification(userId, notificationId);

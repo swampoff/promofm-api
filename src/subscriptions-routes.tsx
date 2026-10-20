@@ -4,11 +4,11 @@
  */
 
 import { Hono } from 'hono';
-import { getSubscription, upsertSubscription, getAllSubscriptions, getPaymentBalance, getPaymentMethods, upsertPaymentBalance, upsertPaymentSession, getPaymentSession, insertPaymentTx } from './db.tsx';
+import { getSubscription, upsertSubscription, getAllSubscriptions, getPaymentBalance, getChargeablePaymentMethod, upsertPaymentBalance, upsertPaymentSession, getPaymentSession, insertPaymentTx } from './db.tsx';
 import { notifyAllAdmins, notifyCrossCabinet } from './cross-cabinet-notify.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
-import { safeErrorMessage } from './security.tsx';
+import { safeErrorMessage, secretMatches } from './security.tsx';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 
 const subscriptions = new Hono();
@@ -852,7 +852,7 @@ subscriptions.post('/charge-recurring', async (c) => {
       return c.json({ success: false, error: 'Server misconfiguration' }, 500);
     }
 
-    if (cronSecret !== expectedSecret) {
+    if (!secretMatches(cronSecret, expectedSecret)) {
       return c.json({ success: false, error: 'Unauthorized' }, 401);
     }
 
@@ -886,9 +886,10 @@ subscriptions.post('/charge-recurring', async (c) => {
       const userId = sub.user_id || sub.userId || entry.key.replace(SUBSCRIPTION_PREFIX, '');
       if (!userId) { skipped++; continue; }
 
-      // Check for saved payment method
-      const methods = await getPaymentMethods(userId);
-      const savedMethod = methods?.[0];
+      // Check for saved payment method. Только карта, сохранённая вебхуком шлюза
+      // (с токеном): после починки payment_methods (db.tsx) в списке бывают и
+      // способы без токена, списание с них падало бы и понижало тариф.
+      const savedMethod = await getChargeablePaymentMethod(userId);
 
       if (!savedMethod) {
         // No saved payment method — mark subscription as expiring

@@ -1089,3 +1089,129 @@ Manual checks after deploy:
 - **Two entitlement sources remain** (`venue_profiles.data` tiers vs `venue_radio_subscriptions`): M6 only stops one from pausing the other. Pick one before taking efir payments at scale.
 - **Admin in the venue cabinet**: an admin may still open `/venue-billing/me` (creates an admin `venue_profiles` row, as before) and could even bind a card; the crons would charge an admin who does that. Deliberate: PLAN §3.5 lets admins into the cabinet.
 - **Not in code, still open from the reviews' PLAN §4 lists**: venue-campaign CTA switch (launch decision), migration 160 dry-run on prod, AutoDJ nginx restriction and `X-Internal-Key` rotation, `requireAuth` / `/auth/me` status check, station-request `reject` status guard (pre-existing), frontend items (`/?chat=&t=` restore, `email-logo.png`, `account_pending` handling, `cardSaveFailed` after the card return).
+
+---
+
+## 6. PHASE 3 FIXES: flows, regression, copy and visual reviews (20.10.2026)
+
+**Goal.** Four phase-3 reviews (flows, promo-music regression, copy, visual) plus the known backend items. Each backend finding was checked against the code before it was fixed. There are no new env vars and no new migrations. Nothing here depends on `PROMOAIR_ORIGIN`. promo-music.ru behaves as before, except for the shared bug fixes marked **(both sites)**.
+
+### Verdicts
+
+| # | Finding | Verdict |
+|---|---|---|
+| flows M1 | Notifications could never be marked read: `getNotification` looked up `id = userId:id`, while every writer stores `id` | **fixed (both sites)**. `getNotification` matches `id` AND `user_id`, and falls back to the old composite id. It returns the same shape as the list (rich `data` plus columns), so get+upsert no longer blanks rows whose `data = {}`. The venue `PUT /notifications/:id/read` is a single UPDATE (`is_read`, `status='read'`, `read_at`, `data.read`) and answers 404 when the user has no such row. Every caller is now scoped to the session user: `notifications-routes` read/delete use `requireOwner`; `notifications-messenger` read/star/delete use the session user, and a different `user_id` gets 403 unless the caller is an admin. Before, those routes trusted the client's `user_id`, which would have become an IDOR once the lookup started working |
+| flows M2 | Cabinet and admin showed «Мое заведение · bar · Москва»; up to 3 «new venue» e-mails per venue; junk rows for admins | **fixed**. `GET /api/venue/profile` returns 404 `{error:'not_a_venue'}` for any non-venue role, admins included, and uses `ensureVenueProfile`. `ensureVenueProfile` takes `venueName` from `users.full_name` (the venue name on promoair sign-ups), takes `contactName` from the application, and writes `venue_type`/`city`/`country`/`capacity` as NULL (the column DEFAULTs `club`/0 are overridden). It inserts with `ON CONFLICT DO NOTHING RETURNING`, so only the call that inserted the row sends the e-mail. Nothing on promo-music.ru reads the old defaults (checked: backend has no comparison with them; the old cabinet falls back on empty values client-side) |
+| flows M3 | A cancelled YooKassa payment came back as «оплата прошла» | **fixed (backend side)**. Both return URLs carry `&order=<orderId>`. `GET /checkout/session/:orderId` (owner only, 403 for anyone else, admins included) maps venue orders as follows: `processing` → `pending`; the 1 ₽ check after its refund → `succeeded`; `canceled` and `succeeded` pass through; a refunded paid order → `refunded`. Non-venue payments are unchanged |
+| flows M5 | «Оставить заявку» on «Радио полного цикла» switched hosts and podcasts on for free | **fixed**. `POST /venue-air/my/live-air {enabled:true}` now only records `format.liveAirRequestedAt` and sends the team one request e-mail plus Telegram; it does not change `airType` and does not touch `host_enabled`. A repeat call does not send a second e-mail. `GET /my` returns `liveAirRequested` and `liveAirRequestedAt`. Podcasts also require full radio: `startVenuePodcast` (cabinet, Telegram, scheduler) is gated like the hosts. The same hole through the questionnaire is closed too: `PUT /venue-station` on a request that is already provisioned or live turns a switch to `full_radio` into the same request. The team switches it on with the new `POST /venue-air/admin/live-air/:userId` (below). `enabled:false` from the cabinet still switches off (as before) and withdraws a pending request |
+| flows m1 | Reset, auto-login and chat tokens were stored in `page_views.path` | **fixed server-side** (the frontend fix is separate): `/analytics/pv` strips `token` and `auto_login_token`, and strips `chat` + `t` when `chat` is present |
+| flows m4 | `exchange-auto-login` set no refresh cookie | **fixed**: `createRefreshToken` + `setRefreshCookie`, same as `/signin`; a failure is logged and the login still succeeds |
+| flows m6 | `cardRequired` was true for an admin-assigned trial without a card | **fixed**: `status==='trial' && !card && autoRenew !== false` |
+| flows m7 | Autocharges stayed «В обработке» forever | **fixed**: the `payment_txns` row of the trial-end charge and of the renewal is written as `completed`; both are written only after the gateway reports `succeeded`. The `content_order` category filter is in the frontend |
+| flows m9 | Venues got «Загрузите свой первый трек» as their welcome | **fixed**: venues get «Добро пожаловать в PROMO.AIR!» (or ПРОМО.МУЗЫКА for promo-music sign-ups) with a link to the questionnaire (`actionUrl /venue/onboarding`). Other roles keep the old text |
+| regression m2 | promo-music admin visitor stats mixed in promoair.ru | **fixed**: `/analytics/live` and `/analytics/stats` exclude `host IN (promoair.ru, www.promoair.ru)`. Without the `host` column (160 not applied) they catch 42703, set the flag and run unfiltered as before |
+| regression m4 | The artist renewal could charge a method without a gateway token | **fixed**: `subscriptions-routes` uses `getChargeablePaymentMethod` (gateway webhook card only). There is no timer for this cron |
+| regression M1 / m1 / m3 / m5 | Deploy coupling, payload, admin label, remount | frontend / deploy (not in `api/`) |
+| copy M2 | «приоритетная поддержка» was not implemented | **fixed**: `POST /tickets-system/create` from a venue whose effective plan has `prioritySupport` (Бизнес, Сеть, корпоративный, trial included) gets at least `high` (SLA 24 h), whatever the client sends. A venue's own `PUT` cannot change the priority. Other roles and plans are unchanged |
+| copy M8 | The admin was told an assigned plan would be charged | **fixed (backend side)**: `VenueRow.subscription.autoRenew` (false = assigned by an admin, no charge) |
+| copy M9 | Admin-trial venues got the old T-3 / T-1 e-mails about a «бесплатный режим» | **fixed**. New texts follow the review: «Автосписания по этому пробному периоду нет…», «эфир приостановится», no API or priority claims, prices in ₽. They are sent for every PROMO.AIR reminder without a charge amount, and on both sites when `autoRenew:false` (`venue-trial` passes `noAutoRenew`). Music reminders for the old flow are byte-identical |
+| copy M10 | «Ответьте на это письмо» while Reply-To is noreply | **fixed for air** (payment expired → «напишите нам на info@promofm.ru»; chat reply → «Ответить можно там же, в чате»). Music wording unchanged (deferred, owner's call) |
+| copy m3–m11 (api) | Welcome code wording, time promises, «дн.», playlists in the expiry e-mail, «сгенерируйте», `4990 RUB`, sender/footer brand, Telegram brand, English verify page | **fixed**. Air: «код подключения из 6 символов, приложение PROMO.AIR для Android скачивается в кабинете», «обычно за 1–2 рабочих дня» with an en dash; the «1 рабочий день» line is removed from the changes-requested e-mail; `daysRu()` replaces «дн.» (charge reminders on both sites, a new path); no playlists; «получите новый код»; `rub()` amounts and the subject «Оплата не завершена: 4 990 ₽»; sender `"PROMO.AIR" <noreply@promo-music.ru>` (same address, so SPF and DKIM are unchanged); footer «от PROMO.MUSIC»; Telegram help says «в PROMO.AIR». Verify interstitial: «Подтверждение почты» / «Подтверждаем почту…» (both sites, text only). The welcome line «обычно в течение рабочего дня» stays (the review gave no replacement) |
+| copy m20 | The admin «Владелец» field showed the venue name | **fixed (backend side)**: `VenueRow.contactName` (+ `profile.contactName` in the detail). Sign-up stores `applicationDetails.contactName`. The `?q=` search also matches it |
+| visual m8 | The demo manifest was cached for 30 days at an unhashed URL and sent without gzip | **nginx**: `notes/deploy/promoair.ru.includes` has `location = /server/uploads/air-demo/manifest.json` (no-cache + ETag + gzip). promo-music.ru needs the same block; see the RUNBOOK. Dropping `?t=` is a frontend change |
+| KNOWN contactName | Not stored | **fixed**, as copy m20 |
+| KNOWN change-password | Read the Bearer header only | **fixed (both sites)**: cookie session first, Bearer kept; `token_version` checked as in `requireAuth`. After a change: refresh tokens revoked and cookies cleared, so «все сессии завершены» is now true. promo-music's settings page and the DJ settings were getting 401 until now |
+| KNOWN support replies | The venue bell did not show ticket replies | **fixed**: a team reply (not an internal note) to a venue's ticket also writes a `notifications` row (`type:'support'`, `actionUrl /venue/support?ticket=…`). The cross-cabinet row is still written, independently |
+| KNOWN cron secret | Compared with `!==` | **fixed**: `security.tsx:secretMatches` (sha256 + `timingSafeEqual`) in all four cron endpoints (venue expire-trials, venue charge-recurring, stream-player tick, artist charge-recurring). The other shared secrets (publish webhook, Telegram webhook) are not cron secrets and are untouched |
+| KNOWN internal notes | Returned to the ticket owner | **fixed**: `internal_note:true` messages are filtered for non-admins in `GET /user/:id`, `GET /:id`, `GET /:id/messages` and the `PUT` and `rate` responses. A non-admin cannot create one (forced false). A non-admin `PUT` cannot rewrite `messages`, `user_id` or `id` |
+| KNOWN urgent | The flag changed the price only | **fixed (best effort)**: after the INSERT, `content_orders.data` gets `{urgent, styleTier}` in a separate UPDATE, and `order.urgent` is returned. If `data` is missing on prod the order is still created and a warning is logged (`content_orders.data` is used by the existing notes update but was not checked on prod) |
+
+### What changed
+
+- `src/security.tsx`: `secretMatches()`.
+- `src/db.tsx`: `mapNotificationRow`, `getNotification` (id AND user_id), `markNotificationRead`, `ensureVenueProfile` (real name and contact, no invented fields, insert-only e-mail).
+- `src/venue-routes.tsx`: `GET /profile` (venue role only, `ensureVenueProfile`), `PUT /notifications/:id/read` (UPDATE, 404), cron secret.
+- `src/notifications-routes.tsx`, `src/notifications-messenger-routes.tsx`: owner checks (see M1).
+- `src/tickets-system-routes.tsx`: `visibleMessages` / `ticketForViewer`, `ticketPriority`, non-admin `PUT` guard, venue bell row on a reply.
+- `src/auth-routes.tsx`: `storeVenueApplication` (signup), venue welcome notification, verify page in Russian, `change-password` with the cookie, refresh cookie in `exchange-auto-login`.
+- `src/venue-billing-routes.tsx`: `&order=` in both return URLs, `cardRequired`, renewal txn `completed`, cron secret. `src/venue-billing-helpers.tsx`: trial-end txn `completed`.
+- `src/checkout-routes.tsx`: `publicSessionStatus()` for `GET /session/:orderId`.
+- `src/venue-air-routes.tsx`: `liveAirOn`, `notifyLiveAirRequest`, `/my/live-air` as a request, `GET /my` fields, podcasts gated, `POST /admin/live-air/:userId`, Telegram brand.
+- `src/venue-station-routes.tsx`: `PUT /` keeps `airType` and records the request after launch; it also keeps an earlier `liveAirRequestedAt` across edits.
+- `src/promo-air-admin-helpers.tsx`, `src/promo-air-admin-routes.tsx`: `contactName`, `subscription.autoRenew`, `CONTACT_NAME_SQL` (row and `?q=`).
+- `src/content-orders-routes.tsx`: urgent flag. `src/email-helper.tsx`: air copy, `senderFor`, `daysRu`, `noAutoRenew`. `src/venue-trial.tsx`: passes `noAutoRenew`.
+- `src/pageview-routes.tsx`: `withSiteFilter`, `scrubPath`. `src/subscriptions-routes.tsx`: chargeable card, cron secret. `src/stream-player-routes.tsx`: cron secret.
+
+### API contract changes (frontends)
+
+| Endpoint | Change |
+|---|---|
+| `GET /api/venue/profile` | 404 `{success:false, error:'not_a_venue'}` for every role except `venue`. New profiles: `venueName` from sign-up or null; `venueType`/`city`/`country` null or absent; `contactName` when given at sign-up |
+| `PUT /api/venue/notifications/:id/read` | persists; 404 `{error:'Notification not found'}` when the user has no such notification |
+| `/notifications-messenger/:id/read\|star`, `DELETE /:id` | work with the session user (no `user_id` needed); a foreign `user_id` → 403 |
+| `/notifications/:userId/:id(/read)` | `userId` must be the session user (403) |
+| YooKassa return URLs | `/venue/subscription?payment=success&tier=<t>&order=<id>`, `?card=attached&order=<id>` |
+| `GET /checkout/session/:orderId` | venue orders: `status` ∈ `pending \| succeeded \| canceled` (`refunded` only for a refunded paid order). Owner only |
+| `POST /venue-air/my/live-air` | `{enabled:true}` → `{liveAir:false, liveAirRequested:true, liveAirRequestedAt}` (or `liveAir:true` if the team already switched it on); `{enabled:false}` → off + request withdrawn |
+| `GET /venue-air/my` | `liveAirRequested: boolean`, `liveAirRequestedAt: string\|null` |
+| `POST /venue-air/my/podcast` | 400 «Подкасты входят в «Радио полного цикла»…» unless full radio is on |
+| `POST /venue-air/admin/live-air/:userId` **(new, admin)** | `{enabled: boolean, reason?}` → `{liveAir, requestId}`; 404 without a questionnaire; audit `venue_live_air_on/off` |
+| `GET /promo-air-admin/venues(/:id)` | `row.contactName`, `row.subscription.autoRenew`; detail `profile.contactName` |
+| `POST /tickets-system/create` | venue on Бизнес/Сеть: `priority` ≥ `high` |
+| ticket reads | no `internal_note:true` messages for non-admins |
+| `POST /auth/change-password` | cookie session; on success clears `pf_session`/`pf_refresh` |
+| `POST /auth/exchange-auto-login` | also sets `pf_refresh` |
+| `GET /venue-billing/me` | `cardRequired` false when `autoRenew:false` |
+| content order JSON | `urgent: boolean` |
+
+### Switching «Радио полного цикла» on (team)
+
+No UI yet. The admin, logged in at promo-music.ru, runs this in the browser console on any `/ctrl-pm7k2f` page:
+
+```js
+await (await fetch('/server/api/venue-air/admin/live-air/<venue userId>', {
+  method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ enabled: true, reason: 'согласовано, 20 000 ₽/мес' }),
+})).json()
+```
+
+`enabled:false` switches it off. The price is billed outside the cabinet (there is no online checkout for full radio, PLAN §1). Requests waiting for the team:
+
+```sql
+SELECT u.email, r.user_id, r.format->>'liveAirRequestedAt' AS requested_at, r.format->>'airType' AS air_type
+  FROM venue_station_requests r JOIN users u ON u.id::text = r.user_id
+ WHERE r.format ? 'liveAirRequestedAt' ORDER BY 3;
+```
+
+SQL fallback (same effect as the endpoint, without the audit row): `UPDATE venue_station_requests SET format = (jsonb_set(format, '{airType}', '"full_radio"') - 'liveAirRequestedAt') WHERE id = '<request id>'; UPDATE venue_station_streams SET host_enabled = NULL WHERE user_id = '<venue userId>';`
+
+### Verification (done locally)
+
+```bash
+~/Projects/promoair/bin/tsc-api.sh        # 6 errors, all from the baseline; the 2 venue-routes ones are gone with the rewritten GET /profile
+cd ~/Projects/promoair/api
+npx tsx ../tools/be-site-origin.test.mts  # 14
+npx tsx ../tools/be-billing.test.mts      # 7
+npx tsx ../tools/be-admin.test.mts        # 8 groups (+ contactName, autoRenew, contact search)
+npx tsx ../tools/be-security.test.mts     # 13
+mkdir -p .tmp-email-check && cp ../api-orig/src/email-helper.tsx .tmp-email-check/email-helper-orig.tsx \
+  && npx tsx ../tools/be-email-site.test.mts .tmp-email-check/email-helper-orig.tsx; rm -rf .tmp-email-check   # 35: music byte-identical, air sender/copy
+D=<dir with @electric-sql/pglite-socket@0.2.11>
+npx tsx ../tools/be-billing-e2e.test.mts $D    # 29
+npx tsx ../tools/be-admin-e2e.test.mts $D      # 13
+npx tsx ../tools/be-security-e2e.test.mts $D   # 17 groups
+npx tsx ../tools/be-phase3-e2e.test.mts $D     # 9 groups (new, this section)
+```
+
+`be-phase3-e2e` (PGlite, prod schema plus the tables from 152/048/160 and content_orders) covers: the profile 404 for an artist or admin without a junk row, and 4 concurrent creators → 1 row and 1 e-mail; sign-up contact → admin; notification read (rich, data-less, legacy ids), the count dropping, 404 for unknown and foreign ids, the shared routes limited to the owner; the full-radio request, the questionnaire edit after launch, the admin switch with audit; the payment-status mapping and owner-only access; tickets (notes, priority, PUT guard, bell); change-password with the cookie; refresh after auto-login; page-view filter and fallback; urgent; `cardRequired`; cron secret.
+
+### Deploy order
+
+No new migration, env var or timer. The final order is in `notes/deploy/RUNBOOK.md` and `notes/phase3-fix-be.md` (backups → cleanup → 160/161/162 → code → `CRON_SECRET` → timers → nginx → `PROMOAIR_ORIGIN` → checks). Two nginx additions: the demo manifest block on both vhosts.
+
+### Open risks / not done
+
+- `content_orders.data` was not checked on prod. The flag is best effort; `\d content_orders` at deploy tells.
+- `GET /api/venue/profile` now answers 404 to admins. The promoair cabinet handles a null profile («Ваше заведение»). `SystemTestSuite` («Профиль площадки») will show that call as a 404 for the admin.
+- The music-site wording of the payment-expired and chat-reply e-mails still says «ответьте на это письмо» (owner's call; changing it breaks the byte-identical promo-music contract).
+- The full-radio switch has no admin UI (console snippet above). The price for full radio is not billed online.

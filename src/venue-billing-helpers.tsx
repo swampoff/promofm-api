@@ -304,7 +304,8 @@ async function activateAfterTrial(
       gateway: p.gateway,
       description: `Первый период «${name}» после пробного`,
       metadata: { tier, interval, autoTrialEnd: true, orderId },
-      status: 'pending',
+      // Сюда доходим только после succeeded от шлюза (см. tryAutoChargeAtTrialEnd).
+      status: 'completed',
       createdAt: now.toISOString(),
     });
 

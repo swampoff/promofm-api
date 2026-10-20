@@ -5,6 +5,7 @@
 import { URL } from 'url';
 import * as dns from 'dns';
 import { promisify } from 'util';
+import { createHash, timingSafeEqual } from 'crypto';
 
 const dnsResolve = promisify(dns.resolve4);
 
@@ -113,6 +114,18 @@ export function sanitizeString(input: unknown, maxLen = 1000): string {
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
     .replace(/[<>]/g, '');
   return cleaned.trim().slice(0, maxLen);
+}
+
+/**
+ * Секрет крона (X-Cron-Secret / Bearer) против CRON_SECRET за постоянное время:
+ * сравниваются sha256 обеих строк (одинаковая длина, timingSafeEqual не бросает),
+ * так время ответа не выдаёт совпавший префикс. Пустой или не строка = false.
+ */
+export function secretMatches(provided: unknown, expected: string): boolean {
+  if (typeof provided !== 'string' || !provided || !expected) return false;
+  const a = createHash('sha256').update(provided, 'utf8').digest();
+  const b = createHash('sha256').update(expected, 'utf8').digest();
+  return timingSafeEqual(a, b);
 }
 
 /**

@@ -11,7 +11,7 @@
  */
 
 import { getEffectiveVenuePlan, type VenuePlanId } from './venue-plan-limits.tsx';
-import { isVenuePaidTier, type VenueInterval, type VenuePlanKey } from './venue-plans-constants.tsx';
+import { isVenuePaidTier, isVenueAutoRenewOff, type VenueInterval, type VenuePlanKey } from './venue-plans-constants.tsx';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -89,6 +89,8 @@ export const EFFECTIVE_PLANS: readonly VenuePlanId[] = ['free', 'start', 'busine
 
 export const VENUE_NAME_SQL = `COALESCE(vp.venue_name, vp.data->>'venueName', vp.data->>'name')`;
 export const CITY_SQL = `COALESCE(vp.city, vp.data->>'city')`;
+// Контактное лицо из регистрации (users.settings.application, auth-routes) или профиля.
+export const CONTACT_NAME_SQL = `NULLIF(COALESCE(NULLIF(u.settings->'application'->>'contactName', ''), vp.data->>'contactName'), '')`;
 export const SUB_STATUS_SQL = `lower(COALESCE(NULLIF(vp.data->>'subscriptionStatus', ''), 'pending_card'))`;
 
 // Действующий тариф в SQL: копия getEffectiveVenuePlan (venue-plan-limits.tsx)
@@ -138,7 +140,8 @@ export function buildVenueFilters(query: Record<string, string | undefined>, fir
     if (q.length > 100) return { ok: false, field: 'q', message: 'Слишком длинный поисковый запрос (до 100 символов).' };
     const p = next(`%${escapeLike(q)}%`);
     where.push(`(u.email ILIKE ${p} ESCAPE '\\' OR u.full_name ILIKE ${p} ESCAPE '\\' OR u.display_name ILIKE ${p} ESCAPE '\\'`
-      + ` OR u.username ILIKE ${p} ESCAPE '\\' OR ${VENUE_NAME_SQL} ILIKE ${p} ESCAPE '\\' OR ${CITY_SQL} ILIKE ${p} ESCAPE '\\')`);
+      + ` OR u.username ILIKE ${p} ESCAPE '\\' OR ${VENUE_NAME_SQL} ILIKE ${p} ESCAPE '\\' OR ${CITY_SQL} ILIKE ${p} ESCAPE '\\'`
+      + ` OR ${CONTACT_NAME_SQL} ILIKE ${p} ESCAPE '\\')`);
   }
 
   const status = String(query.status ?? '').trim().toLowerCase();
@@ -350,6 +353,8 @@ export interface VenueRow {
   userId: string;
   email: string;
   name: string | null;
+  /** Контактное лицо из заявки при регистрации (PROMO.AIR); null, если не указано */
+  contactName: string | null;
   accountStatus: string;
   emailVerified: boolean;
   createdAt: string | null;
@@ -363,6 +368,8 @@ export interface VenueRow {
     expiresAt: string | null;
     trialExpiresAt: string | null;
     hasCard: boolean;
+    /** false: тариф или пробный назначил админ, автосписания не будет */
+    autoRenew: boolean;
   };
   request: { id: string; status: string; airType: string | null; points: number; createdAt: string | null } | null;
   streams: { total: number; online: number; lastSeenAt: string | null };
@@ -377,6 +384,7 @@ export function toVenueRow(r: any, nowMs: number = Date.now()): VenueRow {
     userId: String(r.user_id),
     email: r.email || '',
     name: r.name || null,
+    contactName: typeof r.contact_name === 'string' && r.contact_name.trim() ? r.contact_name.trim() : null,
     accountStatus: r.account_status,
     emailVerified: !!r.email_verified,
     createdAt: isoOrNull(r.created_at),
@@ -392,6 +400,7 @@ export function toVenueRow(r: any, nowMs: number = Date.now()): VenueRow {
       expiresAt: isoOrNull(data.subscriptionExpiresAt),
       trialExpiresAt: isoOrNull(data.trial_expires_at),
       hasCard: !!r.has_card,
+      autoRenew: !isVenueAutoRenewOff(data),
     },
     request: r.request_id
       ? { id: String(r.request_id), status: r.request_status, airType: r.air_type || null, points: Number(r.request_points) || 0, createdAt: isoOrNull(r.request_created_at) }

@@ -354,7 +354,22 @@ app.put('/', requireAuth, requireVenueAccount, async (c) => {
     const musicPreferences = body.musicPreferences ?? cur.music_preferences;
     const jingles          = body.jingles          ?? cur.jingles;
     const aiHostConfig     = body.aiHostConfig     ?? cur.ai_host_config;
-    const format           = sanitizeFormat(body.format, cur.format);
+    const format: Record<string, any> = sanitizeFormat(body.format, cur.format);
+    // «Радио полного цикла» после запуска эфира включает команда, а не правка
+    // анкеты (20.10.2026): иначе формат full_radio сразу включал ведущих и
+    // подкасты бесплатно. Для запущенной заявки переход на full_radio
+    // записывается как заявка (тот же liveAirRequestedAt, что у
+    // POST /venue-air/my/live-air), формат остаётся прежним.
+    const curFormat = cur.format && typeof cur.format === 'object' ? cur.format : {};
+    const launched = !['pending_admin', 'changes_requested', 'in_setup'].includes(String(cur.status));
+    let liveAirRequestedNow = false;
+    if (launched && format.airType === 'full_radio' && curFormat.airType !== 'full_radio') {
+      format.airType = 'background';
+      liveAirRequestedNow = !curFormat.liveAirRequestedAt;
+      format.liveAirRequestedAt = curFormat.liveAirRequestedAt || new Date().toISOString();
+    } else if (curFormat.liveAirRequestedAt && format.airType !== 'full_radio') {
+      format.liveAirRequestedAt = curFormat.liveAirRequestedAt;
+    }
 
     // Auto-resubmit semantics: any edit bumps us back to pending_admin
     // (unless already provisioned/live — those keep their status; only
@@ -389,6 +404,11 @@ app.put('/', requireAuth, requireVenueAccount, async (c) => {
       ]
     );
 
+    if (liveAirRequestedNow) {
+      import('./venue-air-routes.tsx')
+        .then((m) => m.notifyLiveAirRequest(String(cur.user_id || userId)))
+        .catch((err) => console.error('notifyLiveAirRequest (questionnaire) failed:', err?.message));
+    }
     // Анкета вернулась от заведения после «нужны правки» — сообщаем админу,
     // как при первой подаче (раньше повторная подача проходила молча).
     if (cur.status === 'changes_requested' && nextStatus === 'pending_admin') {

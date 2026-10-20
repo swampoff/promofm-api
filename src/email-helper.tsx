@@ -10,6 +10,10 @@ const ADMIN_EMAIL = 'info@promofm.ru';
 // после переезда Яндекс принимает письма на info@promofm.ru, но владелец их не видит — дублируем на другой ящик.
 const ADMIN_EMAILS = (process.env.ADMIN_NOTIFY_EMAILS || ADMIN_EMAIL).split(',').map((x) => x.trim()).filter(Boolean);
 const FROM_EMAIL = '"ПРОМО.МУЗЫКА" <noreply@promo-music.ru>';
+// Письма PROMO.AIR: тот же адрес (SPF/DKIM настроены для noreply@promo-music.ru),
+// своё имя отправителя.
+const AIR_FROM_EMAIL = '"PROMO.AIR" <noreply@promo-music.ru>';
+const senderFor = (site?: SiteKey): { from?: string } => (site === 'air' ? { from: AIR_FROM_EMAIL } : {});
 const REPLY_TO = 'noreply@promo-music.ru';
 const SITE_URL = 'https://promo-music.ru';
 
@@ -241,7 +245,7 @@ const airEmailWrapper = (content: string) => `
         <tr><td style="padding: 24px 40px 32px; color: #8a97a8; font-size: 12px; border-top: 1px solid #24364d; text-align: center;">
           <div style="display: inline-block; padding: 8px 14px; margin-bottom: 10px; background: #f9fcff; border-radius: 12px;"><img src="${SITE_BRAND.air.logo}" alt="${SITE_BRAND.air.name}" style="height: 30px; display: block; border: 0;" /></div>
           <p style="margin: 0 0 10px; color: #e0e0e0; font-size: 14px; font-weight: 600;">Команда ${SITE_BRAND.air.name}</p>
-          <p style="margin: 0;">&copy; ${new Date().getFullYear()} ${SITE_BRAND.air.name} – музыка для заведений от ПРОМО.МУЗЫКА</p>
+          <p style="margin: 0;">&copy; ${new Date().getFullYear()} ${SITE_BRAND.air.name} – музыка для заведений от PROMO.MUSIC</p>
           <p style="margin: 4px 0 0;"><a href="${SITE_BRAND.air.url}" style="color: #ff873a; text-decoration: none;">${SITE_BRAND.air.label}</a></p>
         </td></tr>
       </table>
@@ -269,7 +273,7 @@ export async function sendPasswordResetEmail(email: string, name: string, token:
     <p style="color: #999; font-size: 14px;">Ссылка действительна в течение 1 часа.</p>
     <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">Если кнопка не работает: ${resetUrl}</p>
   `, site);
-  return sendEmail({ to: email, subject: `Сброс пароля – ${brand}`, html });
+  return sendEmail({ ...senderFor(site), to: email, subject: `Сброс пароля – ${brand}`, html });
 }
 
 export async function sendActivationEmail(email: string, name: string, token: string): Promise<boolean> {
@@ -306,7 +310,7 @@ export async function sendVerificationEmail(email: string, name: string, token: 
     <p style="color: #999; font-size: 14px;">Ссылка действительна в течение 24 часов.</p>
     <p style="color: #666; font-size: 12px; margin-top: 24px; word-break: break-all;">Если кнопка не работает: ${verifyUrl}</p>
   `, site);
-  return sendEmail({ to: email, subject: `Подтвердите email – ${brand}`, html });
+  return sendEmail({ ...senderFor(site), to: email, subject: `Подтвердите email – ${brand}`, html });
 }
 
 export async function sendLabelInvitationEmail(
@@ -445,7 +449,7 @@ export async function sendAccountApprovedEmail(email: string, name: string, site
     <p>${text}</p>
     <p style="text-align: center; margin: 28px 0;"><a href="${SITE_ORIGIN[site]}${PATH.login}" style="${btn(site)}">Войти</a></p>
   `, site);
-  return sendEmail({ to: email, subject: `Аккаунт одобрен – ${SITE_BRAND[site].name}`, html });
+  return sendEmail({ ...senderFor(site), to: email, subject: `Аккаунт одобрен – ${SITE_BRAND[site].name}`, html });
 }
 
 export async function sendAccountRejectedEmail(email: string, name: string, reason: string, site: SiteKey = 'music'): Promise<boolean> {
@@ -456,7 +460,7 @@ export async function sendAccountRejectedEmail(email: string, name: string, reas
     ${reason ? `<p style="padding: 12px; background: #1a1a2e; border-left: 3px solid #EF4444; border-radius: 4px;"><strong>Причина:</strong> ${escapeHtml(reason)}</p>` : ''}
     <p>Свяжитесь с нами: <a href="mailto:info@promofm.ru" style="color: #FF577F;">info@promofm.ru</a></p>
   `, site);
-  return sendEmail({ to: email, subject: `Заявка отклонена – ${SITE_BRAND[site].name}`, html });
+  return sendEmail({ ...senderFor(site), to: email, subject: `Заявка отклонена – ${SITE_BRAND[site].name}`, html });
 }
 
 // ── Profile verification (migration 058 artist + 062 cross-role) ──
@@ -495,7 +499,7 @@ export async function sendProfileVerifiedEmail(
     <p>Ваш профиль ${escapeHtml(roleLabel)} прошёл проверку администратором. Значок верификации теперь виден всем пользователям платформы.</p>
     <p style="text-align: center; margin: 28px 0;"><a href="${cabinetUrl(site)}" style="${btn(site)}">Открыть кабинет</a></p>
   `, site);
-  return sendEmail({
+  return sendEmail({ ...senderFor(site),
     to: email,
     subject: `Профиль верифицирован – ${SITE_BRAND[site].name}`,
     html,
@@ -518,7 +522,7 @@ export async function sendProfileVerificationRejectedEmail(
     <p>Вы можете подать новую заявку из кабинета после устранения причин.</p>
     <p style="text-align: center; margin: 28px 0;"><a href="${cabinetUrl(site)}" style="${btn(site)}">Открыть кабинет</a></p>
   `, site);
-  return sendEmail({
+  return sendEmail({ ...senderFor(site),
     to: email,
     subject: `Заявка на верификацию отклонена – ${SITE_BRAND[site].name}`,
     html,
@@ -712,24 +716,28 @@ export async function notifyPaymentExpired(data: {
   site?: SiteKey;
 }): Promise<boolean> {
   const site = data.site || 'music';
-  const subject = `Не получилось оплатить ${data.amount} ${escapeHtml(data.currency || 'RUB')} – повторить?`;
+  const air = site === 'air';
+  // PROMO.AIR: сумма «4 990 ₽» (rub), и вместо «ответьте на это письмо»
+  // (Reply-To = noreply, ответ потеряется) адрес поддержки. music как раньше.
+  const amountText = air && (!data.currency || data.currency === 'RUB') ? rub(data.amount) : `${data.amount} ${escapeHtml(data.currency || 'RUB')}`;
+  const subject = air ? `Оплата не завершена: ${amountText}` : `Не получилось оплатить ${data.amount} ${escapeHtml(data.currency || 'RUB')} – повторить?`;
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #F59E0B;">Не получилось оплатить?</h2>
     <p>Здравствуйте${data.name ? ', <b>' + escapeHtml(data.name) + '</b>' : ''}!</p>
     <p>Вы начали оплату на ${site === 'air' ? SITE_BRAND.air.name : 'платформе ПРОМО.МУЗЫКА'}, но не завершили её – платёж был автоматически отменён через несколько минут.</p>
     <table style="width: 100%; border-collapse: collapse; color: #e0e0e0; margin: 16px 0; background: rgba(255,255,255,0.03); border-radius: 8px;">
-      <tr><td style="padding: 10px; color: #999;">Сумма:</td><td style="padding: 10px; font-size: 18px; font-weight: 700; color: #FF577F;">${data.amount} ${escapeHtml(data.currency || 'RUB')}</td></tr>
+      <tr><td style="padding: 10px; color: #999;">Сумма:</td><td style="padding: 10px; font-size: 18px; font-weight: 700; color: #FF577F;">${amountText}</td></tr>
       ${data.description ? `<tr><td style="padding: 10px; color: #999;">Описание:</td><td style="padding: 10px;">${escapeHtml(data.description)}</td></tr>` : ''}
     </table>
     <p style="text-align: center; margin: 28px 0;">
       <a href="${data.retryUrl}" style="${btn(site)}">Повторить оплату</a>
     </p>
-    <p style="color: #888; font-size: 13px;">Если у вас возникли проблемы с оплатой, ответьте на это письмо – мы поможем разобраться.</p>
+    <p style="color: #888; font-size: 13px;">${air ? 'Если не получается оплатить, напишите нам на info@promofm.ru, поможем разобраться.' : 'Если у вас возникли проблемы с оплатой, ответьте на это письмо – мы поможем разобраться.'}</p>
     ${data.orderId ? `<p style="color: #555; font-size: 11px; margin-top: 20px;">Номер заказа: <code>${escapeHtml(data.orderId)}</code></p>` : ''}
   `, site);
   // Best-effort Telegram alert
   notifyAdminTelegram(`⏱ <b>Платёж истёк</b>\n\nEmail: ${stripHtml(data.email)}\nСумма: ${data.amount} ${stripHtml(data.currency || 'RUB')}${data.description ? `\nЗа что: ${stripHtml(data.description)}` : ''}\n\nОтправили reminder с retry-ссылкой.`).catch(() => {});
-  return sendEmail({ to: data.email, subject, html });
+  return sendEmail({ ...senderFor(site), to: data.email, subject, html });
 }
 
 // ── Live Support Chat ────────────────────────────────────────────
@@ -787,9 +795,9 @@ export async function sendChatGuestReplyEmail(data: { toEmail: string; toName?: 
     <p style="text-align: center; margin: 28px 0;">
       <a href="${returnLink}" style="${btn(site)}">Открыть чат</a>
     </p>
-    <p style="color: #888; font-size: 13px;">Просто перейдите по кнопке – ваша история переписки восстановится. Также можно ответить на это письмо: ответ дойдёт до того же оператора.</p>
+    <p style="color: #888; font-size: 13px;">${site === 'air' ? 'Просто перейдите по кнопке – ваша история переписки восстановится. Ответить можно там же, в чате.' : 'Просто перейдите по кнопке – ваша история переписки восстановится. Также можно ответить на это письмо: ответ дойдёт до того же оператора.'}</p>
   `, site);
-  return sendEmail({
+  return sendEmail({ ...senderFor(site),
     to: data.toEmail,
     subject: `Ответ в чате на ${SITE_BRAND[site].name} – ${escapeHtml(data.adminName)}`,
     html,
@@ -815,6 +823,18 @@ export interface TrialChargeNotice {
 export type VenueExpiredReason = 'no_card' | 'charge_failed' | 'cancelled' | 'period_ended' | 'not_renewed';
 
 const rub = (n: number) => `${Math.round(n).toLocaleString('ru-RU')} ₽`;
+// 1 день, 2-4 дня, 5-20 дней, 21 день…
+const daysRu = (n: number) => {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return 'дней';
+  if (b === 1) return 'день';
+  if (b >= 2 && b <= 4) return 'дня';
+  return 'дней';
+};
+// Пробный без автосписания (назначен админом, autoRenew:false) или любой
+// пробный PROMO.AIR без суммы списания: бесплатного режима нет, по окончании
+// эфир приостанавливается (venue-trial.tsx). Тексты review copy M9, 20.10.2026.
+const noChargeTrialBox = `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:6px;color:#e0e0e0;">Автосписания по этому пробному периоду нет. Чтобы эфир не остановился, оформите подписку в кабинете или привяжите карту: тогда в конце пробного периода спишем выбранный тариф.</p>`;
 const trialChargeBox = (ch: TrialChargeNotice, dateHuman: string) => ch.hasCard
   ? `<p style="padding:12px;background:#1a1a2e;border-left:3px solid #F59E0B;border-radius:6px;color:#e0e0e0;">${escapeHtml(dateHuman)} спишем с привязанной карты <strong>${rub(ch.amountRub)}</strong> за тариф «${escapeHtml(ch.planName)}» на ${ch.interval === 'year' ? 'год' : 'месяц'}, и эфир продолжит работать без перерыва.</p>`
   : `<p style="padding:12px;background:#2a1818;border-left:3px solid #EF4444;border-radius:6px;color:#fde0e0;">Сохранённой карты для оплаты нет, поэтому продлить подписку автоматически не получится. Чтобы эфир не остановился, оформите подписку в кабинете.</p>`;
@@ -828,16 +848,16 @@ const trialChargeNote = (ch: TrialChargeNotice, dateHuman: string) => ch.hasCard
  * Gives the venue owner time to choose a tariff before access
  * downgrades from «Бизнес» (trial) to «Старт» (paid).
  */
-export async function sendVenueTrialEndingEmail(data: { toEmail: string; venueName: string; daysRemaining: number; expiresAtIso: string; site?: SiteKey; charge?: TrialChargeNotice; }) {
+export async function sendVenueTrialEndingEmail(data: { toEmail: string; venueName: string; daysRemaining: number; expiresAtIso: string; site?: SiteKey; charge?: TrialChargeNotice; noAutoRenew?: boolean; }) {
   const site = data.site || 'music';
   const expiresHuman = new Date(data.expiresAtIso).toLocaleDateString('ru-RU', { day: '2-digit', month: 'long', year: 'numeric' });
-  const daysWord = data.daysRemaining === 1 ? 'день' : 'дн.';
+  const daysWord = daysRu(data.daysRemaining);
   if (data.charge) {
     // Карточная схема (с 16.10.2026): честно называем сумму и дату автосписания.
     const ch = data.charge;
     const chargeHuman = new Date(ch.atIso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: 'Europe/Moscow' });
     const endHuman = new Date(data.expiresAtIso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Moscow' });
-    return sendEmail({
+    return sendEmail({ ...senderFor(site),
       to: data.toEmail,
       subject: `${venueBrand(site)}: пробный период заканчивается через ${data.daysRemaining} ${daysWord}`,
       html: emailWrapper(`
@@ -852,6 +872,23 @@ export async function sendVenueTrialEndingEmail(data: { toEmail: string; venueNa
   `, site),
     });
   }
+  if (site === 'air' || data.noAutoRenew) {
+    const endHuman = new Date(data.expiresAtIso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Moscow' });
+    return sendEmail({ ...senderFor(site),
+      to: data.toEmail,
+      subject: `${venueBrand(site)}: пробный период заканчивается через ${data.daysRemaining} ${daysWord}`,
+      html: emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Пробный период ${venueBrand(site)} скоро закончится</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
+    <p>Пробный период заканчивается <strong>${escapeHtml(endHuman)}</strong> (через ${data.daysRemaining} ${daysWord}).</p>
+    ${noChargeTrialBox}
+    <p style="text-align:center;margin:28px 0;">
+      <a href="${SITE_ORIGIN[site]}${PATH.venueSubscription}" style="${btn(site)}">Выбрать тариф</a>
+    </p>
+    <p style="color:#888;font-size:13px;">Если ничего не сделать, после окончания пробного периода эфир приостановится. Анкета эфира и настройки сохранятся.</p>
+  `, site),
+    });
+  }
   const html = emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Триал ${venueBrand(site)} заканчивается</h2>
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
@@ -862,7 +899,7 @@ export async function sendVenueTrialEndingEmail(data: { toEmail: string; venueNa
     </p>
     <p style="color:#888;font-size:13px;">Если ничего не сделать – заведение перейдёт на бесплатный режим: 1 зона, до 5 плейлистов, базовый каталог. Все ваши данные сохранятся, можно будет вернуться к платному тарифу в любое время.</p>
   `, site);
-  return sendEmail({
+  return sendEmail({ ...senderFor(site),
     to: data.toEmail,
     subject: `${venueBrand(site)}: триал заканчивается через ${data.daysRemaining} ${data.daysRemaining === 1 ? 'день' : 'дн.'}`,
     html,
@@ -876,7 +913,9 @@ export async function sendVenueTrialEndingEmail(data: { toEmail: string; venueNa
  */
 export async function sendVenueTrialExpiredEmail(data: { toEmail: string; venueName: string; site?: SiteKey; reason?: VenueExpiredReason; }) {
   const site = data.site || 'music';
-  if (data.reason) {
+  // PROMO.AIR всегда в этом виде: старый текст ниже про бесплатный режим и
+  // плейлисты к нему не относится (без причины: общая фраза).
+  if (data.reason || site === 'air') {
     // Карточная схема (с 16.10.2026): письмо об отключении называет причину.
     const why: Record<VenueExpiredReason, string> = {
       no_card: 'Пробный период закончился, а сохранённой карты для оплаты нет.',
@@ -886,14 +925,14 @@ export async function sendVenueTrialExpiredEmail(data: { toEmail: string; venueN
       // тариф или пробный от администратора: автосписания по нему не было
       not_renewed: 'Срок подписки закончился, автопродление для неё не было включено.',
     };
-    return sendEmail({
+    return sendEmail({ ...senderFor(site),
       to: data.toEmail,
       subject: `${venueBrand(site)}: подписка не активна`,
       html: emailWrapper(`
     <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Подписка ${venueBrand(site)} не активна</h2>
     <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
-    <p>${why[data.reason] || why.period_ended}</p>
-    <p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:6px;color:#e0e0e0;">Эфир и функции тарифа приостановлены. Анкета эфира, плейлисты и настройки сохранены: оформите подписку в кабинете, и всё вернётся.</p>
+    <p>${data.reason ? (why[data.reason] || why.period_ended) : 'Срок пробного периода или подписки закончился.'}</p>
+    <p style="padding:12px;background:#1a1a2e;border-left:3px solid #10B981;border-radius:6px;color:#e0e0e0;">${site === 'air' ? 'Эфир и функции тарифа приостановлены. Анкета эфира и настройки сохранены: оформите подписку в кабинете, и всё вернётся.' : 'Эфир и функции тарифа приостановлены. Анкета эфира, плейлисты и настройки сохранены: оформите подписку в кабинете, и всё вернётся.'}</p>
     <p style="text-align:center;margin:28px 0;">
       <a href="${SITE_ORIGIN[site]}${PATH.venueSubscription}" style="${btn(site)}">Оформить подписку</a>
     </p>
@@ -911,7 +950,7 @@ export async function sendVenueTrialExpiredEmail(data: { toEmail: string; venueN
     </p>
     <p style="color:#888;font-size:13px;">Спасибо за то, что попробовали ${venueBrand(site)}! Если есть вопросы – напишите на info@promofm.ru или в чат поддержки.</p>
   `, site);
-  return sendEmail({
+  return sendEmail({ ...senderFor(site),
     to: data.toEmail,
     subject: `${venueBrand(site)}: триал завершён, заведение в бесплатном режиме`,
     html,
@@ -943,8 +982,11 @@ export async function sendVenueRadioWelcomeEmail(data: { toEmail: string; venueN
     <p style="padding:14px;background:#1a1a2e;border-left:3px solid #6366f1;border-radius:6px;color:#e0e0e0;">
       <strong>Что дальше:</strong><br>
       1. Зайдите в кабинет и заполните анкету – какая музыка нужна, какие джинглы, какой стиль ведущих.<br>
-      2. Наш редактор соберёт ваш эфир под запрос (обычно за 1-2 рабочих дня).<br>
-      3. Вы получите 6-значный код и приложение для Android-устройства в заведении.<br>
+      ${site === 'air'
+        ? `2. Наш редактор соберёт ваш эфир по анкете, обычно за 1–2 рабочих дня.<br>
+      3. Для каждой точки мы выдадим код подключения из 6 символов, приложение PROMO.AIR для Android скачивается в кабинете.<br>`
+        : `2. Наш редактор соберёт ваш эфир под запрос (обычно за 1-2 рабочих дня).<br>
+      3. Вы получите 6-значный код и приложение для Android-устройства в заведении.<br>`}
       4. Подключаете устройство к колонкам – и эфир играет.
     </p>
     <p style="text-align:center;margin:28px 0;">
@@ -952,7 +994,7 @@ export async function sendVenueRadioWelcomeEmail(data: { toEmail: string; venueN
     </p>
     <p style="color:#888;font-size:13px;">Вопросы? Напишите в чат поддержки прямо из кабинета или на info@promofm.ru – отвечаем в рабочие часы.</p>
   `, site);
-  return sendEmail({
+  return sendEmail({ ...senderFor(site),
     to: data.toEmail,
     subject: `Добро пожаловать на ${venueBrand(site)}: ${days} дней бесплатно`,
     html,
@@ -964,7 +1006,7 @@ export async function sendVenueRadioWelcomeEmail(data: { toEmail: string; venueN
  * existing venue-trial cron. Complements sendVenueTrialEndingEmail
  * which fires at T-3 days; this one is the «last chance» nudge.
  */
-export async function sendVenueTrialLastDayEmail(data: { toEmail: string; venueName: string; expiresAtIso: string; site?: SiteKey; charge?: TrialChargeNotice; }) {
+export async function sendVenueTrialLastDayEmail(data: { toEmail: string; venueName: string; expiresAtIso: string; site?: SiteKey; charge?: TrialChargeNotice; noAutoRenew?: boolean; }) {
   const site = data.site || 'music';
   const expiresHuman = new Date(data.expiresAtIso).toLocaleDateString('ru-RU', {
     day: '2-digit', month: 'long',
@@ -972,7 +1014,7 @@ export async function sendVenueTrialLastDayEmail(data: { toEmail: string; venueN
   if (data.charge) {
     const ch = data.charge;
     const chargeHuman = new Date(ch.atIso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: 'Europe/Moscow' });
-    return sendEmail({
+    return sendEmail({ ...senderFor(site),
       to: data.toEmail,
       subject: `${venueBrand(site)}: пробный период заканчивается ${chargeHuman}`,
       html: emailWrapper(`
@@ -984,6 +1026,22 @@ export async function sendVenueTrialLastDayEmail(data: { toEmail: string; venueN
       <a href="${SITE_ORIGIN[site]}${PATH.venueSubscription}" style="${btn(site)}">${ch.hasCard ? 'Управлять подпиской' : 'Оформить подписку'}</a>
     </p>
     ${trialChargeNote(ch, chargeHuman)}
+  `, site),
+    });
+  }
+  if (site === 'air' || data.noAutoRenew) {
+    return sendEmail({ ...senderFor(site),
+      to: data.toEmail,
+      subject: `${venueBrand(site)}: завтра последний день пробного периода`,
+      html: emailWrapper(`
+    <h2 style="margin: 0 0 16px; color: #fff; font-size: 20px;">Завтра последний день пробного периода</h2>
+    <p>Здравствуйте, <strong>${escapeHtml(data.venueName)}</strong>!</p>
+    <p>Пробный период на ${venueBrand(site)} заканчивается <strong>${escapeHtml(expiresHuman)}</strong>.</p>
+    <p style="padding:12px;background:#2a1818;border-left:3px solid #EF4444;border-radius:6px;color:#fde0e0;">Автосписания по нему нет: если до конца дня не оформить подписку или не привязать карту, эфир в заведении приостановится. Настройки сохранятся.</p>
+    <p style="text-align:center;margin:28px 0;">
+      <a href="${SITE_ORIGIN[site]}${PATH.venueSubscription}" style="${btn(site)}">Выбрать тариф и продолжить</a>
+    </p>
+    <p style="color:#888;font-size:13px;">Тарифы: Старт 4 990 ₽, Бизнес 9 990 ₽, Сеть 14 990 ₽ в месяц.</p>
   `, site),
     });
   }
@@ -999,7 +1057,7 @@ export async function sendVenueTrialLastDayEmail(data: { toEmail: string; venueN
     </p>
     <p style="color:#888;font-size:13px;">Тарифы: «Бизнес» ₽9 990/мес – до 4 зон, расширенная аналитика, расписание. «Сеть» ₽14 990/мес – несколько точек, API.</p>
   `, site);
-  return sendEmail({
+  return sendEmail({ ...senderFor(site),
     to: data.toEmail,
     subject: `${venueBrand(site)}: завтра последний день триала`,
     html,
@@ -1028,9 +1086,9 @@ export async function sendVenueRadioReadyEmail(data: { toEmail: string; venueNam
     <p style="text-align:center;margin:24px 0;">
       <a href="${SITE_ORIGIN[site]}${PATH.venueApk}" style="${btn(site)}">Открыть кабинет</a>
     </p>
-    <p style="color:#888;font-size:13px;">Код действует 24 часа. Если не успеете подключить – сгенерируйте новый в кабинете.</p>
+    <p style="color:#888;font-size:13px;">${site === 'air' ? 'Код действует 24 часа. Не успели подключить: получите новый код в кабинете.' : 'Код действует 24 часа. Если не успеете подключить – сгенерируйте новый в кабинете.'}</p>
   `, site);
-  return sendEmail({
+  return sendEmail({ ...senderFor(site),
     to: data.toEmail,
     subject: `${venueBrand(site)}: ваше радио готово, код подключения внутри`,
     html,
@@ -1052,9 +1110,9 @@ export async function sendVenueRadioChangesRequestedEmail(data: { toEmail: strin
     <p style="text-align:center;margin:24px 0;">
       <a href="${SITE_ORIGIN[site]}${PATH.venueOnboarding}" style="${btn(site)}">Открыть анкету</a>
     </p>
-    <p style="color:#888;font-size:13px;">После сохранения изменений анкета снова уйдёт редактору – обычно эфир запускается за 1 рабочий день.</p>
+    <p style="color:#888;font-size:13px;">${site === 'air' ? 'После сохранения изменений анкета снова уйдёт редактору.' : 'После сохранения изменений анкета снова уйдёт редактору – обычно эфир запускается за 1 рабочий день.'}</p>
   `, site);
-  return sendEmail({
+  return sendEmail({ ...senderFor(site),
     to: data.toEmail,
     subject: `${venueBrand(site)}: уточните анкету для эфира`,
     html,
@@ -1077,7 +1135,7 @@ export async function sendVenueRadioRejectedEmail(data: { toEmail: string; venue
     </p>
     <p style="color:#888;font-size:13px;">Остались вопросы – напишите нам на info@promofm.ru.</p>
   `, site);
-  return sendEmail({
+  return sendEmail({ ...senderFor(site),
     to: data.toEmail,
     subject: `${venueBrand(site)}: заявка на эфир не принята`,
     html,

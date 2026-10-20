@@ -16,6 +16,7 @@
 
 import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
+import { logAdminAction } from './audit-helper.tsx';
 import { pool } from './db-client.tsx';
 import { venueDjPort, venueNameFor, VENUE_MOUNT_RE } from './venue-station-routes.tsx';
 
@@ -124,7 +125,7 @@ async function venueStreams(venueUserId: string): Promise<VenueStream[]> {
   return out;
 }
 
-interface HostCfg { voice?: string; style?: string; intervalMinutes?: number; topics?: string[]; notes?: string; airType?: string }
+interface HostCfg { voice?: string; style?: string; intervalMinutes?: number; topics?: string[]; notes?: string; airType?: string; liveAirRequestedAt?: string | null }
 
 async function hostConfigFor(venueUserId: string): Promise<HostCfg> {
   const { rows } = await pool.query(
@@ -132,7 +133,36 @@ async function hostConfigFor(venueUserId: string): Promise<HostCfg> {
     [venueUserId],
   );
   const cfg = (rows[0]?.ai_host_config || {}) as HostCfg;
-  return { ...cfg, airType: rows[0]?.format?.airType };
+  const requestedAt = rows[0]?.format?.liveAirRequestedAt;
+  return { ...cfg, airType: rows[0]?.format?.airType, liveAirRequestedAt: typeof requestedAt === 'string' ? requestedAt : null };
+}
+
+/**
+ * Ведущие и подкасты включены: формат анкеты «Радио полного цикла» (его ставит
+ * команда, см. POST /admin/live-air/:userId) или ведущий включён админом на
+ * потоке. Та же формула, что у планировщика и GET /my.
+ */
+function liveAirOn(streams: Array<{ hostEnabled?: boolean | null }>, cfg: HostCfg): boolean {
+  return streams.some((s) => s.hostEnabled === true || (s.hostEnabled !== false && cfg.airType === 'full_radio'));
+}
+
+/**
+ * Письмо и Telegram команде: заведение просит «Радио полного цикла».
+ * Ничего не включает: запуск и цену решает команда (PLAN §1).
+ */
+export async function notifyLiveAirRequest(venueUserId: string): Promise<void> {
+  const venueName = await venueNameFor(venueUserId).catch(() => 'Заведение');
+  const { rows: u } = await pool.query(`SELECT email FROM users WHERE id::text = $1 LIMIT 1`, [venueUserId]);
+  const email = u[0]?.email || 'нет почты';
+  const m = await import('./email-helper.tsx');
+  const price = LIVE_AIR_PRICE.toLocaleString('ru-RU');
+  const html = m.emailWrapper(`
+      <h2 style="margin:0 0 16px;color:#FF577F;">Заявка на «Радио полного цикла»: ${m.escapeHtml(venueName)}</h2>
+      <p style="color:#e0e0e0;">Заведение ${m.escapeHtml(venueName)} (${m.escapeHtml(email)}) оставило в кабинете заявку на «Радио полного цикла» (${price} ₽/мес).</p>
+      <p style="color:#888;font-size:13px;">Ведущие и подкасты пока не включены. Свяжитесь с заведением, согласуйте запуск и стоимость, затем включите эфир с ведущими (docs/PROMOAIR.md, раздел 6).</p>
+      <p style="color:#888;font-size:13px;">ID: ${m.escapeHtml(venueUserId)}</p>`);
+  await m.sendEmail({ to: 'info@promofm.ru', subject: `[ПРОМО] Заявка на «Радио полного цикла»: ${venueName}`, html });
+  await m.notifyAdminTelegram(`📻 <b>Заявка на «Радио полного цикла»</b>\n${esc(venueName)} (${esc(email)})\n${price} ₽/мес, ведущие пока не включены: согласовать и включить вручную`).catch(() => {});
 }
 
 // Ведущий у заведения постоянный: выбираем по голосу из анкеты и id заведения.
@@ -387,6 +417,11 @@ async function podcastsToday(venueUserId: string): Promise<number> {
 export async function startVenuePodcast(venueUserId: string, topic: string | null, notifyChat: string | null): Promise<{ ok: boolean; error?: string }> {
   const streams = await venueStreams(venueUserId);
   if (!streams.length) return { ok: false, error: 'Эфир заведения ещё не запущен' };
+  // Подкасты, как и ведущие, только в «Радио полного цикла» (раньше собирались
+  // по запросу у любого заведения с потоком).
+  if (!liveAirOn(streams, await hostConfigFor(venueUserId))) {
+    return { ok: false, error: 'Подкасты входят в «Радио полного цикла». Оставьте заявку в кабинете, и мы свяжемся с вами.' };
+  }
   if (podcastRunning.has(venueUserId)) return { ok: false, error: 'Подкаст уже собирается' };
   if ((await podcastsToday(venueUserId)) >= PODCASTS_PER_DAY) return { ok: false, error: `Сегодня уже ${PODCASTS_PER_DAY} подкаста, это предел на день` };
   const items = await activeAgenda(venueUserId);
@@ -556,7 +591,7 @@ if (process.env.VENUE_AIR_STUDIO !== '0') {
 
 // ─── Telegram: сообщения от voice-bot.mjs ─────────────────────────────────
 
-const HELP = (venue: string) => `Бот радио «${esc(venue)}» в ПРОМО.ЭИР.
+const HELP = (venue: string) => `Бот радио «${esc(venue)}» в PROMO.AIR.
 
 ✍️ Напишите новость текстом: новое меню, событие, акция. Ведущие расскажут о ней гостям в ближайших выходах в эфир.
 🎙 Пришлите голосовое или аудиофайл: запись прозвучит в эфире в ближайший час с 10:00 до 22:00.
@@ -705,14 +740,18 @@ app.get('/my', requireAuth, async (c) => {
       getBot(),
     ]);
     const [host] = hostNames(venueUserId, cfg.voice);
-    const hostOn = streams.some((s) => s.hostEnabled === true || (s.hostEnabled !== false && cfg.airType === 'full_radio'));
+    const hostOn = liveAirOn(streams, cfg);
+    const liveAir = cfg.airType === 'full_radio';
     const { rows: reqRows } = await pool.query(`SELECT 1 FROM venue_station_requests WHERE user_id = $1 LIMIT 1`, [venueUserId]);
     const t = tg.rows[0];
     return c.json({
       success: true,
       data: {
         hasStream: streams.length > 0,
-        liveAir: cfg.airType === 'full_radio',
+        liveAir,
+        // Заявка на «Радио полного цикла» ждёт команду (POST /my/live-air).
+        liveAirRequested: !liveAir && !!cfg.liveAirRequestedAt,
+        liveAirRequestedAt: !liveAir ? cfg.liveAirRequestedAt || null : null,
         liveAirPrice: LIVE_AIR_PRICE,
         hasRequest: reqRows.length > 0,
         streams: streams.map((s) => ({ id: s.id, pointName: s.pointName, online: s.online })),
@@ -738,33 +777,67 @@ app.get('/my', requireAuth, async (c) => {
   }
 });
 
-// Переключатель LIVE AIR в кабинете: формат эфира в анкете (full_radio ↔ background).
+// «Радио полного цикла» из кабинета (20.10.2026).
+// enabled:true = ЗАЯВКА: в анкету пишется format.liveAirRequestedAt, команде
+// уходит письмо и Telegram. Формат (airType) и ведущие на потоках не меняются:
+// раньше этот вызов ставил full_radio и сбрасывал host_enabled, и ведущие с
+// подкастами включались сразу и бесплатно. Включает команда:
+// POST /admin/live-air/:userId. Повторная заявка письмо не дублирует.
+// enabled:false = выключить (как раньше: формат background, ручные настройки
+// ведущего сброшены) и отозвать заявку.
 app.post('/my/live-air', requireAuth, async (c) => {
   const venueUserId = String(c.get('userId'));
   const body: any = await c.req.json().catch(() => ({}));
   const enabled = body?.enabled === true;
-  const { rows } = await pool.query(
-    `UPDATE venue_station_requests
-        SET format = jsonb_set(COALESCE(format, '{}'::jsonb), '{airType}', to_jsonb($2::text)), updated_at = now()
-      WHERE id = (SELECT id FROM venue_station_requests WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1)
-      RETURNING id`,
-    [venueUserId, enabled ? 'full_radio' : 'background'],
+  const { rows: cur } = await pool.query(
+    `SELECT id, format FROM venue_station_requests WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [venueUserId],
   );
-  if (!rows[0]) return c.json({ success: false, error: 'Сначала заполните анкету эфира' }, 400);
+  if (!cur[0]) return c.json({ success: false, error: 'Сначала заполните анкету эфира' }, 400);
+  const format = cur[0].format && typeof cur[0].format === 'object' ? cur[0].format : {};
+
+  if (enabled) {
+    if (format.airType === 'full_radio') {
+      return c.json({ success: true, data: { liveAir: true, liveAirRequested: false, liveAirRequestedAt: null } });
+    }
+    if (typeof format.liveAirRequestedAt === 'string' && format.liveAirRequestedAt) {
+      return c.json({ success: true, data: { liveAir: false, liveAirRequested: true, liveAirRequestedAt: format.liveAirRequestedAt } });
+    }
+    const { rows } = await pool.query(
+      `UPDATE venue_station_requests
+          SET format = jsonb_set(COALESCE(format, '{}'::jsonb), '{liveAirRequestedAt}', to_jsonb(to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))),
+              updated_at = now()
+        WHERE id = $1
+        RETURNING format->>'liveAirRequestedAt' AS requested_at`,
+      [cur[0].id],
+    );
+    notifyLiveAirRequest(venueUserId).catch((e) => console.warn('[venue-air] live-air request notify', e?.message));
+    return c.json({ success: true, data: { liveAir: false, liveAirRequested: true, liveAirRequestedAt: rows[0]?.requested_at || null } });
+  }
+
+  const wasOn = format.airType === 'full_radio';
+  await pool.query(
+    `UPDATE venue_station_requests
+        SET format = jsonb_set(COALESCE(format, '{}'::jsonb), '{airType}', to_jsonb('background'::text)) - 'liveAirRequestedAt',
+            updated_at = now()
+      WHERE id = $1`,
+    [cur[0].id],
+  );
   // Формат решает сам: ручной запрет/включение ведущего на потоках сбрасываем.
   await pool.query(`UPDATE venue_station_streams SET host_enabled = NULL WHERE user_id = $1`, [venueUserId]);
-  const venueName = await venueNameFor(venueUserId).catch(() => 'Заведение');
-  const { rows: u } = await pool.query(`SELECT email FROM users WHERE id::text = $1 LIMIT 1`, [venueUserId]);
-  import('./email-helper.tsx').then(async (m) => {
-    const what = enabled ? `включило LIVE AIR (${LIVE_AIR_PRICE.toLocaleString('ru-RU')} ₽/мес)` : 'выключило LIVE AIR';
-    const html = m.emailWrapper(`
+  if (wasOn) {
+    const venueName = await venueNameFor(venueUserId).catch(() => 'Заведение');
+    const { rows: u } = await pool.query(`SELECT email FROM users WHERE id::text = $1 LIMIT 1`, [venueUserId]);
+    import('./email-helper.tsx').then(async (m) => {
+      const html = m.emailWrapper(`
       <h2 style="margin:0 0 16px;color:#FF577F;">LIVE AIR: ${m.escapeHtml(venueName)}</h2>
-      <p style="color:#e0e0e0;">Заведение ${m.escapeHtml(venueName)} (${m.escapeHtml(u[0]?.email || 'нет почты')}) ${what} в кабинете.</p>
-      <p style="color:#888;font-size:13px;">${enabled ? 'Ведущие и подкасты уже работают. Переведите заведение на тариф LIVE AIR.' : 'Ведущие и подкасты остановлены. Проверьте тариф.'}</p>`);
-    await m.sendEmail({ to: 'info@promofm.ru', subject: `[ПРОМО] LIVE AIR ${enabled ? 'включён' : 'выключен'}: ${venueName}`, html });
-    await m.notifyAdminTelegram(`📻 <b>LIVE AIR ${enabled ? 'включён' : 'выключен'}</b>\n${venueName} (${u[0]?.email || 'нет почты'})${enabled ? `\nТариф ${LIVE_AIR_PRICE} ₽/мес – перевести вручную` : ''}`).catch(() => {});
-  }).catch(() => {});
-  return c.json({ success: true, data: { liveAir: enabled } });
+      <p style="color:#e0e0e0;">Заведение ${m.escapeHtml(venueName)} (${m.escapeHtml(u[0]?.email || 'нет почты')}) выключило «Радио полного цикла» в кабинете.</p>
+      <p style="color:#888;font-size:13px;">Ведущие и подкасты остановлены. Проверьте тариф.</p>`);
+      await m.sendEmail({ to: 'info@promofm.ru', subject: `[ПРОМО] LIVE AIR выключен: ${venueName}`, html });
+      await m.notifyAdminTelegram(`📻 <b>LIVE AIR выключен</b>\n${esc(venueName)} (${esc(u[0]?.email || 'нет почты')})`).catch(() => {});
+    }).catch(() => {});
+  }
+  return c.json({ success: true, data: { liveAir: false, liveAirRequested: false, liveAirRequestedAt: null } });
 });
 
 app.post('/my/agenda', requireAuth, async (c) => {
@@ -814,6 +887,37 @@ app.post('/my/telegram/unlink', requireAuth, async (c) => {
 });
 
 // ─── Админ ────────────────────────────────────────────────────────────────
+
+// «Радио полного цикла» включает и выключает команда (20.10.2026): формат
+// последней анкеты full_radio ↔ background, заявка закрывается, ручные
+// настройки ведущего на потоках сбрасываются (дальше решает формат).
+// Тело { enabled: boolean, reason?: string }. Запись в audit_logs.
+app.post('/admin/live-air/:userId', requireAuth, requireAdmin, async (c) => {
+  const userId = c.req.param('userId');
+  const body: any = await c.req.json().catch(() => ({}));
+  if (body?.enabled !== true && body?.enabled !== false) {
+    return c.json({ success: false, error: 'enabled: true или false' }, 400);
+  }
+  const enabled = body.enabled === true;
+  const { rows } = await pool.query(
+    `UPDATE venue_station_requests
+        SET format = (jsonb_set(COALESCE(format, '{}'::jsonb), '{airType}', to_jsonb($2::text)) - 'liveAirRequestedAt')
+                     || CASE WHEN $3::boolean THEN jsonb_build_object('liveAirEnabledAt', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) ELSE '{}'::jsonb END,
+            updated_at = now()
+      WHERE id = (SELECT id FROM venue_station_requests WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1)
+      RETURNING id::text AS id`,
+    [userId, enabled ? 'full_radio' : 'background', enabled],
+  );
+  if (!rows[0]) return c.json({ success: false, error: 'У заведения нет анкеты эфира' }, 404);
+  await pool.query(`UPDATE venue_station_streams SET host_enabled = NULL WHERE user_id = $1`, [userId]);
+  logAdminAction(c, {
+    action: enabled ? 'venue_live_air_on' : 'venue_live_air_off',
+    resourceType: 'venue',
+    targetId: userId,
+    details: { actorEmail: c.get('userEmail') || null, requestId: rows[0].id, reason: typeof body.reason === 'string' ? body.reason.slice(0, 500) : null },
+  });
+  return c.json({ success: true, data: { liveAir: enabled, requestId: rows[0].id } });
+});
 
 app.post('/admin/streams/:id/host', requireAuth, requireAdmin, async (c) => {
   const id = c.req.param('id');

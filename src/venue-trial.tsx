@@ -372,7 +372,10 @@ export async function expireTrialsOnce(): Promise<CronResult> {
       // Пробный от админа без автопродления: обещать списание нельзя, письмо
       // уходит в прежнем общем виде (без суммы и даты).
       let charge: TrialChargeNotice | undefined;
-      if (remindNow && !isVenueAutoRenewOff(row.data)) {
+      // Без автопродления письмо говорит правду: списания не будет, по окончании
+      // эфир приостановится (раньше уходил старый текст про бесплатный режим).
+      const noAutoRenew = isVenueAutoRenewOff(row.data);
+      if (remindNow && !noAutoRenew) {
         const plan = resolveVenueChargePlan(row.data);
         const hasCard = !!(await getChargeablePaymentMethod(row.user_id));
         charge = { amountRub: plan.amount, planName: plan.name, interval: plan.interval, atIso: state.expiresAtIso as string, hasCard };
@@ -398,6 +401,7 @@ export async function expireTrialsOnce(): Promise<CronResult> {
               expiresAtIso: state.expiresAtIso,
               site: await siteForUserId(row.user_id),
               charge,
+              noAutoRenew,
             }).catch((e) => console.warn('[venue-trial] last-day email failed:', e?.message));
           }
           result.warned++;
@@ -426,6 +430,7 @@ export async function expireTrialsOnce(): Promise<CronResult> {
             expiresAtIso: state.expiresAtIso,
             site: await siteForUserId(row.user_id),
             charge,
+            noAutoRenew,
           }).catch((e) => console.warn('[venue-trial] warning email failed:', e?.message));
         }
         result.warned++;

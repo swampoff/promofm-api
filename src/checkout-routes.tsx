@@ -3118,6 +3118,22 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
 });
 
 // ── GET /session/:orderId ──
+//
+// Итог оплаты для страницы возврата (только владельцу сессии). Для оплат
+// заведения (тариф, проверка карты, абонемент эфира) статус приводится к
+// трём значениям кабинета PROMO.AIR: succeeded / canceled / pending.
+// 'processing' (вебхук разбирает платёж) = pending; проверочный 1 ₽ после
+// возврата ('refunded') = succeeded: карта привязана, рубль вернулся, как и
+// обещано. Остальные платежи отдают статус сессии как раньше.
+function publicSessionStatus(session: PaymentSession): string {
+  const s = String(session.status || 'pending');
+  const venue = String(session.type || '').startsWith('venue_') || String(session.metadata?.type || '').startsWith('venue_');
+  if (!venue) return s;
+  if (s === 'succeeded' || s === 'canceled') return s;
+  if (s === 'refunded' && isVenueCardCheck(session)) return 'succeeded';
+  if (s === 'refunded') return 'refunded';
+  return 'pending';
+}
 
 checkoutRoutes.get('/session/:orderId', requireAuth, async (c) => {
   try {
@@ -3137,7 +3153,7 @@ checkoutRoutes.get('/session/:orderId', requireAuth, async (c) => {
       success: true,
       data: {
         orderId: session.orderId,
-        status: session.status,
+        status: publicSessionStatus(session),
         amount: session.amount,
         currency: session.currency,
         type: session.type,

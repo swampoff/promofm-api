@@ -72,7 +72,7 @@ import { pool } from './db-client.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { ensureVenueProfile, getVenueProfile as dbGetVenueProfile, upsertVenueProfile, getChargeablePaymentMethod, upsertPaymentSession, insertPaymentTx } from './db.tsx';
 import { recordRevenue } from './platform-revenue.tsx';
-import { safeErrorMessage } from './security.tsx';
+import { safeErrorMessage, secretMatches } from './security.tsx';
 import { emitSSE } from './sse-routes.tsx';
 import { originFromRequest, siteForUserId, PATH } from './site-origin.tsx';
 import { loadVenueReceiptEmail, requireVenueAccount, isChargeableAccount, pauseVenueStreams, settleChargeSession } from './venue-billing-helpers.tsx';
@@ -180,7 +180,9 @@ app.post('/subscribe', requireAuth, requireVenueAccount, async (c) => {
     const gateway = getGateway('yookassa');
     const orderId = crypto.randomUUID();
     // Возврат на тот сайт, откуда начали оплату (сессия у promoair.ru своя).
-    const returnUrl = `${originFromRequest(c)}${PATH.venueSubscription}?payment=success&tier=${tier}`;
+    // order: кабинет спрашивает итог у GET /checkout/session/:orderId, а не
+    // верит адресу (ЮKassa возвращает сюда и после отмены оплаты).
+    const returnUrl = `${originFromRequest(c)}${PATH.venueSubscription}?payment=success&tier=${tier}&order=${orderId}`;
     const desc = `Подписка «${plan.name}» (${interval === 'year' ? 'год' : 'мес'}) – ${profile.venueName || 'заведение'}`;
     // 54-ФЗ: чек на e-mail заведения (без него шлюз подставлял noreply@).
     const receiptEmail = await loadVenueReceiptEmail(userId);
@@ -292,7 +294,7 @@ app.post('/attach-card', requireAuth, requireVenueAccount, async (c) => {
     const { getGateway } = await import('./payment-gateway.tsx');
     const gateway = getGateway('yookassa');
     const orderId = crypto.randomUUID();
-    const returnUrl = `${originFromRequest(c)}${PATH.venueSubscription}?card=attached`;
+    const returnUrl = `${originFromRequest(c)}${PATH.venueSubscription}?card=attached&order=${orderId}`;
     const desc = `Привязка карты для пробного периода – ${profile.venueName || 'заведение'} (1 ₽ вернётся автоматически)`;
     const receiptEmail = await loadVenueReceiptEmail(userId);
     // Выбор тарифа: trialPlan / trialInterval, НЕ planKey (см. вебхук).
@@ -532,8 +534,10 @@ app.get('/me', requireAuth, requireVenueAccount, async (c) => {
       nextChargeRub: next?.amountRub ?? null,
       nextChargePlan: next?.tier || null,
       nextChargeInterval: next?.interval || null,
-      // Пробный идёт, а карта не сохранилась: автосписания не будет.
-      cardRequired: status === 'trial' && !card,
+      // Пробный идёт, а карта не сохранилась: автосписания не будет. Пробный
+      // от админа (autoRenew:false) карты и не ждёт: там баннер «карта не
+      // сохранилась» был бы неправдой.
+      cardRequired: status === 'trial' && !card && !isVenueAutoRenewOff(data),
     };
 
     return c.json({ success: true, subscription, savedCard });
@@ -575,7 +579,7 @@ app.post('/cron/charge-recurring', async (c) => {
     return c.json({ success: false, error: 'Server misconfiguration' }, 500);
   }
   const provided = c.req.header('X-Cron-Secret') || c.req.header('Authorization')?.replace('Bearer ', '');
-  if (provided !== expected) {
+  if (!secretMatches(provided, expected)) {
     return c.json({ success: false, error: 'Unauthorized' }, 401);
   }
 
@@ -785,7 +789,9 @@ app.post('/cron/charge-recurring', async (c) => {
             gateway: card.gateway || 'yookassa',
             description: `Автопродление «${plan.name}»`,
             metadata: { tier, interval, recurring: true, orderId },
-            status: 'pending',
+            // Пишется только после succeeded от шлюза: деньги списаны. Раньше
+            // 'pending' навсегда («В обработке» в истории платежей).
+            status: 'completed',
             createdAt: now.toISOString(),
           });
 

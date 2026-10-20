@@ -51,6 +51,8 @@ interface ContentOrder {
   audioUrl?: string;
   paymentOrderId?: string;
   paymentGateway?: string;
+  /** Срочный заказ (data.urgent, с 20.10.2026) */
+  urgent?: boolean;
   paidAt?: string;
   createdAt: string;
   updatedAt: string;
@@ -71,6 +73,7 @@ function rowToOrder(r: any): ContentOrder {
     audioUrl: r.audio_url || undefined,
     paymentOrderId: r.payment_order_id || undefined,
     paymentGateway: r.payment_gateway || undefined,
+    urgent: r.data && typeof r.data === 'object' ? r.data.urgent === true : false,
     paidAt: r.paid_at?.toISOString?.() || r.paid_at,
     createdAt: r.created_at?.toISOString?.() || r.created_at,
     updatedAt: r.updated_at?.toISOString?.() || r.updated_at,
@@ -129,8 +132,28 @@ app.post('/orders', requireAuth, profileLimiter, async (c) => {
       [orderId, venueId, venueName, contentType, text, style, duration || 30, voiceType, price]
     );
 
+    // Срочность (и выбранный тариф модалки) сохраняем в content_orders.data:
+    // раньше флаг только менял цену и терялся, команда не видела, что заказ
+    // срочный. Отдельный best-effort UPDATE (как signup_site): заказ уже создан,
+    // ошибка записи флага его не отменяет.
+    let row = r.rows[0];
+    if (body.urgent === true || typeof body.styleTier === 'string') {
+      try {
+        const u = await pool.query(
+          `UPDATE content_orders
+              SET data = COALESCE(data, '{}'::jsonb) || jsonb_build_object('urgent', $2::boolean, 'styleTier', $3::text)
+            WHERE id = $1
+            RETURNING *`,
+          [orderId, body.urgent === true, typeof body.styleTier === 'string' ? body.styleTier.slice(0, 40) : null]
+        );
+        if (u.rows[0]) row = u.rows[0];
+      } catch (err: any) {
+        console.warn(`[content-orders] urgent flag not stored for ${orderId}:`, err?.message);
+      }
+    }
+
     console.log(`Content order created: ${orderId} (${contentType}) for venue=${venueId}`);
-    return c.json({ success: true, order: rowToOrder(r.rows[0]) });
+    return c.json({ success: true, order: rowToOrder(row) });
   } catch (error: any) {
     console.error('POST /orders error:', error);
     return c.json({ success: false, error: error.message || 'Failed to create order' }, 500);

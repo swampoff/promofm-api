@@ -39,7 +39,7 @@ import { Hono } from 'hono';
 import { pool } from './db-client.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { getVenueProfile as dbGetVenueProfile } from './db.tsx';
-import { safeErrorMessage } from './security.tsx';
+import { safeErrorMessage, secretMatches } from './security.tsx';
 
 const app = new Hono();
 
@@ -318,7 +318,7 @@ app.post('/cron/tick', async (c) => {
     return c.json({ success: false, error: 'Server misconfiguration' }, 500);
   }
   const provided = c.req.header('X-Cron-Secret') || c.req.header('Authorization')?.replace('Bearer ', '');
-  if (provided !== expected) {
+  if (!secretMatches(provided, expected)) {
     return c.json({ success: false, error: 'Unauthorized' }, 401);
   }
 

@@ -26,12 +26,12 @@
  */
 
 import { Hono } from 'hono';
-import { getBooking, getBookingsByUser, getNotification, getNotificationsByUser, getVenueProfile as dbGetVenueProfile, upsertNotification, upsertVenueProfile, getPlatformStats, setPlatformStats, getVenueRadioBrand, patchVenueRadioBrand, listRadioVenueRequestsByStation, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, insertRadioVenueRequest, insertRadioNotification, type VenueAdCampaignRow } from './db.tsx';
+import { getBooking, getBookingsByUser, getNotificationsByUser, markNotificationRead, ensureVenueProfile, getVenueProfile as dbGetVenueProfile, upsertVenueProfile, getPlatformStats, setPlatformStats, getVenueRadioBrand, patchVenueRadioBrand, listRadioVenueRequestsByStation, listVenueAdCampaigns, insertVenueAdCampaign, updateVenueAdCampaign, insertRadioVenueRequest, insertRadioNotification, type VenueAdCampaignRow } from './db.tsx';
 import { pool } from './db-client.tsx';
 import { resolveUserId } from './resolve-user-id.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { notifyVenueRequest } from './email-helper.tsx';
-import { safeErrorMessage } from './security.tsx';
+import { safeErrorMessage, secretMatches } from './security.tsx';
 import { splitRadioCampaignAmount } from './financial-constants.tsx';
 import {
   getEffectiveVenuePlan,
@@ -71,57 +71,22 @@ async function getVenueProfile(userId: string) {
 // =====================================================
 
 // GET /profile - Получить профиль заведения
+//
+// 20.10.2026: только для роли venue (остальным 404 { error: 'not_a_venue' }:
+// раньше админ или артист, открывший кабинет, получал мусорную строку
+// «Мое заведение · bar · Москва» и письмо админу). Строку создаёт
+// ensureVenueProfile (db.tsx), как у оплаты и анкеты эфира: имя из
+// регистрации, без выдуманных типа и города, письмо «новое заведение»
+// только при реальной вставке.
 app.get('/profile', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
-    const profile = await getVenueProfile(userId);
+    if (c.get('userRole') !== 'venue') {
+      return c.json({ success: false, error: 'not_a_venue' }, 404);
+    }
+    const profile = parse(await ensureVenueProfile(userId));
     if (!profile) {
-      // Создаем дефолтный профиль, если не найден
-      const defaultProfile = {
-        id: `venue-${userId}`,
-        userId,
-        venueName: 'Мое заведение',
-        description: null,
-        venueType: 'bar',
-        address: '',
-        city: 'Москва',
-        country: 'Россия',
-        capacity: null,
-        logoUrl: null,
-        coverImageUrl: null,
-        genres: [],
-        socialLinks: {},
-        workingHours: null,
-        status: 'active',
-        verified: false,
-        // Пробный период (7 дней с 16.10.2026) включается ТОЛЬКО после привязки карты
-        // (POST /venue-billing/attach-card → вебхук ставит 'trial').
-        // Владелец 2026-08-07: «заведение обязано привязывать карту».
-        // 'pending_card' не распознаётся getEffectiveVenuePlan → план 'free',
-        // эфир не выдаётся авансом. Действующие 'trial' не трогаем.
-        subscriptionStatus: 'pending_card',
-        subscriptionPlan: 'start',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      await upsertVenueProfile(userId, defaultProfile);
-      // Уведомляем админа: раньше о новых заведениях никто не узнавал
-      // (владелец 2026-08-07). Не блокируем ответ клиенту.
-      import('./email-helper.tsx')
-        .then((m: any) => m.notifyAdminNewVenue?.({
-          venueName: defaultProfile.venueName || defaultProfile.name || '',
-          city: defaultProfile.city,
-          venueType: defaultProfile.venueType,
-          email: defaultProfile.email,
-          userId,
-          stage: 'registered',
-        }))
-        .catch((e: any) => console.error('[venue] admin notify failed:', e?.message || e));
-      return c.json({
-        ...defaultProfile,
-        effectivePlan: getEffectiveVenuePlan(defaultProfile),
-        planLimits: getEffectiveVenueLimits(defaultProfile),
-      });
+      return c.json({ success: false, error: 'not_a_venue' }, 404);
     }
 
     // Surface the venue's resolved plan + limits so the cabinet can
@@ -492,14 +457,12 @@ app.put('/notifications/:id/read', requireAuth, async (c) => {
   try {
     const userId = await getUserId(c);
     const notifId = c.req.param('id');
-    const notifRaw = await getNotification(userId, notifId);
-    
-    if (notifRaw) {
-      const notif = parse(notifRaw);
-      if (notif) {
-        notif.read = true;
-        await upsertNotification(userId, notifId, notif);
-      }
+    // Одна UPDATE по id И user_id. Раньше get искал составной id
+    // `${userId}:${id}`, ничего не находил и отвечал success: прочитанное
+    // не сохранялось, счётчик колокольчика не уменьшался (20.10.2026).
+    const changed = await markNotificationRead(userId, notifId);
+    if (!changed) {
+      return c.json({ success: false, error: 'Notification not found' }, 404);
     }
 
     return c.json({ success: true });
@@ -1067,7 +1030,7 @@ app.post('/cron/expire-trials', async (c) => {
     return c.json({ success: false, error: 'Server misconfiguration' }, 500);
   }
   const provided = c.req.header('X-Cron-Secret') || c.req.header('Authorization')?.replace('Bearer ', '');
-  if (provided !== expected) {
+  if (!secretMatches(provided, expected)) {
     return c.json({ success: false, error: 'Unauthorized' }, 401);
   }
 

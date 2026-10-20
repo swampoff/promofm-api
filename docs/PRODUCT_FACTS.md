@@ -918,12 +918,68 @@ PROMO.AIR section of the admin on promo-music.ru (`/ctrl-pm7k2f/promo-air`).
   date it expires with the «автопродление не было включено» email. The
   flag is cleared by a paid `/subscribe`, `/venue-billing/resume` or a card
   binding during the trial (each is the venue's consent to be charged).
+- Rows and the detail carry `contactName` (sign-up application) and
+  `subscription.autoRenew` (false = assigned by an admin, never charged);
+  `?q=` also searches the contact name (since 2026-10-20).
 - Trial extension: only while `subscriptionStatus='trial'`, +1..60 days
   from the current end (or from now if it already passed), T-3/T-1
   reminders re-armed.
 - Every admin action on venues is in `audit_logs` (`promoair_*`,
   `venue_station_*`, `venue_stream_*`, `venue_apk_*`; `details.actorEmail`,
   `reason`, `before`/`after`). Pairing codes are never logged.
+
+### Venue profile, full radio, notifications, tickets (since 2026-10-20, PHASE 3)
+
+Details and contracts: `docs/PROMOAIR.md` §6.
+
+- **Venue profile row.** Created by `db.tsx:ensureVenueProfile` on the
+  first `GET /api/venue/profile`, `/venue-billing/*` or `/venue-station/*`
+  call, only for `users.role='venue'`. `venue_name` = `users.full_name`
+  (promoair sign-up sends the venue name there); type, city and country are
+  NULL (no more «Мое заведение / bar / Москва»); `data.contactName` comes from
+  `users.settings.application.contactName` (written at sign-up). One admin
+  «new venue» e-mail per venue: only the call whose `INSERT … ON CONFLICT
+  DO NOTHING` inserted the row sends it. `GET /api/venue/profile` answers
+  404 `not_a_venue` to every other role, admins included.
+- **«Радио полного цикла» is switched on by the team only.** The cabinet
+  (`POST /venue-air/my/live-air {enabled:true}`) and a questionnaire edit
+  after launch (`PUT /venue-station`) only record
+  `venue_station_requests.format.liveAirRequestedAt` and notify info@ +
+  Telegram. Hosts and podcasts run when the latest request has
+  `format.airType='full_radio'` or a stream has `host_enabled=true`; the team
+  sets that with `POST /venue-air/admin/live-air/:userId` (audit
+  `venue_live_air_on/off`). The 20 000 ₽ is not billed online.
+- **Notifications read state persists** (both sites):
+  `getNotification(userId, id)` matches `id` AND `user_id` (plus the legacy
+  `userId:id` form); the venue read is one UPDATE; unknown or foreign id
+  → 404. Before 20.10 nothing was ever marked read.
+- **Support tickets.** Messages with `internal_note:true` are returned to
+  admins only; non-admins cannot create them. A venue whose effective plan
+  has `prioritySupport` (Бизнес, Сеть, корпоративный, trial included) gets
+  priority ≥ `high` (SLA 24 h) on create, decided server-side. A team reply
+  to a venue's ticket also lands in the venue bell (`notifications`,
+  `actionUrl /venue/support?ticket=…`).
+- **Payment return.** Venue return URLs carry `&order=<orderId>`;
+  `GET /checkout/session/:orderId` (owner only) reports venue orders as
+  `pending | succeeded | canceled` (the refunded 1 ₽ check = `succeeded`).
+- **Venue payment history.** Trial-end and renewal charges are written to
+  `payment_txns` as `completed` (only after the gateway's `succeeded`).
+- **Sessions.** `POST /auth/change-password` works with the cookie session
+  and ends all sessions (refresh tokens revoked, cookies cleared).
+  `exchange-auto-login` sets `pf_refresh` like `/signin`.
+- **Artist auto-renewal** (`/subscriptions/charge-recurring`, no timer)
+  charges only a gateway-webhook card (`getChargeablePaymentMethod`).
+- **Cron secrets** are compared in constant time (`security.tsx:secretMatches`).
+- **Visitor stats** (`/analytics/live`, `/analytics/stats`) exclude
+  promoair.ru page views (`page_views.host`); `/analytics/pv` drops
+  `token`, `auto_login_token` and `chat`+`t` from the stored path.
+- **E-mails.** PROMO.AIR letters come from `"PROMO.AIR"
+  <noreply@promo-music.ru>`; music letters are byte-identical to before.
+  T-3/T-1 reminders of a trial without autocharge (`autoRenew:false`, both
+  sites, and every PROMO.AIR reminder without an amount) say there is no
+  autocharge and that the air pauses at the end; no «бесплатный режим».
+- **Content orders** store `data.urgent` (best effort; the order JSON has
+  `urgent`).
 
 ### Partner account moderation gate (since 2026-10-17, SECURITY)
 

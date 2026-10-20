@@ -69,6 +69,29 @@ async function storeSignupSite(userId: string, site: string): Promise<void> {
   }
 }
 
+// Данные заявки заведения в users.settings.application (слияние jsonb, другие
+// ключи settings не трогаются). Best-effort, как storeSignupSite.
+async function storeVenueApplication(userId: string, details: any): Promise<void> {
+  const a = details && typeof details === 'object' ? details : {};
+  const clean = (v: unknown, max: number) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const application: Record<string, string> = { submittedAt: new Date().toISOString() };
+  const contactName = clean(a.contactName, 120);
+  const venueName = clean(a.venueName, 200);
+  const source = clean(a.source, 40);
+  if (contactName) application.contactName = contactName;
+  if (venueName) application.venueName = venueName;
+  if (source) application.source = source;
+  if (!contactName && !venueName) return;
+  try {
+    await sql(
+      `UPDATE users SET settings = COALESCE(settings, '{}'::jsonb) || jsonb_build_object('application', $1::jsonb) WHERE id = $2`,
+      [JSON.stringify(application), userId]
+    );
+  } catch (err) {
+    log.warn({ err, userId }, 'venue_application_store_failed');
+  }
+}
+
 // ── JWT helpers ──
 function signToken(user: { id: string; email: string; role: string; token_version?: number }) {
   return jwt.sign({ sub: user.id, email: user.email, role: user.role, tv: user.token_version || 1 }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN, algorithm: 'HS256' });
@@ -126,14 +149,25 @@ async function _safeJsonParse_old(c: any): Promise<{ ok: true; body: any } | { o
 const auth = new Hono();
 
 // ── Helper: создать профиль на VPS (152-ФЗ) ──
-async function createVpsProfile(userId: string, email: string, name: string, role: string, avatar?: string | null) {
+async function createVpsProfile(userId: string, email: string, name: string, role: string, avatar?: string | null, site: string = 'music') {
   const accountStatus = PARTNER_ROLES.includes(role || 'artist') ? 'pending' : 'active';
   await vpsSaveProfile(userId, { email, name: name || email.split("@")[0], role: role || "artist", avatar: avatar || null, accountStatus });
   const notifId = `notif_${Date.now()}`;
+  // Заведению «загрузите первый трек» не подходит (20.10.2026): первый шаг
+  // у него анкета эфира. Остальным ролям текст прежний.
+  const welcome = role === 'venue'
+    ? {
+        title: site === 'air' ? "Добро пожаловать в PROMO.AIR!" : "Добро пожаловать в ПРОМО.МУЗЫКА!",
+        message: "Заполните анкету эфира: по ней наша команда соберёт и запустит эфир для вашего заведения.",
+        actionUrl: "/venue/onboarding",
+      }
+    : {
+        title: "Добро пожаловать в ПРОМО.МУЗЫКА!",
+        message: "Ваш аккаунт создан. Загрузите свой первый трек и начните продвижение.",
+      };
   await upsertNotification(userId, notifId, {
     id: notifId, userId, type: "info",
-    title: "Добро пожаловать в ПРОМО.МУЗЫКА!",
-    message: "Ваш аккаунт создан. Загрузите свой первый трек и начните продвижение.",
+    ...welcome,
     read: false, createdAt: new Date().toISOString(),
   });
 }
@@ -145,9 +179,9 @@ async function createVpsProfile(userId: string, email: string, name: string, rol
  * without hitting a "duplicate email" wall. Returns true on success, false on
  * rollback (caller should return a 5xx to the client).
  */
-async function createVpsProfileOrRollback(userId: string, email: string, name: string, role: string, avatar?: string | null): Promise<boolean> {
+async function createVpsProfileOrRollback(userId: string, email: string, name: string, role: string, avatar?: string | null, site: string = 'music'): Promise<boolean> {
   try {
-    await createVpsProfile(userId, email, name, role, avatar);
+    await createVpsProfile(userId, email, name, role, avatar, site);
     return true;
   } catch (profileErr) {
     log.error({ err: profileErr, userId, email, role }, 'profile_create_failed_rolling_back_user');
@@ -252,7 +286,8 @@ auth.post("/signup", async (c) => {
       }
     }
 
-    const profileOk = await createVpsProfileOrRollback(userId, email, userName, userRole);
+    const signupSite = signupSiteFromRequest(c);
+    const profileOk = await createVpsProfileOrRollback(userId, email, userName, userRole, null, signupSite);
     if (!profileOk) {
       return c.json({ success: false, error: 'Ошибка регистрации – не удалось создать профиль. Попробуйте ещё раз.' }, 500);
     }
@@ -278,8 +313,12 @@ auth.post("/signup", async (c) => {
       } catch (e) { log.warn({ err: e, userId }, 'radio_application_store_failed'); }
     }
 
-    const signupSite = signupSiteFromRequest(c);
     await storeSignupSite(userId, signupSite);
+    // Заявка заведения: контактное лицо (PROMO.AIR шлёт название заведения в
+    // name, а имя человека в applicationDetails.contactName). Хранится в
+    // users.settings.application: строки venue_profiles при регистрации ещё
+    // нет; ensureVenueProfile копирует его в профиль, админка показывает.
+    if (userRole === 'venue') await storeVenueApplication(userId, applicationDetails);
     const site = siteFromRequest(c);
 
     log.info({ email, userId, role: userRole, status: accountStatus, signupSite }, 'user_registered');
@@ -1033,10 +1072,10 @@ auth.get("/verify-email-page", async (c) => {
   if (!token) return c.redirect(`${originFromRequest(c)}${PATH.login}?error=missing_token`);
 
   return c.html(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Email Verification</title>
+<html lang="ru"><head><meta charset="utf-8"><title>Подтверждение почты</title>
 <style>body{display:flex;justify-content:center;align-items:center;height:100vh;background:#0a0a1a;color:#fff;font-family:sans-serif}
 .card{text-align:center;padding:40px;border-radius:16px;background:#1a1a2e}</style></head>
-<body><div class="card"><p>Confirming your email...</p>
+<body><div class="card"><p>Подтверждаем почту…</p>
 <form id="f" method="POST" action="/server/auth/verify-email-confirm">
 <input type="hidden" name="token" value="${token.replace(/"/g, '&quot;')}">
 </form><script>document.getElementById('f').submit()</script>
@@ -1143,9 +1182,14 @@ auth.post("/resend-verification-by-email", async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 // POST /auth/change-password
 // ──────────────────────────────────────────────────────────────────────
+// 20.10.2026: сессия из cookie pf_session, как у requireAuth (фронты шлют
+// только cookie, путь через Bearer отвечал 401 всем). Bearer оставлен для
+// старых клиентов. Проверка token_version как в requireAuth. После смены
+// пароля отзываются все refresh-токены и чистятся cookie: «все сессии
+// завершены» теперь правда.
 auth.post("/change-password", async (c) => {
   try {
-    const token = c.req.header("Authorization")?.split(" ")[1];
+    const token = getSessionCookie(c) || c.req.header("Authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
     if (!token) return c.json({ success: false, error: "Authorization required" }, 401);
     const decoded = verifyToken(token);
     if (!decoded) return c.json({ success: false, error: "Недействительная сессия." }, 401);
@@ -1155,14 +1199,20 @@ auth.post("/change-password", async (c) => {
     const pwErr2 = validatePassword(newPassword);
     if (pwErr2) return c.json({ success: false, error: pwErr2 }, 400);
 
-    const result = await sql(`SELECT id, password_hash FROM users WHERE id = $1`, [decoded.sub]);
+    const result = await sql(`SELECT id, password_hash, token_version FROM users WHERE id = $1`, [decoded.sub]);
     if (result.rows.length === 0) return c.json({ success: false, error: "Not found" }, 404);
+    if (decoded.tv !== undefined && (result.rows[0].token_version || 0) > (decoded.tv || 0)) {
+      return c.json({ success: false, error: "Сессия устарела. Войдите заново." }, 401);
+    }
 
     const valid = await bcrypt.compare(currentPassword, result.rows[0].password_hash || '');
     if (!valid) return c.json({ success: false, error: "Неверный текущий пароль" }, 400);
 
     const newHash = await bcrypt.hash(newPassword, 12);
     await sql(`UPDATE users SET password_hash = $1, token_version = COALESCE(token_version, 1) + 1 WHERE id = $2`, [newHash, decoded.sub]);
+    await revokeAllRefreshTokens(decoded.sub).catch((e: any) => log.warn({ err: e, userId: decoded.sub }, 'change_password_revoke_failed'));
+    clearSessionCookie(c);
+    clearRefreshCookie(c);
     return c.json({ success: true, message: "Пароль изменён. Все сессии завершены, войдите заново." });
   } catch (error) {
     return c.json({ success: false, error: "Internal server error" }, 500);
@@ -1493,6 +1543,16 @@ auth.post("/exchange-auto-login", async (c) => {
     }
     const accessToken = signToken({ id: user.id, email: user.email, role: user.role, token_version: user.token_version || 1 });
     setSessionCookie(c, accessToken);
+    // Refresh-cookie как у /signin (20.10.2026): без неё сессия после входа по
+    // ссылке из письма не продлевалась и обрывалась вместе с access-токеном.
+    try {
+      const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || c.req.header('x-real-ip') || '';
+      const ua = c.req.header('user-agent') || '';
+      const refreshTokenData = await createRefreshToken(user.id, ip, ua);
+      setRefreshCookie(c, refreshTokenData.token);
+    } catch (err) {
+      log.warn({ err, userId: user.id }, 'auto_login_refresh_token_failed');
+    }
     const profile = await vpsGetProfile(user.id);
 
     // Phase D C: accessToken убран. Auto-login через email-verification

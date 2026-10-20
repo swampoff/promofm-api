@@ -525,28 +525,65 @@ export async function getNotificationsByUser(userId: string) {
   //     (orderTitle, newStatus, comment, createdAt camelCase, etc.)
   // Merge: jsonb supplies rich fields, native columns are the source of
   // truth for primitives that the trigger keeps in sync.
-  return (data || []).map((r: any) => {
-    const rich = r.data && typeof r.data === 'object' ? r.data : null;
-    return {
-      ...(rich || {}),
-      id: r.id,
-      type: r.notification_type || rich?.type || 'info',
-      title: r.title || rich?.title || '',
-      message: r.message || rich?.message || '',
-      read: r.is_read ?? rich?.read ?? false,
-      createdAt: rich?.createdAt || r.created_at || '',
-    };
-  });
+  return (data || []).map(mapNotificationRow);
 }
 
+function mapNotificationRow(r: any): Record<string, any> {
+  const rich = r.data && typeof r.data === 'object' ? r.data : null;
+  return {
+    ...(rich || {}),
+    id: r.id,
+    type: r.notification_type || rich?.type || 'info',
+    title: r.title || rich?.title || '',
+    message: r.message || rich?.message || '',
+    read: r.is_read ?? rich?.read ?? false,
+    createdAt: rich?.createdAt || r.created_at || '',
+  };
+}
+
+/**
+ * Одно уведомление пользователя: строка с этим id И этим user_id.
+ * До 20.10.2026 искали id = `${userId}:${notifId}`, а все писатели
+ * (upsertNotification) кладут id = notifId: поиск не находил ничего, и
+ * «прочитано» / «в избранное» / удаление никогда не сохранялись (на обоих
+ * сайтах). Старые составные id `${userId}:${notifId}` ищутся вторым шагом.
+ * Возвращает ту же форму, что getNotificationsByUser (rich data + колонки),
+ * чтобы get + upsert не стирали заголовок у строк без data.
+ */
 export async function getNotification(userId: string, notifId: string) {
-  const { data, error } = await db()
-    .from('notifications')
-    .select('*')
-    .eq('id', `${userId}:${notifId}`)
-    .maybeSingle();
-  if (error) console.error('[db] getNotification:', error);
-  return data ? (data.data || data) : null;
+  const { pool } = await import('./db-client.tsx');
+  try {
+    const r = await pool.query(
+      `SELECT * FROM notifications
+        WHERE user_id::text = $1 AND (id = $2 OR id = $1 || ':' || $2)
+        ORDER BY (id = $2) DESC
+        LIMIT 1`,
+      [String(userId), String(notifId)],
+    );
+    return r.rows[0] ? mapNotificationRow(r.rows[0]) : null;
+  } catch (error) {
+    console.error('[db] getNotification:', error);
+    return null;
+  }
+}
+
+/**
+ * Отметить уведомление прочитанным одной UPDATE (без get + upsert, которые
+ * переписывали строку целиком). false = у пользователя нет такого уведомления.
+ */
+export async function markNotificationRead(userId: string, notifId: string): Promise<boolean> {
+  const { pool } = await import('./db-client.tsx');
+  const r = await pool.query(
+    `UPDATE notifications
+        SET is_read = TRUE,
+            status = 'read',
+            read_at = COALESCE(read_at, NOW()),
+            data = CASE WHEN jsonb_typeof(data) = 'object' THEN data || '{"read":true}'::jsonb ELSE data END,
+            updated_at = NOW()
+      WHERE user_id::text = $1 AND (id = $2 OR id = $1 || ':' || $2)`,
+    [String(userId), String(notifId)],
+  );
+  return (r.rowCount || 0) > 0;
 }
 
 export async function upsertNotification(userId: string, notifId: string, notif: Record<string, any>) {
@@ -1299,23 +1336,49 @@ export async function upsertDjProfile(djId: string, profile: Record<string, any>
  * в «Профиль» анкета «Формат и точки», привязка карты и брендинг отдавали 404,
  * а админ не узнавал о новом заведении (аудит 10-05). Создаём заготовку для
  * пользователя с ролью venue при первом обращении любого из этих разделов.
+ *
+ * 20.10.2026: имя заведения берём из регистрации (users.full_name: PROMO.AIR
+ * шлёт туда название заведения), контактное лицо из users.settings.application.
+ * Тип, город и страну не выдумываем (раньше «Мое заведение», «bar», «Москва»).
+ * Кабинет грузит профиль, оплату и эфир параллельно: INSERT … ON CONFLICT DO
+ * NOTHING, и письмо «новое заведение» уходит только из того вызова, который
+ * строку действительно вставил (раньше до трёх писем на заведение).
  */
 export async function ensureVenueProfile(userId: string) {
   const existing = await getVenueProfile(userId);
   if (existing) return existing;
-  const { data: u } = await db().from('users').select('role, email, full_name').eq('id', userId).maybeSingle();
+  const { pool } = await import('./db-client.tsx');
+  const ur = await pool.query(
+    `SELECT role::text AS role, email, full_name, settings FROM users WHERE id::text = $1 AND deleted_at IS NULL LIMIT 1`,
+    [String(userId)],
+  );
+  const u = ur.rows[0];
   if (!u || String(u.role) !== 'venue') return null;
+  const venueName = String(u.full_name || '').trim().slice(0, 200) || null;
+  const app = u.settings && typeof u.settings === 'object' ? u.settings.application : null;
+  const contactName = app && typeof app.contactName === 'string' ? app.contactName.trim().slice(0, 120) : '';
   const now = new Date().toISOString();
-  await upsertVenueProfile(userId, {
-    id: `venue-${userId}`, userId, venueName: 'Мое заведение', description: null, venueType: 'bar',
-    address: '', city: 'Москва', country: 'Россия', capacity: null, logoUrl: null, coverImageUrl: null,
+  const data = {
+    id: `venue-${userId}`, userId, venueName, description: null, venueType: null,
+    address: '', city: null, country: null, capacity: null, logoUrl: null, coverImageUrl: null,
     genres: [], socialLinks: {}, workingHours: null, status: 'active', verified: false,
+    ...(contactName ? { contactName } : {}),
     // Пробный период (7 дней) только после привязки карты (см. GET /venue/profile).
     subscriptionStatus: 'pending_card', subscriptionPlan: 'start', createdAt: now, updatedAt: now,
-  });
-  import('./email-helper.tsx')
-    .then((m: any) => m.notifyAdminNewVenue?.({ venueName: 'Мое заведение', city: 'Москва', venueType: 'bar', email: u.email, userId, stage: 'registered' }))
-    .catch(() => {});
+  };
+  // venue_type и capacity явно NULL: у колонок есть DEFAULT ('club', 0).
+  const ins = await pool.query(
+    `INSERT INTO venue_profiles (user_id, venue_name, venue_type, city, address, country, capacity, genres, social_links, data, updated_at)
+     VALUES ($1, $2, NULL, NULL, '', NULL, NULL, '{}'::text[], '{}'::jsonb, $3::jsonb, NOW())
+     ON CONFLICT (user_id) DO NOTHING
+     RETURNING id`,
+    [String(userId), venueName, JSON.stringify(data)],
+  );
+  if (ins.rowCount) {
+    import('./email-helper.tsx')
+      .then((m: any) => m.notifyAdminNewVenue?.({ venueName: venueName || '', email: u.email, userId, stage: 'registered' }))
+      .catch(() => {});
+  }
   return getVenueProfile(userId);
 }
 

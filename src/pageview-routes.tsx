@@ -23,6 +23,41 @@ const app = new Hono();
 // (42703 undefined_column), пишем как раньше и больше не пробуем.
 let pageViewsHostColumn = true;
 
+// Статистика админки promo-music.ru (/live, /stats) без просмотров promoair.ru.
+// Без колонки host (миграция 160 не применена) фильтра нет, как раньше.
+const NOT_AIR_SQL = `coalesce(host, '') NOT IN ('promoair.ru', 'www.promoair.ru')`;
+async function withSiteFilter<T>(run: (siteFilter: string) => Promise<T>): Promise<T> {
+  if (!pageViewsHostColumn) return run('TRUE');
+  try {
+    return await run(NOT_AIR_SQL);
+  } catch (err: any) {
+    if (err?.code !== '42703') throw err;
+    pageViewsHostColumn = false;
+    console.warn('[pageview] page_views.host missing (migration 160 not applied), stats without site filter');
+    return run('TRUE');
+  }
+}
+
+// Секреты из ссылок писем не храним в page_views.path: токен сброса пароля,
+// автовход после подтверждения почты, ключ гостевого чата (?chat=&t=).
+const SECRET_QUERY_KEYS = ['token', 'auto_login_token'];
+function scrubPath(raw: unknown): string {
+  const p = String(raw || '/').substring(0, 500);
+  const q = p.indexOf('?');
+  if (q < 0) return p;
+  try {
+    const params = new URLSearchParams(p.slice(q + 1));
+    let changed = false;
+    for (const k of SECRET_QUERY_KEYS) if (params.has(k)) { params.delete(k); changed = true; }
+    if (params.has('chat')) { params.delete('chat'); params.delete('t'); changed = true; }
+    if (!changed) return p;
+    const rest = params.toString();
+    return rest ? `${p.slice(0, q)}?${rest}` : p.slice(0, q);
+  } catch {
+    return p.slice(0, q);
+  }
+}
+
 // is_bot detection at insert time. Extended 2026-07: +prerender (крон prerender.py
 // UA "PromoFM-Prerender" раньше считался человеком) + headless/monitor/curl и т.п.
 const BOT_RE = /bot|crawl|spider|slurp|bingbot|googlebot|yandex|baidu|facebook|twitter|telegram|whatsapp|semrush|ahrefs|gptbot|claudebot|bytespider|petalbot|prerender|headless|monitor|uptime|pingdom|dataprovider|externalagent|python-requests|curl\/|wget/i;
@@ -66,7 +101,7 @@ app.post('/pv', async (c) => {
     const country = geo?.country || null;
 
     const values = [
-      (body.p || '/').substring(0, 500),
+      scrubPath(body.p),
       (body.r || '').substring(0, 1000) || null,
       ua.substring(0, 500),
       ip,
@@ -116,14 +151,14 @@ app.get('/live', requireAdminOrKey, async (c) => {
   try {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-    const [visitors, views, topPages, topRefs, devices, browsers] = await Promise.all([
-      pool.query(`SELECT COUNT(DISTINCT session_id) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false`, [since]),
-      pool.query(`SELECT COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false`, [since]),
-      pool.query(`SELECT path, COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false GROUP BY path ORDER BY cnt DESC LIMIT 10`, [since]),
-      pool.query(`SELECT referrer, COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false AND referrer IS NOT NULL AND referrer != '' GROUP BY referrer ORDER BY cnt DESC LIMIT 10`, [since]),
-      pool.query(`SELECT device, COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false GROUP BY device ORDER BY cnt DESC`, [since]),
-      pool.query(`SELECT browser, COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false GROUP BY browser ORDER BY cnt DESC LIMIT 8`, [since]),
-    ]);
+    const [visitors, views, topPages, topRefs, devices, browsers] = await withSiteFilter((SITE) => Promise.all([
+      pool.query(`SELECT COUNT(DISTINCT session_id) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false AND ${SITE}`, [since]),
+      pool.query(`SELECT COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false AND ${SITE}`, [since]),
+      pool.query(`SELECT path, COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false AND ${SITE} GROUP BY path ORDER BY cnt DESC LIMIT 10`, [since]),
+      pool.query(`SELECT referrer, COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false AND ${SITE} AND referrer IS NOT NULL AND referrer != '' GROUP BY referrer ORDER BY cnt DESC LIMIT 10`, [since]),
+      pool.query(`SELECT device, COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false AND ${SITE} GROUP BY device ORDER BY cnt DESC`, [since]),
+      pool.query(`SELECT browser, COUNT(*) as cnt FROM page_views WHERE created_at >= $1 AND is_bot = false AND ${SITE} GROUP BY browser ORDER BY cnt DESC LIMIT 8`, [since]),
+    ]));
 
     return c.json({
       success: true,
@@ -148,12 +183,14 @@ app.get('/live', requireAdminOrKey, async (c) => {
 app.get('/stats', requireAdminOrKey, async (c) => {
   try {
     const days = Math.min(365, Math.max(1, parseInt(c.req.query('days') || '30')));
-    const HUMAN = `NOT is_bot AND coalesce(user_agent,'') !~* '(prerender|bot|crawl|spider|slurp|externalagent|headless|phantom|python|curl|wget|monitor|uptime|pingdom|facebookexternalhit|semrush|ahrefs|bytespider|gptbot|claudebot|dataprovider|petalbot)'`;
+    const BASE_HUMAN = `NOT is_bot AND coalesce(user_agent,'') !~* '(prerender|bot|crawl|spider|slurp|externalagent|headless|phantom|python|curl|wget|monitor|uptime|pingdom|facebookexternalhit|semrush|ahrefs|bytespider|gptbot|claudebot|dataprovider|petalbot)'`;
     const MSK = `(created_at AT TIME ZONE 'Europe/Moscow')::date`;
     const SINCE = `created_at > (now() - ($1 * interval '1 day'))`;
     const pr = [days];
 
-    const [daily, sum, pages, sources, devices, browsers, geo] = await Promise.all([
+    const [daily, sum, pages, sources, devices, browsers, geo] = await withSiteFilter((SITE) => {
+      const HUMAN = `${BASE_HUMAN} AND ${SITE}`;
+      return Promise.all([
       pool.query(`WITH fs AS (SELECT session_id, min(${MSK}) fd FROM page_views WHERE ${HUMAN} GROUP BY 1)
         SELECT to_char(${MSK},'YYYY-MM-DD') AS date, count(DISTINCT pv.session_id)::int AS visitors,
           count(DISTINCT pv.ip)::int AS ips, count(*)::int AS views,
@@ -163,7 +200,7 @@ app.get('/stats', requireAdminOrKey, async (c) => {
       pool.query(`SELECT count(DISTINCT session_id) FILTER (WHERE ${HUMAN})::int AS visitors,
           count(DISTINCT ip) FILTER (WHERE ${HUMAN})::int AS ips,
           count(*) FILTER (WHERE ${HUMAN})::int AS views,
-          count(*) FILTER (WHERE NOT (${HUMAN}))::int AS bots_excluded
+          count(*) FILTER (WHERE NOT (${BASE_HUMAN}) AND ${SITE})::int AS bots_excluded
         FROM page_views WHERE ${SINCE}`, pr),
       pool.query(`SELECT path, count(DISTINCT session_id)::int AS visitors, count(*)::int AS views
         FROM page_views WHERE ${HUMAN} AND ${SINCE} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`, pr),
@@ -180,7 +217,8 @@ app.get('/stats', requireAdminOrKey, async (c) => {
         FROM page_views WHERE ${HUMAN} AND ${SINCE} GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, pr),
       pool.query(`SELECT coalesce(nullif(country,''),'??') AS country, count(DISTINCT session_id)::int AS visitors
         FROM page_views WHERE ${HUMAN} AND ${SINCE} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`, pr),
-    ]);
+      ]);
+    });
 
     const s0 = sum.rows[0] || {};
     return c.json({ success: true, data: {

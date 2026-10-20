@@ -294,7 +294,11 @@ notifications.post('/campaigns/:campaignId/send', requireAuth, async (c) => {
 });
 
 // Удалить уведомление
-notifications.delete('/:userId/:notificationId', requireAuth, async (c) => {
+// requireOwner (20.10.2026): getNotification теперь находит строку по id и
+// user_id, поэтому userId из пути обязан совпадать с сессией (иначе это была
+// бы правка чужих уведомлений). Удаление тоже: deleteNotification берёт
+// user_id из пути.
+notifications.delete('/:userId/:notificationId', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const notificationId = c.req.param('notificationId');
@@ -312,7 +316,7 @@ notifications.delete('/:userId/:notificationId', requireAuth, async (c) => {
 });
 
 // Отметить уведомление как прочитанное
-notifications.put('/:userId/:notificationId/read', requireAuth, async (c) => {
+notifications.put('/:userId/:notificationId/read', requireAuth, requireOwner('userId'), async (c) => {
   try {
     const userId = c.req.param('userId');
     const notificationId = c.req.param('notificationId');
