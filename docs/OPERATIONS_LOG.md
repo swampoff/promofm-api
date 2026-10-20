@@ -46,6 +46,14 @@ record of what got executed.
 - **Verified:** `enum_range(user_status)` содержит `rejected`; `venue_radio_plans` = basic, business, efir, pro, trial; `chat_sessions_source_chk` с `widget:air`/`cabinet:air`; `page_views.host` есть; `count(*) venue_profiles` = 1; `content_orders.data jsonb` есть (флаг «срочно» сохраняется).
 - **Follow-ups:** `CRON_SECRET` и таймеры venue-кронов (RUNBOOK §0 шаги 5-6, таймеры только после боевой привязки карты 1 ₽); миграция 097 маркетплейса всё ещё не применена.
 
+### 2026-10-20 (продолжение) – выкатка кода, CRON_SECRET, nginx, promoair.ru на сервере
+
+- **Код:** API `feat/promoair-domain` → main fast-forward (`9f7ab51`), `git pull --ff-only` в `/opt/promofm-api` (GitHub Action на этот сервер не выкатил), `systemctl restart promofm-api` 18:38 MSK, health 200, без новых ошибок в журнале. Фронт `feat/promoair-site` (с влитым `cfae9bf5` «События», конфликт только в импортах `AdminApp.tsx`) → main `bd3d33be`, `./deploy.sh` 18:40: главный CSS promo-music.ru тот же (`index-DypQYKBu.css`), 9 страниц `promoair-pages`. Гостевой прогон promo-music.ru (10 страниц × 1440/390): 5xx нет, `.pa-root` нигде нет; единственная ошибка консоли `POST /auth/refresh` 400 у гостя была и раньше.
+- **CRON_SECRET:** бэкап `/root/backups/promofm-api.env.2026-10-20_1843`, строка `printf` из PROMOAIR.md §2 (64 hex), рестарт; cron без секрета теперь 401 (было 500). Таймеры НЕ включены.
+- **nginx promo-music.ru** (бэкап `/root/backups/promo-music.ru.includes.2026-10-20_1844`): `/air/dj-api/` наружу только `GET status` и `GET now-playing`, остальное 404, POST на status 403 (по журналам за ~10 дней снаружи были только GET status 22 610, GET queue 1, GET now-playing 1); `location = /server/uploads/air-demo/manifest.json` с `no-cache`, ETag, gzip, CORS `*`, nosniff.
+- **promoair.ru:** домен зарегистрирован владельцем на reg.ru 20.10 18:13 MSK (paid-till 2027-10-20, state UNVERIFIED, NS пока `ns*.hosting.reg.ru`). Зона bind `/etc/bind/master/promoair.ru` (serial 2026102001) + `/etc/bind/promoair.conf`, include в `named.conf.local` (бэкап `/root/backups/named.conf.local.2026-10-20_*`), `rndc reload`. Сайт FastPanel id 8 (`app_file promoair.html`, шаблонный index.php удалён), корень = bind mount `/var/www/promofm/html` **ro** (fstab, бэкап `/root/backups/fstab.2026-10-20_*`), правила `/etc/nginx/fastpanel2-sites/fastuser/promoair.ru.includes`. По HTTP на 87.242.64.88 проверены все пути RUNBOOK §1 шаг 5.
+- **Ждёт:** NS в reg.ru → `ns1/ns2.arbatsite.ru`, затем сертификат LE, `PROMOAIR_ORIGIN`, правила `promoair-pages internal` и 301 `promoair.html` на promo-music.ru.
+
 ## 2026-07-02 — Артист-рассылка: финал прогона + hard-bounce чистка (laptop; запись — cloud по отчёту)
 
 - **What:** финальный прогон рассылки по артист-базе. 873 отправлено,
