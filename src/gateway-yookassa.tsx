@@ -6,6 +6,7 @@
  * Webhook verification: server-side GET /v3/payments/{id}
  */
 
+import crypto from 'crypto';
 import type {
   PaymentGateway,
   PaymentSessionRequest,
@@ -15,6 +16,32 @@ import type {
 } from './payment-gateway.tsx';
 
 const API_BASE = 'https://api.yookassa.ru/v3';
+
+/**
+ * Idempotence-Key у ЮKassa не длиннее 64 символов, иначе 400. Ключи
+ * автосписаний заведений длиннее (venue-renew-<uuid>-<ms>-<день> = 73), и
+ * каждое продление отклонялось бы. Длинный ключ заменяем его sha256 (64 hex):
+ * тот же вход даёт тот же ключ, идемпотентность сохраняется. orderId в БД и
+ * в metadata остаётся прежним. Ключи до 64 символов не меняются.
+ */
+export function yookassaIdempotenceKey(key: string): string {
+  return key.length <= 64 ? key : crypto.createHash('sha256').update(key).digest('hex');
+}
+
+// Состав чека 54-ФЗ (одна услуга) для платежа, автосписания и возврата.
+function receiptFor(email: string, description: string | undefined, amount: number, currency?: string) {
+  return {
+    customer: { email },
+    items: [{
+      description: description?.slice(0, 128) || 'Оплата на ПРОМО.МУЗЫКА',
+      quantity: '1.00',
+      amount: { value: amount.toFixed(2), currency: currency || 'RUB' },
+      vat_code: 1,  // Без НДС
+      payment_subject: 'service',
+      payment_mode: 'full_payment',
+    }],
+  };
+}
 
 // YooKassa API response shape (для всех endpoint'ов /payments, /refunds,
 // /payouts — у каждого есть error envelope {description, message} и
@@ -154,7 +181,7 @@ export class YooKassaGateway implements PaymentGateway {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': getAuthHeader(),
-        'Idempotence-Key': req.orderId,
+        'Idempotence-Key': yookassaIdempotenceKey(req.orderId),
       },
       body: JSON.stringify(body),
     });
@@ -284,6 +311,10 @@ export class YooKassaGateway implements PaymentGateway {
     idempotenceKey?: string;
     metadata?: Record<string, string>;
     shopId?: string;
+    // 54-ФЗ: чек возврата на этот адрес (состав как у платежа). Без него
+    // запрос прежний (остальные возвраты не меняются).
+    receiptEmail?: string;
+    receiptDescription?: string;
   }): Promise<{ id: string; status: 'succeeded' | 'pending' | 'canceled'; amount: number; raw: any }> {
     const body: any = {
       amount: {
@@ -294,7 +325,10 @@ export class YooKassaGateway implements PaymentGateway {
       description: opts?.description?.slice(0, 250),
       metadata: opts?.metadata || {},
     };
-    const idempotenceKey = opts?.idempotenceKey || `refund-${paymentId}-${Date.now()}`;
+    if (opts?.receiptEmail) {
+      body.receipt = receiptFor(opts.receiptEmail, opts.receiptDescription || opts.description, amountRub);
+    }
+    const idempotenceKey = yookassaIdempotenceKey(opts?.idempotenceKey || `refund-${paymentId}-${Date.now()}`);
     const payload = JSON.stringify(body);
 
     const doRefund = async (auth: string): Promise<Response> => {
@@ -364,17 +398,7 @@ export class YooKassaGateway implements PaymentGateway {
     // venue-billing). Состав чека как в createPayment. Без адреса запрос
     // прежний (артистский рекуррент не меняется).
     if (params.receiptEmail) {
-      body.receipt = {
-        customer: { email: params.receiptEmail },
-        items: [{
-          description: params.description?.slice(0, 128) || 'Оплата на ПРОМО.МУЗЫКА',
-          quantity: '1.00',
-          amount: { value: params.amount.toFixed(2), currency: params.currency || 'RUB' },
-          vat_code: 1,  // Без НДС
-          payment_subject: 'service',
-          payment_mode: 'full_payment',
-        }],
-      };
+      body.receipt = receiptFor(params.receiptEmail, params.description, params.amount, params.currency);
     }
 
     const response = await fetch(`${API_BASE}/payments`, {
@@ -382,7 +406,7 @@ export class YooKassaGateway implements PaymentGateway {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': getAuthHeader(),
-        'Idempotence-Key': params.orderId,
+        'Idempotence-Key': yookassaIdempotenceKey(params.orderId),
       },
       body: JSON.stringify(body),
     });

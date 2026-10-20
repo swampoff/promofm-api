@@ -1814,6 +1814,24 @@ export async function getUserSessions(userId: string) {
 // каждая запись падала, QueryBuilder только логировал ошибку, и карты не
 // сохранялись ни у кого (рекуррент артистов, триал и продление заведений).
 // Теперь uuid выдаёт БД, а id приложения ('pm-…') живёт в data.id.
+//
+// Списывать можно только карту, которую сохранил вебхук шлюза (data.source =
+// GATEWAY_CARD_SOURCE). Ручные способы из настроек пишутся через
+// userPaymentMethodInput: токен шлюза и source из тела запроса отбрасываются,
+// иначе чужой payment_method_id стал бы «картой» заведения для автосписаний.
+export const GATEWAY_CARD_SOURCE = 'gateway_webhook';
+
+/** Тело POST способа оплаты от пользователя без полей, которые ставит только сервер. */
+export function userPaymentMethodInput(body: any): Record<string, any> {
+  const { id: _id, gatewayMethodId: _token, gateway: _gw, source: _src, ...rest } = body && typeof body === 'object' ? body : ({} as any);
+  return rest;
+}
+
+/** Способ оплаты для ответа клиенту: без токена шлюза (он нужен только кронам). */
+export function publicPaymentMethod<T extends Record<string, any>>(m: T): Omit<T, 'gatewayMethodId' | 'source'> {
+  const { gatewayMethodId: _token, source: _src, ...rest } = m || ({} as T);
+  return rest;
+}
 
 export async function getPaymentMethods(userId: string) {
   const { data, error } = await db()
@@ -1827,10 +1845,10 @@ export async function getPaymentMethods(userId: string) {
 }
 
 /**
- * Самая свежая сохранённая карта шлюза (есть многоразовый gatewayMethodId)
- * или null. Для списаний: ручные способы из настроек (без токена) не берём.
- * Ошибка БД пробрасывается: крон не должен принять сбой чтения за «карты нет»
- * и отключить заведение.
+ * Самая свежая карта, сохранённая вебхуком шлюза (есть многоразовый
+ * gatewayMethodId и source = GATEWAY_CARD_SOURCE), или null. Для списаний:
+ * ручные способы из настроек не берём. Ошибка БД пробрасывается: крон не
+ * должен принять сбой чтения за «карты нет» и отключить заведение.
  */
 export async function getChargeablePaymentMethod(userId: string): Promise<Record<string, any> | null> {
   const { pool } = await import('./db-client.tsx');
@@ -1838,9 +1856,10 @@ export async function getChargeablePaymentMethod(userId: string): Promise<Record
     `SELECT id::text AS row_id, data, card_last_four, card_brand
        FROM payment_methods
       WHERE user_id = $1 AND COALESCE(data->>'gatewayMethodId', '') <> ''
+        AND data->>'source' = $2
       ORDER BY created_at DESC
       LIMIT 1`,
-    [userId],
+    [userId, GATEWAY_CARD_SOURCE],
   );
   const row = r.rows[0];
   if (!row) return null;

@@ -191,7 +191,7 @@ app.get("/user/:userId/payment-methods", requireAuth, requireOwner('userId'), as
     }
 
     const methods = await db.getPaymentMethods(userId);
-    return c.json({ methods: methods || [] });
+    return c.json({ methods: (methods || []).map(db.publicPaymentMethod) });
   } catch (error) {
     console.error("Error fetching payment methods:", error);
     return apiError(c, 'INTERNAL_ERROR');
@@ -211,9 +211,11 @@ app.post("/user/:userId/payment-methods", settingsLimiter, requireAuth, requireO
     const existingMethods = await db.getPaymentMethods(userId);
 
     const methodId = `pm-${Date.now()}`;
+    // Токен шлюза, источник и id из тела не принимаются (db.userPaymentMethodInput):
+    // ручной способ не может стать картой для автосписаний.
     const newMethod = {
+      ...db.userPaymentMethodInput(body),
       id: methodId,
-      ...body,
       isDefault: (!existingMethods || existingMethods.length === 0),
     };
 

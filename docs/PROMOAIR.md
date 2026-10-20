@@ -80,10 +80,12 @@ promoair.ru runs on the same API, database, sessions and YooKassa shop as promo-
 ```bash
 sudo -u postgres psql -d promofm -v ON_ERROR_STOP=1 <<'EOF'
 BEGIN;
+SET LOCAL lock_timeout = '5s';   -- ALTER TABLE users must not queue behind a long transaction (review §5)
 \i /opt/promofm-api/src/migrations/160_promoair_site.sql
 ROLLBACK;
 EOF
 # then the same with COMMIT, BEFORE restarting promofm-api with the new code
+# "canceling statement due to lock timeout" = nothing applied; retry at a quiet moment
 ```
 
 Rollback (only if needed):
@@ -303,7 +305,7 @@ Install (lead, after the cleanup below):
 
 ```bash
 # 0. secret (do not echo it to the terminal)
-sudo -u promofm sh -c 'grep -q "^CRON_SECRET=" /opt/promofm-api/.env || echo "CRON_SECRET=$(openssl rand -hex 32)" >> /opt/promofm-api/.env'
+sudo -u promofm sh -c 'grep -q "^CRON_SECRET=" /opt/promofm-api/.env || printf "\nCRON_SECRET=%s\n" "$(openssl rand -hex 32)" >> /opt/promofm-api/.env'   # printf: safe if .env has no trailing newline (review §5)
 sudo systemctl restart promofm-api
 # 1. units
 sudo cp /opt/promofm-api/systemd/promofm-venue-cron@.service /etc/systemd/system/
@@ -433,7 +435,7 @@ sudo -u postgres psql -d promofm -c "SELECT order_id, status, updated_at FROM pa
   - the admin gets the usual «payment received» email for each 1 ₽ check.
 - **Pending gateway charge at trial end.**
   - The venue keeps trial access until the webhook settles; the log shows `first charge still pending` every hour.
-  - The renewal cron keeps its old day-stamped orderId: a renewal still `pending` the next day may be charged again (existing behaviour, not changed).
+  - ~~The renewal cron keeps its old day-stamped orderId: a renewal still `pending` the next day may be charged again.~~ Fixed in §5 (attempts tagged with `renewFor`).
 - **Two subscription systems remain.**
   - `venue_profiles.data` (tiers) and `venue_radio_subscriptions` (provisioning trial, efir) are separate.
   - `/venue-radio/subscription` shows `priceMonth: 0` for `efir` rows (the real price sits in the request).
@@ -579,7 +581,7 @@ Dates are ISO strings in UTC. Money is rubles (`amountRub`, may carry kopecks). 
 ```
 
 - `signupSite`: `users.signup_site` (`air` / `music`), `null` for users registered before migration 160 or while it is not applied.
-- `subscription.status` defaults to `pending_card` (no profile or no status); `plan` is the stored tier (`null` if none); `hasCard` = a saved card with a gateway token (the one autocharge would use).
+- `subscription.status` defaults to `pending_card` (no profile or no status); `plan` is the stored tier (`null` if none); `hasCard` = a card saved by the gateway webhook (`data.source='gateway_webhook'`, the one autocharge would use; since §5 a token typed into the settings forms does not count).
 - `request`: the latest station request (any status, including `rejected`); `points` = number of points in the questionnaire.
 
 Bad filter: `400 {"success":false,"error":"invalid_filter","field":"status","message":"Неизвестный статус аккаунта."}`.
@@ -654,7 +656,7 @@ Repeat or wrong state: `409 {"success":false,"error":"conflict","status":"active
 
 #### `POST /venues/:userId/block` `{reason}`
 
-Any of `active | pending | rejected | inactive` → `banned`. In one transaction: `token_version + 1` (live sessions get 401), all refresh tokens revoked, streams `provisioned|live → paused`, venue API keys revoked. Sign-in with the password then returns 403. No e-mail to the venue.
+Any of `active | pending | rejected | inactive` → `banned`. In one transaction: `token_version + 1` (live sessions get 401), all refresh tokens revoked, streams `provisioned|live → paused`, venue API keys revoked, and (since §5) the subscription cancelled: `trial|active → cancelled` with `cancelledFromStatus`, so no cron charges the card; the response adds `cancelledSubscription` (the status before, or `null`). Sign-in with the password then returns 403. No e-mail to the venue.
 
 ```json
 { "success": true, "row": { "...": "VenueRow, accountStatus 'banned'" }, "pausedStreamIds": ["55555555-5555-4555-8555-555555555555"], "revokedApiTokens": 1 }
@@ -664,7 +666,7 @@ Already blocked: `409 {"success":false,"error":"conflict","status":"banned","kin
 
 #### `POST /venues/:userId/restore` `{reason?}`
 
-`banned | blocked | suspended → active`. Streams stay paused and API keys stay revoked: resume streams with `/api/venue-station/admin/streams/:id/resume` (or a plan assignment, below); the venue issues new keys itself.
+`banned | blocked | suspended →` the status before the block (since §5: read from the latest `promoair_venue_block` audit row, so a blocked `pending` / `rejected` account goes back to `pending` / `rejected`, not `active`; no audit row → `active`). Streams stay paused, API keys stay revoked and the subscription stays cancelled: resume streams with `/api/venue-station/admin/streams/:id/resume` (or a plan assignment, below); the venue issues new keys itself and turns renewal on with `/venue-billing/resume`.
 
 ```json
 { "success": true, "row": { "...": "VenueRow, accountStatus 'active'" } }
@@ -680,7 +682,7 @@ Already blocked: `409 {"success":false,"error":"conflict","status":"banned","kin
 - Account must be `active` or `pending`, otherwise 409 `kind:'account'`.
 - Writes `venue_profiles.data`: `subscriptionStatus`, `subscriptionPlan`, `subscriptionInterval`, `subscriptionExpiresAt = until`, `subscriptionPriceRub = 0`, `subscriptionAssignedByAdminAt`; clears `cancelledFromStatus`, `subscriptionCancelledAt`, `subscriptionExpiredReason`. For `trial` also `trial_expires_at = until` and the T-3 / T-1 reminder flags are reset. Creates the profile if the venue has none (`ensureVenueProfile`). No payment row.
 - Paused streams go back to `provisioned` (as after a payment).
-- **After `until` the usual crons apply:** with a saved card the plan is charged (renewal 3 days before the end, or the trial-end charge); without a card the venue expires. The admin UI should say so (`row.subscription.hasCard`).
+- **No charge after `until` (changed in §5):** the assignment writes `autoRenew:false`. The crons never charge such a plan or trial, even with a saved card; at `until` it expires with the «автопродление не было включено» e-mail. It renews only after the venue's own consent: a paid `/subscribe`, `/venue-billing/resume`, or a card binding during the trial.
 
 ```json
 {
@@ -811,7 +813,7 @@ journalctl -u promofm-api --since '10 min ago' | grep 'promo-air-admin'   # shou
 ### Open risks / not done
 
 - **Approve does not verify the e-mail.** Unlike `/auth/admin/approve-user`, which sets `is_email_verified=true`. A venue approved before it confirmed the address still gets 401 «Email не подтверждён» at sign-in and must use the link from the signup e-mail (or resend). This is deliberate: an admin click should not vouch for an address nobody confirmed. The UI should show `row.emailVerified`.
-- **Plan after `until` may charge the card.** An admin-assigned plan follows the normal billing rules: a venue with a saved card is charged the assigned tier at the end. There is no «don't renew» flag; changing the crons is out of scope. If a comp should not renew, assign it to a venue without a card, or cancel it in the cabinet.
+- ~~**Plan after `until` may charge the card.**~~ Fixed in §5: assignments carry `autoRenew:false` and are never charged.
 - **Sign-in gate now refuses `'banned'`** (behaviour change on promo-music.ru, fixes the UsersManagement ban). Other entry points are SECURITY's: VK login (`auth-routes.tsx` VK callback) and `/auth/refresh` do not check `users.status`. VK sessions of a blocked user are still rejected right away by `token_version`, because VK tokens are signed with `tv=1`. `exchange-auto-login` is in SECURITY's list.
 - **`/auth/admin/reject-user` stays broken until 162** (pre-existing). It has no status guard either; SECURITY owns the approve/reject guards in `auth-routes.tsx`.
 - **`mark-live` sets `last_seen_at = NOW()`** without a device (`venue-station-routes.tsx` `setStreamStatus`). That is why «online» here also requires `paired_at`.
@@ -958,3 +960,132 @@ sudo -u postgres psql -d promofm -c "SELECT status::text, count(*) FROM users GR
 - **Pre-existing, not fixed:** `GET /promo-air-dj/scripts/:id?limit=abc` → `LIMIT NaN` → 500; `/api/venue-station/admin/:id/reject` has no status guard (ADMIN's note); `/auth/resend-verification` reads only Bearer (dead, be-domain §6).
 - **Not done here (out of code):** nginx `/air/dj-api/` restriction (snippet above), `X-Internal-Key` rotation.
 - **Prod access during this work:** read-only `\d`/SELECT, `pg_dump --schema-only` of 8 tables, `git log -S`/`git show` in `/opt/promofm-api`, two public GETs on `/air/dj-api/status|now-playing`. One `journalctl` grep I started for the 097 question was too slow; I stopped it and killed my own two `journalctl` PIDs on the server. Nothing else was touched.
+
+---
+
+## 5. REVIEW FIXES: money and security review of the backend chain (20.10.2026)
+
+**Goal.** Two adversarial reviews (money path, security) of sections 1-4 found 2 blockers, 9 majors and 15 minors. I verified each against the code and fixed every confirmed blocker and major plus the cheap minors. No new env vars, no new migrations. Nothing here depends on `PROMOAIR_ORIGIN`.
+
+### Verdicts
+
+| # | Finding | Verdict |
+|---|---|---|
+| money B1 | Renewal `Idempotence-Key` 73 chars, YooKassa max 64 → every renewal 400 → paying venues expired | **fixed**: `yookassaIdempotenceKey` = the key if ≤ 64, else sha256 hex (createPayment, chargeRecurring, refund) |
+| security B1 | `/create-session` topup/donation labelled `metadata.type='venue_card_attach'` was credited and then refunded in full | **fixed**: card check = `type 'venue_subscription'` + label + amount 1 (only the server creates it), refund is the constant 1 ₽, create-session refuses client `metadata.type` `venue_*` |
+| money M1 | `pending` renewal never extended, charged again the next day | **fixed**: attempts tagged `metadata.renewFor`; succeeded → extend without charge, in flight → wait; session written before the gateway call; result settled only from `pending` |
+| money M2 | blocked/banned venues still charged | **fixed**: both crons charge only `users.status='active'` and not deleted; others expire at the end, without e-mail; admin block also cancels the subscription |
+| money M3 / security M3 | admin plan «без списания» charged the saved card at `until` | **fixed**: assignment writes `autoRenew:false`; crons never charge it, it expires as `not_renewed`; consent (paid `/subscribe`, `/resume`, card binding in trial) clears it |
+| money M4 | re-binding a card after an unprocessed trial end gave 7 new days and changed the charge key | **fixed**: the trial end is never moved when it exists; the plan is not switched under a due charge |
+| money M5 / security M1 | user-posted `gatewayMethodId` became the chargeable card; tokens returned to clients | **fixed**: webhook cards carry `source:'gateway_webhook'`, only those are chargeable (and admin `hasCard`); POST routes drop `gatewayMethodId/gateway/source/id`; no client response carries the token |
+| money M6 | venue-billing expiry paused streams paid via `venue_radio_subscriptions` (efir) | **fixed**: `pauseVenueStreams` skips venues with an active, unexpired station subscription |
+| security M2 | any role (artist) could use venue-billing / questionnaire, get charged, invisible in admin | **fixed**: `requireVenueAccount` (DB role `venue` + `active`, or admin) on subscribe/attach-card/cancel/resume/me and `POST|PUT /venue-station` |
+| money m1 / security m1 | trial cron wrote stale `{...row.data}` snapshots over concurrent cancel/subscribe | **fixed**: jsonb `||` patches; the expiry write only while still `trial`, side effects only if it wrote |
+| money m2 | trial starts though the gateway did not save the card | **deferred**: the promoair cabinet polls for `status != pending_card` after the card return and shows the honest `cardRequired` banner; staying `pending_card` needs a frontend change. No charge happens without a card; the first real 1 ₽ test settles whether the shop saves cards at all |
+| money m3 | early webhook for a pending first charge → «Session not in DB», venue stays on trial | **fixed** (session written before the gateway call, same settle logic as M1) |
+| money m4 | efir payment without 54-FZ e-mail | **fixed** |
+| money m5 | 1 ₽ check booked as income, admin «payment received» e-mail each time | **partly fixed**: no admin e-mail; the `payment_txns` income row stays on purpose (the promoair cabinet history shows «Проверка карты» from it, the session records the refund) |
+| money m6 / security m5 | cleanup SQL committed on `-v apply=0` | **fixed**: `\if :apply` / `\if :allow_diff` with defaults (checked with the server's psql 16: unset/0 → rollback, 1/yes → commit, garbage → error + rollback) |
+| money m7 | `/me` showed a trial date before any trial | **fixed** (null while `pending_card`) |
+| money m8 | no lock on charge-recurring | **fixed**: `pg_try_advisory_lock(770452)`, same pattern as the trial cron |
+| security m2 | block then restore approved an unreviewed account | **fixed**: restore returns the status before the block (audit row), `active` only if there is none |
+| security m3 | 1 ₽ refund without receipt | **fixed**: refund sends a receipt to the same e-mail (same item shape as the payment). Still verify on the first real binding |
+| security m4 | `echo >> .env` merges into the last line | **fixed** in §2 (printf) |
+| security m6 | migration 160 without `lock_timeout` | **fixed** in §1 (`SET LOCAL lock_timeout='5s'`) |
+| security m7 | `venue_radio_subscription` webhook activated any row for any payer | **fixed**: create-session refuses the label; the webhook also requires the row to belong to the payer (else log `venue_radio_subscription_owner_mismatch`, no change) |
+| note | www.promoair.ru must 301 to the apex (host-only cookies) | deploy note below |
+
+### What changed
+
+- **`src/gateway-yookassa.tsx`**: `yookassaIdempotenceKey` (:27), `receiptFor` (:32), used by `createPayment`, `chargeRecurring`; `refund` takes optional `receiptEmail` / `receiptDescription` (:316). Without them every request body is unchanged.
+- **`src/checkout-routes.tsx`**:
+  - `isVenueCardCheck` (:56) gates the card-check branch (:429), the revenue skip (:1985) and the admin e-mail (:2048); refund = `VENUE_CARD_CHECK_RUB` with receipt.
+  - `saveCardFromWebhook` stamps `source` (:87).
+  - card change in a trial keeps an existing end, applies the plan only while the trial runs, clears `autoRenew` (:489); trial start clears it too.
+  - paid `venue_subscription` clears `autoRenew` (:313).
+  - `venue_radio_subscription` ownership check inside the transaction (:578).
+  - create-session refuses `metadata.type` `venue_*` (:2161, 400).
+  - `GET /methods` without tokens (:3160).
+- **`src/db.tsx`**: `GATEWAY_CARD_SOURCE`, `userPaymentMethodInput`, `publicPaymentMethod` (:1822-:1831); `getChargeablePaymentMethod` requires the source.
+- **`src/payment-gateway.tsx`**: `SavedPaymentMethod.source` (:114).
+- **`src/payments-routes.tsx`** (:67, :73) and **`src/settings-routes.tsx`** (:194, :217): sanitized input, token-free output.
+- **`src/venue-billing-helpers.tsx`**: `requireVenueAccount` (:32), `isChargeableAccount` (:59), `pauseVenueStreams` (:71), `settleChargeSession` (:93); `tryAutoChargeAtTrialEnd` returns `not_renewing` for `autoRenew:false` (:176), writes the session before the gateway (:227), re-calls with the same key only when a pending session has no gateway id, records money only if it settled the session; `activateAfterTrial` writes a jsonb patch.
+- **`src/venue-billing-routes.tsx`**: gate on the five cabinet routes (:161-:485); `/resume` also for `autoRenew:false` (:448) and clears the flag; `/me` without token, `autoRenew`, no trial dates while `pending_card` (:513); `/cron/charge-recurring` rewritten around lock (:569), account check, `renewFor` attempts (:674-:701), pre-written session (:728), settle; `extendVenuePeriod` (:853); `markVenueExpired` (:874) jsonb patch, `pauseVenueStreams`, `not_renewed` e-mail, `email=null` for closed accounts.
+- **`src/venue-trial.tsx`**: account status in the scan, `chargeable` (:267); closed → expire `account_closed` without e-mail or reminders; `not_renewing` → `not_renewed`; guarded jsonb writes; reminders without an amount for `autoRenew:false` (:375).
+- **`src/venue-plans-constants.tsx`**: `isVenueAutoRenewOff` (:113), `getVenueNextCharge` null for it (:134).
+- **`src/email-helper.tsx`**: reason `not_renewed` (:815, :887). Music output for the existing reasons unchanged (`be-email-site` 34/34).
+- **`src/promo-air-admin-helpers.tsx`**: `planAssignmentData` writes `autoRenew:false` (:310); `restoreTarget` (:191).
+- **`src/promo-air-admin-routes.tsx`**: `has_card` requires the source (:76); `cutVenueAccess` cancels trial/active (:430, response/audit field `cancelledSubscription`); restore target from `statusBeforeBlock` (:461, :508).
+- **`src/venue-station-routes.tsx`**: `requireVenueAccount` on `POST /` and `PUT /` (:274, :334).
+- **`src/venue-radio-routes.tsx`**: receipt e-mail on `/subscribe` (:154).
+- **`scripts/sql/promoair-cleanup-venue-profiles.sql`**: value checks for `apply` / `allow_diff`.
+- **Docs**: §1 migration heredoc, §2 `CRON_SECRET` line and pending-renewal note, §3 block / restore / plan / `hasCard` texts, `PRODUCT_FACTS.md` venue billing and admin sections.
+
+### API contract changes (frontends)
+
+| Endpoint | Change |
+|---|---|
+| `/venue-billing/{me,subscribe,attach-card,cancel,resume}`, `POST/PUT /venue-station` | 403 `{success:false, code:'venue_only'}` unless `users.role='venue'` and `status='active'`, or admin |
+| `GET /venue-billing/me` | `savedCard.gatewayMethodId` removed; new `subscription.autoRenew`; `expiresAt` / `trialExpiresAt` null while `pending_card` |
+| `POST /venue-billing/resume` | also 200 for `active`/`trial` with `autoRenew:false` (turns renewal on; card required) |
+| `GET /checkout/methods`, `GET /payments/payment-methods`, `GET /settings/user/:id/payment-methods` | no `gatewayMethodId` / `source` |
+| `POST /checkout/create-session` | 400 for `metadata.type` starting with `venue_` |
+| `POST /promo-air-admin/venues/:id/block` | adds `cancelledSubscription`; the venue's trial/active subscription becomes `cancelled` |
+| `POST /promo-air-admin/venues/:id/restore` | target = status before the block (`pending` / `rejected` / `inactive` / `active`) |
+| `POST /promo-air-admin/venues/:id/plan` | writes `autoRenew:false`; never charged |
+
+The frontend types `savedCard.gatewayMethodId` (`fe/src/utils/api/venue-billing.ts:33`, `fe/src/promoair/api/cabinet-core.ts:50`) are not read anywhere; the field is simply absent now.
+
+### New env vars / migrations
+
+None. Migrations 160/161/162 and the cleanup are unchanged in content (160's apply heredoc gained `lock_timeout`).
+
+### Verification (done locally)
+
+```bash
+~/Projects/promoair/bin/tsc-api.sh        # 8 errors, all from the baseline (same set as before this section)
+cd ~/Projects/promoair/api
+npx tsx ../tools/be-site-origin.test.mts  # 14
+npx tsx ../tools/be-billing.test.mts      # 7 (+ autoRenew next charge, Idempotence-Key ≤ 64)
+npx tsx ../tools/be-admin.test.mts        # 8 groups (+ restoreTarget, autoRenew:false)
+npx tsx ../tools/be-security.test.mts     # 13
+mkdir -p .tmp-email-check && cp ../api-orig/src/email-helper.tsx .tmp-email-check/email-helper-orig.tsx \
+  && npx tsx ../tools/be-email-site.test.mts .tmp-email-check/email-helper-orig.tsx; rm -rf .tmp-email-check   # 34
+D=<dir with @electric-sql/pglite-socket@0.2.11>
+npx tsx ../tools/be-billing-e2e.test.mts $D    # 29 (19 + 10 review sections)
+npx tsx ../tools/be-admin-e2e.test.mts $D      # 13 (block cancels the subscription, exact restore, autoRenew)
+npx tsx ../tools/be-security-e2e.test.mts $D   # 17 groups
+```
+
+- New e2e sections in `be-billing-e2e` (PGlite, prod schema, YooKassa mocked): crafted 500 ₽ card-check sessions are not refunded and start no trial, create-session refuses `venue_*`; posted tokens dropped, raw token rows not chargeable, no token in 4 client responses; artist/blocked venue 403 on 5 billing routes and the questionnaire, admin 200; pending renewal waited for across a day change, extended once after the webhook, money booked once; banned active/trial/cancelled venues never charged and get no e-mail; paid efir keeps streams on, unpaid ones paused; admin plan/trial never charged, `/resume` re-enables it; re-binding after the trial end keeps the end and the `venue-first-…` key; pending first charge settles through the webhook; another payer cannot activate a station row; no trial date before the card.
+- Mutation check on a scratch copy of `src/`: reverting the card-check predicate, the `source` filter, the in-flight renewal check, the trial-cron account check or the M4 end-date rule each made the billing e2e fail at the matching section.
+- Prod, read-only: `\d payment_sessions`, `\d venue_radio_subscriptions`, `audit_logs` columns, venue users by status (5 active, 1 pending), the cleanup junk set (unchanged, 11 ids), tokenised `payment_methods` (0). psql `\if` semantics checked with a meta-only script (no SQL); the script was written to `/tmp` on the server for that and removed right after.
+- Not possible locally: the advisory lock (PGlite is one backend session, locks are re-entrant). The code is the trial cron's proven pattern with its own key.
+
+### Deploy order (replaces the order spread over §1-§4; the lead runs it)
+
+1. **Backups**: `sudo -u postgres pg_dump -d promofm -Fc -f /root/backups/promofm_$(date +%F_%H%M).dump` (full), plus the `venue_profiles` dumps from §2.
+2. **Cleanup** (§2): dry-run (`-v apply=0` or no `-v`), read the previews and the guard, then `-v apply=1`. Re-checked read-only on 20.10: the junk set is still exactly the 11 guarded ids (12 rows in total), and `payment_methods` has 0 rows with a token.
+3. **Migrations** in any order, each dry-run then COMMIT: 160 (with `SET LOCAL lock_timeout='5s'`), 161, 162.
+4. **Code**: deploy, `systemctl restart promofm-api` with `PROMOAIR_ORIGIN` empty. Check `journalctl -u promofm-api --since '5 min ago' | grep -iE 'error|venue_only'`.
+5. **CRON_SECRET** (§2, printf line), restart.
+6. **One real 1 ₽ binding** with a test venue account (§2 «Checks on prod»): session `succeeded` → `refunded`, `payment_methods.data` has `gatewayMethodId` **and** `"source":"gateway_webhook"`, trial 7 days, money back, the refund log line is `venue_card_attach_refunded` (if it is `venue_card_attach_refund_failed` with a receipt error, the shop needs a different receipt setup: tell me).
+7. **Timers** (§2): one manual run of each unit (expect `"scanned":0` or only the test venue), then enable. Safe now for `charge-recurring` (review B1/M1/M2 fixed).
+8. **nginx promoair.ru**: headers from §1 on every `/server/` block; `www.promoair.ru` → `301 https://promoair.ru$request_uri` (cookies are host-only); `/air/dj-api/` restriction from §4 on promo-music.ru.
+9. **`PROMOAIR_ORIGIN=https://promoair.ru`** once `https://promoair.ru/server/health` answers, restart.
+
+Manual checks after deploy:
+- As an artist: `GET /server/api/venue-billing/me` → 403 `venue_only`; as a venue → 200 without `gatewayMethodId`.
+- `POST /server/api/checkout/create-session` with `metadata.type:'venue_card_attach'` → 400.
+- Admin: block a test venue with a trial → its `subscriptionStatus` is `cancelled`; restore → previous account status.
+- Admin: assign a plan to the test venue → `/venue-billing/me` shows `autoRenew:false`, `nextChargeAt:null`.
+- After the first renewal day: `SELECT order_id, status, data->'metadata'->>'renewFor' FROM payment_sessions WHERE order_id LIKE 'venue-renew-%' ORDER BY created_at DESC LIMIT 5`.
+
+### Open risks / not done
+
+- **Card not saved by the gateway** (money m2, deferred): trial still starts with `cardSaveFailed` / `cardRequired`; no charge happens, the venue expires at the end with an honest e-mail. Making it stay `pending_card` needs the promoair cabinet to handle that state after the card return.
+- **Refund receipt** (security m3): mirrors the payment receipt; only the first real binding proves the shop accepts it.
+- **Pending charge of a venue that gets blocked meanwhile**: the cron stops waiting (account closed → expired); if the gateway later confirms the payment, it is recorded by the webhook but nothing is extended. Refund by hand (admin), as for other blocked payers.
+- **Two entitlement sources remain** (`venue_profiles.data` tiers vs `venue_radio_subscriptions`): M6 only stops one from pausing the other. Pick one before taking efir payments at scale.
+- **Admin in the venue cabinet**: an admin may still open `/venue-billing/me` (creates an admin `venue_profiles` row, as before) and could even bind a card; the crons would charge an admin who does that. Deliberate: PLAN §3.5 lets admins into the cabinet.
+- **Not in code, still open from the reviews' PLAN §4 lists**: venue-campaign CTA switch (launch decision), migration 160 dry-run on prod, AutoDJ nginx restriction and `X-Internal-Key` rotation, `requireAuth` / `/auth/me` status check, station-request `reject` status guard (pre-existing), frontend items (`/?chat=&t=` restore, `email-logo.png`, `account_pending` handling, `cardSaveFailed` after the card return).

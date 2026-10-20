@@ -177,8 +177,22 @@ export const ACCOUNT_TRANSITIONS: Record<AccountAction, { from: readonly string[
   approve: { from: ['pending'], to: 'active' },
   reject: { from: ['pending'], to: 'rejected' },
   block: { from: ['active', 'pending', 'rejected', 'inactive'], to: 'banned' },
+  // to по умолчанию; фактически restoreTarget (статус до блокировки)
   restore: { from: BLOCKED_STATUSES, to: 'active' },
 };
+
+/**
+ * Во что вернуть аккаунт при восстановлении: в статус до блокировки
+ * (details.before.accountStatus последней promoair_venue_block). Иначе
+ * блокировка заявки на проверке или отклонённой с последующим
+ * восстановлением одобряла бы аккаунт без проверки. Нет записи (блок из
+ * других разделов админки) или статус не из списка → active, как раньше.
+ */
+export function restoreTarget(statusBeforeBlock: unknown): string {
+  return statusBeforeBlock === 'pending' || statusBeforeBlock === 'rejected' || statusBeforeBlock === 'inactive'
+    ? statusBeforeBlock
+    : ACCOUNT_TRANSITIONS.restore.to;
+}
 
 export function canTransition(action: AccountAction, from: string | null | undefined): boolean {
   return !!from && ACCOUNT_TRANSITIONS[action].from.includes(from);
@@ -273,8 +287,11 @@ export function subscriptionSnapshot(data: any): SubscriptionSnapshot {
  * ветка venue_subscription), плюс отметка subscriptionAssignedByAdminAt.
  * Пометки отмены и истечения снимаются. subscriptionPriceRub = 0: этот
  * период никто не оплачивал. Пробный: срок пробного и сброс напоминаний
- * T-3 / T-1, чтобы они пришли к новой дате. Что будет после даты окончания,
- * решают обычные кроны (списание с сохранённой карты или истечение).
+ * T-3 / T-1, чтобы они пришли к новой дате.
+ * autoRenew: false: назначение «без списания» (PLAN §3.6) не превращается в
+ * списание с сохранённой карты. Кроны такой период не списывают и по
+ * окончании переводят в expired (письмо «автопродление не было включено»).
+ * Флаг снимают оплата тарифа, /venue-billing/resume и привязка карты в пробном.
  */
 export function planAssignmentData(prev: any, a: PlanAssignment, nowIso: string): Record<string, any> {
   const p = prev && typeof prev === 'object' ? prev : {};
@@ -290,6 +307,7 @@ export function planAssignmentData(prev: any, a: PlanAssignment, nowIso: string)
     cancelledFromStatus: null,
     subscriptionCancelledAt: null,
     subscriptionExpiredReason: null,
+    autoRenew: false,
     updatedAt: nowIso,
   };
   if (a.status === 'trial') {

@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import {
   getPaymentBalance, upsertPaymentBalance, debitAvailableToPendingAtomic,
-  getPaymentMethods as dbGetPaymentMethods, upsertPaymentMethod,
+  getPaymentMethods as dbGetPaymentMethods, upsertPaymentMethod, userPaymentMethodInput, publicPaymentMethod,
   insertPaymentTx, getPaymentTxsByUser, getAllPaymentTxs, getPaymentTxStats, getPaymentTxUserSummaries,
 } from './db.tsx';
 import { pool } from './db-client.tsx';
@@ -64,11 +64,13 @@ async function getUserStats(userId: string): Promise<any> {
 }
 
 async function getPaymentMethodsList(userId: string): Promise<any[]> {
-  return await dbGetPaymentMethods(userId);
+  return (await dbGetPaymentMethods(userId)).map(publicPaymentMethod);
 }
 
+// Токен шлюза, источник и id из тела не принимаются (userPaymentMethodInput):
+// ручной способ не может стать картой для автосписаний.
 async function addPaymentMethod(userId: string, methodData: any): Promise<any> {
-  const method = { id: `pm-${crypto.randomUUID()}`, ...methodData, createdAt: new Date().toISOString() };
+  const method = { ...userPaymentMethodInput(methodData), id: `pm-${crypto.randomUUID()}`, createdAt: new Date().toISOString() };
   await upsertPaymentMethod(method.id, userId, method);
   return method;
 }

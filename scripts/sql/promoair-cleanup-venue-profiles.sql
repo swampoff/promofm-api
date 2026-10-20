@@ -28,6 +28,20 @@
 -- (ON_ERROR_STOP) и ничего не удаляет. Сначала разобраться; осознанно
 -- пропустить проверку: -v allow_diff=1.
 --
+-- apply и allow_diff проверяются по значению (psql boolean: 1/0, on/off,
+-- true/false): -v apply=0 = dry-run. Раньше \if :{?apply} проверял только,
+-- задана ли переменная, и -v apply=0 тоже делал COMMIT. Не булево значение
+-- = ошибка psql, с ON_ERROR_STOP скрипт останавливается без COMMIT.
+
+\if :{?apply}
+\else
+\set apply 0
+\endif
+\if :{?allow_diff}
+\else
+\set allow_diff 0
+\endif
+--
 -- Связанные демо-строки в других таблицах (по venue_id 'venue-1..3' и
 -- 'venue-test-venue-001': radio_venue_requests 11, venue_ad_campaigns 5,
 -- venue_playlists 12, venue_orders_index 1) этот скрипт только показывает и
@@ -88,7 +102,7 @@ SELECT t, venue_id, n FROM (
     OR venue_id IN (SELECT 'venue-' || user_id FROM _junk_venue_profiles WHERE user_id IS NOT NULL)
  ORDER BY t, venue_id;
 
-\if :{?allow_diff}
+\if :allow_diff
 \else
 DO $$
 DECLARE
@@ -111,7 +125,7 @@ DELETE FROM venue_profiles
  WHERE id IN (SELECT id FROM _junk_venue_profiles)
 RETURNING id, user_id;
 
-\if :{?apply}
+\if :apply
 COMMIT;
 \echo 'venue_profiles cleanup COMMITTED'
 \else

@@ -812,7 +812,7 @@ export interface TrialChargeNotice {
 }
 
 // Почему подписка заведения стала неактивной (письмо об отключении).
-export type VenueExpiredReason = 'no_card' | 'charge_failed' | 'cancelled' | 'period_ended';
+export type VenueExpiredReason = 'no_card' | 'charge_failed' | 'cancelled' | 'period_ended' | 'not_renewed';
 
 const rub = (n: number) => `${Math.round(n).toLocaleString('ru-RU')} ₽`;
 const trialChargeBox = (ch: TrialChargeNotice, dateHuman: string) => ch.hasCard
@@ -883,6 +883,8 @@ export async function sendVenueTrialExpiredEmail(data: { toEmail: string; venueN
       charge_failed: 'Пробный период закончился, но списать оплату с карты не получилось.',
       cancelled: 'Подписка была отменена, и её срок закончился.',
       period_ended: 'Оплаченный период закончился, а продлить подписку с карты не получилось.',
+      // тариф или пробный от администратора: автосписания по нему не было
+      not_renewed: 'Срок подписки закончился, автопродление для неё не было включено.',
     };
     return sendEmail({
       to: data.toEmail,

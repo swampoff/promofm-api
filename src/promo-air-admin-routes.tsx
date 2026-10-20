@@ -34,7 +34,7 @@ import { createLogger } from './logger.tsx';
 import {
   ACCOUNT_TRANSITIONS, PLAN_ACCOUNT_STATUSES, BLOCKED_STATUSES, SUB_STATUS_SQL, VENUE_NAME_SQL, CITY_SQL,
   buildVenueFilters, decodeCursor, isUuid, pageOf, parseLimit, parsePlanAssignment, parseReason,
-  parseTrialDays, planAssignmentData, subscriptionSnapshot, toAuditItem, toDevice, toPaymentItem, toStreamItem,
+  parseTrialDays, planAssignmentData, restoreTarget, subscriptionSnapshot, toAuditItem, toDevice, toPaymentItem, toStreamItem,
   toVenueRow, trialExtensionData, type AccountAction, type IdKind,
 } from './promo-air-admin-helpers.tsx';
 
@@ -70,9 +70,10 @@ const VENUE_ROW_SQL = `
          ${CITY_SQL}                                    AS city,
          COALESCE(vp.address, vp.data->>'address')      AS address,
          vp.data                                        AS profile_data,
-         EXISTS (SELECT 1 FROM payment_methods pm
+         EXISTS (SELECT 1 FROM payment_methods pm         -- как getChargeablePaymentMethod
                   WHERE pm.user_id = u.id::text
-                    AND COALESCE(pm.data->>'gatewayMethodId', '') <> '') AS has_card,
+                    AND COALESCE(pm.data->>'gatewayMethodId', '') <> ''
+                    AND pm.data->>'source' = 'gateway_webhook') AS has_card,
          req.id::text                                   AS request_id,
          req.status                                     AS request_status,
          req.format->>'airType'                         AS air_type,
@@ -383,7 +384,7 @@ type Transition =
  * меняется, только если прежний статус допустим для действия. Иначе 409
  * с текущим статусом (или 404, если это не заведение).
  */
-async function transitionAccount(db: Db, userId: string, action: AccountAction): Promise<Transition> {
+async function transitionAccount(db: Db, userId: string, action: AccountAction, to: string = ACCOUNT_TRANSITIONS[action].to): Promise<Transition> {
   const t = ACCOUNT_TRANSITIONS[action];
   const r = await db.query(
     `WITH prev AS (
@@ -398,7 +399,7 @@ async function transitionAccount(db: Db, userId: string, action: AccountAction):
       WHERE u.id = prev.id AND prev.prev_status = ANY($2::text[])
      RETURNING u.id::text AS id, u.email, COALESCE(NULLIF(u.full_name, ''), u.username) AS name,
                prev.prev_status, to_jsonb(u)->>'signup_site' AS signup_site`,
-    [userId, [...t.from], t.to]
+    [userId, [...t.from], to]
   );
   if (r.rows[0]) return { ok: true, user: r.rows[0] };
   const cur = await db.query(
@@ -413,11 +414,31 @@ async function transitionAccount(db: Db, userId: string, action: AccountAction):
  * Блокировка отрезает доступ целиком: сессии (тот же путь, что бан в админке
  * пользователей), потоки на паузу (как при истечении подписки, markVenueExpired)
  * и API-ключи заведения (Bearer-доступ статус аккаунта не проверяет).
- * Восстановление потоки и ключи не возвращает: потоки админ включает сам
- * (/venue-station/admin/streams/:id/resume), ключи заведение выпускает заново.
+ * Подписка (trial / active) отменяется так же, как /venue-billing/cancel:
+ * кроны больше не списывают, срок истекает сам. Войти и отменить подписку
+ * заблокированный владелец не может.
+ * Восстановление потоки, ключи и подписку не возвращает: потоки админ включает
+ * сам (/venue-station/admin/streams/:id/resume), ключи заведение выпускает
+ * заново, автопродление включает /venue-billing/resume (нужна карта).
  */
 async function cutVenueAccess(db: Db, userId: string) {
   await revokeUserSessions(userId, db);
+  const nowIso = new Date().toISOString();
+  const sub = await db.query(
+    `UPDATE venue_profiles
+        SET data = data || jsonb_build_object(
+              'subscriptionStatus', 'cancelled',
+              'cancelledFromStatus', data->>'subscriptionStatus',
+              'subscriptionCancelledAt', $2::text,
+              'subscriptionExpiresAt', CASE WHEN data->>'subscriptionStatus' = 'trial'
+                                            THEN COALESCE(data->>'trial_expires_at', data->>'subscriptionExpiresAt')
+                                            ELSE data->>'subscriptionExpiresAt' END,
+              'subscriptionUpdatedAt', $2::text),
+            updated_at = NOW()
+      WHERE user_id = $1 AND data->>'subscriptionStatus' IN ('trial', 'active')
+      RETURNING data->>'cancelledFromStatus' AS was`,
+    [userId, nowIso]
+  );
   const paused = await db.query(
     `UPDATE venue_station_streams
         SET status = 'paused', updated_at = NOW()
@@ -429,7 +450,24 @@ async function cutVenueAccess(db: Db, userId: string) {
     `UPDATE venue_api_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
     [userId]
   );
-  return { pausedStreamIds: paused.rows.map((x: any) => x.id), revokedApiTokens: tokens.rowCount || 0 };
+  return {
+    pausedStreamIds: paused.rows.map((x: any) => x.id),
+    revokedApiTokens: tokens.rowCount || 0,
+    cancelledSubscription: sub.rows[0]?.was || null,
+  };
+}
+
+// Статус до последней блокировки из журнала (restoreTarget).
+async function statusBeforeBlock(db: Db, userId: string): Promise<string | null> {
+  const r = await db.query(
+    `SELECT details->'before'->>'accountStatus' AS status
+       FROM audit_logs
+      WHERE action = 'promoair_venue_block' AND target_id = $1
+      ORDER BY id DESC
+      LIMIT 1`,
+    [userId]
+  );
+  return r.rows[0]?.status || null;
 }
 
 const ACCOUNT_AUDIT: Record<AccountAction, string> = {
@@ -467,9 +505,10 @@ async function handleAccountAction(c: Context, action: AccountAction) {
     if (!reason.ok) return fail(c, 400, 'reason_required', { message: 'Укажите причину.' });
 
     const out = await inTx(async (db) => {
-      const t = await transitionAccount(db, userId, action);
-      if (!t.ok) return { t, cut: null };
-      return { t, cut: action === 'block' ? await cutVenueAccess(db, userId) : null };
+      const to = action === 'restore' ? restoreTarget(await statusBeforeBlock(db, userId)) : ACCOUNT_TRANSITIONS[action].to;
+      const t = await transitionAccount(db, userId, action, to);
+      if (!t.ok) return { t, to, cut: null };
+      return { t, to, cut: action === 'block' ? await cutVenueAccess(db, userId) : null };
     });
     const t = out.t;
     if (t.ok === false) {
@@ -480,7 +519,7 @@ async function handleAccountAction(c: Context, action: AccountAction) {
     audit(c, ACCOUNT_AUDIT[action], userId, {
       reason: reason.reason,
       before: { accountStatus: t.user.prev_status },
-      after: { accountStatus: ACCOUNT_TRANSITIONS[action].to },
+      after: { accountStatus: out.to },
       ...(out.cut || {}),
     });
     notifyAccountDecision(action, userId, t.user, reason.reason);

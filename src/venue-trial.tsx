@@ -36,7 +36,10 @@
  *          tier from the saved card (tryAutoChargeAtTrialEnd). Charged →
  *          'active'. No card / declined → mark 'expired', send expiry
  *          email, fire SSE. Gateway pending or a transient error → retry
- *          next run (errors for up to TRIAL_CHARGE_RETRY_MS).
+ *          next run (errors for up to TRIAL_CHARGE_RETRY_MS). A trial the
+ *          admin assigned (autoRenew:false) or an account that is not
+ *          active (blocked, rejected, deleted, no user) is never charged:
+ *          it expires (the closed account without an email).
  *        - status='trial' AND daysRemaining ∈ (0, 3] AND no prior
  *          warning sent → send warning email (with the amount and date
  *          of the first charge), mark `data.trial_warning_sent_at`.
@@ -60,8 +63,8 @@ import { emitSSE } from './sse-routes.tsx';
 import { sendVenueTrialEndingEmail, sendVenueTrialExpiredEmail, sendVenueTrialLastDayEmail, type TrialChargeNotice } from './email-helper.tsx';
 import { siteForUserId } from './site-origin.tsx';
 import { getChargeablePaymentMethod } from './db.tsx';
-import { resolveVenueChargePlan } from './venue-plans-constants.tsx';
-import type { TrialChargeOutcome } from './venue-billing-helpers.tsx';
+import { resolveVenueChargePlan, isVenueAutoRenewOff } from './venue-plans-constants.tsx';
+import { isChargeableAccount, pauseVenueStreams, type TrialChargeOutcome } from './venue-billing-helpers.tsx';
 
 // Пробный период для заведений. Владелец 2026-10-16: сокращён с 14 до 7 дней.
 // 7 дней действуют только для пробных, начатых с TRIAL_7D_START_ISO; тем, кто
@@ -225,14 +228,16 @@ export async function expireTrialsOnce(): Promise<CronResult> {
     throw err;
   }
 
-  let trialRows: Array<{ user_id: string; data: any; email: string | null; venue_name: string; created_at: string | null }>;
+  let trialRows: Array<{ user_id: string; data: any; email: string | null; venue_name: string; created_at: string | null; account_status: string | null; user_deleted: boolean | null }>;
   try {
     const q = await pool.query(
       `SELECT vp.user_id,
               vp.data,
               u.email                                AS email,
               COALESCE(vp.data->>'venueName', '')    AS venue_name,
-              vp.data->>'createdAt'                   AS created_at
+              vp.data->>'createdAt'                   AS created_at,
+              u.status::text                          AS account_status,
+              (u.deleted_at IS NOT NULL)              AS user_deleted
          FROM venue_profiles vp
          LEFT JOIN users u ON u.id::text = vp.user_id
         WHERE vp.data->>'subscriptionStatus' = 'trial'
@@ -257,16 +262,22 @@ export async function expireTrialsOnce(): Promise<CronResult> {
         data: row.data,
       });
 
+      // Заблокированный, отклонённый, удалённый аккаунт или строка без
+      // пользователя: не списываем и не пишем, срок просто истекает.
+      const chargeable = isChargeableAccount(row);
+
       if (state.isExpired) {
         // Первое списание выбранного тарифа с карты, привязанной при старте
         // пробного (POST /venue-billing/attach-card). Вся цепочка списание →
         // активация → выручка в venue-billing-helpers.tsx.
         let outcome: TrialChargeOutcome = 'error';
-        try {
-          const { tryAutoChargeAtTrialEnd } = await import('./venue-billing-helpers.tsx');
-          outcome = await tryAutoChargeAtTrialEnd(row.user_id, row.data, { email: row.email, trialEndIso: state.expiresAtIso });
-        } catch (e: any) {
-          console.warn('[venue-trial] auto-charge attempt failed for', row.user_id, ':', e?.message);
+        if (chargeable) {
+          try {
+            const { tryAutoChargeAtTrialEnd } = await import('./venue-billing-helpers.tsx');
+            outcome = await tryAutoChargeAtTrialEnd(row.user_id, row.data, { email: row.email, trialEndIso: state.expiresAtIso });
+          } catch (e: any) {
+            console.warn('[venue-trial] auto-charge attempt failed for', row.user_id, ':', e?.message);
+          }
         }
 
         if (outcome === 'charged') {
@@ -280,7 +291,7 @@ export async function expireTrialsOnce(): Promise<CronResult> {
           result.skipped++;
           continue;
         }
-        if (outcome === 'error') {
+        if (outcome === 'error' && chargeable) {
           const endedMs = state.expiresAtIso ? Date.parse(state.expiresAtIso) : now;
           if (now - endedMs < TRIAL_CHARGE_RETRY_MS) {
             result.skipped++;
@@ -288,44 +299,51 @@ export async function expireTrialsOnce(): Promise<CronResult> {
           }
         }
 
-        // No card, card declined, or still failing a day after the trial
-        // ended → mark expired, revoke bearer tokens, pause streams, email.
-        const reason = outcome === 'no_card' ? 'no_card' : 'charge_failed';
-        const nextData = {
-          ...row.data,
-          subscriptionStatus: 'expired',
-          subscriptionPlan: 'free',
-          subscriptionExpiredReason: reason,
-          trial_ended_at: new Date(now).toISOString(),
-          updatedAt: new Date(now).toISOString(),
-        };
-        await pool.query(
+        // No card, card declined, admin trial without autorenew, account
+        // closed, or still failing a day after the trial ended → mark
+        // expired, revoke bearer tokens, pause streams, email.
+        const reason = !chargeable ? 'account_closed'
+          : outcome === 'no_card' ? 'no_card'
+          : outcome === 'not_renewing' ? 'not_renewed'
+          : 'charge_failed';
+        // Только поля истечения поверх текущей строки и только пока она ещё
+        // trial: отмена или оплата, сделанные во время прогона (письма, запросы
+        // к шлюзу по другим строкам), не затираются копией из начала прогона.
+        const upd = await pool.query(
           `UPDATE venue_profiles
-              SET data = $1::jsonb,
+              SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb,
                   updated_at = NOW()
-            WHERE user_id = $2`,
-          [JSON.stringify(nextData), row.user_id]
+            WHERE user_id = $2 AND data->>'subscriptionStatus' = 'trial'`,
+          [JSON.stringify({
+            subscriptionStatus: 'expired',
+            subscriptionPlan: 'free',
+            subscriptionExpiredReason: reason,
+            trial_ended_at: new Date(now).toISOString(),
+            updatedAt: new Date(now).toISOString(),
+          }), row.user_id]
         );
+        if (!upd.rowCount) {
+          result.skipped++;
+          continue;
+        }
 
         // Revoke bearer tokens — APK gets 401 on next poll, stops
-        // playing. Pause streams so admin UI shows the right state.
+        // playing. Pause streams so admin UI shows the right state
+        // (not while a station subscription is paid, pauseVenueStreams).
         await pool.query(
           `UPDATE venue_api_tokens SET revoked_at = NOW()
             WHERE user_id = $1 AND revoked_at IS NULL`,
           [row.user_id]
         ).catch((e) => console.warn('[venue-trial] token revoke failed:', e?.message));
-        await pool.query(
-          `UPDATE venue_station_streams
-              SET status = 'paused', updated_at = NOW()
-            WHERE user_id = $1 AND status IN ('provisioned', 'live')`,
-          [row.user_id]
-        ).catch((e) => console.warn('[venue-trial] stream pause failed:', e?.message));
+        await pauseVenueStreams(row.user_id)
+          .catch((e) => console.warn('[venue-trial] stream pause failed:', e?.message));
 
         emitSSE(row.user_id, {
           type: 'venue_trial_expired',
           data: { status: 'expired', plan: 'free', reason },
         });
-        if (row.email) {
+        // Закрытому аккаунту письмо «оформите подписку» не шлём: войти он не может.
+        if (row.email && reason !== 'account_closed') {
           await sendVenueTrialExpiredEmail({
             toEmail: row.email,
             venueName: row.venue_name || 'ваше заведение',
@@ -337,6 +355,12 @@ export async function expireTrialsOnce(): Promise<CronResult> {
         continue;
       }
 
+      // Закрытому аккаунту напоминания о списании не шлём.
+      if (!chargeable) {
+        result.skipped++;
+        continue;
+      }
+
       // Сумма и дата первого списания для напоминаний T-3 / T-1. Карта может
       // не сохраниться (cardSaveFailed): тогда письмо просит оформить подписку.
       // (Тот же отбор, что у веток ниже: T-1 в последний день, T-3 если ещё не уходило.)
@@ -345,8 +369,10 @@ export async function expireTrialsOnce(): Promise<CronResult> {
         : !!row.data?.trial_warning_sent_at;
       const remindNow = state.isTrialing && !!state.expiresAtIso && !remindersDone
         && state.daysRemaining > 0 && state.daysRemaining <= TRIAL_WARNING_DAYS;
+      // Пробный от админа без автопродления: обещать списание нельзя, письмо
+      // уходит в прежнем общем виде (без суммы и даты).
       let charge: TrialChargeNotice | undefined;
-      if (remindNow) {
+      if (remindNow && !isVenueAutoRenewOff(row.data)) {
         const plan = resolveVenueChargePlan(row.data);
         const hasCard = !!(await getChargeablePaymentMethod(row.user_id));
         charge = { amountRub: plan.amount, planName: plan.name, interval: plan.interval, atIso: state.expiresAtIso as string, hasCard };
@@ -358,17 +384,12 @@ export async function expireTrialsOnce(): Promise<CronResult> {
       if (state.isTrialing && state.daysRemaining === TRIAL_LAST_DAY_DAYS) {
         const alreadySent = !!row.data?.trial_last_day_sent_at;
         if (!alreadySent) {
-          const nextData = {
-            ...row.data,
-            trial_last_day_sent_at: new Date(now).toISOString(),
-            updatedAt: new Date(now).toISOString(),
-          };
           await pool.query(
             `UPDATE venue_profiles
-                SET data = $1::jsonb,
+                SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb,
                     updated_at = NOW()
               WHERE user_id = $2`,
-            [JSON.stringify(nextData), row.user_id]
+            [JSON.stringify({ trial_last_day_sent_at: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() }), row.user_id]
           );
           if (row.email && state.expiresAtIso) {
             await sendVenueTrialLastDayEmail({
@@ -390,17 +411,12 @@ export async function expireTrialsOnce(): Promise<CronResult> {
           result.skipped++;
           continue;
         }
-        const nextData = {
-          ...row.data,
-          trial_warning_sent_at: new Date(now).toISOString(),
-          updatedAt: new Date(now).toISOString(),
-        };
         await pool.query(
           `UPDATE venue_profiles
-              SET data = $1::jsonb,
+              SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb,
                   updated_at = NOW()
             WHERE user_id = $2`,
-          [JSON.stringify(nextData), row.user_id]
+          [JSON.stringify({ trial_warning_sent_at: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() }), row.user_id]
         );
         if (row.email && state.expiresAtIso) {
           await sendVenueTrialEndingEmail({

@@ -104,6 +104,16 @@ export function resolveVenueChargePlan(data: any): { tier: VenuePlanKey; interva
   return { tier, interval, amount: venuePlanPrice(tier, interval), name: VENUE_PLANS_CORE[tier].name };
 }
 
+/**
+ * Автопродление выключено: тариф или пробный назначил админ без оплаты
+ * (planAssignmentData пишет autoRenew:false). Кроны такой период не списывают,
+ * а по окончании переводят в expired. Флаг снимают оплата тарифа (вебхук),
+ * /resume и привязка карты в пробном.
+ */
+export function isVenueAutoRenewOff(data: any): boolean {
+  return data?.autoRenew === false;
+}
+
 export interface VenueNextCharge {
   at: string;                    // ISO: когда крон спишет (не раньше «сейчас»)
   amountRub: number;
@@ -115,12 +125,13 @@ export interface VenueNextCharge {
 /**
  * Ближайшее автосписание для кабинета (GET /venue-billing/me). null, если
  * списания не будет: нет сохранённой карты, подписка отменена / истекла /
- * карта не привязана, или тариф без фиксированной цены.
+ * карта не привязана, автопродление выключено (autoRenew === false: тариф
+ * назначил админ, isVenueAutoRenewOff), или тариф без фиксированной цены.
  *   trial  → в момент окончания пробного (крон expire-trials, раз в час);
  *   active → за RENEWAL_LEAD_DAYS до конца периода (крон charge-recurring).
  */
 export function getVenueNextCharge(data: any, hasCard: boolean, nowMs: number = Date.now()): VenueNextCharge | null {
-  if (!data || !hasCard) return null;
+  if (!data || !hasCard || isVenueAutoRenewOff(data)) return null;
   const status = String(data.subscriptionStatus || 'pending_card');
   if (status === 'trial') {
     const end = Date.parse(data.trial_expires_at || '');

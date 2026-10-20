@@ -11,7 +11,7 @@
  */
 
 import { Hono } from 'hono';
-import { claimPaymentSessionForProcessing, createCoinTransactionKv, creditAvailableAtomic, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, incrementCoinBalanceAtomic, reserveCreditOnce, revertPaymentSessionToPending, setCoinBalance, setPaymentSessionShopId, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx } from './db.tsx';
+import { claimPaymentSessionForProcessing, createCoinTransactionKv, creditAvailableAtomic, deletePaymentMethod, getCoinBalance, getPaymentBalance, getPaymentMethods, getPaymentSession, incrementCoinBalanceAtomic, reserveCreditOnce, revertPaymentSessionToPending, setCoinBalance, setPaymentSessionShopId, upsertPaymentBalance, upsertPaymentMethod, upsertPaymentSession, upsertSubscription, insertPaymentTx, GATEWAY_CARD_SOURCE, publicPaymentMethod } from './db.tsx';
 import { requireAuth } from './auth-middleware.tsx';
 import { safeErrorMessage } from './security.tsx';
 import {
@@ -43,6 +43,22 @@ const log = createLogger("checkout");
 const checkoutRoutes = new Hono();
 
 
+// ── Venue card check (1 ₽) ──
+//
+// Проверочный платёж привязки карты заведения создаёт только сервер
+// (POST /venue-billing/attach-card): type 'venue_subscription' + metadata.type
+// 'venue_card_attach', сумма 1 ₽. Клиентский /create-session такой type не
+// принимает, а metadata.type 'venue_*' отклоняет. Раньше ветка вебхука
+// срабатывала по одному metadata.type: topup на любую сумму с этой меткой
+// зачислялся на баланс и возвращался на карту целиком. Всё, что не совпало
+// по трём признакам, обычный платёж: без пробного и без возврата.
+const VENUE_CARD_CHECK_RUB = 1;
+function isVenueCardCheck(session: PaymentSession): boolean {
+  return session.type === 'venue_subscription'
+    && session.metadata?.type === 'venue_card_attach'
+    && Number(session.amount) === VENUE_CARD_CHECK_RUB;
+}
+
 // ── Helper: save the card for recurring charges ──
 //
 // Вызывается в начале processPaymentSuccess, до веток по типу платежа: ветке
@@ -68,6 +84,7 @@ async function saveCardFromWebhook(session: PaymentSession, webhook: WebhookPayl
     title: `${gatewayLabel} карта${card.last4 ? ` •• ${card.last4}` : ''}`,
     ...(card.last4 ? { last4: card.last4 } : {}),
     ...(card.brand ? { brand: card.brand } : {}),
+    source: GATEWAY_CARD_SOURCE,
     createdAt: now,
   };
   try {
@@ -291,6 +308,9 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           // Оплата после отмены = возобновление: снимаем пометки отмены.
           cancelledFromStatus:     null,
           subscriptionCancelledAt: null,
+          // Оплата картой с сохранением = согласие на автопродление (снимает
+          // autoRenew:false тарифа, назначенного админом).
+          autoRenew:               null,
           updatedAt:               now,
         };
 
@@ -406,7 +426,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
   //   trial / отменённый пробный с остатком срока → смена карты (и тарифа),
   //     срок пробного не меняется, отмена снимается;
   //   active / expired / отменённая платная → только карта, статус не трогаем.
-  if (session.metadata?.type === 'venue_card_attach') {
+  if (isVenueCardCheck(session)) {
     const venueUserId = String(session.userId || '');
     // Цель = плательщик (session.userId из JWT), metadata.userId только сверяем.
     const userMismatch = !!session.metadata.userId && String(session.metadata.userId) !== venueUserId;
@@ -445,6 +465,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           trial_last_day_sent_at: null,
           cardAttachedAt: nowIso,
           cardSaveFailed: !savedCardId,
+          autoRenew: null,   // привязка карты = согласие на списание в конце пробного
           updatedAt: nowIso,
         });
         log.info({ venueUserId, until, plan: choice.subscriptionPlan || prof.subscriptionPlan || 'start' }, 'venue_trial_started_after_card');
@@ -459,13 +480,20 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           }))
           .catch((e: any) => log.warn({ err: e?.message }, 'venue_card_admin_notify_failed'));
       } else if (st === 'trial' || (st === 'cancelled' && prof.cancelledFromStatus === 'trial' && trialLeft)) {
-        // Пробный без срока (старые строки до карточной схемы) получает 7 дней от сейчас.
-        const until = trialLeft
+        // Срок пробного не сдвигается, даже если он уже прошёл, а крон ещё не
+        // списал (таймеры выключены, повтор после сбоя, платёж в обработке):
+        // иначе повторная привязка давала бы новые 7 дней, а ключ первого
+        // списания (по концу пробного) менялся бы и оплата терялась. Такой
+        // пробный крон спишет на ближайшем прогоне, тариф тогда не меняем.
+        // 7 дней от сейчас только пробному без срока (строки до карточной схемы).
+        const hasEnd = Number.isFinite(prevTrialEndMs);
+        const until = hasEnd
           ? new Date(prevTrialEndMs).toISOString()
           : new Date(nowMs + trialPeriodDaysFor(nowMs) * 24 * 60 * 60 * 1000).toISOString();
         await upsertVenueProfile(venueUserId, {
           ...prof,
-          ...choice,
+          ...(trialLeft || !hasEnd ? choice : {}),
+          autoRenew: null,   // привязка карты в пробном = согласие на списание в конце
           subscriptionStatus: 'trial',
           trial_expires_at: until,
           subscriptionExpiresAt: until,
@@ -486,16 +514,19 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     // Возврат проверочного рубля. Ждём ответ шлюза, чтобы сбой был в логе;
     // idempotenceKey по orderId: повтор вебхука не вернёт рубль дважды.
     // (До 16.10 здесь читался несуществующий webhook.sessionId, и рубль
-    // не возвращался никогда.)
+    // не возвращался никогда.) Возвращаем ровно VENUE_CARD_CHECK_RUB; чек
+    // возврата на тот же e-mail, что у платежа.
     const attachPaymentId = webhook.paymentId || session.gatewayPaymentId;
     if (attachPaymentId) {
       try {
         const { getGateway } = await import('./payment-gateway.tsx');
         const gw: any = getGateway('yookassa');
-        const refund = await gw.refund(attachPaymentId, Number(session.amount) || 1, {
+        const receiptEmail = String(webhook.metadata?.email || '').trim();
+        const refund = await gw.refund(attachPaymentId, VENUE_CARD_CHECK_RUB, {
           description: 'Возврат проверочного платежа за привязку карты',
           idempotenceKey: `refund-attach-${session.orderId}`,
           shopId: (session as any).shop_id || undefined,
+          ...(receiptEmail.includes('@') ? { receiptEmail, receiptDescription: session.description } : {}),
         });
         log.info({ orderId: session.orderId, refundId: refund?.id, status: refund?.status }, 'venue_card_attach_refunded');
       } catch (e: any) {
@@ -530,10 +561,22 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
       // закрываем ('superseded') в той же транзакции, а новый период считаем
       // от её конца: оплата во время пробного не съедает оставшиеся дни.
       const client = await vrPool.connect();
-      let r: any;
+      let r: any = { rows: [] };
+      let ownerMismatch = false;
       try {
         await client.query('BEGIN');
-        const prev = await client.query(
+        // Строка подписки должна принадлежать плательщику (user_id или старый
+        // ключ venue_profiles.id). Иначе чужая оплата включала бы произвольную
+        // строку и закрывала действующую подписку другого заведения.
+        const own = await client.query(
+          `SELECT s.id FROM venue_radio_subscriptions s
+            WHERE s.id = $1
+              AND (s.venue_id = $2 OR s.venue_id IN (SELECT vp.id FROM venue_profiles vp WHERE vp.user_id = $2))
+            FOR UPDATE`,
+          [subId, String(session.userId || '')]
+        );
+        ownerMismatch = own.rows.length === 0;
+        const prev = ownerMismatch ? { rows: [] as any[] } : await client.query(
           `UPDATE venue_radio_subscriptions o
               SET status = 'superseded', updated_at = NOW()
              FROM venue_radio_subscriptions n
@@ -546,7 +589,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
           const d = x.current_period_end ? new Date(x.current_period_end) : null;
           return d && (!m || d > m) ? d : m;
         }, null as Date | null);
-        r = await client.query(
+        if (!ownerMismatch) r = await client.query(
           `UPDATE venue_radio_subscriptions
               SET status = 'active',
                   current_period_start = COALESCE(current_period_start, NOW()),
@@ -564,6 +607,11 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
         throw txErr;
       } finally {
         client.release();
+      }
+      if (ownerMismatch) {
+        // Не throw: деньги уже списаны, повтор вебхука ничего не изменит.
+        // Разбор и возврат вручную (как venue_subscription_impersonation).
+        log.warn({ subscriptionId: subId, sessionUserId: session.userId, orderId: session.orderId }, 'venue_radio_subscription_owner_mismatch');
       }
       if (r.rows.length > 0) {
         log.info({ subscriptionId: subId, venueId: r.rows[0].venue_id, planId: r.rows[0].plan_id, until: r.rows[0].current_period_end, amount: session.amount }, 'venue_radio_subscription_activated');
@@ -1934,7 +1982,7 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
 
   // Record platform revenue (using existing platform-revenue if available)
   // Проверочный 1 ₽ привязки карты заведения сразу возвращается: это не выручка.
-  if (session.metadata?.type !== 'venue_card_attach') try {
+  if (!isVenueCardCheck(session)) try {
     const { recordRevenue } = await import('./platform-revenue.tsx');
     const commissionRate = session.type === 'donation' ? 0 : 0.1; // 10% commission except donations
 
@@ -1996,8 +2044,8 @@ async function processPaymentSuccess(session: PaymentSession, webhook: WebhookPa
     log.warn({ err }, 'revenue_recording_skipped');
   }
 
-  // Email notification to admin
-  notifyPaymentReceived({
+  // Email notification to admin (не о каждом проверочном 1 ₽ заведения: он возвращается)
+  if (!isVenueCardCheck(session)) notifyPaymentReceived({
     amount: session.amount,
     currency: session.currency,
     type: session.type,
@@ -2105,6 +2153,13 @@ checkoutRoutes.post('/create-session', requireAuth, async (c) => {
     }
     if (!type || !['purchase', 'subscription', 'donation', 'topup'].includes(type)) {
       return c.json({ success: false, error: 'Укажите type: purchase, subscription, donation или topup' }, 400);
+    }
+    // Платежи заведений с metadata.type 'venue_*' (проверка карты, абонемент
+    // эфира) создаёт только сервер (venue-billing, venue-radio), и вебхук
+    // доверяет их metadata. С клиента такая метка не принимается.
+    if (typeof metadata?.type === 'string' && metadata.type.startsWith('venue_')) {
+      log.warn({ userId, type, metadataType: metadata.type, amount }, 'venue_metadata_via_create_session_blocked');
+      return c.json({ success: false, error: 'Оплата этого типа создаётся в кабинете заведения, не напрямую' }, 400);
     }
     // For subscriptions the price MUST match the canonical plan price — the client cannot
     // dictate the amount. This blocks the "open DevTools, lower the price" attack.
@@ -3102,7 +3157,7 @@ checkoutRoutes.get('/methods', requireAuth, async (c) => {
   try {
     const userId = c.get('userId');
     const methods = await getPaymentMethods(userId);
-    return c.json({ success: true, data: methods || [] });
+    return c.json({ success: true, data: (methods || []).map(publicPaymentMethod) });
   } catch (error: any) {
     return c.json({ success: true, data: [] });
   }

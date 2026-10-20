@@ -38,6 +38,7 @@ import { safeErrorMessage } from './security.tsx';
 import { sendVenueRadioReadyEmail, sendVenueRadioChangesRequestedEmail, sendVenueRadioRejectedEmail } from './email-helper.tsx';
 import { siteForUserId } from './site-origin.tsx';
 import { TRIAL_PERIOD_DAYS } from './venue-trial.tsx';
+import { requireVenueAccount } from './venue-billing-helpers.tsx';
 
 const app = new Hono();
 
@@ -269,7 +270,8 @@ app.get('/me', requireAuth, async (c) => {
 // POST / — submit the onboarding wizard. Idempotent per-venue: if a
 // request already exists in any open status, we 409 and tell the
 // caller to PUT / instead (used when admin requested changes).
-app.post('/', requireAuth, async (c) => {
+// Анкету подаёт только заведение (или админ), см. requireVenueAccount.
+app.post('/', requireAuth, requireVenueAccount, async (c) => {
   try {
     const userId = await getUserId(c);
     const profile = await loadVenueProfile(userId);
@@ -329,7 +331,7 @@ app.post('/', requireAuth, async (c) => {
 // or when the venue wants to edit preferences before admin takes it).
 // Auto-bumps status back to pending_admin so the admin queue picks it
 // up again.
-app.put('/', requireAuth, async (c) => {
+app.put('/', requireAuth, requireVenueAccount, async (c) => {
   try {
     const userId = await getUserId(c);
     const profile = await loadVenueProfile(userId);

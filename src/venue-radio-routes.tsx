@@ -14,6 +14,7 @@ import { Hono } from 'hono';
 import { requireAuth, requireAdmin } from './auth-middleware.tsx';
 import { pool } from './db-client.tsx';
 import { isAllowedUrl, originFromRequest, PATH } from './site-origin.tsx';
+import { loadVenueReceiptEmail } from './venue-billing-helpers.tsx';
 
 const app = new Hono();
 
@@ -149,6 +150,8 @@ app.post('/subscribe', requireAuth, async (c) => {
     const { upsertPaymentSession } = await import('./db.tsx');
     const orderId = crypto.randomUUID();
     const gw = getGateway('yookassa');
+    // 54-ФЗ: чек на e-mail заведения (без него шлюз подставлял noreply@).
+    const receiptEmail = await loadVenueReceiptEmail(venueId);
     const result = await gw.createPayment({
       amount: price,
       currency: 'RUB',
@@ -162,6 +165,7 @@ app.post('/subscribe', requireAuth, async (c) => {
         subscriptionId,
         venueId,
         planId,
+        ...(receiptEmail ? { email: receiptEmail } : {}),
       },
       savePaymentMethod: false,
       type: 'subscription',

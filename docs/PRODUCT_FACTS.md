@@ -483,26 +483,55 @@ Endpoints under `/server/api/venue-billing`:
   scans only `trial`, the renewal cron never charges `cancelled`); then
   the renewal cron flips to expired + revokes tokens.
 - `POST /resume`: undo a cancel before the period ends (needs a saved
-  card). Paying via `/subscribe` also clears the cancel.
+  card). Paying via `/subscribe` also clears the cancel. Also turns on
+  renewal of an admin-assigned plan (`autoRenew:false`, see below).
 - `GET  /me`: current subscription state (no status = `pending_card`),
-  `effectivePlan`, saved card summary (last4, brand, gateway), and
-  `nextChargeAt` / `nextChargeRub` (trial end, or 3 days before the
-  paid period ends; null when no charge will happen).
+  `effectivePlan`, saved card summary (last4, brand, gateway; never the
+  gateway token), `autoRenew`, and `nextChargeAt` / `nextChargeRub`
+  (trial end, or 3 days before the paid period ends; null when no charge
+  will happen). Before the card is bound no trial dates are shown.
+- Access (since 2026-10-20, review fix): subscribe / attach-card / cancel /
+  resume / me and the air questionnaire (`POST|PUT /venue-station`) only
+  for `users.role='venue'` with `status='active'` (checked in the DB) or an
+  admin (`venue-billing-helpers.tsx:requireVenueAccount`); others get 403
+  `{code:'venue_only'}`. Before, any logged-in user (artists are active at
+  once) could start a trial and be charged, invisible in the admin.
 - `GET  /plans`: public, see «Subscription tiers».
 - `POST /cron/charge-recurring` — CRON_SECRET. Mirror of artist
   `/subscriptions/charge-recurring` but scoped to `venue_profiles`.
   Charges venues whose `subscriptionExpiresAt` is within 3 days OR
   past (`RENEWAL_LEAD_DAYS`). On charge failure / no card past expiry
   → marks expired (see `markVenueExpired` below). Idempotent via
-  deterministic `venue-renew-{userId}-{expiresMs}-{day}` orderId.
+  deterministic `venue-renew-{userId}-{expiresMs}-{day}` orderId (73
+  chars; the YooKassa `Idempotence-Key` is its sha256 because the API
+  allows at most 64, `gateway-yookassa.tsx:yookassaIdempotenceKey`).
+  Every attempt for one period carries `metadata.renewFor` = period end:
+  a succeeded attempt (also one the webhook confirmed later) extends
+  without a new charge, one still at the gateway is waited for, so a
+  `pending` renewal is never charged again the next day. Never charged:
+  `cancelled`, `autoRenew:false` (admin plan), account not `active` or
+  deleted; those expire at the period end. Advisory lock 770452.
   Runs every 6 h (`systemd/promofm-venue-charge-recurring.timer`).
 - Saved cards: `payment_methods` (uuid id from the DB, app id in
-  `data.id`, token in `data.gatewayMethodId`). The newest row with a
-  token is charged (`db.tsx:getChargeablePaymentMethod`). Before
-  2026-10-16 every write failed on prod (id 'pm-…' into uuid, missing
-  `updated_at`), so no card was ever saved (artists included).
-- 54-ФЗ: subscribe, attach-card and both autocharges send the venue's
-  `users.email` as the receipt e-mail (before: `noreply@promo-music.ru`).
+  `data.id`, token in `data.gatewayMethodId`). Only a card saved by the
+  gateway webhook is charged: `data.source='gateway_webhook'`
+  (`db.tsx:getChargeablePaymentMethod`, also the admin `hasCard`). The
+  manual POST routes (`/payments/payment-methods`,
+  `/settings/user/:id/payment-methods`) drop `gatewayMethodId`,
+  `gateway`, `source`, `id` from the body, and no client response
+  returns the token. Before 2026-10-16 every write failed on prod (id
+  'pm-…' into uuid, missing `updated_at`), so no card was ever saved
+  (artists included).
+- 54-ФЗ: subscribe, attach-card, both autocharges, the 1 ₽ refund and
+  the station subscription (`/venue-radio/subscribe`, efir) send the
+  venue's `users.email` as the receipt e-mail (before:
+  `noreply@promo-music.ru`).
+- The 1 ₽ card check is recognised only as `session.type=
+  'venue_subscription'` + `metadata.type='venue_card_attach'` + amount 1
+  (only the server creates it); exactly 1 ₽ is refunded, no revenue, no
+  admin «payment received» e-mail. `/checkout/create-session` refuses any
+  client `metadata.type` starting with `venue_` (400). Before 2026-10-20 a
+  topup labelled `venue_card_attach` was credited and refunded in full.
 
 Webhook in `checkout-routes.tsx`: `session.type === 'venue_subscription'`
 + `session.metadata.planKey` → activates the tier on
@@ -524,9 +553,12 @@ at trial end, paid period after cancellation ran out):
 - All `venue_api_tokens.revoked_at = NOW()` — APK gets 401 on next
   poll, shows lock-screen «оплатите чтобы продолжить»
 - All `venue_station_streams.status = 'paused'` — admin UI shows
-  the state
+  the state; not while the venue has an active, unexpired
+  `venue_radio_subscriptions` row (paid efir / old plans / provisioning
+  trial), `venue-billing-helpers.tsx:pauseVenueStreams`
 - SSE `venue_subscription_expired` event + email
-  (`sendVenueTrialExpiredEmail` with `reason`: cancelled / period_ended)
+  (`sendVenueTrialExpiredEmail` with `reason`: cancelled / period_ended /
+  not_renewed); no email for a closed account (`account_closed`)
 
 ### Trial-end auto-charge
 
@@ -537,11 +569,16 @@ The card bound at trial start (attach-card) is charged by the hourly
 expire-trials cron for the chosen tier/interval (`resolveVenueChargePlan`:
 chosen → «Старт» monthly), with a 54-ФЗ receipt to the venue's e-mail.
 orderId `venue-first-{userId}-{trialEndMs}` (deterministic: no double
-charge). Charged → active for 30 / 365 days from now. No card or
-declined → expired (revoke tokens, pause streams, email with the
+charge). The pending session is written before the gateway call, so an
+early webhook finds it. Charged → active for 30 / 365 days from now. No
+card or declined → expired (revoke tokens, pause streams, email with the
 reason). Gateway `pending` → wait for the webhook, next run activates.
-Network/gateway error → retried hourly for 24 h, then expired. T-3 and
-T-1 emails name the amount, tier and date of the charge.
+Network/gateway error → retried hourly for 24 h, then expired. Not
+charged: an admin trial (`autoRenew:false`, expires as `not_renewed`) and
+an account that is not `active` (expires as `account_closed`, no email).
+T-3 and T-1 emails name the amount, tier and date of the charge. Binding
+a card again after the trial ended keeps the end date (the cron charges
+it); before 2026-10-20 it gave 7 new days.
 
 This is the difference between «1000 триалов / 0 платящих» and a
 working funnel — without it every trial silently dies on day 14.
@@ -859,8 +896,12 @@ PROMO.AIR section of the admin on promo-music.ru (`/ctrl-pm7k2f/promo-air`).
 - Account moderation: approve / reject only from `pending`, block from any
   non-blocked status → `'banned'` + `token_version+1` + refresh tokens
   revoked (shared `auth-security.tsx:revokeUserSessions`, same as the
-  UsersManagement ban) + streams paused + venue API keys revoked. Restore:
-  banned/blocked/suspended → `active`; streams and API keys stay off.
+  UsersManagement ban) + streams paused + venue API keys revoked + the
+  subscription cancelled (trial/active → `cancelled`, no more charges).
+  Restore: banned/blocked/suspended → the status before the block (from
+  the `promoair_venue_block` audit row; `active` if none), so a blocked
+  pending/rejected account is not approved by a restore; streams, API
+  keys and renewal stay off.
   Approve does NOT mark the e-mail verified (the venue still confirms it;
   `/auth/admin/approve-user` does mark it). A stale state answers 409
   `{error:'conflict', status}`.
@@ -872,9 +913,11 @@ PROMO.AIR section of the admin on promo-music.ru (`/ctrl-pm7k2f/promo-air`).
   `venue_profiles.data` fields as a payment (`subscriptionStatus/Plan/
   Interval/ExpiresAt`, `subscriptionPriceRub=0`,
   `subscriptionAssignedByAdminAt`), clears cancel/expiry marks, un-pauses
-  paused streams like a payment. No `payment_sessions` row. After the
-  date the normal crons apply: a saved card is charged the assigned plan
-  (renewal or trial-end charge), no card → expired.
+  paused streams like a payment. No `payment_sessions` row. Sets
+  `autoRenew:false` (since 2026-10-20): the crons never charge it, at the
+  date it expires with the «автопродление не было включено» email. The
+  flag is cleared by a paid `/subscribe`, `/venue-billing/resume` or a card
+  binding during the trial (each is the venue's consent to be charged).
 - Trial extension: only while `subscriptionStatus='trial'`, +1..60 days
   from the current end (or from now if it already passed), T-3/T-1
   reminders re-armed.

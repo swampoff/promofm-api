@@ -109,6 +109,9 @@ export interface SavedPaymentMethod {
   title: string;       // 'Visa *4242'
   last4?: string;
   brand?: string;
+  // 'gateway_webhook' = карту сохранил вебхук шлюза; только такую списывают
+  // кроны (db.tsx getChargeablePaymentMethod).
+  source?: string;
   createdAt: string;
 }
 
