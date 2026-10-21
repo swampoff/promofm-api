@@ -936,7 +936,8 @@ Details and contracts: `docs/PROMOAIR.md` §6.
   first `GET /api/venue/profile`, `/venue-billing/*` or `/venue-station/*`
   call, only for `users.role='venue'`. `venue_name` = `users.full_name`
   (promoair sign-up sends the venue name there); type, city and country are
-  NULL (no more «Мое заведение / bar / Москва»); `data.contactName` comes from
+  NULL (no more «Мое заведение / bar / Москва»), except type, city and phone
+  given in the sign-up application (since 2026-10-21); `data.contactName` comes from
   `users.settings.application.contactName` (written at sign-up). One admin
   «new venue» e-mail per venue: only the call whose `INSERT … ON CONFLICT
   DO NOTHING` inserted the row sends it. `GET /api/venue/profile` answers
@@ -980,6 +981,43 @@ Details and contracts: `docs/PROMOAIR.md` §6.
   autocharge and that the air pauses at the end; no «бесплатный режим».
 - **Content orders** store `data.urgent` (best effort; the order JSON has
   `urgent`).
+
+### Venue sign-up = application, VK ID on promoair.ru (since 2026-10-21)
+
+Details and contracts: `docs/PROMOAIR.md` §7, §8.
+
+- **One form.** A venue sign-up from promoair.ru (or with
+  `applicationDetails.source='promoair'`) must carry phone, city and venue
+  type (`src/venue-application.tsx`): 400 `{error, field}` otherwise, before
+  any INSERT. Stored in `users.settings.application`: `contactName`,
+  `venueName`, `phone` (`+7XXXXXXXXXX` for Russian numbers, 10–15 digits),
+  `city`, `venueType` (cafe, restaurant, bar, lounge, club, shop, hotel, spa,
+  gym, other: the cabinet profile list), `points` (`1` | `2-4` | `5+`, default
+  `1`), `source`, `submittedAt`. The old promo-music.ru venue form (no
+  application) is not validated. Other roles: unchanged.
+- **Admin e-mail / Telegram** for a venue application: Контактное лицо,
+  Телефон (`tel:`), Город, Тип, Точек, escaped; to `ADMIN_EMAILS` only.
+- **Profile seed.** `ensureVenueProfile` copies city, type (list values only)
+  and phone from the application into the new `venue_profiles` row.
+- **Admin rows** (`/promo-air-admin/venues`) carry `phone`, `city`,
+  `venueType`, `points` (profile first, else the application); `?city=` and
+  `?q=` match the application city too.
+- **PROMO.AIR e-mail footer**: `© <year> PROMO.AIR · ООО «Промо Фм» · ИНН
+  5038195100 · info@promofm.ru`; no PROMO.AIR e-mail body mentions or links
+  promo-music.ru (sender address unchanged).
+- **Venue stream URLs** created by `services/promo-air-venue` are
+  `https://promoair.ru/air/live/venue-<slug>`; older promo-music.ru URLs keep
+  working (both hosts accepted).
+- **VK ID on promoair.ru** (app `PROMOAIR_VK_APP_ID`, default 54840499; OAuthList
+  with VK ID, OK, Mail.ru): `POST /auth/vk-air {access_token}` works only on
+  site `air` (else 404), verifies the token with `id.vk.com/oauth2/user_info`
+  and our client_id. Known `vk_id` → status gate as `/signin` → session; same
+  e-mail → pending/blocked 403 without linking, active → link + session; else
+  `needsSignup` + an HMAC `vkTicket` (30 min, single use). `/auth/signup` with
+  the ticket (venue on promoair.ru only): no password, `vk_id` + avatar set,
+  e-mail verified and no confirmation e-mail when it equals the VK e-mail,
+  status `pending`, admin «Через: vk_oauth». promo-music.ru's VK flow
+  (`/auth/vk-callback`, app 54426299) is unchanged.
 
 ### Partner account moderation gate (since 2026-10-17, SECURITY)
 

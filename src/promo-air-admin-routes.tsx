@@ -33,6 +33,7 @@ import { safeErrorMessage } from './security.tsx';
 import { createLogger } from './logger.tsx';
 import {
   ACCOUNT_TRANSITIONS, PLAN_ACCOUNT_STATUSES, BLOCKED_STATUSES, SUB_STATUS_SQL, VENUE_NAME_SQL, CITY_SQL, CONTACT_NAME_SQL,
+  VENUE_PHONE_SQL, VENUE_CITY_SQL, VENUE_TYPE_SQL, VENUE_POINTS_SQL,
   buildVenueFilters, decodeCursor, isUuid, pageOf, parseLimit, parsePlanAssignment, parseReason,
   parseTrialDays, planAssignmentData, restoreTarget, subscriptionSnapshot, toAuditItem, toDevice, toPaymentItem, toStreamItem,
   toVenueRow, trialExtensionData, type AccountAction, type IdKind,
@@ -61,6 +62,10 @@ const VENUE_ROW_SQL = `
          u.email,
          COALESCE(NULLIF(u.full_name, ''), NULLIF(u.display_name, ''), u.username) AS name,
          ${CONTACT_NAME_SQL}                            AS contact_name,
+         ${VENUE_PHONE_SQL}                             AS phone,
+         ${VENUE_CITY_SQL}                              AS venue_city,
+         ${VENUE_TYPE_SQL}                              AS venue_type_any,
+         ${VENUE_POINTS_SQL}                            AS signup_points,
          u.status::text                                 AS account_status,
          COALESCE(u.is_email_verified, false)           AS email_verified,
          u.created_at,

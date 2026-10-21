@@ -5,6 +5,7 @@
  */
 
 import { getDbClient } from './db-client.tsx';
+import { isVenueType } from './venue-application.tsx';
 
 const db = () => getDbClient();
 
@@ -1340,6 +1341,8 @@ export async function upsertDjProfile(djId: string, profile: Record<string, any>
  * 20.10.2026: имя заведения берём из регистрации (users.full_name: PROMO.AIR
  * шлёт туда название заведения), контактное лицо из users.settings.application.
  * Тип, город и страну не выдумываем (раньше «Мое заведение», «bar», «Москва»).
+ * 21.10.2026: город, тип и телефон берём из заявки при регистрации (форма
+ * PROMO.AIR, users.settings.application), если они там есть.
  * Кабинет грузит профиль, оплату и эфир параллельно: INSERT … ON CONFLICT DO
  * NOTHING, и письмо «новое заведение» уходит только из того вызова, который
  * строку действительно вставил (раньше до трёх писем на заведение).
@@ -1356,23 +1359,31 @@ export async function ensureVenueProfile(userId: string) {
   if (!u || String(u.role) !== 'venue') return null;
   const venueName = String(u.full_name || '').trim().slice(0, 200) || null;
   const app = u.settings && typeof u.settings === 'object' ? u.settings.application : null;
-  const contactName = app && typeof app.contactName === 'string' ? app.contactName.trim().slice(0, 120) : '';
+  const appText = (key: string, max: number) => (app && typeof app[key] === 'string' ? app[key].trim().slice(0, max) : '');
+  const contactName = appText('contactName', 120);
+  // Город, тип и телефон из заявки при регистрации (PROMO.AIR, venue-application.tsx);
+  // тип только из списка профиля, без заявки NULL, как раньше.
+  const appType = appText('venueType', 40);
+  const venueType = isVenueType(appType) ? appType : null;
+  const city = appText('city', 120) || null;
+  const phone = appText('phone', 40) || null;
   const now = new Date().toISOString();
   const data = {
-    id: `venue-${userId}`, userId, venueName, description: null, venueType: null,
-    address: '', city: null, country: null, capacity: null, logoUrl: null, coverImageUrl: null,
+    id: `venue-${userId}`, userId, venueName, description: null, venueType,
+    address: '', city, country: null, capacity: null, logoUrl: null, coverImageUrl: null,
     genres: [], socialLinks: {}, workingHours: null, status: 'active', verified: false,
     ...(contactName ? { contactName } : {}),
+    ...(phone ? { phone } : {}),
     // Пробный период (7 дней) только после привязки карты (см. GET /venue/profile).
     subscriptionStatus: 'pending_card', subscriptionPlan: 'start', createdAt: now, updatedAt: now,
   };
-  // venue_type и capacity явно NULL: у колонок есть DEFAULT ('club', 0).
+  // venue_type и capacity явно (NULL без заявки): у колонок есть DEFAULT ('club', 0).
   const ins = await pool.query(
-    `INSERT INTO venue_profiles (user_id, venue_name, venue_type, city, address, country, capacity, genres, social_links, data, updated_at)
-     VALUES ($1, $2, NULL, NULL, '', NULL, NULL, '{}'::text[], '{}'::jsonb, $3::jsonb, NOW())
+    `INSERT INTO venue_profiles (user_id, venue_name, venue_type, city, phone, address, country, capacity, genres, social_links, data, updated_at)
+     VALUES ($1, $2, $3, $4, $5, '', NULL, NULL, '{}'::text[], '{}'::jsonb, $6::jsonb, NOW())
      ON CONFLICT (user_id) DO NOTHING
      RETURNING id`,
-    [String(userId), venueName, JSON.stringify(data)],
+    [String(userId), venueName, venueType, city, phone, JSON.stringify(data)],
   );
   if (ins.rowCount) {
     import('./email-helper.tsx')

@@ -4,6 +4,7 @@
 import nodemailer from 'nodemailer';
 import crypto from 'crypto';
 import { SITE_BRAND, SITE_ORIGIN, PATH, type SiteKey } from './site-origin.tsx';
+import { venueTypeLabel, venuePointsLabel } from './venue-application.tsx';
 
 const ADMIN_EMAIL = 'info@promofm.ru';
 // 09.10.2026: админские уведомления уходят на несколько адресов (ADMIN_NOTIFY_EMAILS в .env, через запятую):
@@ -228,6 +229,7 @@ export const emailWrapper = (content: string, site: SiteKey = 'music') => site =
 
 // Тёмный фон как у основного шаблона: inline-цвета контента писем (#fff, #e0e0e0)
 // рассчитаны на тёмную подложку. Цвета: ink #162538 и оранжевый градиент PROMO.AIR.
+// Подвал (владелец 21.10.2026): оператор и реквизиты, без PROMO.MUSIC и ссылок на promo-music.ru.
 const airEmailWrapper = (content: string) => `
 <!DOCTYPE html>
 <html>
@@ -245,7 +247,7 @@ const airEmailWrapper = (content: string) => `
         <tr><td style="padding: 24px 40px 32px; color: #8a97a8; font-size: 12px; border-top: 1px solid #24364d; text-align: center;">
           <div style="display: inline-block; padding: 8px 14px; margin-bottom: 10px; background: #f9fcff; border-radius: 12px;"><img src="${SITE_BRAND.air.logo}" alt="${SITE_BRAND.air.name}" style="height: 30px; display: block; border: 0;" /></div>
           <p style="margin: 0 0 10px; color: #e0e0e0; font-size: 14px; font-weight: 600;">Команда ${SITE_BRAND.air.name}</p>
-          <p style="margin: 0;">&copy; ${new Date().getFullYear()} ${SITE_BRAND.air.name} – музыка для заведений от PROMO.MUSIC</p>
+          <p style="margin: 0;">&copy; ${new Date().getFullYear()} ${SITE_BRAND.air.name} · ООО «Промо Фм» · ИНН 5038195100 · <a href="mailto:info@promofm.ru" style="color: #8a97a8; text-decoration: underline;">info@promofm.ru</a></p>
           <p style="margin: 4px 0 0;"><a href="${SITE_BRAND.air.url}" style="color: #ff873a; text-decoration: none;">${SITE_BRAND.air.label}</a></p>
         </td></tr>
       </table>
@@ -429,13 +431,41 @@ export async function notifyBookingRequest(data: {
   ).catch(() => {});
 }
 
+// Заявка заведения (PROMO.AIR, venue-application.tsx): строки для письма и
+// короткий текст для Telegram, чтобы команда могла позвонить до одобрения.
+// Всё экранируется; ссылка tel: только из цифр и «+».
+function venueApplicationFields(a: any): Array<[string, string]> {
+  const s = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+  return ([
+    ['Контактное лицо', s(a?.contactName)],
+    ['Телефон', s(a?.phone)],
+    ['Город', s(a?.city)],
+    ['Тип', venueTypeLabel(a?.venueType)],
+    ['Точек', venuePointsLabel(a?.points)],
+  ] as Array<[string, string]>).filter(([, v]) => v);
+}
+function venueApplicationRowsHtml(a: any): string {
+  return venueApplicationFields(a).map(([label, value]) => {
+    const cell = label === 'Телефон'
+      ? `<a href="tel:${escapeHtml(value.replace(/[^\d+]/g, ''))}">${escapeHtml(value)}</a>`
+      : escapeHtml(value);
+    return `<tr><td style="padding: 8px;">${label}:</td><td>${cell}</td></tr>`;
+  }).join('');
+}
+
 export async function notifyNewUser(data: { email: string; name: string; role: string; via?: string; needsApproval?: boolean; application?: any; site?: SiteKey }) {
   // Строка «Сайт» только для регистраций с promoair.ru: письмо о promo-music.ru не меняется.
   const siteRow = data.site === 'air' ? `<tr><td style="padding: 8px;">Сайт:</td><td>${SITE_BRAND.air.label}</td></tr>` : '';
-  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: ${data.needsApproval ? '#F59E0B' : '#3B82F6'};">${data.needsApproval ? 'Заявка – требует одобрения' : 'Новый пользователь'}</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Имя:</td><td>${escapeHtml(data.name)}</td></tr><tr><td style="padding: 8px;">Email:</td><td>${escapeHtml(data.email)}</td></tr><tr><td style="padding: 8px;">Роль:</td><td>${escapeHtml(data.role)}</td></tr>${data.via ? `<tr><td style="padding: 8px;">Через:</td><td>${escapeHtml(data.via)}</td></tr>` : ''}${siteRow}${data.application ? `<tr><td style="padding: 8px;">Заявка:</td><td>${escapeHtml(JSON.stringify(data.application))}</td></tr>` : ''}</table></div>`;
+  // Заявка заведения: отдельные строки; у остальных ролей (радио) как раньше, JSON одной строкой.
+  const venueApp = data.role === 'venue' && data.application && typeof data.application === 'object' ? data.application : null;
+  const applicationRows = venueApp
+    ? venueApplicationRowsHtml(venueApp)
+    : data.application ? `<tr><td style="padding: 8px;">Заявка:</td><td>${escapeHtml(JSON.stringify(data.application))}</td></tr>` : '';
+  const html = `<div style="font-family: Arial, sans-serif; max-width: 600px;"><h2 style="color: ${data.needsApproval ? '#F59E0B' : '#3B82F6'};">${data.needsApproval ? 'Заявка – требует одобрения' : 'Новый пользователь'}</h2><table style="width: 100%; border-collapse: collapse;"><tr><td style="padding: 8px;">Имя:</td><td>${escapeHtml(data.name)}</td></tr><tr><td style="padding: 8px;">Email:</td><td>${escapeHtml(data.email)}</td></tr><tr><td style="padding: 8px;">Роль:</td><td>${escapeHtml(data.role)}</td></tr>${data.via ? `<tr><td style="padding: 8px;">Через:</td><td>${escapeHtml(data.via)}</td></tr>` : ''}${siteRow}${applicationRows}</table></div>`;
+  const tgVenue = venueApp ? venueApplicationFields(venueApp).map(([label, value]) => `\n${label === 'Контактное лицо' ? 'Контакт' : label}: ${escapeHtml(value)}`).join('') : '';
   // 09.10.2026: дубль в Telegram — после переезда письма на info@promofm.ru до владельца не доходят
   // (Яндекс принимает, но в ящик не кладёт); Telegram не зависит от почты.
-  notifyAdminTelegram(`${data.needsApproval ? '📝 Заявка на модерацию' : '👤 Новая регистрация'}: <b>${escapeHtml(data.name)}</b>\nРоль: ${escapeHtml(data.role)}\nEmail: ${escapeHtml(data.email)}${data.via ? `\nЧерез: ${escapeHtml(data.via)}` : ''}${data.site === 'air' ? `\nСайт: ${SITE_BRAND.air.label}` : ''}`).catch(() => {});
+  notifyAdminTelegram(`${data.needsApproval ? '📝 Заявка на модерацию' : '👤 Новая регистрация'}: <b>${escapeHtml(data.name)}</b>\nРоль: ${escapeHtml(data.role)}\nEmail: ${escapeHtml(data.email)}${data.via ? `\nЧерез: ${escapeHtml(data.via)}` : ''}${data.site === 'air' ? `\nСайт: ${SITE_BRAND.air.label}` : ''}${tgVenue}`).catch(() => {});
   await sendAdminEmail({subject: data.needsApproval ? `[ПРОМО] ЗАЯВКА: ${escapeHtml(data.role)} ${escapeHtml(data.name)}` : `[ПРОМО] Новый ${escapeHtml(data.role)}: ${escapeHtml(data.name)}`, html });
 }
 

@@ -24,6 +24,8 @@ import {
 import { setSessionCookie, clearSessionCookie, getSessionCookie, setRefreshCookie, getRefreshCookie, clearRefreshCookie } from './cookie-helper.tsx';
 import { ALLOWED_ORIGINS, PATH, originFromRequest, siteFromRequest, siteForUserId, signupSiteFromRequest } from './site-origin.tsx';
 import { accountBlockOf, accountBlockBody, autoLoginBlockBody, moderationConflictText } from './access-gates.tsx';
+import { parseVenueApplication, isPromoAirSignup, normalizeVenuePhone, type VenueApplication } from './venue-application.tsx';
+import { signVkAirTicket, verifyVkAirTicket, vkAirTicketStoreId, VK_AIR_TICKET_TTL_S, VK_AIR_TICKET_TYPE, type VkAirTicket } from './vk-air-ticket.tsx';
 
 import { createLogger } from "./logger.tsx";
 
@@ -70,18 +72,10 @@ async function storeSignupSite(userId: string, site: string): Promise<void> {
 }
 
 // Данные заявки заведения в users.settings.application (слияние jsonb, другие
-// ключи settings не трогаются). Best-effort, как storeSignupSite.
-async function storeVenueApplication(userId: string, details: any): Promise<void> {
-  const a = details && typeof details === 'object' ? details : {};
-  const clean = (v: unknown, max: number) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
-  const application: Record<string, string> = { submittedAt: new Date().toISOString() };
-  const contactName = clean(a.contactName, 120);
-  const venueName = clean(a.venueName, 200);
-  const source = clean(a.source, 40);
-  if (contactName) application.contactName = contactName;
-  if (venueName) application.venueName = venueName;
-  if (source) application.source = source;
-  if (!contactName && !venueName) return;
+// ключи settings не трогаются). Заявку собирает и проверяет parseVenueApplication
+// (venue-application.tsx). Best-effort, как storeSignupSite.
+async function storeVenueApplication(userId: string, application: VenueApplication | null): Promise<void> {
+  if (!application) return;
   try {
     await sql(
       `UPDATE users SET settings = COALESCE(settings, '{}'::jsonb) || jsonb_build_object('application', $1::jsonb) WHERE id = $2`,
@@ -220,14 +214,25 @@ auth.post("/signup", async (c) => {
     const parsed = await safeJsonParse(c);
     if (!parsed.ok) return parsed.response;
     const body = parsed.body;
-    const { email, password, name, role, consentPersonalData, consentNewsletter, captchaToken, applicationDetails } = body;
+    const { email, password, name, role, consentPersonalData, consentNewsletter, captchaToken, applicationDetails, vkTicket } = body;
     // H6: reCAPTCHA v3 verification (skipped if not configured)
     const captchaResult = await verifyCaptcha(captchaToken, 'signup');
     if (!captchaResult.ok) return c.json({ success: false, error: captchaResult.error || 'Проверка CAPTCHA не пройдена' }, 403);
-    if (!email || !password) return c.json({ success: false, error: "Email и пароль обязательны" }, 400);
+    // VK ID (PROMO.AIR, docs/PROMOAIR.md §8): тикет из /auth/vk-air читается
+    // только у заведения на promoair.ru; пароль тогда необязателен. Для
+    // остальных ролей и сайтов поле не читается, регистрация как раньше.
+    const vkTicketAllowed = Boolean(vkTicket) && role === 'venue' && siteFromRequest(c) === 'air';
+    let vk: VkAirTicket | null = null;
+    if (vkTicketAllowed) {
+      vk = verifyVkAirTicket(vkTicket);
+      if (!vk) return c.json({ success: false, error: VK_TICKET_EXPIRED, code: 'vk_ticket_expired' }, 400);
+    }
+    if (!email || (!password && !vk)) return c.json({ success: false, error: "Email и пароль обязательны" }, 400);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ success: false, error: "Некорректный формат email" }, 400);
-    const pwErr = validatePassword(password);
-    if (pwErr) return c.json({ success: false, error: pwErr }, 400);
+    if (password || !vk) {
+      const pwErr = validatePassword(password);
+      if (pwErr) return c.json({ success: false, error: pwErr }, 400);
+    }
     if (!consentPersonalData) return c.json({ success: false, error: "Необходимо согласие на обработку персональных данных" }, 400);
 
     // Whitelist: only allow roles declared in roles.tsx, and block admin/superadmin
@@ -259,20 +264,52 @@ auth.post("/signup", async (c) => {
       radioApp = { stationName, broadcastType, frequency, streamUrl, website, phone, position };
     }
 
+    // Заведение с promoair.ru: регистрация и есть заявка на подключение
+    // (решение владельца 21.10.2026). Телефон, город и тип обязательны, чтобы
+    // команда могла позвонить до одобрения; иначе 400, как у радиостанций.
+    // Старая форма promo-music.ru этих полей не шлёт и работает как раньше.
+    let venueApp: VenueApplication | null = null;
+    if (userRole === 'venue') {
+      const parsedApp = parseVenueApplication(applicationDetails, { required: isPromoAirSignup(signupSiteFromRequest(c), applicationDetails) });
+      if (!parsedApp.ok) return c.json({ success: false, error: parsedApp.error, field: parsedApp.field }, 400);
+      venueApp = parsedApp.application;
+    }
+
+    // VK ID: тикет одноразовый (отмечается атомарно, после проверки заявки и
+    // до INSERT; повтор = 400), аккаунт VK свободен (иначе 409), почта
+    // подтверждена, если совпадает с почтой из VK.
+    let vkEmailVerified = false;
+    if (vk) {
+      if (!(await vpsUseToken(vkAirTicketStoreId(vk.n)))) return c.json({ success: false, error: VK_TICKET_EXPIRED, code: 'vk_ticket_expired' }, 400);
+      const taken = await sql(`SELECT 1 FROM users WHERE vk_id = $1 LIMIT 1`, [vk.vkUserId]);
+      if (taken.rows.length) return c.json({ success: false, error: VK_ID_TAKEN, code: 'vk_id_taken' }, 409);
+      vkEmailVerified = Boolean(vk.emailFromVk && vk.email && String(email).trim().toLowerCase() === vk.email);
+    }
+
     const accountStatus = isPartner ? 'pending' : 'active';
     const userName = name || email.split("@")[0];
-    const passwordHash = await bcrypt.hash(password, 12);
+    // Без пароля (вход через VK ID): случайный хеш, как у VK-регистрации.
+    const passwordHash = await bcrypt.hash(password || (crypto.randomUUID() + crypto.randomUUID()), 12);
     const username = makeUsername(email, userName);
 
     let userId: string;
     try {
-      const result = await sql(
+      const result = vk
+        ? await sql(
+          `INSERT INTO users (email, password_hash, username, full_name, role, status, is_email_verified, consent_personal_data, consent_newsletter, consent_at, vk_id, avatar_url)
+           VALUES ($1, $2, $3, $4, $5::user_role, $6::user_status, $7, $8, $9, now(), $10, $11) RETURNING id`,
+          [email, passwordHash, username, userName, userRole, accountStatus, vkEmailVerified, !!consentPersonalData, !!consentNewsletter, vk.vkUserId, vk.avatar]
+        )
+        : await sql(
         `INSERT INTO users (email, password_hash, username, full_name, role, status, is_email_verified, consent_personal_data, consent_newsletter, consent_at)
          VALUES ($1, $2, $3, $4, $5::user_role, $6::user_status, false, $7, $8, now()) RETURNING id`,
         [email, passwordHash, username, userName, userRole, accountStatus, !!consentPersonalData, !!consentNewsletter]
       );
       userId = result.rows[0].id;
     } catch (err: any) {
+      if (vk && err.code === '23505' && String(err.constraint || '').includes('vk_id')) {
+        return c.json({ success: false, error: VK_ID_TAKEN, code: 'vk_id_taken' }, 409);
+      }
       if (err.code === '23505') {
         if (err.constraint?.includes('email')) logAuthEvent('signup_fail', {
           description: `Дубликат email: ${email}`, error: 'email_exists',
@@ -287,7 +324,7 @@ auth.post("/signup", async (c) => {
     }
 
     const signupSite = signupSiteFromRequest(c);
-    const profileOk = await createVpsProfileOrRollback(userId, email, userName, userRole, null, signupSite);
+    const profileOk = await createVpsProfileOrRollback(userId, email, userName, userRole, vk ? vk.avatar : null, signupSite);
     if (!profileOk) {
       return c.json({ success: false, error: 'Ошибка регистрации – не удалось создать профиль. Попробуйте ещё раз.' }, 500);
     }
@@ -318,7 +355,7 @@ auth.post("/signup", async (c) => {
     // name, а имя человека в applicationDetails.contactName). Хранится в
     // users.settings.application: строки venue_profiles при регистрации ещё
     // нет; ensureVenueProfile копирует его в профиль, админка показывает.
-    if (userRole === 'venue') await storeVenueApplication(userId, applicationDetails);
+    if (userRole === 'venue') await storeVenueApplication(userId, venueApp);
     const site = siteFromRequest(c);
 
     log.info({ email, userId, role: userRole, status: accountStatus, signupSite }, 'user_registered');
@@ -328,11 +365,14 @@ auth.post("/signup", async (c) => {
       userAgent: c.req.header('user-agent') || '',
     });
 
-    notifyNewUser({ email, name: userName, role: userRole, via: "email", needsApproval: isPartner, application: radioApp || undefined, site: signupSite }).catch(() => {});
+    notifyNewUser({ email, name: userName, role: userRole, via: vk ? "vk_oauth" : "email", needsApproval: isPartner, application: radioApp || venueApp || undefined, site: signupSite }).catch(() => {});
 
-    const verificationToken = crypto.randomUUID();
-    await vpsStoreToken(userId, verificationToken, "email_verify", 24);
-    sendVerificationEmail(email, userName, verificationToken, site).catch((e) => log.warn({ err: e, email }, "verification_email_failed"));
+    // Почту из VK не подтверждаем второй раз: письма-ссылки нет.
+    if (!vkEmailVerified) {
+      const verificationToken = crypto.randomUUID();
+      await vpsStoreToken(userId, verificationToken, "email_verify", 24);
+      sendVerificationEmail(email, userName, verificationToken, site).catch((e) => log.warn({ err: e, email }, "verification_email_failed"));
+    }
 
     // Venue-specific welcome — fires alongside the standard
     // verification email so the new venue understands the 7-day trial
@@ -344,7 +384,7 @@ auth.post("/signup", async (c) => {
     }
 
     return c.json({
-      success: true, emailVerificationRequired: true,
+      success: true, emailVerificationRequired: !vkEmailVerified,
       accountStatus: isPartner ? 'pending' : 'active',
       message: isPartner ? 'Заявка отправлена на модерацию.' : undefined,
       data: { user: { id: userId, email, name: userName, role: userRole } },
@@ -686,6 +726,129 @@ auth.post("/vk-callback", async (c) => {
   } catch (error) {
     log.error({ err: error }, "vk_callback_error");
     return c.json({ success: false, error: "VK OAuth ошибка" }, 500);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// POST /auth/vk-air: VK ID на promoair.ru (виджет OAuthList: VK ID, Одноклассники, Mail.ru)
+// ──────────────────────────────────────────────────────────────────────
+// Отдельное приложение VK ID (PROMOAIR_VK_APP_ID, по умолчанию 54840499),
+// виджет обменивает код на токен в браузере и присылает access_token. Токен
+// проверяем у VK (user_info с нашим client_id: токен другого приложения не
+// пройдёт); личность берём только из ответа VK. Дальше:
+//   1. users.vk_id совпал → гейт статуса как у /signin → сессия;
+//   2. почта из VK совпала с users.email → на проверке или заблокирован: 403
+//      без привязки; активен: привязка vk_id и сессия;
+//   3. иначе needsSignup + vkTicket (vk-air-ticket.tsx) для формы заявки.
+// Работает только на promoair.ru (сайт 'air'), иначе 404. Токены в журнал не пишем.
+const VK_TICKET_EXPIRED = 'Сессия VK ID истекла, войдите через VK ещё раз';
+const VK_ID_TAKEN = 'Этот VK ID уже привязан к другому кабинету. Войдите через VK ID.';
+const VK_AIR_FAILED = 'Не получилось войти через VK ID. Попробуйте ещё раз.';
+
+interface VkIdUser { id: string; name: string; email: string | null; phone: string | null; avatar: string | null }
+
+async function fetchVkIdUser(accessToken: string): Promise<VkIdUser | null> {
+  const clientId = process.env.PROMOAIR_VK_APP_ID || '54840499';
+  let resp: Response;
+  try {
+    resp = await fetch('https://id.vk.com/oauth2/user_info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: clientId, access_token: accessToken }).toString(),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err: any) {
+    log.warn({ err: err?.name || 'fetch_failed' }, 'vk_air_user_info_unreachable');
+    return null;
+  }
+  let data: any = null;
+  try { data = await resp.json(); } catch { /* ниже: null */ }
+  const u = data?.user;
+  const id = u && (typeof u.user_id === 'string' || typeof u.user_id === 'number') ? String(u.user_id) : '';
+  if (!resp.ok || data?.error || !/^\d{1,20}$/.test(id)) {
+    log.warn({ status: resp.status, error: typeof data?.error === 'string' ? data.error.slice(0, 60) : undefined }, 'vk_air_token_rejected');
+    return null;
+  }
+  const name = [u.first_name, u.last_name].filter((x: unknown) => typeof x === 'string' && x.trim()).join(' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const emailRaw = typeof u.email === 'string' ? u.email.trim().toLowerCase() : '';
+  const email = emailRaw.length <= 200 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailRaw) ? emailRaw : null;
+  const avatar = typeof u.avatar === 'string' && u.avatar.length <= 1000 && /^https:\/\//.test(u.avatar) ? u.avatar : null;
+  return { id, name, email, phone: normalizeVenuePhone(u.phone), avatar };
+}
+
+/** Сессия как у /signin: pf_session (token_version из базы) + pf_refresh. */
+async function startVkAirSession(c: any, u: { id: string; email: string; role: string; token_version?: number }) {
+  setSessionCookie(c, signToken({ id: u.id, email: u.email, role: u.role, token_version: u.token_version || 1 }));
+  const ip = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || 'unknown';
+  const ua = c.req.header('user-agent') || 'unknown';
+  const refreshData = await createRefreshToken(u.id, ip, ua);
+  setRefreshCookie(c, refreshData.token);
+  await sql(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [u.id]);
+}
+
+auth.post('/vk-air', async (c) => {
+  if (siteFromRequest(c) !== 'air') return c.json({ success: false, error: 'Not found' }, 404);
+  try {
+    const parsed = await safeJsonParse(c);
+    if (!parsed.ok) return parsed.response;
+    const accessToken = typeof parsed.body?.access_token === 'string' ? parsed.body.access_token.trim() : '';
+    const mode = parsed.body?.mode === 'signup' ? 'signup' : 'login';
+    if (!accessToken || accessToken.length > 4096) return c.json({ success: false, error: VK_AIR_FAILED }, 400);
+
+    const vkUser = await fetchVkIdUser(accessToken);
+    if (!vkUser) return c.json({ success: false, error: VK_AIR_FAILED }, 401);
+    const cols = `id::text AS id, email, full_name, role::text AS role, status::text AS status, token_version, vk_id`;
+    const userBody = (u: any) => ({ id: u.id, email: u.email, name: u.full_name || vkUser.name, role: u.role });
+
+    // 1. Уже привязан
+    const byVk = await sql(`SELECT ${cols} FROM users WHERE vk_id = $1 AND deleted_at IS NULL LIMIT 1`, [vkUser.id]);
+    if (byVk.rows.length) {
+      const u = byVk.rows[0];
+      const block = accountBlockOf(u.status);
+      if (block) return c.json(accountBlockBody(block), 403);
+      await startVkAirSession(c, u);
+      log.info({ userId: u.id, mode }, 'vk_air_signin');
+      return c.json({ success: true, linked: false, data: { user: userBody(u) } });
+    }
+
+    // 2. Та же почта: привязка только активному аккаунту
+    if (vkUser.email) {
+      const byEmail = await sql(`SELECT ${cols} FROM users WHERE lower(email) = $1 AND deleted_at IS NULL LIMIT 1`, [vkUser.email]);
+      if (byEmail.rows.length) {
+        const u = byEmail.rows[0];
+        const block = accountBlockOf(u.status);
+        if (block) return c.json(accountBlockBody(block), 403);
+        if (u.vk_id && u.vk_id !== vkUser.id) {
+          return c.json({ success: false, error: 'Этот кабинет уже привязан к другому VK ID. Войдите по почте и паролю.', code: 'vk_other_linked' }, 409);
+        }
+        try {
+          await sql(`UPDATE users SET vk_id = $1, avatar_url = COALESCE(avatar_url, $2) WHERE id = $3 AND vk_id IS NULL`, [vkUser.id, vkUser.avatar, u.id]);
+        } catch (err: any) {
+          if (err.code === '23505') return c.json({ success: false, error: VK_ID_TAKEN, code: 'vk_id_taken' }, 409);
+          throw err;
+        }
+        await startVkAirSession(c, u);
+        log.info({ userId: u.id, mode }, 'vk_air_linked_by_email');
+        return c.json({ success: true, linked: true, data: { user: userBody(u) } });
+      }
+    }
+
+    // 3. Нового аккаунта не создаём: заявку заполняют в форме (тикет на 30 минут)
+    const { ticket, payload } = signVkAirTicket({
+      vkUserId: vkUser.id, email: vkUser.email, emailFromVk: Boolean(vkUser.email),
+      name: vkUser.name, phone: vkUser.phone, avatar: vkUser.avatar,
+    });
+    await vpsStoreToken(`vk:${vkUser.id}`, vkAirTicketStoreId(payload.n), VK_AIR_TICKET_TYPE, VK_AIR_TICKET_TTL_S / 3600);
+    log.info({ mode, hasEmail: Boolean(vkUser.email), hasPhone: Boolean(vkUser.phone) }, 'vk_air_needs_signup');
+    return c.json({
+      success: false, needsSignup: true,
+      prefill: { name: vkUser.name, email: vkUser.email, phone: vkUser.phone },
+      emailVerified: Boolean(vkUser.email),
+      vkTicket: ticket,
+    });
+  } catch (error: any) {
+    log.error({ err: error?.message }, 'vk_air_error');
+    return c.json({ success: false, error: VK_AIR_FAILED }, 500);
   }
 });
 

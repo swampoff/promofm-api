@@ -6,8 +6,11 @@
 #   promo-air-venue start|stop|restart|status <slug>
 #   promo-air-venue rebuild <slug>      — пересобрать список треков после смены музыки
 #   promo-air-venue remove <slug>       — остановить и выключить (данные остаются)
-# Поток заведения: https://promo-music.ru/air/live/venue-<slug>
+# Поток заведения: https://promoair.ru/air/live/venue-<slug>
 # Этот адрес админ вставляет в «Провижининг» заявки (поток на точку).
+# 21.10.2026: адрес на promoair.ru (nginx promoair.ru проксирует /air/live/ на тот же
+# стрим-сервер, notes/deploy/promoair.ru.includes); старые потоки с адресом
+# promo-music.ru/air/live/venue-<slug> продолжают работать, кабинет и API принимают оба.
 # Фоновый каталог PROMO.AIR (08.10.2026): без --music-dir в папку музыки
 # заведения ссылками подключаются жанры каталога (по умолчанию $CATALOG_DEFAULT).
 # Жанры: lounge cafe deep-house chillout sport workout meditation focus
@@ -17,7 +20,7 @@
 set -euo pipefail
 ENV_DIR=/etc/promo-air/venues
 DATA_ROOT=/var/lib/promo-air
-PUBLIC=https://promo-music.ru/air/live
+PUBLIC=https://promoair.ru/air/live
 CATALOG_DIR=/mnt/data/promo-air-catalog
 CATALOG_GENRES="lounge cafe deep-house chillout sport workout meditation focus restaurant hotel spa"
 CATALOG_DEFAULT=lounge,cafe,chillout,restaurant,hotel

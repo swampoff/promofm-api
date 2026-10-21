@@ -13,7 +13,7 @@
 
     promo-air-venue create zagorami-veranda --name "Zagorami · Веранда" \
         [--music-dir /var/lib/promo-air/zagorami-veranda/music] [--jingle-every 3]
-    # → https://promo-music.ru/air/live/venue-zagorami-veranda
+    # → https://promoair.ru/air/live/venue-zagorami-veranda (с 21.10.2026; старые потоки на promo-music.ru работают)
     # этот адрес админ вставляет в «Провижининг» заявки (поток на точку)
     promo-air-venue list | rebuild <slug> | stop|start|restart <slug> | remove <slug>
 

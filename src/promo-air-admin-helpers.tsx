@@ -91,6 +91,13 @@ export const VENUE_NAME_SQL = `COALESCE(vp.venue_name, vp.data->>'venueName', vp
 export const CITY_SQL = `COALESCE(vp.city, vp.data->>'city')`;
 // Контактное лицо из регистрации (users.settings.application, auth-routes) или профиля.
 export const CONTACT_NAME_SQL = `NULLIF(COALESCE(NULLIF(u.settings->'application'->>'contactName', ''), vp.data->>'contactName'), '')`;
+// Заявка при регистрации (21.10.2026, venue-application.tsx): телефон, город, тип
+// и число точек. Профиль заведения (его правит кабинет) первым, затем заявка:
+// у заведения на проверке профиля ещё нет, и команда видит данные заявки.
+export const VENUE_PHONE_SQL = `NULLIF(COALESCE(NULLIF(vp.phone, ''), NULLIF(vp.data->>'phone', ''), u.settings->'application'->>'phone'), '')`;
+export const VENUE_CITY_SQL = `NULLIF(COALESCE(NULLIF(${CITY_SQL}, ''), u.settings->'application'->>'city'), '')`;
+export const VENUE_TYPE_SQL = `NULLIF(COALESCE(NULLIF(COALESCE(vp.venue_type, vp.data->>'venueType', vp.data->>'type'), ''), u.settings->'application'->>'venueType'), '')`;
+export const VENUE_POINTS_SQL = `NULLIF(u.settings->'application'->>'points', '')`;
 export const SUB_STATUS_SQL = `lower(COALESCE(NULLIF(vp.data->>'subscriptionStatus', ''), 'pending_card'))`;
 
 // Действующий тариф в SQL: копия getEffectiveVenuePlan (venue-plan-limits.tsx)
@@ -140,7 +147,7 @@ export function buildVenueFilters(query: Record<string, string | undefined>, fir
     if (q.length > 100) return { ok: false, field: 'q', message: 'Слишком длинный поисковый запрос (до 100 символов).' };
     const p = next(`%${escapeLike(q)}%`);
     where.push(`(u.email ILIKE ${p} ESCAPE '\\' OR u.full_name ILIKE ${p} ESCAPE '\\' OR u.display_name ILIKE ${p} ESCAPE '\\'`
-      + ` OR u.username ILIKE ${p} ESCAPE '\\' OR ${VENUE_NAME_SQL} ILIKE ${p} ESCAPE '\\' OR ${CITY_SQL} ILIKE ${p} ESCAPE '\\'`
+      + ` OR u.username ILIKE ${p} ESCAPE '\\' OR ${VENUE_NAME_SQL} ILIKE ${p} ESCAPE '\\' OR ${VENUE_CITY_SQL} ILIKE ${p} ESCAPE '\\'`
       + ` OR ${CONTACT_NAME_SQL} ILIKE ${p} ESCAPE '\\')`);
   }
 
@@ -166,7 +173,7 @@ export function buildVenueFilters(query: Record<string, string | undefined>, fir
   const city = String(query.city ?? '').trim();
   if (city) {
     if (city.length > 100) return { ok: false, field: 'city', message: 'Слишком длинное название города.' };
-    where.push(`lower(${CITY_SQL}) = lower(${next(city)})`);
+    where.push(`lower(${VENUE_CITY_SQL}) = lower(${next(city)})`);
   }
 
   return { ok: true, where, params };
@@ -355,6 +362,14 @@ export interface VenueRow {
   name: string | null;
   /** Контактное лицо из заявки при регистрации (PROMO.AIR); null, если не указано */
   contactName: string | null;
+  /** Телефон для связи: профиль, иначе заявка при регистрации (21.10.2026) */
+  phone: string | null;
+  /** Город: профиль, иначе заявка */
+  city: string | null;
+  /** Тип заведения (cafe, bar, …): профиль, иначе заявка */
+  venueType: string | null;
+  /** Сколько точек указали при регистрации: '1' | '2-4' | '5+'; число точек анкеты эфира = request.points */
+  points: '1' | '2-4' | '5+' | null;
   accountStatus: string;
   emailVerified: boolean;
   createdAt: string | null;
@@ -375,6 +390,8 @@ export interface VenueRow {
   streams: { total: number; online: number; lastSeenAt: string | null };
 }
 
+const textOrNull = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
 /** Строка запроса VENUE_ROW_SQL (promo-air-admin-routes.tsx) → VenueRow. */
 export function toVenueRow(r: any, nowMs: number = Date.now()): VenueRow {
   const hasProfile = r.profile_id !== null && r.profile_id !== undefined;
@@ -385,6 +402,10 @@ export function toVenueRow(r: any, nowMs: number = Date.now()): VenueRow {
     email: r.email || '',
     name: r.name || null,
     contactName: typeof r.contact_name === 'string' && r.contact_name.trim() ? r.contact_name.trim() : null,
+    phone: textOrNull(r.phone),
+    city: textOrNull(r.venue_city),
+    venueType: textOrNull(r.venue_type_any),
+    points: r.signup_points === '1' || r.signup_points === '2-4' || r.signup_points === '5+' ? r.signup_points : null,
     accountStatus: r.account_status,
     emailVerified: !!r.email_verified,
     createdAt: isoOrNull(r.created_at),

@@ -1215,3 +1215,103 @@ No new migration, env var or timer. The final order is in `notes/deploy/RUNBOOK.
 - `GET /api/venue/profile` now answers 404 to admins. The promoair cabinet handles a null profile («Ваше заведение»). `SystemTestSuite` («Профиль площадки») will show that call as a 404 for the admin.
 - The music-site wording of the payment-expired and chat-reply e-mails still says «ответьте на это письмо» (owner's call; changing it breaks the byte-identical promo-music contract).
 - The full-radio switch has no admin UI (console snippet above). The price for full radio is not billed online.
+
+---
+
+## 7. CONNECT: the venue sign-up is the application; PROMO.AIR on its own (21.10.2026)
+
+**Goal.** Owner decision: one form. Registration on promoair.ru *is* the application for connecting a venue; the account stays `pending` until the team approves it by hand (unchanged, §3/§4). The team gets what it needs to call the venue before approving. Second owner decision: «система кабинетов и радио остается на promoair.ru, без перехода на promo-music.ru; внизу просто логотип, название фирмы, данные». No new migration; one new optional env var in §8.
+
+### What changed (backend)
+
+- **`src/venue-application.tsx` (new, pure).** `VENUE_TYPE_LABELS` (the cabinet profile's values: cafe, restaurant, bar, lounge, club, shop, hotel, spa, gym, other), `VENUE_POINTS_LABELS` (`1`, `2-4`, `5+`), `normalizeVenuePhone` (Russian numbers → `+7XXXXXXXXXX`: `8 900…`, `7 900…`, `+7 900…`, ten digits `900…`; others → `+<digits>`; 10 to 15 digits, letters refused), `parseVenueApplication(details, {required})`, `isPromoAirSignup(site, details)`.
+- **`src/auth-routes.tsx` `/signup`, role `venue` only.** Before the INSERT (like the radio validation): when the sign-up comes from promoair.ru (`signupSiteFromRequest = 'air'`) or carries `applicationDetails.source = 'promoair'`, the application is required. 400 bodies, all `{success:false, error, field}`:
+
+  | Field | When | `error` |
+  |---|---|---|
+  | `phone` | missing | `Укажите телефон для связи` |
+  | `phone` | not 10–15 digits | `Проверьте номер телефона: нужно от 10 до 15 цифр` |
+  | `city` | shorter than 2 | `Укажите город` |
+  | `venueType` | missing | `Укажите тип заведения` |
+  | `venueType` | not in the list | `Выберите тип заведения из списка` |
+  | `points` | given but not `1`/`2-4`/`5+` | `Укажите, сколько у вас точек: 1, 2–4 или 5 и больше` |
+
+  Stored in `users.settings.application` next to `contactName`: `{submittedAt, contactName, venueName, source, phone, city, venueType, points}` (trimmed, whitespace collapsed, contact 120, venue 200, city 120 chars; points default `1`). The old promo-music.ru form (venue without `applicationDetails`) is not validated and stores nothing, as before. Artist, radio, label and all other roles: same code path as before (tested byte for byte, below).
+- **`src/email-helper.tsx` `notifyNewUser`.** For `role='venue'` with an application: rows Контактное лицо, Телефон (`<a href="tel:+7…">`, href digits and `+` only), Город, Тип (Russian label), Точек (`1`, `2–4`, `5 и больше`), everything escaped, instead of the JSON row. The Telegram copy adds `Контакт / Телефон / Город / Тип / Точек`. Recipients unchanged (`ADMIN_EMAILS`). Radio keeps its JSON row; every other admin e-mail is byte-identical.
+- **`src/db.tsx` `ensureVenueProfile`.** A new profile takes `venue_type` (only a value from the list), `city` and `phone` from the application (native columns and `data`); no application → NULL as before.
+- **Admin (`promo-air-admin-helpers.tsx`, `-routes.tsx`).** `VENUE_PHONE_SQL`, `VENUE_CITY_SQL`, `VENUE_TYPE_SQL`, `VENUE_POINTS_SQL` (profile first, then the application; a venue on review has no profile yet). `VenueRow` gains `phone`, `city`, `venueType`, `points` (`'1'|'2-4'|'5+'|null`; the questionnaire count stays `request.points`). `?city=` and `?q=` also match the application city.
+- **PROMO.AIR e-mails.** Footer `© <year> PROMO.AIR · ООО «Промо Фм» · ИНН 5038195100 · info@promofm.ru` (was «… музыка для заведений от PROMO.MUSIC»). Checked: no PROMO.AIR e-mail (25 variants) mentions or links promo-music.ru / PROMO.MUSIC in its body; the sender address stays `noreply@promo-music.ru` (SPF/DKIM).
+- **Venue streams.** `services/promo-air-venue/promo-air-venue`: `PUBLIC=https://promoair.ru/air/live` (new streams print `https://promoair.ru/air/live/venue-<slug>` for the provisioning form). promoair.ru proxies `/air/live/` to the same stream server (`notes/deploy/promoair.ru.includes`). Existing rows keep their promo-music.ru URL; `VENUE_MOUNT_RE` (API) and the cabinet regex accept both hosts. Use the script change only once promoair.ru answers over HTTPS.
+
+### Frontend (for reference)
+
+`fe/src/promoair/auth/AirAuthPage.tsx`: Телефон (`type=tel`, `autocomplete=tel`, `inputmode=tel`, shown as `+7…` after blur), Тип заведения (select, the cabinet list), Город, Сколько точек (1 / 2–4 / 5 и больше), two columns on desktop, one on phones, 16px inputs and 44px chips on phones; body `applicationDetails = {venueName, contactName, phone, city, venueType, points, source:'promoair'}`. A 400 with a field lands under that field. Admin: VenueDetailDialog («Позвонить», Телефон, Тип, Город, Точек при регистрации), ModerationTab cards, the table and the pending list use the new row fields. promo-music.ru: the PROMO.AIR landings (`/promo-air` and its `/promo-air/*` pages, demo, the alias routes of `PromoAirRoute`) send «Подключить» to `https://promoair.ru/login?mode=signup` (full page). New footer on the site, auth pages and cabinet (`ui/OperatorFooter.tsx`), logo subtitle «BY PROMO.MUSIC» removed, Profile «Открыть PROMO.MUSIC» and the Ads radio-integration link removed, legal pages say «Оператор сервиса PROMO.AIR: ООО «Промо Фм», ИНН 5038195100, ОГРН 1255000110661.», `promoair.html` Organization JSON-LD has `legalName`/`taxID`/ОГРН instead of `parentOrganization: PROMO.MUSIC`.
+
+### Verification (done locally)
+
+```bash
+~/Projects/promoair/bin/tsc-api.sh     # 6 errors, all baseline
+cd ~/Projects/promoair/api
+D=<dir with @electric-sql/pglite-socket@0.2.11>
+npx tsx ../tools/be-venue-signup.test.mts $D   # 8 groups (new)
+mkdir -p .tmp-email-check && cp ../api-orig/src/email-helper.tsx .tmp-email-check/email-helper-orig.tsx \
+  && npx tsx ../tools/be-email-site.test.mts .tmp-email-check/email-helper-orig.tsx; rm -rf .tmp-email-check   # 39
+```
+
+`be-venue-signup` (PGlite, prod schema, real auth/venue/admin routes): phone normalisation identical in backend and frontend; the stored application; 400 for missing/invalid phone, city, type and bad points with no user row and no e-mail; the admin e-mail rows and the Telegram text (escaped); the old promo-music.ru venue form, artist and label (real sign-ups): same response and an admin e-mail byte-identical to `api-orig`'s `notifyNewUser`; radio_station: the same 400 and the same admin e-mail (compared directly: a real radio sign-up trips a pglite-socket reply mix-up in this harness, about 2 runs in 5, while the radio code path itself is untouched); profile seeded with city/type/phone; admin rows before approval (from the application) and after a cabinet edit (profile wins); city filter and search. Updated for the intended change: `be-admin` (city filter SQL), `be-security-e2e` and `be-phase3-e2e` (their promoair.ru venue sign-ups now send the application), `be-email-site` (air footer, no promo-music.ru in any air body).
+
+### Deploy
+
+No migration, no env var for this section. Frontend and API go together (the promoair form sends fields the old API ignores; the new API refuses a promoair sign-up without them). **The promo-music.ru PROMO.AIR CTAs point to promoair.ru: deploy that frontend only when promoair.ru answers**, otherwise those buttons lead nowhere.
+
+---
+
+## 8. VK ID on promoair.ru: VK ID, Одноклассники, Mail.ru (21.10.2026)
+
+**Goal.** Owner decision: venues can sign in and apply with VK ID and its alternatives (OK, Mail.ru). Separate VK ID app for promoair.ru: **54840499** (promo-music.ru keeps app 54426299 and its own `/auth/vk-callback`, unchanged). OK and Mail.ru come back through the same VK ID code, so it is one integration. The account still stays `pending` until approved.
+
+### Flow
+
+1. The auth page (`/login`, login and sign-up modes) loads `@vkid/sdk@2.6.8` UMD from `https://unpkg.com/@vkid/sdk@2.6.8/dist-sdk/umd/index.js` (SRI `sha384-h6nfHl7mxue2dpO+9z/y0r2nJDYXEr2P7VqkjeSje3deuALsUXtDqYK/MPNoKl+O`, `crossorigin=anonymous`), only when the block mounts. If it does not load, the block is not shown. `VKID.Config.init({ app: VITE_PROMOAIR_VK_APP_ID || 54840499, redirectUrl: window.location.origin, responseMode: Callback, source: LOWCODE, scope: 'email phone' })`, `new VKID.OAuthList().render({ container, oauthList: ['vkid','ok_ru','mail_ru'], styles:{height:48, borderRadius:12} })`.
+2. On `OAuthListInternalEvents.LOGIN_SUCCESS` the browser calls `VKID.Auth.exchangeCode(code, device_id)` and sends `POST /server/auth/vk-air {access_token, mode}`.
+3. **`POST /auth/vk-air`** (`src/auth-routes.tsx`): only when `siteFromRequest(c) === 'air'` (i.e. on promoair.ru with `PROMOAIR_ORIGIN` set), otherwise 404 and VK is not called. The token is checked with `POST https://id.vk.com/oauth2/user_info` (form `client_id=PROMOAIR_VK_APP_ID||54840499`, `access_token`; a token of another app is refused by VK). Identity comes only from that answer (`user_id`, name, e-mail lower-cased, phone via `normalizeVenuePhone`, https avatar). Then:
+   - `users.vk_id` matches → `accountBlockOf` gate (403 with the `/signin` bodies) → `pf_session` (with the user's `token_version`) + `pf_refresh`, `last_login_at`. `{success:true, linked:false, data:{user:{id,email,name,role}}}`. Any role signs in; the promoair page shows its wrong-role screen for non-venues.
+   - else the VK e-mail matches `users.email` (case-insensitive): pending/rejected/blocked → the 403 body and **no link**; linked to another VK ID → 409 `vk_other_linked`; active → `vk_id` set (avatar if empty) + session, `linked:true`.
+   - else `200 {success:false, needsSignup:true, prefill:{name,email,phone}, emailVerified, vkTicket}`. No account is created here.
+   - Bad token: 401 `Не получилось войти через VK ID. Попробуйте ещё раз.` Tokens are never logged.
+4. **vkTicket** (`src/vk-air-ticket.tsx`): `base64url(JSON).base64url(HMAC-SHA256)` with `VK_AIR_TICKET_SECRET` or `JWT_SECRET`, payload `{v, n, vkUserId, email, emailFromVk, name, phone, avatar, exp}`, 30 minutes. The nonce is stored in `verification_tokens` (`token_type='vk_air_ticket'`, `user_id='vk:<id>'`) under an id derived with the secret (not usable as any other token).
+5. The form switches to sign-up, fills Контактное лицо, Почта, Телефон, hides the password and shows «Вход через VK ID: <имя> · сменить». It sends the normal body plus `vkTicket`, without `password`.
+6. **`/auth/signup` with `vkTicket`**, read only for `role='venue'` on site `air` (anywhere else the field is ignored and the sign-up behaves as before, e.g. 400 «Email и пароль обязательны»): bad, forged or expired ticket → 400 `{error:'Сессия VK ID истекла, войдите через VK ещё раз', code:'vk_ticket_expired'}`; the application is validated first (a 400 there does not burn the ticket); then the nonce is marked used atomically (reuse → the same 400); `vk_id` already linked → 409 `{code:'vk_id_taken'}`. Password optional (random bcrypt hash, as the VK branch). The user gets `vk_id` and `avatar_url`; `is_email_verified=true` and **no confirmation e-mail** when the submitted e-mail equals the VK e-mail (`emailVerificationRequired:false`, the page goes straight to «Аккаунт на проверке»); otherwise the normal confirmation e-mail. Status stays `pending`; the welcome e-mail and the admin notification (`via vk_oauth`, all application rows from §7) are sent.
+
+### Env
+
+| Var | Where | Default | Notes |
+|---|---|---|---|
+| `PROMOAIR_VK_APP_ID` | API `.env` | `54840499` | client_id for `user_info`; no secret needed for this flow |
+| `VK_AIR_TICKET_SECRET` | API `.env` | `JWT_SECRET` | optional; rotating it invalidates open tickets (30 min) |
+| `VITE_PROMOAIR_VK_APP_ID` | build (`fe/deploy.sh`, `.github/workflows/deploy.yml`) | `54840499` | next to `VITE_VK_APP_ID` |
+
+If a Content-Security-Policy is ever added to promoair.ru, it must allow `https://unpkg.com` (script) and `https://id.vk.com`, `https://*.vk.com`, `https://*.mail.ru`, `https://*.ok.ru` (popup, stats).
+
+### VK ID console (owner), app 54840499
+
+- trusted redirect URL `https://promoair.ru` (exactly the page origin; the widget sends `window.location.origin`);
+- base domain `promoair.ru`;
+- scopes `email` and `phone` enabled (without `phone` the prefill has no phone; without `email` no e-mail match and no auto-confirmed e-mail);
+- the OK and Mail.ru alternatives switched on.
+
+### Verification (done locally)
+
+```bash
+cd ~/Projects/promoair/api && npx tsx ../tools/be-vk-air.test.mts $D   # 7 groups + the log check
+```
+
+`be-vk-air` (PGlite, prod schema, `id.vk.com` mocked): 404 from promo-music.ru with no VK call; 401 for a bad token and for a token of another app; `client_id` 54840499 (or `PROMOAIR_VK_APP_ID`) sent form-encoded; active venue by `vk_id` → session with the DB `token_version` and refresh cookie; pending and banned → the `/signin` 403 bodies, no cookie; e-mail match: pending 403 and not linked, active linked (case-insensitive), linked to another VK ID 409; unknown → needsSignup, prefill, 30-minute ticket, nonce row; sign-up with the ticket → pending venue with `vk_id`, avatar, verified e-mail, no confirmation link, welcome sent, admin `vk_oauth` with the application; forged / garbage / bad signature / expired / reused ticket → 400; ignored on promo-music.ru and for an artist; different e-mail → not verified, confirmation sent; VK ID taken → 409; plain sign-ups unchanged. The suite re-runs itself with `LOG_LEVEL=debug` and fails if any access token or ticket appears in the log output. Screens: `~/Projects/promoair/shots/connect/*_vk-*.png` (`tools/vk-shots.cjs`, the real 2.6.8 widget served from the same file, SRI checked).
+
+### Manual check on prod (after `PROMOAIR_ORIGIN` and the console settings)
+
+1. `curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{"access_token":"x"}' https://promo-music.ru/server/auth/vk-air` → 404; the same to `https://promoair.ru/server/auth/vk-air` → 401.
+2. https://promoair.ru/login: three buttons under «Войти». VK ID with a test VK account that has no PROMO.AIR account → the sign-up form with name, e-mail and phone filled, no password field; send → «Аккаунт на проверке», no confirmation e-mail, admin e-mail «Через: vk_oauth» with the application.
+3. `SELECT email, status, vk_id, is_email_verified FROM users WHERE vk_id IS NOT NULL AND signup_site='air' ORDER BY created_at DESC LIMIT 5`.
+4. Approve it in the admin, press VK ID again → the cabinet opens. Try OK and Mail.ru once each.
+5. `journalctl -u promofm-api --since '10 min ago' | grep vk_air` → `vk_air_needs_signup`, `vk_air_signin`, no tokens.
