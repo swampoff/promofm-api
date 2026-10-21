@@ -570,7 +570,11 @@ auth.post("/vk-callback", async (c) => {
   try {
     const vkParsed = await safeJsonParse(c);
     if (!vkParsed.ok) return vkParsed.response;
-    const { code, redirect_uri, code_verifier, device_id, role: vkRequestedRole } = vkParsed.body;
+    const { code, redirect_uri, code_verifier, device_id, role: vkRequestedRole, provider: vkProviderRaw } = vkParsed.body;
+    // Провайдер VK ID: сам VK, Одноклассники или Mail.ru. Обмен кода и профиль одинаковые,
+    // различаем только для учёта регистраций (via).
+    const VK_VIA: Record<string, string> = { vkid: 'vk_oauth', ok_ru: 'ok_oauth', mail_ru: 'mail_oauth' };
+    const vkVia = VK_VIA[String(vkProviderRaw || 'vkid')] || 'vk_oauth';
 
     // Validate redirect_uri: prevent OAuth redirect manipulation.
     // Только наши origin'ы (site-origin.tsx); сам VK дополнительно сверяет
@@ -622,7 +626,7 @@ auth.post("/vk-callback", async (c) => {
     const vkAvatar = vkProfile.user?.avatar || null;
     const email = vkEmail || vkProfile.user?.email || null;
 
-    log.info({ vkUserId, vkName, email }, 'vk_oauth_user');
+    log.info({ vkUserId, vkName, email, via: vkVia }, 'vk_oauth_user');
 
     // 3. Find existing user by vk_id
     const existing = await sql(`SELECT id, email, full_name, role::text, status::text, avatar_url FROM users WHERE vk_id = $1 AND deleted_at IS NULL`, [String(vkUserId)]);
@@ -708,7 +712,7 @@ auth.post("/vk-callback", async (c) => {
     }
     const vkSignupSite = signupSiteFromRequest(c);
     await storeSignupSite(userId, vkSignupSite);
-    notifyNewUser({ email: userEmail, name: vkName, role: vkRole, via: "vk_oauth", site: vkSignupSite }).catch(() => {});
+    notifyNewUser({ email: userEmail, name: vkName, role: vkRole, via: vkVia, site: vkSignupSite }).catch(() => {});
 
     const accessToken = signToken({ id: userId, email: userEmail, role: vkRole });
     setSessionCookie(c, accessToken);
