@@ -64,6 +64,11 @@ record of what got executed.
 - **Учёт:** `/etc/sites/promofm.env` (SITE_DOMAINS + SITE_NOTES), `/root/SITES.md` (строка promofm, раздел DNS); бэкапы в `/root/backups/`.
 - **Осталось (владелец):** подтвердить данные домена в reg.ru (UNVERIFIED), счётчик Метрики, сайт в ЮKassa, боевая привязка карты 1 ₽ → таймеры venue-кронов.
 
+### 2026-10-21 – превью ссылок и SEO по семантическому ядру promoair.ru
+
+- **Превью ссылок** (фронт `bbc3bbb3`): og.jpg без «BY PROMO.MUSIC», адрес `og.jpg?v=20261021`, `favicon.ico`/`favicon-32.png`; nginx promoair.ru: `= /favicon.ico`, `= /apple-touch-icon(-precomposed).png` (бэкап `/root/backups/promoair.ru.includes.2026-10-21_21*`).
+- **SEO** (фронт `8ed4fb5c`, `./deploy.sh` 22:41 MSK): ядро владельца `notes/seo-semantic-core.md`; 16 пререндеренных страниц (новые `/music-for-business`, `/jingles`, `/music-for-{cafe,restaurant,shop,hotel,fitness,spa-salon}`), `/in-store-music` → 301 `/music-for-business` (nginx + клиент), FAQPage/Product/BreadcrumbList, sitemap 16 URL. nginx promoair.ru: exact-локации всех 16 страниц, regex 301 со слэшем, бэкап `/root/backups/promoair.ru.includes.2026-10-21_22*`. Карту сайта в подвале агент добавил, убрал по решению владельца (подвал = логотип, компания, реквизиты).
+
 ### 2026-10-21 – форма подключения, вход VK ID/OK/Mail.ru, подвал без promo-music.ru
 
 - **Тест почты (по согласию владельца):** одно письмо «[ПРОМО] ТЕСТ: уведомление о регистрации заведения» на info@promofm.ru через `sendEmail` (временный скрипт в `scripts/`, удалён), SMTP reg.ru принял `<4776cc31-c1ad-83a9-9a36-cfc43a82165b@promo-music.ru>`. Доставку во «Входящие» проверяет владелец.
