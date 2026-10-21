@@ -54,6 +54,16 @@ record of what got executed.
 - **promoair.ru:** домен зарегистрирован владельцем на reg.ru 20.10 18:13 MSK (paid-till 2027-10-20, state UNVERIFIED, NS пока `ns*.hosting.reg.ru`). Зона bind `/etc/bind/master/promoair.ru` (serial 2026102001) + `/etc/bind/promoair.conf`, include в `named.conf.local` (бэкап `/root/backups/named.conf.local.2026-10-20_*`), `rndc reload`. Сайт FastPanel id 8 (`app_file promoair.html`, шаблонный index.php удалён), корень = bind mount `/var/www/promofm/html` **ro** (fstab, бэкап `/root/backups/fstab.2026-10-20_*`), правила `/etc/nginx/fastpanel2-sites/fastuser/promoair.ru.includes`. По HTTP на 87.242.64.88 проверены все пути RUNBOOK §1 шаг 5.
 - **Ждёт:** NS в reg.ru → `ns1/ns2.arbatsite.ru`, затем сертификат LE, `PROMOAIR_ORIGIN`, правила `promoair-pages internal` и 301 `promoair.html` на promo-music.ru.
 
+### 2026-10-20/21 – promoair.ru запущен
+
+- **DNS:** владелец сменил NS в reg.ru на `ns1/ns2.arbatsite.ru` 20.10 ~18:57 MSK; зона `.ru` опубликовала делегацию примерно через 2,5 ч (Google/Яндекс/Cloudflare отдают 87.242.64.88 с ~21:30).
+- **Сертификат:** `mogwai certificates create-le --server-name promoair.ru --server-name www.promoair.ru --email info@promofm.ru` → `/var/www/httpd-cert/promoair.ru_2026-10-20-21-32_02.crt` (SAN promoair.ru + www, до 2027-01-18; предупреждение панели про `www` vhost безвредно). `PUT /api/sites/8 {"https_redirect":true,"http2":true}` → 200.
+- **Проверка снаружи (RUNBOOK §1 шаг 5):** все пути как в RUNBOOK, http → https, www → apex, `/ctrl-pm7k2f` → promo-music.ru, `/.env` 403, манифест no-cache + gzip.
+- **API:** бэкап `.env`, `PROMOAIR_ORIGIN=https://promoair.ru`, рестарт 21.10 10:44 MSK, без предупреждения `[site-origin]`; CORS: `Origin: https://promoair.ru` → ACAO promoair.ru, promo-music.ru без изменений.
+- **promo-music.ru nginx** (бэкап `/root/backups/promo-music.ru.includes.2026-10-21_*`): `location ^~ /promoair-pages/ { internal; }` (404), `location = /promoair.html { return 301 https://promoair.ru/; }`.
+- **Учёт:** `/etc/sites/promofm.env` (SITE_DOMAINS + SITE_NOTES), `/root/SITES.md` (строка promofm, раздел DNS); бэкапы в `/root/backups/`.
+- **Осталось (владелец):** подтвердить данные домена в reg.ru (UNVERIFIED), счётчик Метрики, сайт в ЮKassa, боевая привязка карты 1 ₽ → таймеры venue-кронов.
+
 ## 2026-07-02 — Артист-рассылка: финал прогона + hard-bounce чистка (laptop; запись — cloud по отчёту)
 
 - **What:** финальный прогон рассылки по артист-базе. 873 отправлено,
