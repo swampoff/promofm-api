@@ -64,6 +64,14 @@ record of what got executed.
 - **Учёт:** `/etc/sites/promofm.env` (SITE_DOMAINS + SITE_NOTES), `/root/SITES.md` (строка promofm, раздел DNS); бэкапы в `/root/backups/`.
 - **Осталось (владелец):** подтвердить данные домена в reg.ru (UNVERIFIED), счётчик Метрики, сайт в ЮKassa, боевая привязка карты 1 ₽ → таймеры venue-кронов.
 
+### 2026-10-21 – форма подключения, вход VK ID/OK/Mail.ru, подвал без promo-music.ru
+
+- **Тест почты (по согласию владельца):** одно письмо «[ПРОМО] ТЕСТ: уведомление о регистрации заведения» на info@promofm.ru через `sendEmail` (временный скрипт в `scripts/`, удалён), SMTP reg.ru принял `<4776cc31-c1ad-83a9-9a36-cfc43a82165b@promo-music.ru>`. Доставку во «Входящие» проверяет владелец.
+- **Слияние:** параллельная сессия в 13:04-13:05 выкатила OK/Mail.ru на promo-music.ru (`315de03` API, `aa6a8c91` фронт); влито в наши ветки без конфликтов, тесты на объединённом коде: be-vk-air 7, be-venue-signup 8, be-security-e2e 17 групп, be-email-site 39.
+- **API** main `83e3eeb`, `git pull --ff-only` + рестарт 13:3x MSK, health 200, NRestarts 0. `/auth/vk-air`: promo-music.ru 404, promoair.ru без токена 400. Проба signup без согласия → 400, пользователь не создан (проверено SELECT).
+- **Фронт** main `7996ecf4`, `./deploy.sh` 13:42 MSK (с `VITE_PROMOAIR_VK_APP_ID=54840499`): на promoair.ru поля телефон/тип/город/точки, виджет VK OAuthList (SDK 2.6.8 с unpkg, SRI) рисует 3 кнопки, подвал ООО «Промо Фм» + ИНН/ОГРН, на `/`, `/in-store-music`, `/venue`, `/login` нет упоминаний PROMO.MUSIC; кнопка «Подключить заведение» на promo-music.ru/promo-air ведёт на `https://promoair.ru/login?mode=signup`.
+- **Ждёт владельца:** настройки приложения VK ID 54840499 (redirect `https://promoair.ru`, домен, scope email+phone, OK и Mail.ru), живой вход через VK.
+
 ### 2026-10-21 – витрина эфира на promoair.ru
 
 - **Фронт:** main `438454c1` (`./deploy.sh` 12:01 MSK): секция «Витрина эфира» на `/` и `/in-store-music` (11 примеров эфира из `air-demo/manifest.json`: аудиологотип, ведущие, треки, подкаст), полоса «Сейчас в эфире» в кабинете (`/venue/music`). Проверено на живом сайте: клик по карточке → `air-demo/<slug>/logo1.mp3` 206, док «Аудиологотип · Играет».
