@@ -16,6 +16,9 @@ const SITE_DESC = 'Платформа продвижения для артист
 const SITE_ALT_NAMES = ['Промо Музыка', 'Promo Music', 'PROMO.MUSIC', 'promo-music.ru'];
 const HOME_KEYWORDS = 'промо музыка, promo music, продвижение музыки, питчинг на радио, попасть на радио, чарты, дистрибуция музыки, promo-music.ru';
 const LOGO = `${DOMAIN}/logo.png`;
+// Обложка для превью ссылок в мессенджерах и соцсетях (1200×630). Логотип 692×636 для og:image не годится:
+// Telegram, WhatsApp и VK показывали из него мелкий квадрат. Обложка лежит в public фронта.
+const OG_COVER = `${DOMAIN}/og-cover.jpg`;
 
 function esc(s: string): string {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -222,12 +225,12 @@ function renderPage(opts: {
 <meta property="og:site_name" content="${SITE_NAME}">
 <meta property="og:title" content="${esc(opts.title)}">
 <meta property="og:description" content="${esc(opts.desc)}">
-<meta property="og:image" content="${esc(opts.image || LOGO)}">
+<meta property="og:image" content="${esc(opts.image || OG_COVER)}">${opts.image ? '' : '\n<meta property="og:image:secure_url" content="' + OG_COVER + '">\n<meta property="og:image:type" content="image/jpeg">\n<meta property="og:image:width" content="1200">\n<meta property="og:image:height" content="630">'}
 <meta property="og:locale" content="ru_RU">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${esc(opts.title)}">
 <meta name="twitter:description" content="${esc(opts.desc)}">
-<meta name="twitter:image" content="${esc(opts.image || LOGO)}">
+<meta name="twitter:image" content="${esc(opts.image || OG_COVER)}">
 ${orgLd}${breadcrumbs}${opts.jsonLd || ''}
 </head>
 <body>
@@ -513,9 +516,9 @@ async function renderNotFound(path: string): Promise<string> {
   });
 }
 
-async function renderServicePage(path: string, title: string, robots: string): Promise<string> {
+async function renderServicePage(path: string, title: string, robots: string, desc?: string): Promise<string> {
   return renderPageWithTokens({
-    title, desc: `${SITE_NAME} – платформа продвижения музыки.`,
+    title, desc: desc || `${SITE_NAME} – платформа продвижения музыки.`,
     canonical: `${DOMAIN}${path}`, type: 'website', robots,
     body: `<h1>${esc(title.split(/ [—–] /)[0])}</h1><p><a href="${DOMAIN}/">На главную ${SITE_NAME}</a></p>`,
   });
@@ -955,6 +958,11 @@ ${k.ticket_link ? `<p><a href="${esc(k.ticket_link)}" rel="nofollow noopener">К
     }
     if (kind === 'private') {
       c.header('X-Robots-Tag', 'noindex, nofollow');
+      // Ссылку на вход часто кидают в мессенджеры: карточка должна рассказывать о сайте, а не о «кабинете»
+      if (path === '/login') {
+        return c.body(await renderServicePage(path, `Вход и регистрация – ${SITE_NAME}`, 'noindex, nofollow',
+          'Войдите в кабинет или зарегистрируйтесь: артист, диджей, продюсер, звукорежиссёр, лейбл, радиостанция или заведение. Продвижение музыки: радио, плейлисты, эфир.'));
+      }
       return c.body(await renderServicePage(path, `Личный кабинет – ${SITE_NAME}`, 'noindex, nofollow'));
     }
 
