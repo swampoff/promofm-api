@@ -64,6 +64,11 @@ record of what got executed.
 - **Учёт:** `/etc/sites/promofm.env` (SITE_DOMAINS + SITE_NOTES), `/root/SITES.md` (строка promofm, раздел DNS); бэкапы в `/root/backups/`.
 - **Осталось (владелец):** подтвердить данные домена в reg.ru (UNVERIFIED), счётчик Метрики, сайт в ЮKassa, боевая привязка карты 1 ₽ → таймеры venue-кронов.
 
+### 2026-10-21 – витрина эфира на promoair.ru
+
+- **Фронт:** main `438454c1` (`./deploy.sh` 12:01 MSK): секция «Витрина эфира» на `/` и `/in-store-music` (11 примеров эфира из `air-demo/manifest.json`: аудиологотип, ведущие, треки, подкаст), полоса «Сейчас в эфире» в кабинете (`/venue/music`). Проверено на живом сайте: клик по карточке → `air-demo/<slug>/logo1.mp3` 206, док «Аудиологотип · Играет».
+- **Файлы витрины треков (не используются сайтом):** `scripts/build-air-showcase.py` собрал `/var/www/promofm/uploads/air-showcase/<genre>/{1,2,3}.mp3` + `manifest.json` (11 направлений × 3 трека из `air_catalog_tracks`, промпты p012/p028/p044 v0, loudnorm −16 LUFS, без тегов). Владелец выбрал вместо этого витрину примеров эфира; файлы оставлены для будущей библиотеки в кабинете. nginx promoair.ru: `location = /server/uploads/air-showcase/manifest.json` no-cache + gzip (бэкап `/root/backups/promoair.ru.includes.2026-10-21_*`).
+
 ## 2026-07-02 — Артист-рассылка: финал прогона + hard-bounce чистка (laptop; запись — cloud по отчёту)
 
 - **What:** финальный прогон рассылки по артист-базе. 873 отправлено,
