@@ -2255,20 +2255,22 @@ landing.post('/admin/albums/pinned', requireAdminOrKey, async (c) => {
     if (!Array.isArray(body.albums)) {
       return c.json({ success: false, error: 'albums array required' }, 400);
     }
-    const albums: PinnedAlbum[] = body.albums
+    // sanitizeUrl асинхронная и бросает исключение на недопустимом адресе
+    const safeUrl = async (u: unknown) => { try { return u ? await sanitizeUrl(String(u)) : ''; } catch { return ''; } };
+    const albums: PinnedAlbum[] = await Promise.all(body.albums
       .filter((a: any) => a && a.title && a.artist)
-      .map((a: any, i: number) => ({
+      .map(async (a: any, i: number) => ({
         id: a.id || 'pin-' + i + '-' + String(a.title).toLowerCase().replace(/[^a-zа-яё0-9]+/gi, '-').slice(0, 40),
         title: sanitizeString(a.title),
         artist: sanitizeString(a.artist),
-        coverUrl: sanitizeUrl(a.coverUrl || ''),
-        region: a.region === 'ru' ? 'ru' : 'world',
+        coverUrl: await safeUrl(a.coverUrl),
+        region: (a.region === 'ru' ? 'ru' : 'world') as 'ru' | 'world',
         genre: sanitizeString(a.genre || ''),
         releaseDate: String(a.releaseDate || ''),
-        url: sanitizeUrl(a.url || ''),
+        url: await safeUrl(a.url),
         source: 'editorial',
         pinnedUntil: a.pinnedUntil || new Date(Date.now() + (Number(a.days) || 14) * 86_400_000).toISOString(),
-      }));
+      })));
     await setPlatformStats('albums:pinned', { albums, updatedAt: new Date().toISOString() });
     return c.json({ success: true, pinned: albums.length, albums });
   } catch (error) {
@@ -2285,17 +2287,18 @@ landing.post('/admin/albums/weekly', requireAdminOrKey, async (c) => {
       return c.json({ success: false, error: 'albums array required' }, 400);
     }
 
-    const normalized = albums.map((a: any, i: number) => ({
+    const safeCover = async (u: unknown) => { try { return u ? await sanitizeUrl(String(u)) : ''; } catch { return ''; } };
+    const normalized = await Promise.all(albums.map(async (a: any, i: number) => ({
       id: a.id || 'album-' + Date.now() + '-' + i,
       title: sanitizeString(a.title || ''),
       artist: sanitizeString(a.artist || ''),
-      coverUrl: sanitizeUrl(a.coverUrl || a.cover_url || ''),
+      coverUrl: await safeCover(a.coverUrl || a.cover_url),
       region: a.region || 'world',
       genre: a.genre || '',
       releaseDate: a.releaseDate || a.release_date || '',
       source: a.source || 'manual',
       position: a.position ?? i + 1,
-    }));
+    })));
 
     await setPlatformStats('albums:weekly', {
       albums: normalized,
@@ -2410,7 +2413,49 @@ landing.post('/build-albums', async (c) => {
   // PR #45 fix-albums-filter-singles чистил Yandex и Apple, а
   // Billboard остался невидимым источником синглов.
   // billboard-200 (без global) — это Top Albums Chart, что нам нужно.
-  const billboardMd = await fetchMarkdown(
+  //
+  // 23.10.2026: сначала берём HTML напрямую (без Firecrawl): страница отдаёт все
+  // 200 строк, название в h3#title-of-a-story, исполнитель в следующем span.c-label
+  // (в атрибуте class ведущий пробел), обложка в data-lazy-src. Разбор markdown
+  // через Firecrawl остаётся запасным, если прямой запрос ничего не дал.
+  try {
+    const bbRes = await fetch('https://www.billboard.com/charts/billboard-200/', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' },
+    });
+    if (bbRes.ok) {
+      const bbHtml = await bbRes.text();
+      const decode = (s: string) => s.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&#0?39;|&#x27;/g, "'")
+        .replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+      const rows = bbHtml.split('o-chart-results-list-row-container').slice(1);
+      rows.forEach((row: string, idx: number) => {
+        if (worldAlbums.length >= 15) return;
+        const t = row.match(/<h3[^>]*id="title-of-a-story"[^>]*>([\s\S]*?)<\/h3>/);
+        const a = row.match(/<\/h3>\s*<span[^>]*class="\s*c-label[^"]*"[^>]*>([\s\S]*?)<\/span>/);
+        const img = row.match(/data-lazy-src="([^"]+)"/);
+        const title = t ? decode(t[1]) : '';
+        const artist = a ? decode(a[1]) : '';
+        if (!title || !artist) return;
+        worldAlbums.push({
+          id: 'bb-' + (idx + 1),
+          title,
+          artist,
+          coverUrl: img ? img[1].replace(/-\d+x\d+\.(jpg|png)$/, '-344x344.$1') : '',
+          region: 'world',
+          genre: '',
+          releaseDate: '',
+          source: 'billboard',
+          position: idx + 1,
+        });
+      });
+      console.log(`[albums:weekly] Billboard HTML: ${worldAlbums.length} albums`);
+    } else {
+      errors.push('billboard_html: HTTP ' + bbRes.status);
+    }
+  } catch (err: any) {
+    errors.push('billboard_html: ' + err.message);
+  }
+
+  const billboardMd = worldAlbums.length >= 10 ? '' : await fetchMarkdown(
     'billboard_200',
     'https://www.billboard.com/charts/billboard-200/',
     8000
@@ -2502,6 +2547,11 @@ landing.post('/build-albums', async (c) => {
           const title = String(ent?.['im:name']?.label || '').trim();
           const artist = String(ent?.['im:artist']?.label || '').trim();
           if (!title || !artist) continue;
+          // Лента iTunes topalbums отдаёт и каталог (сборники 1996 г., Billy Joel 1976)
+          // и EP: в «Альбомы недели» берём только альбомы не старше полугода (23.10.2026)
+          if (/\s-\s(EP|Single)\s*$/i.test(title)) continue;
+          const rel = Date.parse(String(ent?.['im:releaseDate']?.label || ''));
+          if (!rel || Date.now() - rel > 183 * 86_400_000) continue;
           // Cover: im:image[2].label (largest), но обычно 170x170 — заменим
           // на 500x500 через простую регекс-замену (Apple CDN convention).
           const imgs = Array.isArray(ent?.['im:image']) ? ent['im:image'] : [];
