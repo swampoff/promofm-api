@@ -2200,17 +2200,79 @@ landing.post('/admin/tracks/publish', requireAdminOrKey, async (c) => {
 // WEEKLY ALBUMS — Альбомы недели (РФ + Мир)
 // ============================================
 
+/**
+ * Редакционные альбомы (23.10.2026): закрепляются поверх автосборки build-albums,
+ * которая дважды в неделю перезаписывает albums:weekly. Хранятся отдельно
+ * (albums:pinned), у каждого срок pinnedUntil; просроченные просто не показываются.
+ */
+type PinnedAlbum = {
+  id: string; title: string; artist: string; coverUrl: string; region: 'ru' | 'world';
+  genre: string; releaseDate: string; url: string; source: string; pinnedUntil: string;
+};
+
+async function getActivePinnedAlbums(): Promise<PinnedAlbum[]> {
+  const raw: any = await getPlatformStats('albums:pinned');
+  const now = Date.now();
+  return (Array.isArray(raw?.albums) ? raw.albums : [])
+    .filter((a: PinnedAlbum) => a && a.title && (!a.pinnedUntil || Date.parse(a.pinnedUntil) > now));
+}
+
+/** Закреплённые сверху своего региона, без дублей автосборки, позиции заново по региону. */
+function mergePinnedAlbums(auto: any[], pinned: PinnedAlbum[]): any[] {
+  const key = (a: any) => `${String(a.artist || '').toLowerCase().trim()}|${String(a.title || '').toLowerCase().trim()}`;
+  const pinnedKeys = new Set(pinned.map(key));
+  const out: any[] = [];
+  for (const region of ['ru', 'world']) {
+    const list = [
+      ...pinned.filter((a) => a.region === region),
+      ...auto.filter((a) => a.region === region && !pinnedKeys.has(key(a))),
+    ];
+    list.forEach((a, i) => out.push({ ...a, position: i + 1 }));
+  }
+  return out;
+}
+
 /** GET /albums/weekly — публичный endpoint */
 landing.get('/albums/weekly', async (c) => {
   try {
     const cached: any = await getPlatformStats('albums:weekly');
-    if (cached?.albums?.length) {
-      return c.json({ success: true, data: cached });
+    const pinned = await getActivePinnedAlbums().catch(() => [] as PinnedAlbum[]);
+    if (cached?.albums?.length || pinned.length) {
+      const albums = mergePinnedAlbums(cached?.albums || [], pinned);
+      return c.json({ success: true, data: { ...(cached || {}), albums, totalAlbums: albums.length, pinned: pinned.length } });
     }
     return c.json({ success: true, data: { albums: [], updatedAt: null } });
   } catch (error) {
     console.error('Error fetching weekly albums:', error);
     return c.json({ success: true, data: { albums: [], updatedAt: null } });
+  }
+});
+
+/** POST /admin/albums/pinned — задать редакционные альбомы {albums:[{title, artist, coverUrl, region, url, releaseDate, genre, days?}]} (admin/internal) */
+landing.post('/admin/albums/pinned', requireAdminOrKey, async (c) => {
+  try {
+    const body = await c.req.json();
+    if (!Array.isArray(body.albums)) {
+      return c.json({ success: false, error: 'albums array required' }, 400);
+    }
+    const albums: PinnedAlbum[] = body.albums
+      .filter((a: any) => a && a.title && a.artist)
+      .map((a: any, i: number) => ({
+        id: a.id || 'pin-' + i + '-' + String(a.title).toLowerCase().replace(/[^a-zа-яё0-9]+/gi, '-').slice(0, 40),
+        title: sanitizeString(a.title),
+        artist: sanitizeString(a.artist),
+        coverUrl: sanitizeUrl(a.coverUrl || ''),
+        region: a.region === 'ru' ? 'ru' : 'world',
+        genre: sanitizeString(a.genre || ''),
+        releaseDate: String(a.releaseDate || ''),
+        url: sanitizeUrl(a.url || ''),
+        source: 'editorial',
+        pinnedUntil: a.pinnedUntil || new Date(Date.now() + (Number(a.days) || 14) * 86_400_000).toISOString(),
+      }));
+    await setPlatformStats('albums:pinned', { albums, updatedAt: new Date().toISOString() });
+    return c.json({ success: true, pinned: albums.length, albums });
+  } catch (error) {
+    return c.json({ success: false, error: safeErrorMessage(error) }, 500);
   }
 });
 
@@ -2390,9 +2452,11 @@ landing.post('/build-albums', async (c) => {
         // Skip headings, images, links, stats, share buttons
         if (/^(#{1,4}\s|!\[|\[|Last Week|Peak|Wks|NEW|RE-ENTRY|Facebook|Twitter|Share|\d{1,3}$|=|\\\\)/.test(l)) continue;
         if (l === '-' || l === '---' || l === '\\\\') continue;
-        // Skip short stat labels
-        if (/^(LW|NE|RE|-)$/.test(l)) continue;
-        artist = l.replace(/^[-*]\s*/, '').trim();
+        // Skip short stat labels. Маркер списка снимаем ДО проверки: строка «- LW»
+        // проходила фильтр, и у всех альбомов исполнителем становилось «LW» (23.10.2026)
+        const cand = l.replace(/^[-*]\s*/, '').trim();
+        if (/^(LW|NE|RE|NEW|RE-?ENTRY|-|\d{1,3})$/i.test(cand)) continue;
+        artist = cand;
         break;
       }
 
