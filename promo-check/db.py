@@ -101,13 +101,26 @@ def save_fingerprint(track_id, fingerprint, watermark_id, duration, watermarked=
                 VALUES (%s, %s, %s, %s, 'done', CASE WHEN %s THEN NOW() ELSE NULL END)
                 ON CONFLICT (track_id) DO UPDATE
                   SET fingerprint = EXCLUDED.fingerprint,
-                      watermark_id = EXCLUDED.watermark_id,
+                      -- id меняем только при реальном встраивании (23.10.2026): иначе терялся
+                      -- id, который уже вшит в файлы у станций и ловится в эфире
+                      watermark_id = CASE WHEN %s THEN EXCLUDED.watermark_id
+                                          ELSE promo_check_fingerprints.watermark_id END,
                       duration = EXCLUDED.duration,
                       status = 'done',
                       fingerprinted_at = NOW(),
                       watermarked_at = CASE WHEN %s THEN NOW() ELSE promo_check_fingerprints.watermarked_at END
-            """, (track_id, fingerprint, watermark_id, duration, watermarked, watermarked))
+            """, (track_id, fingerprint, watermark_id, duration, watermarked, watermarked, watermarked))
         conn.commit()
+
+
+def get_current_watermark_id(table, id_col, content_id):
+    """Текущий watermark_id строки отпечатка (или None). table/id_col — только из кода, не из ввода."""
+    assert (table, id_col) in (("promo_check_fingerprints", "track_id"), ("dj_mix_fingerprints", "mix_id"))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT watermark_id FROM {table} WHERE {id_col} = %s", (content_id,))
+            row = cur.fetchone()
+            return row[0] if row else None
 
 
 def get_track_audio_url(track_id):
@@ -135,13 +148,14 @@ def save_mix_fingerprint(mix_id, fingerprint, watermark_id, duration, watermarke
                 VALUES (%s, %s, %s, %s, 'done', CASE WHEN %s THEN NOW() ELSE NULL END)
                 ON CONFLICT (mix_id) DO UPDATE
                   SET fingerprint = EXCLUDED.fingerprint,
-                      watermark_id = EXCLUDED.watermark_id,
+                      watermark_id = CASE WHEN %s THEN EXCLUDED.watermark_id
+                                          ELSE dj_mix_fingerprints.watermark_id END,
                       duration = EXCLUDED.duration,
                       status = 'done',
                       fingerprinted_at = NOW(),
                       watermarked_at = CASE WHEN %s THEN NOW()
                                             ELSE dj_mix_fingerprints.watermarked_at END
-            """, (mix_id, fingerprint, watermark_id, duration, watermarked, watermarked))
+            """, (mix_id, fingerprint, watermark_id, duration, watermarked, watermarked, watermarked))
         conn.commit()
 
 

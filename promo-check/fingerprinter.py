@@ -6,6 +6,8 @@ import subprocess
 import json
 import secrets
 import os
+import shutil
+import stat
 import sys
 import tempfile
 import logging
@@ -16,9 +18,21 @@ import argparse
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [fingerprinter] %(message)s")
 log = logging.getLogger(__name__)
 
-AUDIOWMARK_BIN = os.environ.get("AUDIOWMARK_BIN", "audiowmark")
-FPCALC_BIN = os.environ.get("FPCALC_BIN", "fpcalc")
+
+def _find_bin(env_name: str, name: str) -> str:
+    """Бинарник из переменной окружения, из PATH или из /usr/local/bin.
+    Крон root запускает скрипты с PATH=/usr/bin:/bin, а audiowmark стоит в /usr/local/bin:
+    с переезда на Арбат (07.10.2026) знак молча не встраивался, шёл fingerprint_only."""
+    if os.environ.get(env_name):
+        return os.environ[env_name]
+    local = f"/usr/local/bin/{name}"
+    return shutil.which(name) or (local if os.path.exists(local) else name)
+
+
+AUDIOWMARK_BIN = _find_bin("AUDIOWMARK_BIN", "audiowmark")
+FPCALC_BIN = _find_bin("FPCALC_BIN", "fpcalc")
 UPLOADS_DIR = "/var/www/promofm/uploads"
+EXISTING_WM_SCORE = 0.7   # шум audiowmark get даёт 0.3–0.4, настоящий знак в исходнике 1.0+
 
 
 def fingerprint_file(filepath: str) -> dict:
@@ -27,7 +41,15 @@ def fingerprint_file(filepath: str) -> dict:
         [FPCALC_BIN, "-raw", "-json", filepath],
         capture_output=True, text=True, timeout=60
     )
+    # fpcalc 1.5.1 (FFmpeg 5) отдаёт код 3 «Error decoding audio frame (End of file)»
+    # на файлах короче 120 с, хотя отпечаток в stdout корректный
     if result.returncode != 0:
+        try:
+            data = json.loads(result.stdout)
+            if result.returncode == 3 and data.get("fingerprint"):
+                return {"duration": data["duration"], "fingerprint": data["fingerprint"]}
+        except Exception:
+            pass
         raise RuntimeError(f"fpcalc failed: {result.stderr}")
     data = json.loads(result.stdout)
     return {"duration": data["duration"], "fingerprint": data["fingerprint"]}
@@ -169,71 +191,159 @@ def resolve_audio_path(audio_url: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _process(content_id, audio_url, save_fn, id_key, label):
+def existing_watermark(filepath: str, score_min: float = EXISTING_WM_SCORE):
+    """Знак, уже вшитый в файл: (hex_id, score) с лучшим score >= score_min или None.
+    Смотрим первые 90 с. Нужно, чтобы не наложить второй знак поверх старого и не потерять id,
+    который уже ловится в эфире; и чтобы проверить свежевшитый знак перед заменой файла."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
+    try:
+        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", filepath, "-t", "90",
+                            "-ac", "2", "-ar", "44100", tmp.name], capture_output=True, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError(f"ffmpeg excerpt failed: {r.stderr.decode()[:200]}")
+        res = subprocess.run([AUDIOWMARK_BIN, "get", tmp.name], capture_output=True, text=True, timeout=180)
+        best = None
+        for line in res.stdout.splitlines():
+            p = line.strip().split()
+            if len(p) >= 4 and p[0] == "pattern":
+                try:
+                    score = float(p[3])
+                except ValueError:
+                    continue
+                if score >= score_min and (best is None or score > best[1]):
+                    best = (p[2], score)
+        return best
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+def _probe_audio(path: str):
+    """(codec_name, bit_rate) первой аудиодорожки."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0",
+                        "-show_entries", "stream=codec_name,bit_rate:format=bit_rate", "-of", "json", path],
+                       capture_output=True, text=True, timeout=30)
+    d = json.loads(r.stdout or "{}")
+    s = (d.get("streams") or [{}])[0]
+    br = s.get("bit_rate") or (d.get("format") or {}).get("bit_rate") or 0
+    return s.get("codec_name"), int(br)
+
+
+def encode_like(wm_wav: str, original: str, dst: str) -> bool:
+    """audiowmark всегда пишет WAV. Возвращаем исходный формат (теги и обложку берём из оригинала):
+    иначе в файле .mp3 оказывался WAV в 10 раз больше — так было со всеми треками, помеченными
+    на старом сервере. Знак переживает MP3 128k (score ~1.2), поэтому MP3 не ниже 192k.
+    False = формат не поддержан, оставляем WAV как раньше."""
+    codec, br = _probe_audio(original)
+    if codec == "mp3":
+        kbps = min(320, max(192, round(br / 1000))) if br else 320
+        enc = ["-map", "1:v?", "-c:v", "copy", "-c:a", "libmp3lame", "-b:a", f"{kbps}k",
+               "-id3v2_version", "3", "-f", "mp3"]
+    elif codec in ("pcm_s16le", "pcm_s24le"):
+        enc = ["-c:a", codec, "-f", "wav"]
+    elif codec == "flac":
+        enc = ["-c:a", "flac", "-f", "flac"]
+    else:
+        return False
+    r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", wm_wav, "-i", original,
+                        "-map", "0:a:0", "-map_metadata", "1"] + enc + [dst],
+                       capture_output=True, timeout=300)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffmpeg re-encode failed: {r.stderr.decode()[:300]}")
+    return True
+
+
+def _process(content_id, audio_url, save_fn, id_key, label, current_wm_id=None):
     """Общий конвейер watermark+fingerprint. save_fn(id, fingerprint, wm_id, duration, watermarked=).
-    Тело идентично прежнему process_track — обобщены только id, целевая таблица (через save_fn)
-    и подписи логов. Побочный эффект прежний: при доступном audiowmark аудиофайл заменяется
-    на watermarked-версию (os.replace)."""
-    wm_id = generate_watermark_id()
+    Знак вшивается в сам аудиофайл, который отдаётся станциям (os.replace). Правки 23.10.2026:
+    - пишем в настоящий файл (realpath): у части треков путь загрузки = симлинк на файл эфира
+      в /mnt/data, прежний os.replace подменял симлинк отдельной копией от root;
+    - владелец и права исходника сохраняются;
+    - если файл уже несёт знак, второй не накладываем (id из БД — только отмечаем дату);
+    - свежий знак проверяется чтением ДО замены файла;
+    - если знак вшить нельзя (нет audiowmark, нет локального файла, ошибка) — выходим с ошибкой
+      и ничего не пишем в БД: раньше сохранялся случайный watermark_id, которого нет ни в одном файле."""
     src_path, upload_path = resolve_audio_path(audio_url)
     if not src_path:
         raise RuntimeError(f"Cannot resolve audio file for {label} {content_id} url={audio_url}")
+    if not upload_path:
+        # файл только скачан во временный: вшить знак в отдаваемый станциям файл нельзя
+        if src_path.startswith(tempfile.gettempdir()) and os.path.exists(src_path):
+            os.unlink(src_path)
+        raise RuntimeError(f"No local file for {label} {content_id} (url={audio_url}): watermark not embedded")
+    if not audiowmark_available():
+        raise RuntimeError(f"audiowmark not available ({AUDIOWMARK_BIN}): watermark not embedded for {label} {content_id}")
 
-    fp_source = src_path
-    method = "fingerprint_only"
-    wm_dst = src_path + ".wm" + (os.path.splitext(src_path)[1] or ".mp3")
+    target = os.path.realpath(upload_path)
+    st = os.stat(target)
 
-    if audiowmark_available():
-        try:
-            if add_watermark(src_path, wm_dst, wm_id):
-                fp_source = wm_dst
-                method = "fingerprint+watermark"
-                log.info(f"Watermark added for {label} {content_id}")
-                replace_target = upload_path or src_path
-                try:
-                    os.replace(wm_dst, replace_target)
-                    fp_source = replace_target
-                    log.info(f"Upload replaced with watermarked version: {replace_target}")
-                except Exception as e:
-                    log.warning(f"Could not replace upload with watermarked: {e}")
-                    fp_source = wm_dst
-            else:
-                log.warning(f"Watermark failed for {content_id}, using plain fingerprint")
-        except Exception as e:
-            log.warning(f"Watermark error for {content_id}: {e}")
-    else:
-        log.info("audiowmark not available, using fingerprint only")
+    found = existing_watermark(target)
+    if found:
+        wid, score = found
+        if current_wm_id and wid == current_wm_id:
+            fp_data = fingerprint_file(target)
+            save_fn(content_id, fp_data["fingerprint"], wid, fp_data["duration"], watermarked=True)
+            log.info(f"{label} {content_id}: file already carries its watermark {wid} (score {score:.2f}), recorded")
+            return {id_key: content_id, "watermark_id": wid, "duration": fp_data["duration"],
+                    "fingerprint_len": len(fp_data["fingerprint"]), "method": "existing-watermark"}
+        raise RuntimeError(f"{label} {content_id}: file {target} already carries watermark {wid} "
+                           f"(score {score:.2f}), DB has {current_wm_id}; not re-embedding, needs manual check")
 
-    fp_data = fingerprint_file(fp_source)
+    wm_id = generate_watermark_id()
+    ext = os.path.splitext(target)[1] or ".mp3"
+    # временные файлы рядом с настоящим (та же ФС для атомарного replace), скрытые от сканеров эфира
+    base = os.path.join(os.path.dirname(target), f".{os.path.basename(target)}")
+    wm_wav = base + ".wm.wav"          # то, что пишет audiowmark (всегда WAV)
+    wm_dst = base + ".wmenc" + ext     # тот же формат, что у оригинала
+    try:
+        if not add_watermark(target, wm_wav, wm_id):
+            raise RuntimeError(f"audiowmark add failed for {label} {content_id}")
+        if encode_like(wm_wav, target, wm_dst):
+            os.unlink(wm_wav)
+        else:
+            log.warning(f"{label} {content_id}: format of {target} not re-encodable, keeping WAV data as before")
+            os.replace(wm_wav, wm_dst)
+        check = existing_watermark(wm_dst)
+        if not check or check[0] != wm_id:
+            raise RuntimeError(f"watermark verification failed for {label} {content_id}: read {check}, expected {wm_id}")
+        os.chown(wm_dst, st.st_uid, st.st_gid)
+        os.chmod(wm_dst, stat.S_IMODE(st.st_mode))
+        os.replace(wm_dst, target)
+    except Exception:
+        for p in (wm_wav, wm_dst):
+            if os.path.exists(p):
+                os.unlink(p)
+        raise
+    log.info(f"Watermark {wm_id} embedded and verified (score {check[1]:.2f}) for {label} {content_id}: {target}")
 
-    if fp_source != src_path and os.path.exists(fp_source):
-        os.unlink(fp_source)
-    if src_path and src_path != upload_path and os.path.exists(src_path) and src_path.startswith("/tmp/"):
-        os.unlink(src_path)
-
-    save_fn(content_id, fp_data["fingerprint"], wm_id, fp_data["duration"],
-            watermarked=(method == "fingerprint+watermark"))
+    fp_data = fingerprint_file(target)
+    save_fn(content_id, fp_data["fingerprint"], wm_id, fp_data["duration"], watermarked=True)
     log.info(f"{label} {content_id} processed: duration={fp_data['duration']:.1f}s "
-             f"fp_len={len(fp_data['fingerprint'])} method={method}")
+             f"fp_len={len(fp_data['fingerprint'])} method=fingerprint+watermark")
     return {
         id_key: content_id,
         "watermark_id": wm_id,
         "duration": fp_data["duration"],
         "fingerprint_len": len(fp_data["fingerprint"]),
-        "method": method,
+        "method": "fingerprint+watermark",
     }
 
 
 def process_track(track_id, audio_url):
     """Back-compat обёртка — прежний контракт (ключ track_id)."""
-    from db import save_fingerprint
-    return _process(track_id, audio_url, save_fingerprint, "track_id", "track")
+    from db import save_fingerprint, get_current_watermark_id
+    return _process(track_id, audio_url, save_fingerprint, "track_id", "track",
+                    current_wm_id=get_current_watermark_id("promo_check_fingerprints", "track_id", track_id))
 
 
 def process_mix(mix_id, audio_url):
     """DJ-микс -> dj_mix_fingerprints (миграция 132 + db.save_mix_fingerprint)."""
-    from db import save_mix_fingerprint
-    return _process(mix_id, audio_url, save_mix_fingerprint, "mix_id", "mix")
+    from db import save_mix_fingerprint, get_current_watermark_id
+    return _process(mix_id, audio_url, save_mix_fingerprint, "mix_id", "mix",
+                    current_wm_id=get_current_watermark_id("dj_mix_fingerprints", "mix_id", mix_id))
 
 
 if __name__ == "__main__":

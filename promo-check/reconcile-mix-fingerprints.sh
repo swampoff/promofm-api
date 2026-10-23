@@ -13,6 +13,12 @@
 #
 # Отличия от трекового: статус 'published' (не published/upcoming) + флаг distribute_radio
 # (микс должен сам согласиться на эфир) + timeout 300 (микс длинный — watermark+fpcalc дольше).
+# 23.10.2026: PATH с /usr/local/bin (там audiowmark), иначе знак не вшивается, см. трековый reconcile.
+export PATH=/usr/local/bin:/usr/bin:/bin
+# один прогон за раз: обработка трека теперь ~40 с (проверка знака до и после), прогон может
+# пережить следующий тик крона; ручной запуск брать под тот же замок: flock /var/lock/promo-check-reconcile-mix.lock python3 fingerprinter.py …
+exec 9>/var/lock/promo-check-reconcile-mix.lock
+flock -n 9 || exit 0
 cd /opt/promofm-promo-check || exit 1
 LOG=/var/log/promo-check-reconcile-mix.log
 ids=$(sudo -u postgres psql -d promofm -t -A -c "
