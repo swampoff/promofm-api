@@ -149,8 +149,10 @@ tracksRoutes.post('/', requireAuth, async (c) => {
 
     // Fire-and-forget: trigger Promo.check fingerprinting in background
     if (track.audio_url) {
-      fetch(`http://127.0.0.1:3000/server/api/promo-check/process/${track.id}`, { method: 'POST' })
-        .catch(() => {}); // non-blocking
+      // напрямую, без HTTP: fetch на /promo-check/process шёл без авторизации и всегда получал 401 (23.10.2026)
+      import('./promo-check-routes.tsx')
+        .then(m => m.queuePromoCheck(track.id))
+        .catch(() => {}); // non-blocking: при сбое трек подхватит крон reconcile
     }
 
     // Fire-and-forget: жанр, если артист его не указал (ID3-тег сюда не

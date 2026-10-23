@@ -22,6 +22,29 @@ async function query<T = Record<string, unknown>>(
   return pool.query(sql, params) as Promise<{ rows: T[] }>;
 }
 
+/**
+ * Поставить трек в очередь водяного знака: строка pending + фоновый fingerprinter.
+ * Загрузка трека раньше звала POST /process/:trackId обычным fetch без авторизации,
+ * маршрут под requireAuth отвечал 401, и знак при загрузке не ставился ни разу
+ * (23.10.2026). Теперь вызывающие зовут эту функцию напрямую. flock — тот же замок,
+ * что у крона reconcile, чтобы один файл не обрабатывали два процесса сразу.
+ */
+export async function queuePromoCheck(trackId: string): Promise<void> {
+  await query(
+    `INSERT INTO promo_check_fingerprints (track_id, fingerprint, watermark_id, duration, status)
+     VALUES ($1, '{}', gen_random_uuid()::text, 0, 'pending')
+     ON CONFLICT (track_id) DO UPDATE SET status = 'pending'`,
+    [trackId]
+  );
+  const child = spawn(
+    "flock",
+    ["/var/lock/promo-check-reconcile.lock", "python3", "/opt/promofm-promo-check/fingerprinter.py", "--track-id", trackId],
+    { detached: true, stdio: "ignore", cwd: "/opt/promofm-promo-check", env: { ...process.env } }
+  );
+  child.on("error", () => {}); // нет flock/python — подхватит крон reconcile
+  child.unref();
+}
+
 // ─── Stats for a single track ─────────────────────────────────────────────────
 
 app.get("/stats/:trackId", requireAuth, async (c) => {
@@ -290,21 +313,8 @@ app.post("/process/:trackId", requireAuth, async (c) => {
     return c.json({ error: "Track has no audio file" }, 422);
   }
 
-  // Mark as pending
-  await query(
-    `INSERT INTO promo_check_fingerprints (track_id, fingerprint, watermark_id, duration, status)
-     VALUES ($1, '{}', gen_random_uuid()::text, 0, 'pending')
-     ON CONFLICT (track_id) DO UPDATE SET status = 'pending'`,
-    [trackId]
-  );
-
-  // Spawn Python fingerprinter in background (non-blocking)
-  const child = spawn(
-    "python3",
-    ["/opt/promofm-promo-check/fingerprinter.py", "--track-id", trackId],
-    { detached: true, stdio: "ignore", env: { ...process.env } }
-  );
-  child.unref();
+  // pending + фоновый fingerprinter (non-blocking)
+  await queuePromoCheck(trackId);
 
   return c.json({
     status: "processing",
