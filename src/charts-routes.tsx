@@ -1366,6 +1366,12 @@ async function buildPromoFMChart(): Promise<PromoFMChartEntry[]> {
         };
       }
 
+      // Один источник засчитывается треку один раз: версии вроде «BAD TIMES» и
+      // «BAD TIMES (Long Version)» сливаются в один ключ и давали источнику двойные очки
+      // (23.10.2026, то же исправлено в promofm-charts-agent.py). Списки идут по возрастанию
+      // позиции, поэтому остаётся лучшая.
+      if (trackScores[key].sources.some(s => s.id === source.id)) continue;
+
       // Очки = вес × (maxPos - позиция + 1) / maxPos × 100
       const positionScore = ((maxPos - (track.position || 1) + 1) / maxPos) * 100;
       trackScores[key].score += weight * positionScore;
