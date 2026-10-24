@@ -150,7 +150,17 @@ def enrich_tracks(tracks: list[dict], batch_size: int = 5) -> int:
 def parse_shazam() -> list[dict]:
     """Shazam Russia Top 200 — parse from alt tags."""
     log.info("Parsing Shazam Russia...")
-    html = fetch("https://www.shazam.com/charts/top-200/russia")
+    # 23.10.2026: shazam.com отвечает 405 (Fastly 54113) на любой запрос с серверных адресов,
+    # в том числе через прокси Soul FM. Страницу можно скачать с обычного компьютера и передать
+    # файлом: SHAZAM_HTML_FILE=/путь/shazam_russia.html python3 promofm-charts-agent.py
+    import os
+    html = ""
+    shazam_file = os.environ.get("SHAZAM_HTML_FILE")
+    if shazam_file and os.path.exists(shazam_file):
+        html = open(shazam_file, encoding="utf-8", errors="replace").read()
+        log.info(f"Shazam: страница из файла {shazam_file}")
+    if not html:
+        html = fetch("https://www.shazam.com/charts/top-200/russia")
     if not html:
         return []
 
@@ -234,29 +244,27 @@ def parse_yandex() -> list[dict]:
 
 
 def parse_russkoe_radio() -> list[dict]:
-    """Русское Радио Хит-парад — HTML parsing."""
+    """Русское Радио: Хит-парад «Золотой Граммофон».
+    23.10.2026: russkoeradiofm.ru больше не существует (DNS). Хит-парад теперь на
+    rusradio.ru/charts/hit-parad-zolotoj-grammofon (Next.js): треки лежат в JSON страницы
+    как "chart":{"tracks":[{"id":…,"title":"…","position":N,"progress":…,"artist":"…"}]}."""
     log.info("Parsing Русское Радио...")
-    html = fetch("https://russkoeradiofm.ru/hitparad/")
+    html = fetch("https://rusradio.ru/charts/hit-parad-zolotoj-grammofon")
     if not html:
         return []
-
-    tracks = []
-    soup = BeautifulSoup(html, "lxml")
-
-    # Structure: div.rus-hit-track > div.rus-hit-title + div.rus-hit-artist
-    for block in soup.select(".rus-hit-track"):
-        title_el = block.select_one(".rus-hit-title")
-        artist_el = block.select_one(".rus-hit-artist")
-        if title_el and artist_el:
-            title = title_el.get_text(strip=True)
-            artist = artist_el.get_text(strip=True)
-            if title and artist and "Название" not in title and "Артист" not in artist:
-                tracks.append({
-                    "position": len(tracks) + 1,
-                    "artist": artist,
-                    "title": title,
-                })
-
+    text = html.replace('\\"', '"')
+    pattern = re.compile(r'\{"id":\d+,"title":"((?:[^"\\]|\\.)*)","position":(\d+),"progress":-?\d+,"artist":"((?:[^"\\]|\\.)*)"')
+    found = {}
+    for m in pattern.finditer(text):
+        try:
+            title = json.loads('"' + m.group(1) + '"').strip()
+            artist = json.loads('"' + m.group(3) + '"').strip()
+        except Exception:
+            continue
+        pos = int(m.group(2))
+        if title and artist and pos not in found:
+            found[pos] = {"position": pos, "artist": artist, "title": title}
+    tracks = [found[k] for k in sorted(found)]
     log.info(f"Русское Радио: {len(tracks)} tracks")
     return tracks
 
@@ -413,6 +421,10 @@ def build_chart(sources: dict[str, list[dict]], prev_chart: list[dict] | None = 
                 }
 
             pos = t.get("position", 1)
+            # Один источник засчитывается треку один раз: версии вроде «BAD TIMES» и
+            # «BAD TIMES (Long Version)» сливаются в один ключ и давали двойные очки (23.10.2026)
+            if any(s["id"] == source_id for s in scores[key]["sources"]):
+                continue
             pos_score = ((max_pos - pos + 1) / max_pos) * 100
             scores[key]["score"] += weight * pos_score
             scores[key]["sources"].append({
