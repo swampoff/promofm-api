@@ -341,7 +341,7 @@ function downloadDeniedHtml(c: any, opts: { status: number; title: string; messa
  <h1>${opts.title}</h1>
  <p>${opts.message}</p>
  ${opts.showLogin ? `<a class="btn primary" href="https://promo-music.ru/login">Войти в кабинет</a>` : ''}
- <a class="btn ghost" href="https://promo-music.ru/novinki-nedeli">Слушать новинки</a>
+ <a class="btn ghost" href="https://promo-music.ru/new-releases">Слушать новинки</a>
 </div></body></html>`;
   return c.html(html, opts.status as any);
 }

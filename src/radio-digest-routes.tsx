@@ -80,7 +80,7 @@ function digestHtml(tracks: DigestTrack[]): string {
       <p style="margin:0 0 16px;">
         <b>${i + 1}) ${escapeHtml(t.artist_name || 'Unknown Artist')} – ${escapeHtml(t.title || 'Без названия')}</b><br>
         ${t.genre ? `Жанр: ${escapeHtml(String(t.genre))}<br>` : ''}
-        Слушать: <a href="${SITE_URL}/novinki-nedeli">${SITE_URL}/novinki-nedeli</a>
+        Слушать: <a href="${SITE_URL}/new-releases">${SITE_URL}/new-releases</a>
       </p>`;
   }).join('');
   return `
@@ -204,7 +204,7 @@ function weeklyTrackCard(t: WeeklyTrack, i: number): string {
   // Ссылка вела прямо на mp3, браузер его качал. Теперь «Слушать» ведёт на
   // публичную страницу новинок с плеером (логин не нужен), а скачивание
   // вынесено отдельной кнопкой на защищённый эндпоинт с учётом выдач.
-  const listen = `${SITE_URL}/novinki-nedeli`;
+  const listen = `${SITE_URL}/new-releases`;
   // 01.10.2026: личная ссылка станции без входа (radio-get-routes.tsx).
   // {{dlkey}} подставляет smtpSendBatch на каждого получателя.
   const download = `${SITE_URL}/server/api/radio-get/${t.id}?k={{dlkey}}`;
@@ -274,7 +274,7 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
   // Публичная страница: станции жаловались, что из письма приходится заново
   // вводить логин и пароль. Слушать и смотреть подборку можно без входа,
   // вход нужен только для скачивания (учёт выдач по станциям).
-  const releasesUrl = `${SITE_URL}/novinki-nedeli`;
+  const releasesUrl = `${SITE_URL}/new-releases`;
 
   // Шапка-баннер. Жалоба владельца 2026-08-11: в письме станциям сверху висел
   // значок «?» — файл /banners/novinki-nedeli.jpg отдавал 404, его на сервере

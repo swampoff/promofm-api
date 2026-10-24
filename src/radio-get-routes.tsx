@@ -196,7 +196,7 @@ function page(title: string, body: string, status = 200, c?: any) {
 <style>${STYLE}</style></head><body><div class="wrap">
 <p class="brand"><b>ПРОМО.МУЗЫКА</b> · новинки для эфира</p>
 ${body}
-<p class="muted"><a href="${SITE_URL}/novinki-nedeli">Все новинки недели</a> · <a href="${SITE_URL}">promo-music.ru</a></p>
+<p class="muted"><a href="${SITE_URL}/new-releases">Все новинки недели</a> · <a href="${SITE_URL}">promo-music.ru</a></p>
 </div></body></html>`;
   c.header('Cache-Control', 'no-store');
   c.header('X-Robots-Tag', 'noindex, nofollow');
