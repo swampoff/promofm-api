@@ -39,6 +39,18 @@ const SITE_URL = 'https://promo-music.ru';
 // баннер 1200×600.
 const DIGEST_BANNER_FILE = 'novinki-nedeli-cover.jpg';
 const DIGEST_BANNER_PATH = `/var/www/promofm/html/banners/${DIGEST_BANNER_FILE}`;
+// Разовые шапки выпуска (владелец 24.10.2026: «поставь это фото», потом снова обычная).
+// Действуют до момента until, дальше письмо само возвращается к DIGEST_BANNER_FILE.
+// Файл кладём в репозиторий фронта (public/banners), иначе выкладка сайта его сотрёт.
+const ONE_OFF_BANNERS: { file: string; until: string }[] = [
+  { file: 'novinki-nedeli-2026-10-26.jpg', until: '2026-10-27T00:00:00+03:00' },
+];
+function currentBannerFile(): string {
+  const now = Date.now();
+  const special = ONE_OFF_BANNERS.find((b) => now < Date.parse(b.until)
+    && existsSync(`/var/www/promofm/html/banners/${b.file}`));
+  return special ? special.file : DIGEST_BANNER_FILE;
+}
 const ADMIN_INTERNAL_KEY = process.env.VPS_INTERNAL_KEY || '';
 const DIGEST_LOCK = 720107;              // ключ advisory-lock, уникальный для daily info@-крона
 const WEEKLY_LOCK = 720108;              // ОТДЕЛЬНЫЙ ключ для понедельничного weekly-крона
@@ -271,12 +283,13 @@ function weeklyDigestHtml(tracks: WeeklyTrack[], dateLabel: string, videos: Week
   // Ниже идёт градиентный заголовок, он рисуется стилями и виден всегда.
   let bannerRow = '';
   try {
-    if (existsSync(DIGEST_BANNER_PATH)) {
+    const bannerFile = currentBannerFile();
+    if (existsSync(`/var/www/promofm/html/banners/${bannerFile}`)) {
       bannerRow = `<tr>
-      <td style="padding:0;"><a href="${releasesUrl}" style="text-decoration:none;"><img src="${SITE_URL}/banners/${DIGEST_BANNER_FILE}" alt="Новинки недели promo.music" style="width:100%;height:auto;display:block;border:0;" /></a></td>
+      <td style="padding:0;"><a href="${releasesUrl}" style="text-decoration:none;"><img src="${SITE_URL}/banners/${bannerFile}" alt="Новинки недели promo.music" style="width:100%;height:auto;display:block;border:0;" /></a></td>
     </tr>`;
     } else {
-      console.warn(`[radio-digest] баннер отсутствует: ${DIGEST_BANNER_PATH} – письмо уйдёт без шапки`);
+      console.warn(`[radio-digest] баннер отсутствует: ${bannerFile} – письмо уйдёт без шапки`);
     }
   } catch { /* без баннера письмо остаётся корректным */ }
   // {{name}} подставляет smtpSendBatch на каждого получателя (имя станции).
